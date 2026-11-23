@@ -73,6 +73,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/c/r/{repo}/delete", post(repo_delete))
         .route("/c/plans/{id}/apply", post(plan_apply))
         .route("/c/r/{repo}/sync", post(sync))
+        .route("/c/r/{repo}/import", post(import))
         .route("/r/{repo}/jobs", get(jobs_part))
         .route("/jobs/{id}", get(job_page))
         .route("/jobs/{id}/log", get(job_log))
@@ -2280,6 +2281,39 @@ async fn job_log(State(app): St, v: Viewer, Path(id): Path<i64>) -> Response {
 async fn job_cancel(State(app): St, v: Viewer, Path(id): Path<i64>) -> Response {
     match api::job_cancel(State(app), v.who(), Path(id)).await {
         Ok(_) => msg(true, "Asked the job to stop."),
+        Err(e) => err_part(e),
+    }
+}
+
+async fn import(
+    State(app): St,
+    v: Viewer,
+    Path(repo): Path<String>,
+    Form(form): Form<Vec<(String, String)>>,
+) -> Response {
+    let list = |k: &str| -> Vec<String> {
+        form_get(&form, k)
+            .split([',', ' '])
+            .filter(|x| !x.is_empty())
+            .map(String::from)
+            .collect()
+    };
+    let req = crate::import::ImportReq {
+        source: form_get(&form, "source").trim().to_string(),
+        dists: list("dists"),
+        components: list("components"),
+        architectures: list("architectures"),
+        keyring: form_get(&form, "keyring").to_string(),
+        replace: form_get(&form, "replace") == "on",
+    };
+    match api::import(State(app), v.who(), Path(repo), Json(req)).await {
+        Ok((_, Json(j))) => msg(
+            true,
+            format!(
+                "Import started: job {}. Its progress is in the job list below.",
+                s(&j["job"])
+            ),
+        ),
         Err(e) => err_part(e),
     }
 }

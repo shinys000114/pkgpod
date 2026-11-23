@@ -178,6 +178,27 @@ pub(crate) enum Cmd {
         #[arg(long, short)]
         wait: bool,
     },
+    /// Import an apt repository into a hosted one, as one version.
+    Import {
+        repo: String,
+        /// The archive root: http(s)://host/debian/.
+        source: String,
+        #[arg(long, value_delimiter = ',', required = true)]
+        dists: Vec<String>,
+        #[arg(long, value_delimiter = ',')]
+        components: Vec<String>,
+        #[arg(long, value_delimiter = ',')]
+        architectures: Vec<String>,
+        /// The upstream's public key (armored file) to check signatures.
+        #[arg(long)]
+        keyring: Option<PathBuf>,
+        /// Replace package files of the same name with other content.
+        #[arg(long)]
+        replace: bool,
+        /// Wait for it and print its log.
+        #[arg(long, short)]
+        wait: bool,
+    },
     /// Recent jobs (of one repository, or all).
     Jobs { repo: Option<String> },
     /// A job and its log.
