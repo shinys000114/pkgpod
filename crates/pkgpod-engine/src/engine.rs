@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use pkgpod_base::db::Db;
@@ -82,6 +83,9 @@ pub struct Engine {
     /// Commits hold it shared, garbage collection exclusively, so GC never
     /// sees a tree whose version row is not written yet.
     pub(crate) gc_lock: RwLock<()>,
+    /// Bumped by every change to repositories, versions or labels, so
+    /// readers can cache what they looked up.
+    generation: AtomicU64,
 }
 
 const REPO_COLS: &str =
@@ -110,7 +114,17 @@ impl Engine {
             signer: RwLock::new(signer),
             locks: Mutex::new(HashMap::new()),
             gc_lock: RwLock::new(()),
+            generation: AtomicU64::new(1),
         })
+    }
+
+    /// Changes whenever a repository, version or label changes.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    fn bump(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn db(&self) -> &Arc<Db> {
@@ -319,6 +333,7 @@ impl Engine {
                 }
                 e => e.into(),
             })?;
+        self.bump();
         let repo = self.repo(&n.name)?;
         if repo.kind.versioned() {
             self.commit(
@@ -346,6 +361,7 @@ impl Engine {
                 params![s.to_string(), r.id],
             )
         })?;
+        self.bump();
         self.repo(name)
     }
 
@@ -358,6 +374,7 @@ impl Engine {
             tx.execute("DELETE FROM labels WHERE repo = ?1", [r.id])?;
             tx.execute("DELETE FROM repos WHERE id = ?1", [r.id])
         })?;
+        self.bump();
         Ok(())
     }
 
@@ -548,6 +565,7 @@ impl Engine {
             Ok::<_, rusqlite::Error>(id)
         })?;
         drop(_g);
+        self.bump();
         self.prune(r)?;
         Ok(self.versions_where(r.id, "v.id = ?2", id)?.pop())
     }
@@ -787,6 +805,7 @@ impl Engine {
             )?;
             Ok(())
         })?;
+        self.bump();
         self.version(name, v.seq)
     }
 
@@ -801,6 +820,7 @@ impl Engine {
         if n == 0 {
             return Err(Error::NotFound(format!("{name} has no label {label}")));
         }
+        self.bump();
         Ok(())
     }
 
