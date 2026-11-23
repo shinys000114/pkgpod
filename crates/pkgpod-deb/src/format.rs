@@ -47,6 +47,57 @@ const GENERATOR: u32 = 1;
 
 pub struct Deb;
 
+/// Settings of a deb mirror.
+pub fn mirror_settings() -> Vec<Field> {
+    vec![
+        Field::text(
+            "source",
+            "",
+            "The upstream archive: http(s)://host/debian/ (follows its Release files) or rsync://host/module/ (the whole tree).",
+        ),
+        Field::list(
+            "dists",
+            "Dists to mirror (http); empty with rsync: everything.",
+        ),
+        Field::list("components", "Components; empty: all the Release lists."),
+        Field::list(
+            "architectures",
+            "Architectures; empty: all the Release lists.",
+        ),
+        Field::bool("sources", false, "Source packages too."),
+        Field::bool("udebs", false, "debian-installer packages too."),
+        Field::list(
+            "extras",
+            "Further index files to keep (globs under dists/<dist>/, e.g. */i18n/*).",
+        ),
+        Field::long(
+            "keyring",
+            "The upstream's public key(s), armored; the Release signature is checked against them. Empty: not checked.",
+        ),
+        Field::text(
+            "schedule",
+            "",
+            "When to sync, as cron (0 */6 * * *); empty: only when asked.",
+        ),
+        Field::bool(
+            "prune",
+            false,
+            "Delete files upstream no longer lists (otherwise only reported).",
+        ),
+        Field::int(
+            "max_delete",
+            10000,
+            "Delete nothing when more files than this would go.",
+        ),
+        Field::int("bwlimit", 0, "Bandwidth limit in KiB/s; 0: none."),
+        Field::int("parallel", 8, "Parallel downloads (http)."),
+        Field::list(
+            "ignore_missing",
+            "Pool files the indexes list but upstream does not serve, accepted as missing.",
+        ),
+    ]
+}
+
 /// Settings of one dist (`dists/<dist>/_dist`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DistDef {
@@ -345,7 +396,10 @@ impl Format for Deb {
         &[Kind::Hosted, Kind::Import, Kind::Mirror]
     }
 
-    fn settings(&self) -> Vec<Field> {
+    fn settings(&self, kind: Kind) -> Vec<Field> {
+        if kind == Kind::Mirror {
+            return mirror_settings();
+        }
         vec![
             Field::text("origin", "", "Origin: field of the Release files."),
             Field::text("label", "", "Label: field of the Release files."),

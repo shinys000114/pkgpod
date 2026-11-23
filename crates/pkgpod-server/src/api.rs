@@ -120,8 +120,15 @@ impl App {
         c.user.as_ref().ok_or(Error::Unauthorized)
     }
 
-    /// Checks addresses against the other repositories'.
+    /// Checks addresses against the other repositories', and a
+    /// schedule's syntax.
     pub fn check_urls(&self, repo: &str, settings: &Value) -> Result<()> {
+        if let Some(c) = settings.get("schedule").and_then(Value::as_str)
+            && !c.trim().is_empty()
+        {
+            crate::cron::Cron::parse(c.trim())
+                .map_err(|e| Error::Invalid(format!("schedule {c:?}: {e}")))?;
+        }
         let Some(urls) = settings.get("urls") else {
             return Ok(());
         };
@@ -289,6 +296,11 @@ pub fn router() -> Router<Arc<App>> {
             "/api/v1/storages/{name}",
             put(storage_set).delete(storage_delete),
         )
+        .route("/api/v1/repos/{repo}/sync", post(sync))
+        .route("/api/v1/repos/{repo}/jobs", get(repo_jobs))
+        .route("/api/v1/jobs", get(all_jobs))
+        .route("/api/v1/jobs/{id}", get(job))
+        .route("/api/v1/jobs/{id}/cancel", post(job_cancel))
         .route("/api/v1/gc", post(gc))
         .route("/api/v1/audit", get(audit))
 }
@@ -551,7 +563,7 @@ pub(crate) async fn formats(State(app): St) -> Json<Value> {
                 "id": f.id(),
                 "title": f.title(),
                 "kinds": f.kinds(),
-                "settings": app.engine.fields(f.id()).unwrap_or_default(),
+                "settings": f.kinds().iter().map(|k| (k.as_str(), app.engine.fields(f.id(), *k).unwrap_or_default())).collect::<std::collections::BTreeMap<_, _>>(),
                 "ops": f.ops(),
             })
         })
@@ -1688,4 +1700,71 @@ pub(crate) async fn gc(
 pub(crate) async fn audit(State(app): St, Who(c): Who) -> Result<Json<Value>> {
     app.require_admin(&c)?;
     Ok(Json(json!(app.auth.audit_log(500)?)))
+}
+
+// ---- jobs ----
+
+pub(crate) async fn sync(
+    State(app): St,
+    Who(c): Who,
+    Path(repo): Path<String>,
+) -> Result<(StatusCode, Json<Value>)> {
+    let (c2, repo2) = (c.clone(), repo.clone());
+    blocking(&app, move |app| {
+        app.repo_for(&c2, &repo2, Role::Write)?;
+        Ok(())
+    })
+    .await?;
+    let id = crate::jobs::start_sync(&app, &repo, c.name())?;
+    app.auth
+        .audit(c.name(), "sync start", &repo, &id.to_string());
+    Ok((StatusCode::ACCEPTED, Json(json!({"job": id}))))
+}
+
+pub(crate) async fn repo_jobs(
+    State(app): St,
+    Who(c): Who,
+    Path(repo): Path<String>,
+) -> Result<Json<Value>> {
+    blocking(&app, move |app| {
+        app.repo_for(&c, &repo, Role::Read)?;
+        Ok(Json(json!(crate::jobs::list(&app.db, Some(&repo), 50)?)))
+    })
+    .await
+}
+
+pub(crate) async fn all_jobs(State(app): St, Who(c): Who) -> Result<Json<Value>> {
+    app.require_admin(&c)?;
+    Ok(Json(json!(crate::jobs::list(&app.db, None, 200)?)))
+}
+
+pub(crate) async fn job(State(app): St, Who(c): Who, Path(id): Path<i64>) -> Result<Json<Value>> {
+    blocking(&app, move |app| {
+        let j = crate::jobs::get(&app.db, id)?;
+        app.repo_for(&c, &j.repo, Role::Read)?;
+        let log = crate::jobs::log(app, id);
+        let mut v = json!(j);
+        v["log"] = json!(log);
+        Ok(Json(v))
+    })
+    .await
+}
+
+pub(crate) async fn job_cancel(
+    State(app): St,
+    Who(c): Who,
+    Path(id): Path<i64>,
+) -> Result<StatusCode> {
+    let app2 = app.clone();
+    let c2 = c.clone();
+    let j = blocking(&app, move |_| {
+        let j = crate::jobs::get(&app2.db, id)?;
+        app2.repo_for(&c2, &j.repo, Role::Write)?;
+        Ok(j)
+    })
+    .await?;
+    app.jobs.cancel(id)?;
+    app.auth
+        .audit(c.name(), "sync cancel", &j.repo, &id.to_string());
+    Ok(StatusCode::ACCEPTED)
 }

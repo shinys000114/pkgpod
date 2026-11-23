@@ -161,8 +161,9 @@ pub trait Format: Send + Sync {
     fn title(&self) -> &'static str;
     /// Kinds of repository this format supports.
     fn kinds(&self) -> &'static [Kind];
-    /// Settings of its repositories, besides the common ones.
-    fn settings(&self) -> Vec<Field> {
+    /// Settings of its repositories of a kind, besides the common ones.
+    fn settings(&self, kind: Kind) -> Vec<Field> {
+        let _ = kind;
         vec![]
     }
     /// Operations on its repositories' trees.

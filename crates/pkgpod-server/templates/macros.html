@@ -9,6 +9,8 @@
   <label class="field"><span>{{ f.name }}</span><select name="{{ f.name }}">{% for (c, on) in f.choices.iter() %}<option{% if on %} selected{% endif %}>{{ c }}</option>{% endfor %}</select><small>{{ f.help }}</small></label>
   {% else if f.kind == "multi" %}
   <fieldset class="field wide dist-pick"><legend>{{ f.name }}</legend>{% if f.choices.is_empty() %}<span class="muted">none yet</span>{% endif %}{% for (c, on) in f.choices.iter() %}<label class="check"><input type="checkbox" name="{{ f.name }}" value="{{ c }}"{% if on %} checked{% endif %}> {{ c }}</label> {% endfor %}<small>{{ f.help }}</small></fieldset>
+  {% else if f.kind == "long" %}
+  <label class="field wide"><span>{{ f.name }}</span><textarea name="{{ f.name }}" rows="5" spellcheck="false">{{ f.value }}</textarea><small>{{ f.help }}</small></label>
   {% else if f.kind == "json" %}
   <label class="field wide"><span>{{ f.name }}</span><textarea name="{{ f.name }}" rows="6" spellcheck="false">{{ f.value }}</textarea><small>{{ f.help }}</small></label>
   {% else if f.kind == "int" %}

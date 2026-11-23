@@ -1,0 +1,10 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+{% extends "base.html" %}
+{% block title %}Job {{ job.id }} · pkgpod{% endblock %}
+{% block main %}
+<div class="page-head"><div class="title"><h1>Job {{ job.id }}</h1>
+  <p class="sub">sync of <a href="/r/{{ repo }}">{{ repo }}</a> · by {{ job.actor }} · started {{ job.started }}</p></div></div>
+<div class="card">
+  {% include "job_log.html" %}
+</div>
+{% endblock %}

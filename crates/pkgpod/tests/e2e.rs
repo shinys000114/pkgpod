@@ -539,3 +539,101 @@ fn console_login_pages_and_csrf() {
         .unwrap();
     assert_eq!(r.status().as_u16(), 200, "a token does not log in");
 }
+
+#[test]
+fn deb_mirror_of_a_hosted_repository() {
+    if !have("dpkg-deb") || !have("gpg") {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&[
+        "key",
+        "generate",
+        "main",
+        "pkgpod e2e <e2e@example.invalid>",
+    ])
+    .unwrap();
+    // The upstream: a public hosted repository of the same server.
+    s.cli(&["repo", "create", "up", "-s", "public=true"])
+        .unwrap();
+    s.cli(&[
+        "op",
+        "up",
+        "dist-set",
+        "name=stable",
+        "components=main,contrib",
+        "-y",
+    ])
+    .unwrap();
+    let debs = s.dir.path().join("debs");
+    std::fs::create_dir_all(&debs).unwrap();
+    let one = build_deb(&debs, "mirrored", "1.0", "amd64", "xz", "");
+    s.cli(&["upload", "up", one.to_str().unwrap()]).unwrap();
+    let (_, key) = get(&s.url("/up/key.asc"), None);
+
+    let keyring = format!("keyring={key}");
+    let source = format!("source={}", s.url("/up/"));
+    s.cli(&[
+        "repo",
+        "create",
+        "mir",
+        "-k",
+        "mirror",
+        "-s",
+        &source,
+        "-s",
+        "dists=stable",
+        "-s",
+        "components=main",
+        "-s",
+        &keyring,
+    ])
+    .unwrap();
+    let out = s.cli(&["sync", "mir", "--wait"]).unwrap();
+    assert!(out.contains("ok:"), "{out}");
+    let (st, pk) = get(&s.url("/mir/dists/stable/main/binary-amd64/Packages"), None);
+    assert_eq!(st, 401, "the mirror is not public");
+    let (st, pk2) = get(
+        &s.url("/mir/dists/stable/main/binary-amd64/Packages"),
+        Some(("admin", "x")),
+    );
+    assert_eq!(st, 401, "{pk}{pk2}");
+    s.cli(&["repo", "set", "mir", "public=true"]).unwrap();
+    let (st, pk) = get(&s.url("/mir/dists/stable/main/binary-amd64/Packages"), None);
+    assert_eq!(st, 200);
+    assert!(pk.contains("Package: mirrored"), "{pk}");
+    let (st, _) = get(
+        &s.url("/mir/pool/main/m/mirrored/mirrored_1.0_amd64.deb"),
+        None,
+    );
+    assert_eq!(st, 200);
+    // The mirror verbatim: the upstream's signature, checked by apt.
+    let (_, inrel) = get(&s.url("/mir/dists/stable/InRelease"), None);
+    assert!(inrel.contains("BEGIN PGP SIGNED MESSAGE"));
+    let jobs = s.json(&["jobs", "mir"]);
+    assert_eq!(jobs[0]["state"], "ok");
+
+    // A wrong keyring fails the sync and leaves the tree as it was.
+    s.cli(&[
+        "repo",
+        "set",
+        "mir",
+        "keyring=-----BEGIN PGP PUBLIC KEY BLOCK-----\nbroken\n-----END PGP PUBLIC KEY BLOCK-----",
+    ])
+    .unwrap();
+    assert!(s.cli(&["sync", "mir", "--wait"]).is_err());
+    assert_eq!(
+        get(&s.url("/mir/dists/stable/main/binary-amd64/Packages"), None).0,
+        200
+    );
+    // Mirrors take no uploads and have no versions.
+    assert!(s.cli(&["upload", "mir", one.to_str().unwrap()]).is_err());
+    assert!(s.json(&["versions", "mir"]).as_array().unwrap().is_empty());
+    // A bad schedule is refused.
+    assert!(
+        s.cli(&["repo", "set", "mir", "schedule=every day"])
+            .is_err()
+    );
+    s.cli(&["repo", "set", "mir", "schedule=0 */6 * * *"])
+        .unwrap();
+}

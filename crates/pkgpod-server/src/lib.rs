@@ -7,6 +7,7 @@
 pub mod api;
 pub mod auth;
 pub mod config;
+pub mod jobs;
 pub mod keys;
 pub mod listeners;
 pub mod routes;
@@ -14,6 +15,8 @@ pub mod schema;
 pub mod serve;
 
 mod console;
+mod cron;
+mod mirror_pkgs;
 mod web;
 
 use std::collections::HashMap;
@@ -108,6 +111,7 @@ pub struct App {
     pub auth: Auth,
     pub keys: Arc<Keys>,
     pub listeners: listeners::Running,
+    pub jobs: jobs::Jobs,
     pub plans: Mutex<HashMap<String, Kept>>,
     cache: Mutex<Cache>,
 }
@@ -149,6 +153,7 @@ impl App {
             );
         }
         listeners::ensure_default(&db)?;
+        jobs::recover(&db)?;
         Ok(Arc::new(App {
             cfg,
             db,
@@ -156,6 +161,7 @@ impl App {
             auth,
             keys,
             listeners: listeners::Running::default(),
+            jobs: jobs::Jobs::default(),
             plans: Mutex::new(HashMap::new()),
             cache: Mutex::new(Cache::default()),
         }))
@@ -238,6 +244,7 @@ impl App {
 /// serving listeners in the database, and the background jobs.
 pub async fn run(app: Arc<App>) -> Result<(), String> {
     listeners::reconcile(&app);
+    let sched = jobs::scheduler(app.clone());
     let gc = {
         let app = app.clone();
         tokio::spawn(async move {
@@ -279,6 +286,8 @@ pub async fn run(app: Arc<App>) -> Result<(), String> {
     tracing::info!("pkgpod {}: management on {addr}", pkgpod_base::version());
     let r = listeners::serve_router(&addr, tls, mgmt, stop_rx).await;
     listeners::stop_all(&app);
+    app.jobs.cancel_all();
+    sched.abort();
     gc.abort();
     r
 }

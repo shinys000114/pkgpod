@@ -34,6 +34,14 @@
 {% endif %}
 </div>
 
+{% if mirror %}
+<div class="card">
+  <div class="card-head"><h2>Sync</h2><span class="hint">from <span class="mono">{{ source }}</span>{% if !next_run.is_empty() %} · next {{ next_run }}{% endif %}</span>
+    {% if can_sync %}<button hx-post="/c/r/{{ name }}/sync" hx-target="#sync-result">Sync now</button>{% endif %}</div>
+  <div id="sync-result" class="card-body results"></div>
+  <div hx-get="/r/{{ name }}/jobs" hx-trigger="load, every 5s"></div>
+</div>
+{% endif %}
 {% if can_write %}
 <details class="card panel">
   <summary>Upload <span class="hint">files into the repository; each upload is a version</span></summary>

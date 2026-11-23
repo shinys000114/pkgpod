@@ -26,7 +26,7 @@ impl Format for Toy {
     fn kinds(&self) -> &'static [Kind] {
         &[Kind::Hosted, Kind::Mirror]
     }
-    fn settings(&self) -> Vec<Field> {
+    fn settings(&self, _: Kind) -> Vec<Field> {
         vec![Field::text("greeting", "hello", "A test setting.")]
     }
     fn ingest(

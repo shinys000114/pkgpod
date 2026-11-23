@@ -67,6 +67,11 @@ pub fn router() -> Router<Arc<App>> {
         .route("/c/r/{repo}/grants/{subject}/delete", post(revoke))
         .route("/c/r/{repo}/delete", post(repo_delete))
         .route("/c/plans/{id}/apply", post(plan_apply))
+        .route("/c/r/{repo}/sync", post(sync))
+        .route("/r/{repo}/jobs", get(jobs_part))
+        .route("/jobs/{id}", get(job_page))
+        .route("/jobs/{id}/log", get(job_log))
+        .route("/c/jobs/{id}/cancel", post(job_cancel))
         .route("/search", get(search_page))
         .route("/search/rows", get(search_rows))
         .route("/account", get(account_page))
@@ -310,6 +315,7 @@ fn form_fields(fields: &[Field], values: &Value) -> Vec<FormField> {
                 FieldKind::Integer => ("int", vec![]),
                 FieldKind::List => ("list", vec![]),
                 FieldKind::Json => ("json", vec![]),
+                FieldKind::Long => ("long", vec![]),
                 FieldKind::Choice { choices } => (
                     "choice",
                     choices.iter().map(|c| (c.clone(), *c == text)).collect(),
@@ -506,7 +512,7 @@ struct IndexPage {
     storages: Vec<String>,
 }
 
-pub fn when(t: Option<i64>) -> String {
+pub(crate) fn when(t: Option<i64>) -> String {
     t.and_then(|t| jiff::Timestamp::from_second(t).ok())
         .map(|t| {
             t.to_zoned_datetime(jiff::tz::TimeZone::system())
@@ -558,7 +564,10 @@ async fn index(State(app): St, v: Viewer) -> Result<Response> {
             id: f.id().to_string(),
             title: f.title().to_string(),
             kinds: f.kinds().iter().map(|k| k.as_str().to_string()).collect(),
-            fields: form_fields(&app.engine.fields(f.id()).unwrap_or_default(), &Value::Null),
+            fields: form_fields(
+                &app.engine.fields(f.id(), Kind::Hosted).unwrap_or_default(),
+                &Value::Null,
+            ),
         })
         .collect();
     let storages = if v.caller.is_admin() {
@@ -580,7 +589,8 @@ async fn repo_create(
     Form(form): Form<Vec<(String, String)>>,
 ) -> Response {
     let format = form_get(&form, "format").to_string();
-    let fields = match app.engine.fields(&format) {
+    let kind = Kind::parse(form_get(&form, "kind")).unwrap_or(Kind::Hosted);
+    let fields = match app.engine.fields(&format, kind) {
         Ok(f) => f,
         Err(e) => return err_part(e.into()),
     };
@@ -628,6 +638,9 @@ struct RepoPage {
     role: String,
     can_write: bool,
     mirror: bool,
+    can_sync: bool,
+    next_run: String,
+    source: String,
     usage: Vec<UseLine>,
     upload: Vec<FormField>,
     ops: Vec<OpForm>,
@@ -650,6 +663,25 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String]) -> Vec<UseLine
         format!("http://{addr}/{}/", r.name)
     });
     let mut out = Vec::new();
+    if r.format == "deb" && r.kind == Kind::Mirror {
+        let (dists, comps, _) = crate::mirror_pkgs::tree_index(&r.tree_dir());
+        let dist = dists.first().cloned().unwrap_or_else(|| "<dist>".into());
+        out.push(UseLine {
+            label: "Source".into(),
+            text: format!(
+                "echo 'deb [signed-by=<the upstream's key>] {base} {dist} {}' | sudo tee /etc/apt/sources.list.d/{}.list",
+                if comps.is_empty() { "main".into() } else { comps.join(" ") },
+                r.name
+            ),
+        });
+        if !dists.is_empty() {
+            out.push(UseLine {
+                label: "Dists".into(),
+                text: dists.join(" "),
+            });
+        }
+        return out;
+    }
     if r.format == "deb" {
         let dists: Vec<String> = app
             .engine
@@ -787,6 +819,10 @@ async fn repo_page(State(app): St, v: Viewer, Path(repo): Path<String>) -> Resul
         role,
         can_write,
         mirror: r.kind == Kind::Mirror,
+        can_sync: r.kind == Kind::Mirror
+            && app.auth.role(&v.caller, &r.name, r.setting_bool("public")) >= Some(Role::Write),
+        next_run: crate::jobs::next_run(&r).unwrap_or_default(),
+        source: r.setting_str("source").to_string(),
         upload,
         ops,
         other_repos: others,
@@ -949,12 +985,114 @@ struct QQ {
     q: String,
 }
 
+#[derive(Deserialize, Default)]
+struct MirrorQ {
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    dist: String,
+    #[serde(default)]
+    component: String,
+    #[serde(default)]
+    arch: String,
+}
+
+#[derive(Template)]
+#[template(path = "mirror_packages.html")]
+struct MirrorPackages {
+    repo: String,
+    dists: Vec<(String, bool)>,
+    comps: Vec<(String, bool)>,
+    archs: Vec<(String, bool)>,
+    q: String,
+    rows: Vec<PkgRow>,
+    total: usize,
+    note: String,
+}
+
+async fn mirror_packages(app: Arc<App>, v: Viewer, repo: String, q: MirrorQ) -> Response {
+    let r = match app.repo_for(&v.caller, &repo, Role::Read) {
+        Ok(r) => r,
+        Err(e) => return err_part(e),
+    };
+    let tree = r.tree_dir();
+    let (dists, comps, archs) = crate::mirror_pkgs::tree_index(&tree);
+    let pick = |want: &str, list: &[String], pref: &str| -> String {
+        if !want.is_empty() && list.iter().any(|x| x == want) {
+            want.to_string()
+        } else if list.iter().any(|x| x == pref) {
+            pref.to_string()
+        } else {
+            list.first().cloned().unwrap_or_default()
+        }
+    };
+    let (d, c, a) = (
+        pick(&q.dist, &dists, ""),
+        pick(&q.component, &comps, "main"),
+        pick(&q.arch, &archs, "amd64"),
+    );
+    let mark = |list: &[String], sel: &str| list.iter().map(|x| (x.clone(), x == sel)).collect();
+    let mut out = MirrorPackages {
+        repo,
+        dists: mark(&dists, &d),
+        comps: mark(&comps, &c),
+        archs: mark(&archs, &a),
+        q: q.q.clone(),
+        rows: vec![],
+        total: 0,
+        note: String::new(),
+    };
+    if d.is_empty() {
+        out.note = "Nothing received yet: sync the mirror first.".into();
+        return render(&out);
+    }
+    let safe = |x: &str| !x.is_empty() && !x.contains(['/', '\\', '\0']) && x != "." && x != "..";
+    if ![&d, &c, &a].iter().all(|x| safe(x)) {
+        out.note = "Not a dist, component or architecture name.".into();
+        return render(&out);
+    }
+    let dir = tree
+        .join("dists")
+        .join(&d)
+        .join(&c)
+        .join(format!("binary-{a}"));
+    match tokio::task::spawn_blocking(move || crate::mirror_pkgs::load(&dir)).await {
+        Ok(Ok(pkgs)) => {
+            let needle = q.q.trim().to_lowercase();
+            let hits: Vec<_> = pkgs
+                .iter()
+                .filter(|p| needle.is_empty() || p.name.to_lowercase().contains(&needle))
+                .collect();
+            out.total = hits.len();
+            out.rows = hits
+                .into_iter()
+                .take(500)
+                .map(|p| PkgRow {
+                    repo: String::new(),
+                    name: p.name.clone(),
+                    version: p.version.clone(),
+                    extra: p.arch.clone(),
+                    size: crate::serve::human(p.size),
+                    path: p.filename.clone(),
+                })
+                .collect();
+        }
+        Ok(Err(e)) => out.note = e,
+        Err(_) => out.note = "reading the index failed".into(),
+    }
+    render(&out)
+}
+
 async fn packages_part(
     State(app): St,
     v: Viewer,
     Path(repo): Path<String>,
-    Query(q): Query<QQ>,
+    Query(mq): Query<MirrorQ>,
 ) -> Response {
+    if app.engine.repo(&repo).is_ok_and(|r| r.kind == Kind::Mirror) {
+        return mirror_packages(app, v, repo, mq).await;
+    }
+    let q = QQ { q: mq.q };
     let limit = 500;
     let res = api::packages(
         State(app.clone()),
@@ -1361,7 +1499,7 @@ async fn settings_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> R
     };
     let can_admin = app.auth.role(&v.caller, &repo, r.setting_bool("public")) == Some(Role::Admin);
     let fields = form_fields(
-        &app.engine.fields(&r.format).unwrap_or_default(),
+        &app.engine.fields(&r.format, r.kind).unwrap_or_default(),
         &r.settings,
     );
     let grants = if can_admin {
@@ -1415,7 +1553,7 @@ async fn settings_save(
     let fields = match app
         .engine
         .repo(&repo)
-        .and_then(|r| app.engine.fields(&r.format))
+        .and_then(|r| app.engine.fields(&r.format, r.kind))
     {
         Ok(f) => f,
         Err(e) => return err_part(e.into()),
@@ -2022,6 +2160,112 @@ async fn gc(State(app): St, v: Viewer, Form(form): Form<Vec<(String, String)>>) 
                 crate::serve::human(r["bytes"].as_u64().unwrap_or(0))
             ),
         ),
+        Err(e) => err_part(e),
+    }
+}
+
+// ---- mirror syncs ----
+
+async fn sync(State(app): St, v: Viewer, Path(repo): Path<String>) -> Response {
+    match api::sync(State(app), v.who(), Path(repo)).await {
+        Ok((_, Json(j))) => msg(true, format!("Sync started: job {}.", s(&j["job"]))),
+        Err(e) => err_part(e),
+    }
+}
+
+pub struct JobRow {
+    pub id: i64,
+    pub state: String,
+    pub actor: String,
+    pub started: String,
+    pub finished: String,
+    pub summary: String,
+}
+
+fn job_row(j: &crate::jobs::Job) -> JobRow {
+    JobRow {
+        id: j.id,
+        state: j.state.clone(),
+        actor: j.actor.clone(),
+        started: when(j.started),
+        finished: when(j.finished),
+        summary: j.summary.clone(),
+    }
+}
+
+#[derive(Template)]
+#[template(path = "jobs.html")]
+struct JobsPart {
+    rows: Vec<JobRow>,
+}
+
+async fn jobs_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> Response {
+    match api::repo_jobs(State(app), v.who(), Path(repo)).await {
+        Ok(Json(list)) => {
+            let jobs: Vec<crate::jobs::Job> = serde_json::from_value(list).unwrap_or_default();
+            render(&JobsPart {
+                rows: jobs.iter().map(job_row).collect(),
+            })
+        }
+        Err(e) => err_part(e),
+    }
+}
+
+#[derive(Template)]
+#[template(path = "job.html")]
+struct JobPage {
+    s: Shell,
+    job: JobRow,
+    repo: String,
+    log: String,
+    running: bool,
+    id: i64,
+    state: String,
+}
+
+async fn job_page(State(app): St, v: Viewer, Path(id): Path<i64>) -> Result<Response> {
+    let j = json_of(api::job(State(app), v.who(), Path(id)).await)?;
+    let log = s(&j["log"]);
+    let job: crate::jobs::Job =
+        serde_json::from_value(j).map_err(|e| Error::Invalid(e.to_string()))?;
+    Ok(render(&JobPage {
+        s: v.shell("repos"),
+        id: job.id,
+        state: job.state.clone(),
+        running: job.state == "running",
+        repo: job.repo.clone(),
+        job: job_row(&job),
+        log,
+    }))
+}
+
+#[derive(Template)]
+#[template(path = "job_log.html")]
+struct JobLog {
+    id: i64,
+    log: String,
+    running: bool,
+    state: String,
+}
+
+async fn job_log(State(app): St, v: Viewer, Path(id): Path<i64>) -> Response {
+    match api::job(State(app), v.who(), Path(id)).await {
+        Ok(Json(j)) => {
+            let state = s(&j["state"]);
+            render(&JobLog {
+                id,
+                log: s(&j["log"]),
+                running: state == "running",
+                state,
+            })
+        }
+        Err(e) => err_part(e),
+    }
+}
+
+async fn job_cancel(State(app): St, v: Viewer, Path(id): Path<i64>) -> Response {
+    match api::job_cancel(State(app), v.who(), Path(id)).await {
+        Ok(_) => msg(true, "Asked the job to stop."),
         Err(e) => err_part(e),
     }
 }

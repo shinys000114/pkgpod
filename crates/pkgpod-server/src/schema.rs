@@ -5,7 +5,8 @@
 
 use pkgpod_base::db::Db;
 
-const STEPS: &[&str] = &["
+const STEPS: &[&str] = &[
+    "
 CREATE TABLE users (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
@@ -76,7 +77,23 @@ CREATE TABLE audit (
     target TEXT NOT NULL,
     detail TEXT NOT NULL
 );
-"];
+",
+    "
+CREATE TABLE jobs (
+    id INTEGER PRIMARY KEY,
+    repo TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    state TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    created INTEGER NOT NULL,
+    started INTEGER,
+    finished INTEGER,
+    summary TEXT NOT NULL DEFAULT '',
+    report TEXT
+);
+CREATE INDEX jobs_repo ON jobs(repo, id);
+",
+];
 
 pub fn migrate(db: &Db) -> pkgpod_base::Result<()> {
     db.migrate("server", STEPS)
