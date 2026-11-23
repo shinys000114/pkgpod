@@ -1,0 +1,83 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+//! The server's tables: people and rights, serving listeners, signing
+//! keys and server-wide settings.
+
+use pkgpod_base::db::Db;
+
+const STEPS: &[&str] = &["
+CREATE TABLE users (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    password TEXT NOT NULL,
+    admin INTEGER NOT NULL DEFAULT 0,
+    disabled INTEGER NOT NULL DEFAULT 0,
+    created INTEGER NOT NULL
+);
+CREATE TABLE teams (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    created INTEGER NOT NULL
+);
+CREATE TABLE team_members (
+    team INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    user INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    PRIMARY KEY (team, user)
+);
+CREATE TABLE grants (
+    repo TEXT NOT NULL,
+    user INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    team INTEGER REFERENCES teams(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    CHECK ((user IS NULL) != (team IS NULL))
+);
+CREATE UNIQUE INDEX grants_user ON grants(repo, user) WHERE user IS NOT NULL;
+CREATE UNIQUE INDEX grants_team ON grants(repo, team) WHERE team IS NOT NULL;
+CREATE TABLE tokens (
+    id INTEGER PRIMARY KEY,
+    user INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    hash BLOB NOT NULL UNIQUE,
+    repos TEXT NOT NULL,
+    write INTEGER NOT NULL,
+    expires INTEGER,
+    created INTEGER NOT NULL,
+    used INTEGER
+);
+CREATE TABLE sessions (
+    hash BLOB PRIMARY KEY,
+    user INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    csrf TEXT NOT NULL,
+    created INTEGER NOT NULL,
+    expires INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE listeners (
+    name TEXT PRIMARY KEY,
+    addr TEXT NOT NULL,
+    cert TEXT NOT NULL DEFAULT '',
+    key TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE keys (
+    name TEXT PRIMARY KEY,
+    fingerprint TEXT NOT NULL,
+    homedir TEXT NOT NULL DEFAULT '',
+    passphrase_file TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE settings (
+    name TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE TABLE audit (
+    id INTEGER PRIMARY KEY,
+    time INTEGER NOT NULL,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    target TEXT NOT NULL,
+    detail TEXT NOT NULL
+);
+"];
+
+pub fn migrate(db: &Db) -> pkgpod_base::Result<()> {
+    db.migrate("server", STEPS)
+}
