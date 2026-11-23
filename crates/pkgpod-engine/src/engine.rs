@@ -503,6 +503,7 @@ impl Engine {
             seq,
             created,
             signer: signer.as_ref(),
+            prev_view: cur.as_ref().and_then(|v| v.view),
         })?;
         let changes = self.objects.diff(&prev_root, &root)?;
         let id = self.db.write(|tx| {
