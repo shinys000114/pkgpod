@@ -237,6 +237,12 @@ pub async fn serve_router(
         if tls.is_some() { " (TLS)" } else { "" }
     );
     let Some(acceptor) = tls else {
+        // Without TCP_NODELAY a small file (headers and body written
+        // apart) waits for the client's delayed ACK: 40 ms a request.
+        use axum::serve::ListenerExt;
+        let listener = listener.tap_io(|tcp| {
+            let _ = tcp.set_nodelay(true);
+        });
         return axum::serve(
             listener,
             router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -260,6 +266,7 @@ pub async fn serve_router(
         };
         let acceptor = acceptor.clone();
         let app = router.clone();
+        let _ = tcp.set_nodelay(true);
         tokio::spawn(async move {
             let Ok(tls) = acceptor.accept(tcp).await else {
                 return;
