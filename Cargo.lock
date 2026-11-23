@@ -2354,6 +2354,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "pkgpod-mirror"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "flate2",
+ "futures-util",
+ "glob",
+ "httpdate",
+ "liblzma",
+ "pkgpod-base",
+ "pkgpod-deb",
+ "reqwest",
+ "rustix",
+ "serde",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror",
+ "time",
+ "tokio",
+ "tower-http 0.7.1",
+]
+
+[[package]]
 name = "pkgpod-server"
 version = "0.0.0"
 dependencies = [
