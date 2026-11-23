@@ -120,6 +120,9 @@ pub struct PublishCx<'a> {
     pub seq: i64,
     pub created: i64,
     pub signer: &'a dyn Signer,
+    /// The tree served for the previous version, for reusing what did
+    /// not change.
+    pub prev_view: Option<Digest>,
 }
 
 impl PublishCx<'_> {

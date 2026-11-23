@@ -1,0 +1,36 @@
+[package]
+name = "pkgpod-deb"
+description = "pkgpod Debian format: .deb parsing, signed indexes, the deb format"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+pkgpod-base.workspace = true
+pkgpod-engine.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ar.workspace = true
+tar.workspace = true
+flate2.workspace = true
+liblzma.workspace = true
+zstd.workspace = true
+sha2.workspace = true
+sha1.workspace = true
+md-5.workspace = true
+time.workspace = true
+thiserror.workspace = true
+pgp.workspace = true
+
+tempfile = { workspace = true, optional = true }
+
+[features]
+# Test helpers for other pkgpod crates.
+testutil = ["dep:tempfile"]
+
+[dev-dependencies]
+tempfile.workspace = true
+pkgpod-deb = { workspace = true, features = ["testutil"] }
