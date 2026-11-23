@@ -393,7 +393,7 @@ impl Format for Deb {
     }
 
     fn kinds(&self) -> &'static [Kind] {
-        &[Kind::Hosted, Kind::Import, Kind::Mirror]
+        &[Kind::Hosted, Kind::Mirror]
     }
 
     fn settings(&self, kind: Kind) -> Vec<Field> {
@@ -685,7 +685,7 @@ fn publish(cx: &PublishCx) -> Result<Option<Digest>> {
             "label": str_of(settings, "label"),
             "sign": bool_of(settings, "sign"),
             "by_hash": bool_of(settings, "by_hash"),
-            "key": str_of(settings, "key"),
+            "key": cx.signer.key_id(cx.key()).unwrap_or_default(),
         })
     };
     let mut view = Edit::new(objs, pkgpod_engine::tree::empty());

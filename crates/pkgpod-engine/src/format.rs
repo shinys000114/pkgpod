@@ -95,6 +95,12 @@ pub trait Signer: Send + Sync {
     fn clearsign(&self, key: Option<&str>, data: &[u8]) -> Result<Vec<u8>>;
     /// Armored detached signature of `data`.
     fn detach_sign(&self, key: Option<&str>, data: &[u8]) -> Result<Vec<u8>>;
+    /// What identifies the key that `key` resolves to now (its
+    /// fingerprint), so publishing notices when the key changes.
+    fn key_id(&self, key: Option<&str>) -> Option<String> {
+        let _ = key;
+        None
+    }
     /// The armored public key clients check signatures with.
     fn public_key(&self, key: Option<&str>) -> Result<Vec<u8>> {
         let _ = key;
