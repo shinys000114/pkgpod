@@ -243,4 +243,7 @@ impl pkgpod_engine::Signer for Keys {
             .map_err(|e| pkgpod_engine::Error::Invalid(e.to_string()))?;
         Ok(s.detach_sign(data)?)
     }
+    fn public_key(&self, key: Option<&str>) -> pkgpod_engine::Result<Vec<u8>> {
+        Keys::public_key(self, key).map_err(|e| pkgpod_engine::Error::Invalid(e.to_string()))
+    }
 }

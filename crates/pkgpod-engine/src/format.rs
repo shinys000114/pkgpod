@@ -95,6 +95,11 @@ pub trait Signer: Send + Sync {
     fn clearsign(&self, key: Option<&str>, data: &[u8]) -> Result<Vec<u8>>;
     /// Armored detached signature of `data`.
     fn detach_sign(&self, key: Option<&str>, data: &[u8]) -> Result<Vec<u8>>;
+    /// The armored public key clients check signatures with.
+    fn public_key(&self, key: Option<&str>) -> Result<Vec<u8>> {
+        let _ = key;
+        Err(crate::Error::Invalid("no public key".into()))
+    }
 }
 
 /// A signer that has no key.
@@ -172,6 +177,12 @@ pub trait Format: Send + Sync {
             "{} repositories have no operation {op}",
             self.id()
         )))
+    }
+    /// Parameters of an upload to a repository whose current state is
+    /// `root` (for the console's form; the CLI passes them as text).
+    fn upload_fields(&self, objects: &Objects, root: &Digest) -> Vec<Field> {
+        let _ = (objects, root);
+        vec![]
     }
     /// Takes in an uploaded file; returns a summary.
     fn ingest(&self, cx: &Cx, up: &Upload, params: &Value, edit: &mut Edit) -> Result<String> {

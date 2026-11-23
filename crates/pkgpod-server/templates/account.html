@@ -1,0 +1,43 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+{% extends "base.html" %}
+{% block title %}Account · pkgpod{% endblock %}
+{% block main %}
+<div class="page-head"><div class="title"><h1>{{ s.user }}</h1><p class="sub">Your password and the tokens programs use (apt, CI, the pkgpod command).</p></div></div>
+<div class="grid">
+<div class="card">
+  <div class="card-head"><h2>Tokens</h2><span class="hint">a token is a password for programs; give it only the repositories and rights it needs</span></div>
+  {% if tokens.is_empty() %}<p class="empty">No tokens.</p>{% else %}
+  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Repositories</th><th>Write</th><th>Expires</th><th>Last used</th><th></th></tr></thead><tbody>
+  {% for t in tokens %}<tr><td>{{ t.name }}</td><td>{{ t.repos }}</td><td>{% if t.write %}yes{% else %}no{% endif %}</td><td>{{ t.expires }}</td><td>{{ t.used }}</td>
+    <td class="acts"><button class="link danger" hx-post="/c/tokens/{{ t.id }}/delete" hx-target="closest tr" hx-swap="outerHTML" hx-confirm="Delete token {{ t.name }}?">delete</button></td></tr>{% endfor %}
+  </tbody></table></div>
+  {% endif %}
+  <div class="card-body">
+  <form hx-post="/c/tokens" hx-target="next .result">
+    <div class="fields">
+      <label class="field"><span>Name</span><input name="name" required placeholder="ci, laptop apt"></label>
+      <label class="field"><span>Repositories</span><input name="repos" placeholder="all"><small>Comma separated; empty: every one you may use.</small></label>
+      <label class="field"><span>Expires in days</span><input type="number" name="expires_days" placeholder="never"></label>
+      <label class="check field"><input type="checkbox" name="write"> <span>may write</span><small>Upload and change; otherwise read only.</small></label>
+    </div>
+    <div class="form-foot"><button type="submit">Make token</button></div>
+  </form>
+  <div class="result"></div>
+  </div>
+</div>
+<div class="card">
+  <div class="card-head"><h2>Password</h2></div>
+  <div class="card-body">
+  <form hx-post="/c/password" hx-target="next .result">
+    <div class="fields">
+      <label class="field"><span>Current</span><input type="password" name="old" required autocomplete="current-password"></label>
+      <label class="field"><span>New</span><input type="password" name="new" required minlength="8" autocomplete="new-password"></label>
+      <label class="field"><span>Again</span><input type="password" name="again" required minlength="8" autocomplete="new-password"></label>
+    </div>
+    <div class="form-foot"><button type="submit">Change</button></div>
+  </form>
+  <div class="result"></div>
+  </div>
+</div>
+</div>
+{% endblock %}

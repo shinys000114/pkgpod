@@ -1,0 +1,70 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+{% extends "base.html" %}
+{% block title %}Server · pkgpod{% endblock %}
+{% block main %}
+<div class="page-head"><div class="title"><h1>Server</h1><p class="sub">Data in <span class="mono">{{ data_dir }}</span>; console and API on <span class="mono">{{ management }}</span> (from the configuration file).</p></div></div>
+<div id="server-result"></div>
+<div class="card">
+  <div class="card-head"><h2>Serving listeners</h2><span class="hint">repositories are served on every listener, chosen by their addresses; a reverse proxy in front gives certificates</span></div>
+  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Address</th><th>TLS</th><th>State</th><th></th></tr></thead><tbody>
+  {% for l in listeners %}<tr><td><b>{{ l.name }}</b></td><td class="mono">{{ l.addr }}</td><td>{% if l.tls %}yes{% else %}no{% endif %}</td>
+    <td><span class="badge {% if l.ok %}ok{% else %}bad{% endif %}">{{ l.state }}</span></td>
+    <td class="acts"><button class="link danger" hx-post="/c/listeners/{{ l.name|urlencode }}/delete" hx-target="#server-result" hx-confirm="Stop and remove listener {{ l.name }}?">remove</button></td></tr>{% endfor %}
+  </tbody></table></div>
+  <div class="card-body">
+  <form hx-post="/c/listeners" hx-target="#server-result">
+    <div class="fields">
+      <label class="field"><span>Name</span><input name="name" required placeholder="default"><small>An existing name changes that listener.</small></label>
+      <label class="field"><span>Address</span><input name="addr" required placeholder="127.0.0.1:8080"></label>
+      <label class="field"><span>Certificate</span><input name="cert" placeholder="/etc/ssl/pkgpod.pem"><small>PEM chain; with a key: TLS.</small></label>
+      <label class="field"><span>Key</span><input name="key" placeholder="/etc/ssl/private/pkgpod.key"></label>
+      <label class="check field"><input type="checkbox" name="disabled"> <span>disabled</span></label>
+    </div>
+    <div class="form-foot"><button type="submit">Save listener</button></div>
+  </form>
+  </div>
+</div>
+<div class="card">
+  <div class="card-head"><h2>Signing keys</h2><span class="hint">repositories are signed with the default key unless their key setting names another</span></div>
+  {% if keys.is_empty() %}<p class="empty">No keys: signed repositories cannot publish until one is added.</p>{% else %}
+  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Fingerprint</th><th></th></tr></thead><tbody>
+  {% for k in keys %}<tr><td><b>{{ k.name }}</b>{% if k.default %} <span class="tag accent">default</span>{% endif %}</td><td class="mono">{{ k.fingerprint }}</td>
+    <td class="acts nowrap"><a href="/api/v1/keys/{{ k.name|urlencode }}/public">public key</a>
+    {% if !k.default %}<button class="link" hx-post="/c/keys/{{ k.name|urlencode }}/default" hx-target="#server-result">make default</button>{% endif %}
+    <button class="link danger" hx-post="/c/keys/{{ k.name|urlencode }}/delete" hx-target="#server-result" hx-confirm="Forget key {{ k.name }}? (it stays in its gpg home)">remove</button></td></tr>{% endfor %}
+  </tbody></table></div>
+  {% endif %}
+  <div class="card-body">
+  <form class="inline" hx-post="/c/keys/generate" hx-target="#server-result">
+    New key <input name="name" required placeholder="main" size="10"> for <input name="uid" required placeholder="Team packages &lt;packages@example.org&gt;" size="36"> <button type="submit">Generate</button>
+  </form>
+  <form class="inline mt" hx-post="/c/keys" hx-target="#server-result">
+    Existing key <input name="name" required placeholder="name" size="10"> <input name="fingerprint" required placeholder="fingerprint" size="42">
+    <input name="homedir" placeholder="gpg home (default: the server's)" size="24"> <input name="passphrase_file" placeholder="passphrase file" size="18"> <button type="submit">Add</button>
+  </form>
+  </div>
+</div>
+<div class="card">
+  <div class="card-head"><h2>Storages</h2><span class="hint">where blobs and mirror trees are kept; repositories choose one when made</span></div>
+  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Path</th><th></th></tr></thead><tbody>
+  {% for (n, p) in storages %}<tr><td><b>{{ n }}</b></td><td class="mono">{{ p }}</td><td class="acts">{% if n != "main" %}<button class="link danger" hx-post="/c/storages/{{ n|urlencode }}/delete" hx-target="#server-result">remove</button>{% endif %}</td></tr>{% endfor %}
+  </tbody></table></div>
+  <div class="card-body"><form class="inline" hx-post="/c/storages" hx-target="#server-result"><input name="name" required placeholder="name" size="10"> <input name="path" required placeholder="/srv/pkgpod" size="30"> <button type="submit">Save storage</button></form></div>
+</div>
+<div class="card">
+  <div class="card-head"><h2>Garbage collection</h2><span class="hint">runs daily; removes versions retention does not keep, then what no kept version uses</span></div>
+  <div class="card-body">
+  <form class="inline" hx-post="/c/gc" hx-target="next .result">
+    Keep what is younger than <input type="number" name="grace_hours" value="24" size="4"> hours
+    <button type="submit" name="dry_run" value="1">Count</button> <button type="submit" class="danger" name="dry_run" value="0">Collect</button>
+  </form>
+  <div class="result"></div>
+  </div>
+</div>
+<div class="card">
+  <div class="card-head"><h2>Recent changes</h2></div>
+  <div class="table-wrap"><table><thead><tr><th>When</th><th>Who</th><th>What</th><th>On</th><th>Details</th></tr></thead><tbody>
+  {% for a in audit %}<tr><td class="nowrap">{{ a.when }}</td><td>{{ a.actor }}</td><td>{{ a.action }}</td><td>{{ a.target }}</td><td class="wrap muted">{{ a.detail }}</td></tr>{% endfor %}
+  </tbody></table></div>
+</div>
+{% endblock %}

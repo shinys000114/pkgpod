@@ -1,0 +1,48 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block main %}
+<div class="page-head">
+  <div class="title"><h1>Repositories</h1><p class="sub">Hosted repositories keep every change as a version; mirrors follow their upstream.</p></div>
+</div>
+<div class="card">
+  <div class="card-head"><h2>Repositories</h2><span class="hint">{{ repos.len() }}</span></div>
+  {% if repos.is_empty() %}<p class="empty">No repositories yet{% if s.admin %}: make one below{% endif %}.</p>{% else %}
+  <div class="table-wrap"><table>
+    <thead><tr><th>Repository</th><th>Format</th><th>Kind</th><th class="num">Version</th><th>Updated</th><th>Addresses</th></tr></thead>
+    <tbody>
+    {% for r in repos %}
+    <tr>
+      <td class="nowrap"><a href="/r/{{ r.name }}"><b>{{ r.name }}</b></a>{% if r.public %} <span class="tag">public</span>{% endif %}</td>
+      <td>{{ r.format }}</td>
+      <td><span class="tag{% if r.kind == "hosted" %} accent{% endif %}">{{ r.kind }}</span></td>
+      <td class="num">{{ r.version }}</td>
+      <td class="nowrap">{{ r.updated }}</td>
+      <td class="mono wrap">{% for u in r.urls %}{{ u }}<br>{% endfor %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% endif %}
+</div>
+{% if s.admin %}
+{% for f in formats %}
+<details class="card panel">
+  <summary>New {{ f.title }} repository</summary>
+  <div class="panel-body">
+  <form hx-post="/c/repos" hx-target="next .result">
+    <input type="hidden" name="format" value="{{ f.id }}">
+    <div class="fields">
+      <label class="field"><span>Name</span><input name="name" placeholder="e.g. ppa" required pattern="[a-z0-9][a-z0-9._-]*"><small>Lowercase letters, digits, '.', '_', '-'.</small></label>
+      <label class="field"><span>Kind</span><select name="kind">{% for k in f.kinds %}<option>{{ k }}</option>{% endfor %}</select><small>hosted: uploads; mirror: follows an upstream.</small></label>
+      <label class="field"><span>Storage</span><select name="storage">{% for st in storages %}<option>{{ st }}</option>{% endfor %}</select></label>
+    </div>
+    {% call m::fields(f.fields) %}{% endcall %}
+    <div class="form-foot"><button type="submit">Create</button></div>
+  </form>
+  <div class="result"></div>
+  </div>
+</details>
+{% endfor %}
+{% endif %}
+{% endblock %}

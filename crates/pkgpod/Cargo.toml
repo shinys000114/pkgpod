@@ -16,7 +16,7 @@ path = "src/main.rs"
 pkgpod-base.workspace = true
 pkgpod-server.workspace = true
 clap.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["form"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -30,5 +30,5 @@ jiff.workspace = true
 [dev-dependencies]
 pkgpod-deb = { workspace = true, features = ["testutil"] }
 tempfile.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["form"] }
 serde_json.workspace = true

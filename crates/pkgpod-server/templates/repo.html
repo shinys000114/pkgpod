@@ -1,0 +1,80 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block title %}{{ name }} · pkgpod{% endblock %}
+{% block main %}
+<div class="page-head">
+  <div class="title">
+    <h1>{{ name }}</h1>
+    <p class="sub"><span class="tag">{{ format }}</span> <span class="tag{% if kind == "hosted" %} accent{% endif %}">{{ kind }}</span>{% if public %} <span class="tag">public</span>{% endif %}
+    {% if !mirror %} · version <b>{{ version }}</b> · {{ updated }}{% endif %} · your role: {{ role }}</p>
+    {% if !description.is_empty() %}<p>{{ description }}</p>{% endif %}
+  </div>
+</div>
+
+<nav class="tabs" hx-target="#tab" hx-swap="innerHTML">
+  <a href="#" hx-get="/r/{{ name }}/tree?path=" class="tab">Browse</a>
+  <a href="#" hx-get="/r/{{ name }}/packages" class="tab">Packages</a>
+  {% if !mirror %}<a href="#" hx-get="/r/{{ name }}/versions" class="tab">Versions</a>{% endif %}
+  <a href="#" hx-get="/r/{{ name }}/settings" class="tab">Settings &amp; rights</a>
+</nav>
+
+<div class="grid">
+<div class="card">
+  <div class="card-head"><h2>Addresses</h2></div>
+  <div class="card-body">{% for u in urls %}<p class="mono">{{ u }}</p>{% endfor %}</div>
+</div>
+{% if !usage.is_empty() %}
+<div class="card">
+  <div class="card-head"><h2>How to use</h2></div>
+  <div class="card-body">
+  {% for u in usage %}<p class="muted">{{ u.label }}</p><pre class="log">{{ u.text }}</pre>{% endfor %}
+  </div>
+</div>
+{% endif %}
+</div>
+
+{% if can_write %}
+<details class="card panel">
+  <summary>Upload <span class="hint">files into the repository; each upload is a version</span></summary>
+  <div class="panel-body">
+  <form hx-post="/c/r/{{ name }}/upload" hx-encoding="multipart/form-data" hx-target="next .result">
+    <div class="fields"><label class="field wide"><span>Files</span><input type="file" name="file" multiple required></label></div>
+    {% call m::fields(upload) %}{% endcall %}
+    <div class="form-foot"><button type="submit">Upload</button></div>
+  </form>
+  <div class="result"></div>
+  </div>
+</details>
+{% for o in ops %}
+<details class="card panel">
+  <summary>{{ o.name }} <span class="hint">{{ o.help }}</span></summary>
+  <div class="panel-body">
+  <form hx-post="/c/r/{{ name }}/ops/{{ o.name }}" hx-target="next .result">
+    {% call m::fields(o.fields) %}{% endcall %}
+    <div class="form-foot"><button type="submit">Preview</button></div>
+  </form>
+  <div class="result"></div>
+  </div>
+</details>
+{% endfor %}
+{% if !other_repos.is_empty() %}
+<details class="card panel">
+  <summary>Promote <span class="hint">copy paths of this repository into another of the same format</span></summary>
+  <div class="panel-body">
+  <form hx-post="/c/r/{{ name }}/promote" hx-target="next .result">
+    <div class="fields">
+      <label class="field"><span>Into</span><select name="to">{% for o in other_repos %}<option>{{ o }}</option>{% endfor %}</select></label>
+      <label class="field"><span>From version</span><input name="version" placeholder="current"><small>A number or a label; empty: the current one.</small></label>
+      <label class="field wide"><span>Path</span><input name="path" placeholder="dists/noble/main/hello_1.0_amd64.deb" required><small>A file or a whole directory (dists/noble). Pick from Browse or Packages.</small></label>
+    </div>
+    <div class="form-foot"><button type="submit">Preview</button></div>
+  </form>
+  <div class="result"></div>
+  </div>
+</details>
+{% endif %}
+{% endif %}
+
+<div id="tab" class="mt"></div>
+{% endblock %}

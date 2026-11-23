@@ -1,0 +1,4 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+<div class="plan{% if ok %} done{% endif %}">
+{% for l in lines %}<p class="{% if !ok %}error{% else %}mono-wrap{% endif %}">{{ l }}</p>{% endfor %}
+</div>

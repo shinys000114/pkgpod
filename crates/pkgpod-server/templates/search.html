@@ -1,0 +1,10 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+{% extends "base.html" %}
+{% block title %}Search · pkgpod{% endblock %}
+{% block main %}
+<div class="page-head"><div class="title"><h1>Search</h1><p class="sub">Packages of every repository you may read, by part of the name.</p></div></div>
+<div class="card">
+  <div class="card-head"><input type="search" name="q" value="{{ q }}" placeholder="package name" autofocus hx-get="/search/rows" hx-trigger="input changed delay:300ms, load" hx-target="#rows"></div>
+  <div id="rows"></div>
+</div>
+{% endblock %}

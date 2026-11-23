@@ -16,6 +16,7 @@
 //! dists/<dist>/<component>/binary-<arch>/{Packages,Packages.gz,Packages.xz,Release}
 //! dists/<dist>/<component>/binary-<arch>/by-hash/SHA256/<sha256>
 //! pool/<component>/<prefix>/<source>/<file>.deb
+//! key.asc                                  the public key (signed repositories)
 //! ```
 //!
 //! A dist whose state and inputs did not change keeps the indexes (and
@@ -457,6 +458,28 @@ impl Format for Deb {
         }
     }
 
+    fn upload_fields(&self, objects: &pkgpod_engine::Objects, root: &Digest) -> Vec<Field> {
+        let mut e = Edit::new(objects, *root);
+        let defs = dists(&mut e).unwrap_or_default();
+        vec![
+            Field::multi(
+                "dists",
+                defs.keys().cloned().collect(),
+                "Dists to add the packages to; none: all.",
+            ),
+            Field::text(
+                "component",
+                "",
+                "Component; empty: main, or the dist's first.",
+            ),
+            Field::bool(
+                "replace",
+                false,
+                "Replace a package file of the same name with other content, everywhere.",
+            ),
+        ]
+    }
+
     fn ingest(&self, cx: &Cx, up: &Upload, p: &Value, e: &mut Edit) -> Result<String> {
         let file = cx.store.path(&up.sha256);
         let info = read_deb(&file)?;
@@ -680,6 +703,13 @@ fn publish(cx: &PublishCx) -> Result<Option<Digest>> {
             &format!("dists/{name}/_inputs"),
             Entry::Value { value: inputs },
         )?;
+    }
+    // The key to check the signatures with, next to what it signs.
+    if bool_of(settings, "sign")
+        && let Ok(k) = cx.signer.public_key(cx.key())
+    {
+        let (d, n) = cx.store.put_bytes(&k)?;
+        view.put("key.asc", Entry::blob(d, n, Value::Null))?;
     }
     Ok(Some(view.finish()?))
 }

@@ -1,0 +1,57 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+{% extends "base.html" %}
+{% block title %}Users & teams · pkgpod{% endblock %}
+{% block main %}
+<div class="page-head"><div class="title"><h1>Users &amp; teams</h1><p class="sub">Rights come from grants per repository (on its Settings tab) to users or teams; grants on * cover every repository.</p></div></div>
+<div id="people-result"></div>
+<div class="card">
+  <div class="card-head"><h2>Users</h2></div>
+  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Server admin</th><th>Disabled</th><th>Created</th><th></th></tr></thead><tbody>
+  {% for u in users %}<tr>
+    <td><b>{{ u.name }}</b></td>
+    <td><button class="link" hx-post="/c/users/{{ u.name|urlencode }}" hx-vals='{"admin": "{% if u.admin %}false{% else %}true{% endif %}"}' hx-target="#people-result">{% if u.admin %}yes{% else %}no{% endif %}</button></td>
+    <td><button class="link" hx-post="/c/users/{{ u.name|urlencode }}" hx-vals='{"disabled": "{% if u.disabled %}false{% else %}true{% endif %}"}' hx-target="#people-result">{% if u.disabled %}yes{% else %}no{% endif %}</button></td>
+    <td>{{ u.created }}</td>
+    <td class="acts nowrap">
+      <form class="inline" hx-post="/c/users/{{ u.name|urlencode }}" hx-target="#people-result"><input type="password" name="password" placeholder="new password" minlength="8" size="14"><button class="link" type="submit">set</button></form>
+      <button class="link danger" hx-post="/c/users/{{ u.name|urlencode }}/delete" hx-target="#people-result" hx-confirm="Delete user {{ u.name }} and their tokens?">delete</button>
+    </td>
+  </tr>{% endfor %}
+  </tbody></table></div>
+  <div class="card-body">
+  <form class="inline" hx-post="/c/users" hx-target="#people-result">
+    <input name="name" placeholder="name" required> <input type="password" name="password" placeholder="password" required minlength="8">
+    <label class="check"><input type="checkbox" name="admin"> server admin</label> <button type="submit">Add user</button>
+  </form>
+  </div>
+</div>
+<div class="card">
+  <div class="card-head"><h2>Teams</h2></div>
+  {% if teams.is_empty() %}<p class="empty">No teams.</p>{% else %}
+  <div class="table-wrap"><table><thead><tr><th>Team</th><th>Members</th><th></th></tr></thead><tbody>
+  {% for t in teams %}<tr>
+    <td><b>{{ t.name }}</b></td>
+    <td>{% for mbr in t.members %}<span class="tag">{{ mbr }}</span><button class="link danger" hx-post="/c/teams/{{ t.name|urlencode }}/members" hx-vals='{"user": "{{ mbr }}", "remove": "1"}' hx-target="#people-result">×</button> {% endfor %}
+      <form class="inline" hx-post="/c/teams/{{ t.name|urlencode }}/members" hx-target="#people-result"><select name="user">{% for u in users %}<option>{{ u.name }}</option>{% endfor %}</select><button class="link" type="submit">add</button></form></td>
+    <td class="acts"><button class="link danger" hx-post="/c/teams/{{ t.name|urlencode }}/delete" hx-target="#people-result" hx-confirm="Delete team {{ t.name }} and its grants?">delete</button></td>
+  </tr>{% endfor %}
+  </tbody></table></div>
+  {% endif %}
+  <div class="card-body"><form class="inline" hx-post="/c/teams" hx-target="#people-result"><input name="name" placeholder="team name" required> <button type="submit">Add team</button></form></div>
+</div>
+<div class="card">
+  <div class="card-head"><h2>Rights on every repository (*)</h2></div>
+  {% if global.is_empty() %}<p class="empty">None.</p>{% else %}
+  <div class="table-wrap"><table><thead><tr><th>Who</th><th>Role</th><th></th></tr></thead><tbody>
+  {% for g in global %}<tr><td>{{ g.subject }}</td><td>{{ g.role }}</td><td class="acts"><button class="link danger" hx-post="/c/r/*/grants/{{ g.subject|urlencode }}/delete" hx-target="#people-result">remove</button></td></tr>{% endfor %}
+  </tbody></table></div>
+  {% endif %}
+  <div class="card-body">
+  <form class="inline" hx-post="/c/r/*/grants" hx-target="#people-result">
+    <select name="subject">{% for u in users %}<option value="user:{{ u.name }}">user {{ u.name }}</option>{% endfor %}{% for t in teams %}<option value="team:{{ t.name }}">team {{ t.name }}</option>{% endfor %}</select>
+    <select name="role"><option>read</option><option>write</option><option>admin</option></select>
+    <button type="submit">Grant on *</button>
+  </form>
+  </div>
+</div>
+{% endblock %}

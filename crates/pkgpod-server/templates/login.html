@@ -1,0 +1,14 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+{% extends "base.html" %}
+{% block title %}Log in · pkgpod{% endblock %}
+{% block anon %}
+<form class="login" method="post" action="/login">
+  <span class="brand"><span class="logo">p</span>pkgpod</span>
+  <h1>Log in</h1>
+  {% if let Some(e) = error %}<p class="error">{{ e }}</p>{% endif %}
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label class="field"><span>User</span><input name="user" autocomplete="username" required autofocus></label>
+  <label class="field"><span>Password</span><input name="password" type="password" autocomplete="current-password" required></label>
+  <button type="submit">Log in</button>
+</form>
+{% endblock %}
