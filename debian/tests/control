@@ -1,0 +1,3 @@
+Tests: install-check
+Depends: @
+Restrictions: needs-root, breaks-testbed, allow-stderr

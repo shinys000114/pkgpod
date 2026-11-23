@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# pkgpod: only what is needed to start. Storages, serving listeners,
+# signing keys, users and repositories are in the database and changed
+# in the console (http://<listen>/), with the API or with `pkgpod`.
+
+data_dir = "/var/lib/pkgpod"
+
+# Console and API. Keep it internal (or behind a reverse proxy).
+listen = "127.0.0.1:8090"
+
+# tls_cert = "/etc/pkgpod/tls/cert.pem"
+# tls_key = "/etc/pkgpod/tls/key.pem"
+
+log = "info"

@@ -1,0 +1,5 @@
+pkgpod (0.0.0-1) unstable; urgency=medium
+
+  * Development build; debian/make-source.sh sets the version.
+
+ -- shinys000114 <shinys000114@users.noreply.github.com>  Tue, 24 Nov 2026 09:00:00 +0000

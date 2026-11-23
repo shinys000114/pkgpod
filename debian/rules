@@ -1,0 +1,60 @@
+#!/usr/bin/make -f
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# A static musl binary (one package per architecture for every release),
+# built with the Rust toolchain on PATH (rustup; debuild needs
+# --preserve-envvar PATH) and cargo-zigbuild when it is there (required
+# for cross builds: dpkg-buildpackage -a arm64). The vendor/ directory of
+# the source package (orig-vendor component) is used when present, so
+# the build needs no network.
+
+include /usr/share/dpkg/architecture.mk
+
+export PATH := $(PATH):$(HOME)/.cargo/bin
+RUST_TARGET_amd64 := x86_64-unknown-linux-musl
+RUST_TARGET_arm64 := aarch64-unknown-linux-musl
+RUST_TARGET := $(RUST_TARGET_$(DEB_HOST_ARCH))
+ifeq ($(RUST_TARGET),)
+$(error unsupported architecture $(DEB_HOST_ARCH))
+endif
+CARGO_BUILD := $(if $(shell command -v cargo-zigbuild),zigbuild,build)
+ifneq ($(wildcard vendor),)
+VENDORED := --offline --config 'source.crates-io.replace-with="vendored"' \
+	--config 'source.vendored.directory="vendor"'
+endif
+OUT := target/$(RUST_TARGET)/release
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+
+# dpkg-buildflags are for the host's gcc (-flto=auto ...); the C parts of
+# crates are built by zig cc (or musl-gcc) with their own flags.
+override_dh_auto_build:
+	env -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS \
+	cargo $(CARGO_BUILD) --release --locked $(VENDORED) \
+		--target $(RUST_TARGET) -p pkgpod
+
+# The test suite needs dpkg-deb, gpg, rsync and apt; CI runs it.
+override_dh_auto_test:
+
+override_dh_auto_install:
+	install -D -m 0755 $(OUT)/pkgpod debian/pkgpod/usr/bin/pkgpod
+	install -D -m 0640 debian/pkgpod.toml debian/pkgpod/etc/pkgpod/pkgpod.toml
+
+override_dh_auto_clean:
+	rm -rf target/$(RUST_TARGET)
+
+# dh_clean deletes *.orig files everywhere: the vendored crates'
+# Cargo.toml.orig are checksummed.
+override_dh_clean:
+	dh_clean -XCargo.toml.orig
+
+override_dh_fixperms:
+	dh_fixperms
+	chmod 0640 debian/pkgpod/etc/pkgpod/pkgpod.toml
+
+# Static and stripped by cargo (profile.release): nothing to strip, no
+# shared libraries (and no cross binutils needed for arm64).
+override_dh_strip override_dh_dwz override_dh_shlibdeps override_dh_makeshlibs:
