@@ -1,0 +1,15 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-only
+set -e
+
+if [ "$1" = "configure" ]; then
+    if ! getent passwd pkgpod >/dev/null; then
+        adduser --system --group --home /var/lib/pkgpod --no-create-home \
+            --gecos "pkgpod server" pkgpod
+    fi
+    chgrp pkgpod /etc/pkgpod/pkgpod.toml 2>/dev/null || true
+    # The database, keys and stores are the server's: closed to others.
+    install -d -o pkgpod -g pkgpod -m 0750 /var/lib/pkgpod
+fi
+
+#DEBHELPER#

@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Builds the Debian source package and, from it and without network, the
+# static (musl) binary packages for amd64 and arm64, into dist/: the .deb
+# files, the source package, the bare binaries and checksums.txt.
+name: build
+description: build pkgpod release artifacts
+inputs:
+  version:
+    description: version or tag (a leading "v" is stripped); must be semver
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
+    - uses: mlugg/setup-zig@v2
+    - uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-zigbuild
+    - name: Tools
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq build-essential debhelper devscripts dpkg-dev lintian
+        # unshare -rn (the build without network) needs user namespaces,
+        # which the runner's AppArmor restricts.
+        sudo sysctl -qw kernel.apparmor_restrict_unprivileged_userns=0 || true
+    - name: Source and binary packages
+      shell: bash
+      run: |
+        set -euo pipefail
+        v="${{ inputs.version }}"; v="${v#v}"; dv="${v//-/\~}"
+        export PKGPOD_COMMIT="${GITHUB_SHA::7}"
+        debian/make-source.sh "$v" dist
+        mkdir -p build
+        dpkg-source -x "dist/pkgpod_${dv}-1.dsc" build/src
+        cd build/src
+        unshare -rn dpkg-buildpackage -us -uc -b
+        DEB_BUILD_OPTIONS=nocheck unshare -rn dpkg-buildpackage -us -uc -b -a arm64 -d -Pcross,nocheck
+        cd ../..
+        mv build/*.deb dist/
+        for t in x86_64 aarch64; do
+          cp "build/src/target/$t-unknown-linux-musl/release/pkgpod" "dist/pkgpod_${v}_linux_$t"
+        done
+        cd dist && sha256sum * > checksums.txt && cat checksums.txt

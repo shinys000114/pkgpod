@@ -1,0 +1,56 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-only
+# Runs as root in a fresh Debian/Ubuntu system: installs the package from
+# /dist (in a container: docker run -v <dir with the .deb>:/dist
+# -v debian/tests:/t debian:trixie sh /t/install-check), or uses the
+# installed one (autopkgtest), checks what postinst set up, runs the
+# server as its service user, makes a repository with the CLI, uploads a
+# package and installs it with apt from the serving listener.
+set -eu
+export DEBIAN_FRONTEND=noninteractive
+fail() { echo "FAIL: $*" >&2; [ -f /tmp/server.log ] && cat /tmp/server.log >&2; exit 1; }
+
+arch=$(dpkg --print-architecture)
+apt-get update -qq
+if ls /dist/pkgpod_*_"$arch".deb >/dev/null 2>&1; then
+    apt-get install -y -qq /dist/pkgpod_*_"$arch".deb >/dev/null
+fi
+command -v dpkg-deb >/dev/null || fail "dpkg-deb missing"
+
+getent passwd pkgpod >/dev/null || fail "no pkgpod user"
+[ "$(stat -c '%U:%G %a' /var/lib/pkgpod)" = "pkgpod:pkgpod 750" ] || fail "data dir: $(stat -c '%U:%G %a' /var/lib/pkgpod)"
+[ "$(stat -c '%G %a' /etc/pkgpod/pkgpod.toml)" = "pkgpod 640" ] || fail "config: $(stat -c '%G %a' /etc/pkgpod/pkgpod.toml)"
+pkgpod --version
+
+# setpriv execs the server itself, so $! is the server.
+setpriv --reuid=pkgpod --regid=pkgpod --init-groups pkgpod serve >/tmp/server.log 2>&1 &
+server=$!
+
+export PKGPOD_URL=http://127.0.0.1:8090 XDG_CONFIG_HOME=/tmp/cfg
+up=
+for _ in $(seq 50); do
+    if pkgpod status >/dev/null 2>&1; then up=1; break; fi
+    sleep 0.2
+done
+[ -n "$up" ] || fail "server did not come up"
+[ -f /var/lib/pkgpod/admin-password ] || fail "no first admin password"
+[ "$(stat -c '%a' /var/lib/pkgpod/admin-password)" = 600 ] || fail "admin-password: $(stat -c '%a' /var/lib/pkgpod/admin-password)"
+pkgpod login -u admin --password-stdin </var/lib/pkgpod/admin-password
+[ "$(stat -c '%a' /var/lib/pkgpod/pkgpod.db)" = 640 ] || fail "database: $(stat -c '%a' /var/lib/pkgpod/pkgpod.db)"
+
+pkgpod repo create t -s public=true -s sign=false
+pkgpod op t dist-set name=stable components=main -y
+mkdir -p /tmp/pkg/DEBIAN /tmp/pkg/usr/share/hello-pkgpod
+printf 'Package: hello-pkgpod\nVersion: 1.0\nArchitecture: all\nMaintainer: Test <test@example.invalid>\nDescription: install test\n' >/tmp/pkg/DEBIAN/control
+echo hello >/tmp/pkg/usr/share/hello-pkgpod/marker
+dpkg-deb --root-owner-group --build /tmp/pkg /tmp/hello-pkgpod_1.0_all.deb >/dev/null
+pkgpod upload t /tmp/hello-pkgpod_1.0_all.deb
+pkgpod search hello | grep -q 'hello-pkgpod' || fail "not found"
+
+# apt reads it from the serving listener.
+echo 'deb [trusted=yes] http://127.0.0.1:8080/t stable main' >/etc/apt/sources.list.d/t.list
+apt-get update -qq -o Dir::Etc::sourcelist=/dev/null -o Dir::Etc::sourceparts=/etc/apt/sources.list.d
+apt-get install -y -qq hello-pkgpod >/dev/null
+[ -f /usr/share/hello-pkgpod/marker ] || fail "not installed"
+kill "$server"
+echo "install-check: ok"

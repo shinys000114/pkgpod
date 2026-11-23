@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+Source: pkgpod
+Section: admin
+Priority: optional
+Maintainer: shinys000114 <shinys000114@users.noreply.github.com>
+# The binary is static (musl), one package per architecture for every
+# Debian and Ubuntu release. The build needs a Rust toolchain (rustup) with
+# the x86_64/aarch64-unknown-linux-musl targets and cargo-zigbuild (plus
+# zig) on PATH; Debian's own rustc has no musl standard library.
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+Homepage: https://github.com/shinys000114/pkgpod
+Vcs-Browser: https://github.com/shinys000114/pkgpod
+Vcs-Git: https://github.com/shinys000114/pkgpod.git
+
+Package: pkgpod
+Architecture: amd64 arm64
+# gpg: signing; ca-certificates: the HTTP client reads the system trust
+# store; rsync: mirrors from rsync sources.
+Depends: ${misc:Depends}, adduser, gpg, ca-certificates
+Recommends: rsync
+Description: package server for a team
+ pkgpod hosts, mirrors and serves packages. Every hosted repository keeps
+ its history: each change is a version, labels make snapshots that stay
+ reachable at their own address, and any version can be compared with
+ another or made current again. Debian repositories publish signed
+ indexes for every version; Debian mirrors follow their upstream on a
+ schedule.
+ .
+ One binary is the server (with a web console and a JSON API) and its
+ command line client.

@@ -1,0 +1,50 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: pkgpod
+Upstream-Contact: https://github.com/shinys000114/pkgpod/issues
+Source: https://github.com/shinys000114/pkgpod
+
+Files: *
+Copyright: 2026 pkgpod contributors
+License: AGPL-3.0-only
+
+Files: crates/pkgpod-server/assets/htmx.min.js debian/missing-sources/htmx.js
+Copyright: 2020 Big Sky Software
+License: 0BSD
+Comment: htmx 2.0.11 from the npm package htmx.org (integrity checked);
+ debian/missing-sources/htmx.js is the same package's unminified source.
+
+Files: vendor/*
+Copyright: 2014-2026 the authors of each crate (see its Cargo.toml)
+License: various
+ The vendored Rust crates (the orig-vendor component) are distributed
+ under their own licenses, mostly MIT, Apache-2.0, BSD-2-Clause,
+ BSD-3-Clause, ISC, Zlib, Unicode-3.0 and MPL-2.0; each crate's
+ directory holds its license files and its Cargo.toml names it. The
+ binaries link them statically; NOTICE lists the third-party code
+ pkgpod follows.
+
+License: AGPL-3.0-only
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU Affero General Public License as
+ published by the Free Software Foundation, version 3.
+ .
+ This program is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU Affero General Public License for more details.
+ .
+ Debian systems have no copy of the GNU Affero General Public License
+ in /usr/share/common-licenses; its complete text is the file LICENSE
+ of the source package, and https://www.gnu.org/licenses/agpl-3.0.txt.
+
+License: 0BSD
+ Permission to use, copy, modify, and/or distribute this software for
+ any purpose with or without fee is hereby granted.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL
+ WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES
+ OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE
+ FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY
+ DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN
+ AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT
+ OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
