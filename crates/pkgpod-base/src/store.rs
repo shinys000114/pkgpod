@@ -88,6 +88,7 @@ impl Store {
         }
         let to = self.path(&d);
         if to.is_file() {
+            touch(&to);
             return Ok((d, inc.len));
         }
         let dir = to.parent().expect("blob path has a parent");
@@ -100,6 +101,7 @@ impl Store {
     pub fn put_bytes(&self, data: &[u8]) -> Result<(Digest, u64)> {
         let d = Digest::of(data);
         if self.has(&d) {
+            touch(&self.path(&d));
             return Ok((d, data.len() as u64));
         }
         let mut inc = self.incoming()?;
@@ -160,6 +162,14 @@ impl Store {
             }
         }
         Ok(out)
+    }
+}
+
+/// Marks a blob stored again as new, so garbage collection keeps it for
+/// its grace period (a change that names it may not be committed yet).
+fn touch(p: &Path) {
+    if let Ok(f) = fs::File::options().append(true).open(p) {
+        let _ = f.set_modified(SystemTime::now());
     }
 }
 
