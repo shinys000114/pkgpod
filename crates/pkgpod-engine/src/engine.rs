@@ -488,7 +488,26 @@ impl Engine {
         }
         let _gc = self.gc_lock.read().unwrap_or_else(|e| e.into_inner());
         let l = self.lock(r.id);
-        let _g = l.lock().unwrap_or_else(|e| e.into_inner());
+        let g = l.lock().unwrap_or_else(|e| e.into_inner());
+        let v = self.commit_locked(r, base, root, summary, actor, force)?;
+        drop(g);
+        if v.is_some() {
+            self.bump();
+            self.prune(r)?;
+        }
+        Ok(v)
+    }
+
+    /// [`Engine::commit`] with the repository's lock held.
+    fn commit_locked(
+        &self,
+        r: &RepoInfo,
+        base: Option<i64>,
+        root: Digest,
+        summary: &str,
+        actor: &str,
+        force: bool,
+    ) -> Result<Option<Version>> {
         // Re-read under the lock.
         let r = &self.repo(&r.name)?;
         let cur = self.current(r)?;
@@ -522,6 +541,13 @@ impl Engine {
             signer: signer.as_ref(),
             prev_view: cur.as_ref().and_then(|v| v.view),
         })?;
+        // A republish that publishes the same as now is no version.
+        if let Some(c) = &cur
+            && c.root == root
+            && c.view == view
+        {
+            return Ok(None);
+        }
         let changes = self.objects.diff(&prev_root, &root)?;
         let id = self.db.write(|tx| {
             tx.execute(
@@ -564,9 +590,6 @@ impl Engine {
             }
             Ok::<_, rusqlite::Error>(id)
         })?;
-        drop(_g);
-        self.bump();
-        self.prune(r)?;
         Ok(self.versions_where(r.id, "v.id = ?2", id)?.pop())
     }
 
@@ -616,15 +639,36 @@ impl Engine {
         })
     }
 
-    /// Computes and applies a change at once.
+    /// Computes and applies a change at once, holding the repository's
+    /// lock throughout, so concurrent changes (parallel uploads) queue
+    /// instead of conflicting.
     pub fn change(
         &self,
         name: &str,
         actor: &str,
         f: impl FnOnce(&Cx, &mut Edit) -> Result<String>,
     ) -> Result<Outcome> {
+        let r = self.repo(name)?;
+        if !r.kind.versioned() {
+            return Err(Error::Invalid(format!(
+                "{name} is a mirror: it cannot be changed"
+            )));
+        }
+        let _gc = self.gc_lock.read().unwrap_or_else(|e| e.into_inner());
+        let l = self.lock(r.id);
+        let g = l.lock().unwrap_or_else(|e| e.into_inner());
         let p = self.preview(name, actor, f)?;
-        self.apply(&p, actor)
+        let v = self.commit_locked(&r, p.base, p.root, &p.summary, actor, false)?;
+        drop(g);
+        if v.is_some() {
+            self.bump();
+            self.prune(&r)?;
+        }
+        Ok(Outcome {
+            version: v,
+            summary: p.summary,
+            changes: p.changes,
+        })
     }
 
     /// Plans (or, with `apply`, applies) a format operation.
@@ -638,13 +682,23 @@ impl Engine {
     ) -> Result<(Plan, Option<Outcome>)> {
         let r = self.repo(name)?;
         let f = self.format(&r.format)?.clone();
+        if apply {
+            let out = self.change(name, actor, |cx, e| f.op(cx, op, params, e))?;
+            let plan = Plan {
+                repo: name.to_string(),
+                base: None,
+                root: out
+                    .version
+                    .as_ref()
+                    .map(|v| v.root)
+                    .unwrap_or_else(tree::empty),
+                summary: out.summary.clone(),
+                changes: out.changes.clone(),
+            };
+            return Ok((plan, Some(out)));
+        }
         let plan = self.preview(name, actor, |cx, e| f.op(cx, op, params, e))?;
-        let out = if apply {
-            Some(self.apply(&plan, actor)?)
-        } else {
-            None
-        };
-        Ok((plan, out))
+        Ok((plan, None))
     }
 
     /// Takes in a file already in the repository's store.

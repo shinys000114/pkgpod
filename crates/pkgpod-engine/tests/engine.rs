@@ -300,3 +300,24 @@ fn retention_and_gc() {
     e.gc(Duration::from_secs(3600), false).unwrap();
     assert!(store.has(&Digest::of(b"young")));
 }
+
+#[test]
+fn parallel_uploads_queue_instead_of_conflicting() {
+    let (_d, e) = engine();
+    hosted(&e, "busy");
+    std::thread::scope(|s| {
+        for i in 0..8 {
+            let e = &e;
+            s.spawn(move || {
+                let v = upload(e, "busy", &format!("p/pkg{i}_1"), &format!("content {i}"));
+                assert!(v.is_some());
+            });
+        }
+    });
+    let v = e.versions("busy").unwrap();
+    assert_eq!(v.len(), 9, "every upload made its own version");
+    let cur = &v[0];
+    assert_eq!(e.objects().walk(&cur.root, "").unwrap().len(), 8);
+    // Republishing what is already published makes no version.
+    assert!(e.republish("busy", "t").unwrap().is_none());
+}
