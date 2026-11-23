@@ -1,0 +1,74 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "AGPL-3.0-only"
+repository = "https://github.com/shinys000114/pkgpod"
+homepage = "https://github.com/shinys000114/pkgpod"
+authors = ["shinys000114"]
+
+[workspace.dependencies]
+pkgpod-base = { path = "crates/pkgpod-base" }
+pkgpod-engine = { path = "crates/pkgpod-engine" }
+pkgpod-deb = { path = "crates/pkgpod-deb" }
+pkgpod-fetch = { path = "crates/pkgpod-fetch" }
+pkgpod-server = { path = "crates/pkgpod-server" }
+clap = { version = "4.6", features = ["derive", "env"] }
+ar = "0.9"
+tar = { version = "0.4", default-features = false }
+flate2 = "1.1"
+liblzma = { version = "0.4", features = ["static"] }
+zstd = "0.14"
+sha2 = "0.11"
+sha1 = "0.11"
+md-5 = "0.11"
+time = { version = "0.3", features = ["formatting", "macros"] }
+thiserror = "2"
+libc = "0.2"
+rustix = { version = "1", features = ["fs", "termios", "process"] }
+pgp = "0.21"
+tempfile = "3"
+rusqlite = { version = "0.43", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+# preserve_order: JSON (and the TOML made from it) keeps the field order
+# the structs define.
+serde_json = { version = "1", features = ["preserve_order"] }
+glob = "0.3"
+base64 = "0.22"
+httpdate = "1"
+mimalloc = { version = "0.1", default-features = false }
+toml = { version = "1", features = ["preserve_order"] }
+axum = { version = "0.8", features = ["multipart"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "fs", "io-util", "net", "time"] }
+tower-http = { version = "0.7", features = ["limit", "trace", "fs"] }
+tower = { version = "0.5", features = ["util"] }
+hyper = "1"
+hyper-util = { version = "0.1", features = ["server-auto", "tokio", "service"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+argon2 = "0.6"
+# System zoneinfo first; the bundled copy covers hosts without tzdata.
+jiff = { version = "1", features = ["tzdb-bundle-always"] }
+askama = "0.16"
+getrandom = "0.4"
+futures-util = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+reqwest = { version = "0.13", features = ["blocking", "json", "multipart", "stream", "query"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+# Password hashing is far too slow unoptimized (tests, debug servers).
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
