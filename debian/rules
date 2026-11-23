@@ -17,7 +17,7 @@ RUST_TARGET := $(RUST_TARGET_$(DEB_HOST_ARCH))
 ifeq ($(RUST_TARGET),)
 $(error unsupported architecture $(DEB_HOST_ARCH))
 endif
-CARGO_BUILD := $(if $(shell command -v cargo-zigbuild),zigbuild,build)
+CARGO_BUILD := $(if $(and $(shell command -v cargo-zigbuild),$(shell command -v zig)),zigbuild,build)
 ifneq ($(wildcard vendor),)
 VENDORED := --offline --config 'source.crates-io.replace-with="vendored"' \
 	--config 'source.vendored.directory="vendor"'
