@@ -844,6 +844,78 @@ pub fn run(
                 )?;
             }
         },
+        Cmd::Sync { repo, wait } => {
+            let v = c.post(&format!("/api/v1/repos/{}/sync", enc(&repo)), &Value::Null)?;
+            let id = v["job"].as_i64().unwrap_or(0);
+            if !wait {
+                x.print(&v, |_| {
+                    println!("job {id} started; follow it with: pkgpod job {id}")
+                });
+                return Ok(());
+            }
+            let mut shown = 0;
+            loop {
+                let j = c.get(&format!("/api/v1/jobs/{id}"))?;
+                let log = j["log"].as_str().unwrap_or("");
+                if log.len() > shown {
+                    print!("{}", &log[shown..]);
+                    shown = log.len();
+                }
+                match j["state"].as_str() {
+                    Some("running" | "queued") => {
+                        std::thread::sleep(std::time::Duration::from_secs(1))
+                    }
+                    Some("ok") => return Ok(()),
+                    _ => return Err(CliError::other(format!("job {id}: {}", s(&j["summary"])))),
+                }
+            }
+        }
+        Cmd::Jobs { repo } => {
+            let v = match repo {
+                Some(r) => c.get(&format!("/api/v1/repos/{}/jobs", enc(&r)))?,
+                None => c.get("/api/v1/jobs")?,
+            };
+            x.print(&v, |v| {
+                let mut rows = vec![vec![
+                    "JOB".into(),
+                    "REPO".into(),
+                    "STATE".into(),
+                    "STARTED".into(),
+                    "FINISHED".into(),
+                    "SUMMARY".into(),
+                ]];
+                for j in v.as_array().into_iter().flatten() {
+                    rows.push(vec![
+                        s(&j["id"]),
+                        s(&j["repo"]),
+                        s(&j["state"]),
+                        when(j["started"].as_i64()),
+                        when(j["finished"].as_i64()),
+                        s(&j["summary"]),
+                    ]);
+                }
+                table(rows);
+            });
+        }
+        Cmd::Job { id, cancel } => {
+            if cancel {
+                c.post(&format!("/api/v1/jobs/{id}/cancel"), &Value::Null)?;
+                println!("asked job {id} to stop");
+                return Ok(());
+            }
+            let j = c.get(&format!("/api/v1/jobs/{id}"))?;
+            x.print(&j, |j| {
+                println!(
+                    "job {} ({} of {}): {} {}",
+                    s(&j["id"]),
+                    s(&j["kind"]),
+                    s(&j["repo"]),
+                    s(&j["state"]),
+                    s(&j["summary"])
+                );
+                print!("{}", j["log"].as_str().unwrap_or(""));
+            });
+        }
         Cmd::Gc {
             dry_run,
             grace_hours,

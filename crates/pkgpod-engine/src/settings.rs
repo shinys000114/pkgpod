@@ -27,6 +27,8 @@ pub enum FieldKind {
     },
     /// Any JSON value (format editors such as deb's dists).
     Json,
+    /// Text of several lines (an armored keyring).
+    Long,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -94,6 +96,14 @@ impl Field {
             default: json!([]),
         }
     }
+    pub fn long(name: &'static str, help: &'static str) -> Field {
+        Field {
+            name,
+            kind: FieldKind::Long,
+            help,
+            default: json!(""),
+        }
+    }
     pub fn json(name: &'static str, default: Value, help: &'static str) -> Field {
         Field {
             name,
@@ -104,9 +114,9 @@ impl Field {
     }
 }
 
-/// Settings every repository has, whatever its format.
-pub fn common() -> Vec<Field> {
-    vec![
+/// Settings every repository of a kind has, whatever its format.
+pub fn common(kind: crate::Kind) -> Vec<Field> {
+    let mut v = vec![
         Field::text("description", "", "What the repository is for."),
         Field::list(
             "urls",
@@ -128,7 +138,12 @@ pub fn common() -> Vec<Field> {
             30,
             "Versions younger than this many days are kept too.",
         ),
-    ]
+    ];
+    if !kind.versioned() {
+        // Mirrors have no versions to keep and sign nothing.
+        v.retain(|f| !matches!(f.name, "keep_versions" | "keep_days" | "key"));
+    }
+    v
 }
 
 /// Checks `v` against `fields`, coercing strings where a CLI gives them
@@ -160,7 +175,7 @@ pub fn check(fields: &[Field], v: &Value) -> Result<Value> {
 fn coerce(f: &Field, x: &Value) -> Result<Value> {
     let bad = |want: &str| Error::Invalid(format!("setting {}: expected {want}, got {x}", f.name));
     Ok(match (&f.kind, x) {
-        (FieldKind::Text, Value::String(_)) => x.clone(),
+        (FieldKind::Text | FieldKind::Long, Value::String(_)) => x.clone(),
         (FieldKind::Bool, Value::Bool(_)) => x.clone(),
         (FieldKind::Bool, Value::String(s)) => match s.as_str() {
             "true" | "yes" | "on" | "1" => json!(true),
@@ -212,7 +227,7 @@ fn coerce(f: &Field, x: &Value) -> Result<Value> {
             }
         }
         (FieldKind::Json, _) => x.clone(),
-        (FieldKind::Text, _) => return Err(bad("text")),
+        (FieldKind::Text | FieldKind::Long, _) => return Err(bad("text")),
         (FieldKind::Bool, _) => return Err(bad("true or false")),
         (FieldKind::Integer, _) => return Err(bad("an integer")),
         (FieldKind::List, _) => return Err(bad("a list of strings")),
@@ -247,7 +262,7 @@ mod tests {
 
     #[test]
     fn defaults_coercion_and_unknown_names() {
-        let f = common();
+        let f = common(crate::Kind::Hosted);
         let v = check(
             &f,
             &json!({"public": "yes", "keep_versions": "7", "urls": "a, b"}),

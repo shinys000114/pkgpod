@@ -150,9 +150,9 @@ impl Engine {
     }
 
     /// Common settings and the format's, in that order.
-    pub fn fields(&self, format: &str) -> Result<Vec<Field>> {
-        let mut f = settings::common();
-        f.extend(self.format(format)?.settings());
+    pub fn fields(&self, format: &str, kind: Kind) -> Result<Vec<Field>> {
+        let mut f = settings::common(kind);
+        f.extend(self.format(format)?.settings(kind));
         Ok(f)
     }
 
@@ -241,7 +241,7 @@ impl Engine {
 
     /// Settings with defaults for fields added since they were stored.
     fn fill(&self, mut r: RepoInfo) -> RepoInfo {
-        if let Ok(f) = self.fields(&r.format) {
+        if let Ok(f) = self.fields(&r.format, r.kind) {
             let known: serde_json::Map<String, Value> = r
                 .settings
                 .as_object()
@@ -299,7 +299,7 @@ impl Engine {
                 n.kind.as_str()
             )));
         }
-        let settings = settings::check(&self.fields(&n.format)?, &n.settings)?;
+        let settings = settings::check(&self.fields(&n.format, n.kind)?, &n.settings)?;
         let storage = n.storage.unwrap_or_else(|| "main".into());
         let exists = self.db.read(|c| {
             c.query_row("SELECT 1 FROM storages WHERE name = ?1", [&storage], |_| {
@@ -354,7 +354,7 @@ impl Engine {
     pub fn update_settings(&self, name: &str, patch: &Value) -> Result<RepoInfo> {
         let r = self.repo(name)?;
         let merged = settings::merge(&r.settings, patch);
-        let s = settings::check(&self.fields(&r.format)?, &merged)?;
+        let s = settings::check(&self.fields(&r.format, r.kind)?, &merged)?;
         self.db.write(|tx| {
             tx.execute(
                 "UPDATE repos SET settings = ?1 WHERE id = ?2",

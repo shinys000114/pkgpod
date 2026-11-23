@@ -1,0 +1,23 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+<div class="card" id="mpk">
+  <div class="card-head"><h2>Packages</h2><span class="hint">from the mirror's own indexes</span></div>
+  <div class="card-body">
+  <form class="inline" hx-get="/r/{{ repo }}/packages" hx-target="#tab" hx-trigger="change, input from:find input[name=q] delay:300ms">
+    <select name="dist">{% for (d, on) in dists %}<option{% if on %} selected{% endif %}>{{ d }}</option>{% endfor %}</select>
+    <select name="component">{% for (c, on) in comps %}<option{% if on %} selected{% endif %}>{{ c }}</option>{% endfor %}</select>
+    <select name="arch">{% for (a, on) in archs %}<option{% if on %} selected{% endif %}>{{ a }}</option>{% endfor %}</select>
+    <input type="search" name="q" value="{{ q }}" placeholder="filter by name">
+  </form>
+  </div>
+  {% if !note.is_empty() %}<p class="empty">{{ note }}</p>
+  {% else if rows.is_empty() %}<p class="empty">No package matches.</p>
+  {% else %}
+  <div class="table-wrap"><table>
+    <thead><tr><th>Package</th><th>Version</th><th>Arch</th><th class="num">Size</th><th>File</th></tr></thead>
+    <tbody>
+    {% for r in rows %}<tr><td><b>{{ r.name }}</b></td><td class="mono wrap">{{ r.version }}</td><td>{{ r.extra }}</td><td class="num">{{ r.size }}</td><td class="mono wrap muted">{{ r.path }}</td></tr>{% endfor %}
+    </tbody>
+  </table></div>
+  <p class="muted card-body">{% if total > rows.len() %}The first {{ rows.len() }} of {{ total }}; narrow the filter.{% else %}{{ total }} package(s).{% endif %}</p>
+  {% endif %}
+</div>

@@ -28,7 +28,7 @@
 {% if s.admin %}
 {% for f in formats %}
 <details class="card panel">
-  <summary>New {{ f.title }} repository</summary>
+  <summary>New {{ f.title }} repository <span class="hint">{% for k in f.kinds %}{{ k }} {% endfor %}</span></summary>
   <div class="panel-body">
   <form hx-post="/c/repos" hx-target="next .result">
     <input type="hidden" name="format" value="{{ f.id }}">

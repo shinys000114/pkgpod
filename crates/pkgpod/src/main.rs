@@ -171,6 +171,22 @@ pub(crate) enum Cmd {
     /// Storages.
     #[command(subcommand)]
     Storage(cmd::StorageCmd),
+    /// Start a sync of a mirror.
+    Sync {
+        repo: String,
+        /// Wait for it and print its log.
+        #[arg(long, short)]
+        wait: bool,
+    },
+    /// Recent jobs (of one repository, or all).
+    Jobs { repo: Option<String> },
+    /// A job and its log.
+    Job {
+        id: i64,
+        /// Stop it.
+        #[arg(long)]
+        cancel: bool,
+    },
     /// Collect garbage.
     Gc {
         #[arg(long)]

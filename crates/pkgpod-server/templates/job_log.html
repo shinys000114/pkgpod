@@ -1,0 +1,7 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+<div{% if running %} hx-get="/jobs/{{ id }}/log" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
+  <div class="card-head"><h2><span class="badge {% if state == "ok" %}ok{% else if running %}run{% else %}bad{% endif %}">{{ state }}</span></h2>
+    {% if running %}<button class="danger" hx-post="/c/jobs/{{ id }}/cancel" hx-target="next .result">Stop</button>{% endif %}</div>
+  <div class="result card-body"></div>
+  <pre class="log">{{ log }}</pre>
+</div>
