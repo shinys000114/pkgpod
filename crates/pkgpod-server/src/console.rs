@@ -55,7 +55,12 @@ pub fn router() -> Router<Arc<App>> {
         .route("/r/{repo}/settings", get(settings_part))
         .route("/c/repos", post(repo_create))
         .route("/c/r/{repo}/ops/{op}", post(op))
-        .route("/c/r/{repo}/upload", post(upload))
+        .route(
+            "/c/r/{repo}/upload",
+            post(upload).layer(axum::extract::DefaultBodyLimit::max(
+                crate::serve::MAX_UPLOAD as usize,
+            )),
+        )
         .route("/c/r/{repo}/remove", post(remove))
         .route("/c/r/{repo}/rollback", post(rollback))
         .route("/c/r/{repo}/promote", post(promote))
@@ -496,10 +501,11 @@ pub struct RepoRow {
     pub public: bool,
 }
 
+/// A form to make a repository of a format and kind.
 pub struct FormatChoice {
     pub id: String,
     pub title: String,
-    pub kinds: Vec<String>,
+    pub kind: String,
     pub fields: Vec<FormField>,
 }
 
@@ -560,14 +566,19 @@ async fn index(State(app): St, v: Viewer) -> Result<Response> {
     let formats = app
         .engine
         .formats()
-        .map(|f| FormatChoice {
-            id: f.id().to_string(),
-            title: f.title().to_string(),
-            kinds: f.kinds().iter().map(|k| k.as_str().to_string()).collect(),
-            fields: form_fields(
-                &app.engine.fields(f.id(), Kind::Hosted).unwrap_or_default(),
-                &Value::Null,
-            ),
+        .flat_map(|f| {
+            f.kinds()
+                .iter()
+                .map(|k| FormatChoice {
+                    id: f.id().to_string(),
+                    title: f.title().to_string(),
+                    kind: k.as_str().to_string(),
+                    fields: form_fields(
+                        &app.engine.fields(f.id(), *k).unwrap_or_default(),
+                        &Value::Null,
+                    ),
+                })
+                .collect::<Vec<_>>()
         })
         .collect();
     let storages = if v.caller.is_admin() {
@@ -1614,7 +1625,10 @@ async fn repo_delete(
     if form_get(&form, "confirm") != repo {
         return msg(false, "Type the repository's name to delete it.");
     }
-    match api::repo_delete(State(app), v.who(), Path(repo)).await {
+    let q = api::DeleteQ {
+        remove_tree: (form_get(&form, "remove_tree") == "on").then(|| "1".into()),
+    };
+    match api::repo_delete(State(app), v.who(), Path(repo), Query(q)).await {
         Ok(_) => {
             let mut r = msg(true, "deleted");
             r.headers_mut()

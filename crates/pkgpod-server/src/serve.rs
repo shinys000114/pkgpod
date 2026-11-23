@@ -148,9 +148,15 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
     let Some(path) = segments(&raw_path) else {
         return status(StatusCode::BAD_REQUEST);
     };
-    let caller = match basic_caller(&app, req.headers()) {
-        Ok(c) => c,
-        Err(_) => return deny(&Caller::anonymous()),
+    // Checking a password is slow on purpose: off the async threads.
+    let caller = if req.headers().contains_key(header::AUTHORIZATION) {
+        let (app2, h) = (app.clone(), req.headers().clone());
+        match tokio::task::spawn_blocking(move || basic_caller(&app2, &h)).await {
+            Ok(Ok(c)) => c,
+            _ => return deny(&Caller::anonymous()),
+        }
+    } else {
+        Caller::anonymous()
     };
     let table = match app.routes() {
         Ok(t) => t,

@@ -133,8 +133,14 @@ impl App {
     /// Opens the database (creating it), the engine and the tables; makes
     /// the first admin if there are no users.
     pub fn open(cfg: Config) -> Result<Arc<App>> {
-        std::fs::create_dir_all(&cfg.data_dir)
-            .map_err(|e| Error::Invalid(format!("{}: {e}", cfg.data_dir.display())))?;
+        if !cfg.data_dir.exists() {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o750)
+                .create(&cfg.data_dir)
+                .map_err(|e| Error::Invalid(format!("{}: {e}", cfg.data_dir.display())))?;
+        }
         let db = Arc::new(Db::open(&cfg.db_path())?);
         schema::migrate(&db)?;
         let keys = Arc::new(Keys::new(db.clone(), &cfg.gnupg()));
@@ -153,7 +159,6 @@ impl App {
             );
         }
         listeners::ensure_default(&db)?;
-        jobs::recover(&db)?;
         Ok(Arc::new(App {
             cfg,
             db,
@@ -243,6 +248,9 @@ impl App {
 /// Runs the server until SIGINT or SIGTERM: the management listener, the
 /// serving listeners in the database, and the background jobs.
 pub async fn run(app: Arc<App>) -> Result<(), String> {
+    // Only the running server owns jobs: admin commands open the same
+    // database while a server runs.
+    jobs::recover(&app.db).map_err(|e| e.to_string())?;
     listeners::reconcile(&app);
     let sched = jobs::scheduler(app.clone());
     let gc = {

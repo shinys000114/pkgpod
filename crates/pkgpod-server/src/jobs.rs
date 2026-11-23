@@ -159,6 +159,7 @@ pub fn start_sync(app: &Arc<App>, repo: &str, actor: &str) -> Result<i64> {
     };
     let app2 = app.clone();
     let repo2 = repo.to_string();
+    let actor2 = actor.to_string();
     std::thread::Builder::new()
         .name(format!("sync-{repo}"))
         .spawn(move || {
@@ -193,7 +194,7 @@ pub fn start_sync(app: &Arc<App>, repo: &str, actor: &str) -> Result<i64> {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&repo2);
-            app2.auth.audit(&r.name, "sync", &repo2, state);
+            app2.auth.audit(&actor2, "sync", &repo2, state);
         })
         .map_err(|e| Error::Invalid(format!("starting the job: {e}")))?;
     Ok(id)

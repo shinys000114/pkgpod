@@ -32,7 +32,8 @@
   <summary>Delete this repository</summary>
   <div class="panel-body">
   <form hx-post="/c/r/{{ repo }}/delete" hx-target="next .result">
-    <p class="warning">All its versions and labels go; files no other repository uses are removed at the next garbage collection.</p>
+    <p class="warning">All its versions and labels go; files no other repository uses are removed at the next garbage collection. A mirror's received files stay on disk unless you tick the box.</p>
+    <label class="check field"><input type="checkbox" name="remove_tree"> <span>also delete a mirror's received files</span></label>
     <label class="field"><span>Type its name</span><input name="confirm" required></label>
     <div class="form-foot"><button class="danger" type="submit">Delete</button></div>
   </form>

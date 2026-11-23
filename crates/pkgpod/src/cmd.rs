@@ -48,6 +48,9 @@ pub enum RepoCmd {
     /// Delete a repository.
     Delete {
         name: String,
+        /// Also delete a mirror's received files.
+        #[arg(long)]
+        remove_tree: bool,
         #[command(flatten)]
         yes: Yes,
     },
@@ -1040,13 +1043,21 @@ fn repo(x: &Ctx, cmd: RepoCmd) -> Result<(), CliError> {
             )?;
             x.print(&v, |_| println!("settings of {name} changed"));
         }
-        RepoCmd::Delete { name, yes } => {
+        RepoCmd::Delete {
+            name,
+            remove_tree,
+            yes,
+        } => {
             if !yes.yes && !term::confirm(&format!("Delete {name} with all its versions?")) {
                 return Err(CliError::usage("not deleted (use -y to skip the question)"));
             }
             c.send(
                 Method::DELETE,
-                &format!("/api/v1/repos/{}", enc(&name)),
+                &format!(
+                    "/api/v1/repos/{}{}",
+                    enc(&name),
+                    if remove_tree { "?remove_tree=1" } else { "" }
+                ),
                 &Value::Null,
             )?;
             println!("deleted {name}");
