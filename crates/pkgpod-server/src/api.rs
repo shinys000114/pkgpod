@@ -253,7 +253,12 @@ pub fn router() -> Router<Arc<App>> {
         .route("/api/v1/repos/{repo}/tree", get(tree))
         .route("/api/v1/repos/{repo}/packages", get(packages))
         .route("/api/v1/repos/{repo}/ops/{op}", post(op))
-        .route("/api/v1/repos/{repo}/upload", post(upload))
+        .route(
+            "/api/v1/repos/{repo}/upload",
+            post(upload).layer(axum::extract::DefaultBodyLimit::max(
+                crate::serve::MAX_UPLOAD as usize,
+            )),
+        )
         .route("/api/v1/repos/{repo}/remove", post(remove))
         .route("/api/v1/repos/{repo}/rollback", post(rollback))
         .route("/api/v1/repos/{repo}/promote", post(promote))
@@ -328,7 +333,7 @@ const DOC: &[(&str, &str, &str)] = &[
     (
         "delete",
         "/api/v1/repos/{repo}",
-        "Delete a repository (server admin).",
+        "Delete a repository (server admin); a mirror's received tree stays unless ?remove_tree=1.",
     ),
     (
         "get",
@@ -663,30 +668,59 @@ pub(crate) async fn repo_patch(
         let r = app.engine.update_settings(&repo, &req.settings)?;
         app.auth
             .audit(c.name(), "repo settings", &repo, &req.settings.to_string());
-        // Settings may change what is published (Release fields, key).
-        if r.kind.versioned() && r.settings != r0.settings {
-            app.engine.republish(&repo, c.name())?;
+        // Settings may change what is published (Release fields, key);
+        // a republish that fails takes the change back.
+        if r.kind.versioned()
+            && r.settings != r0.settings
+            && let Err(e) = app.engine.republish(&repo, c.name())
+        {
+            app.engine.update_settings(&repo, &r0.settings)?;
+            return Err(e.into());
         }
         Ok(Json(repo_json(app, &r, &c)))
     })
     .await
 }
 
+#[derive(Deserialize, Default)]
+pub(crate) struct DeleteQ {
+    /// Also delete a mirror's received tree.
+    #[serde(default)]
+    pub(crate) remove_tree: Option<String>,
+}
+
 pub(crate) async fn repo_delete(
     State(app): St,
     Who(c): Who,
     Path(repo): Path<String>,
+    Query(q): Query<DeleteQ>,
 ) -> Result<StatusCode> {
     app.require_admin(&c)?;
+    if let Some(id) = app.jobs.running(&repo) {
+        return Err(Error::Conflict(format!(
+            "{repo} is syncing (job {id}); stop it first"
+        )));
+    }
+    let remove_tree = matches!(q.remove_tree.as_deref(), Some("1" | "true" | "yes"));
     blocking(&app, move |app| {
         let r = app.engine.repo(&repo)?;
         app.engine.delete_repo(&repo)?;
         app.auth.forget_repo(&repo)?;
+        // A mirror's received tree (perhaps an adopted multi-TB one) stays
+        // unless asked for.
+        let mut detail = String::new();
         if r.kind == Kind::Mirror {
-            // The received tree goes with it.
-            let _ = std::fs::remove_dir_all(r.tree_dir());
+            let tree = r.tree_dir();
+            if remove_tree {
+                std::fs::remove_dir_all(&tree).map_err(|e| {
+                    Error::Invalid(format!("deleted, but removing {}: {e}", tree.display()))
+                })?;
+                detail = format!("removed {}", tree.display());
+            } else {
+                detail = format!("kept {}", tree.display());
+            }
         }
-        app.auth.audit(c.name(), "repo delete", &repo, "");
+        app.auth.audit(c.name(), "repo delete", &repo, &detail);
         Ok(StatusCode::NO_CONTENT)
     })
     .await

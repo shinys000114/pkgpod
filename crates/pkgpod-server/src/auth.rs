@@ -397,25 +397,29 @@ impl Auth {
     pub fn token(&self, token: &str) -> Option<Caller> {
         let h = sha(token);
         let t = now();
-        let found: Option<(User, String, bool, Option<i64>, i64)> = self
+        type Row = (User, String, bool, Option<i64>, i64, Option<i64>);
+        let found: Option<Row> = self
             .db
             .read(|c| {
                 c.query_row(
-                    "SELECT u.id, u.name, u.admin, u.disabled, u.created, t.repos, t.write, t.expires, t.id
+                    "SELECT u.id, u.name, u.admin, u.disabled, u.created, t.repos, t.write, t.expires, t.id, t.used
                      FROM tokens t JOIN users u ON u.id = t.user WHERE t.hash = ?1",
                     [&h],
-                    |r| Ok((row_user(r)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)),
+                    |r| Ok((row_user(r)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?)),
                 )
                 .optional()
             })
             .ok()?;
-        let (user, repos, write, expires, id) = found?;
+        let (user, repos, write, expires, id, used) = found?;
         if user.disabled || expires.is_some_and(|e| e <= t) {
             return None;
         }
-        let _ = self
-            .db
-            .write(|tx| tx.execute("UPDATE tokens SET used = ?1 WHERE id = ?2", params![t, id]));
+        // "Last used" to the minute: no write on every request apt makes.
+        if used.is_none_or(|u| u < t - 60) {
+            let _ = self.db.write(|tx| {
+                tx.execute("UPDATE tokens SET used = ?1 WHERE id = ?2", params![t, id])
+            });
+        }
         Some(Caller {
             user: Some(user),
             scope: Some(Scope {

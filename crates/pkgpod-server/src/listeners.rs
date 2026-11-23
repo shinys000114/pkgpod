@@ -216,9 +216,19 @@ pub async fn serve_router(
     router: Router,
     mut stop: watch::Receiver<bool>,
 ) -> Result<(), String> {
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|e| format!("listening on {addr}: {e}"))?;
+    // A listener changed in place: its old socket may take a moment to
+    // close.
+    let mut tries = 0;
+    let listener = loop {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => break l,
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && tries < 20 => {
+                tries += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            Err(e) => return Err(format!("listening on {addr}: {e}")),
+        }
+    };
     tracing::info!(
         "serving on {}{}",
         listener

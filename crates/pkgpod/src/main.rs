@@ -216,6 +216,13 @@ fn main() -> ExitCode {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
     let cli = Cli::parse();
+    if matches!(cli.cmd, Cmd::Serve(_) | Cmd::Admin { .. }) {
+        // The database, keys and stores are the server's and its group's.
+        // SAFETY: plain libc call before any thread starts.
+        unsafe {
+            libc::umask(0o027);
+        }
+    }
     let r = match cli.cmd {
         Cmd::Serve(a) => serve(&a),
         Cmd::Admin { server, cmd } => admin(&server, cmd),

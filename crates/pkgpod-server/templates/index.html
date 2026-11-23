@@ -28,13 +28,13 @@
 {% if s.admin %}
 {% for f in formats %}
 <details class="card panel">
-  <summary>New {{ f.title }} repository <span class="hint">{% for k in f.kinds %}{{ k }} {% endfor %}</span></summary>
+  <summary>New {{ f.title }} {% if f.kind == "mirror" %}mirror <span class="hint">follows an upstream archive; served where it is received, without versions</span>{% else %}repository <span class="hint">{{ f.kind }}: uploads and operations, every change a version</span>{% endif %}</summary>
   <div class="panel-body">
   <form hx-post="/c/repos" hx-target="next .result">
     <input type="hidden" name="format" value="{{ f.id }}">
+    <input type="hidden" name="kind" value="{{ f.kind }}">
     <div class="fields">
-      <label class="field"><span>Name</span><input name="name" placeholder="e.g. ppa" required pattern="[a-z0-9][a-z0-9._-]*"><small>Lowercase letters, digits, '.', '_', '-'.</small></label>
-      <label class="field"><span>Kind</span><select name="kind">{% for k in f.kinds %}<option>{{ k }}</option>{% endfor %}</select><small>hosted: uploads; mirror: follows an upstream.</small></label>
+      <label class="field"><span>Name</span><input name="name" placeholder="{% if f.kind == "mirror" %}e.g. debian{% else %}e.g. ppa{% endif %}" required pattern="[a-z0-9][a-z0-9._-]*"><small>Lowercase letters, digits, '.', '_', '-'.</small></label>
       <label class="field"><span>Storage</span><select name="storage">{% for st in storages %}<option>{{ st }}</option>{% endfor %}</select></label>
     </div>
     {% call m::fields(f.fields) %}{% endcall %}
