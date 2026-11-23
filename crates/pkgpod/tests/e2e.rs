@@ -637,3 +637,144 @@ fn deb_mirror_of_a_hosted_repository() {
     s.cli(&["repo", "set", "mir", "schedule=0 */6 * * *"])
         .unwrap();
 }
+
+#[test]
+fn import_an_apt_repository_as_one_version() {
+    if !have("dpkg-deb") || !have("gpg") {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&[
+        "key",
+        "generate",
+        "main",
+        "pkgpod e2e <e2e@example.invalid>",
+    ])
+    .unwrap();
+    s.cli(&["repo", "create", "old", "-s", "public=true"])
+        .unwrap();
+    s.cli(&[
+        "op",
+        "old",
+        "dist-set",
+        "name=focal",
+        "components=main,extra",
+        "suite=stable",
+        "-y",
+    ])
+    .unwrap();
+    s.cli(&["op", "old", "dist-set", "name=jammy", "-y"])
+        .unwrap();
+    let debs = s.dir.path().join("debs");
+    std::fs::create_dir_all(&debs).unwrap();
+    for (n, v) in [("one", "1.0"), ("two", "2.0")] {
+        let d = build_deb(&debs, n, v, "amd64", "xz", "");
+        s.cli(&["upload", "old", d.to_str().unwrap(), "-s", "dists=focal"])
+            .unwrap();
+    }
+    let x = build_deb(&debs, "extra-tool", "3", "all", "gzip", "");
+    s.cli(&[
+        "upload",
+        "old",
+        x.to_str().unwrap(),
+        "-s",
+        "dists=focal",
+        "-s",
+        "component=extra",
+    ])
+    .unwrap();
+    let (_, key) = get(&s.url("/old/key.asc"), None);
+    let kf = s.dir.path().join("old.asc");
+    std::fs::write(&kf, key).unwrap();
+
+    s.cli(&["repo", "create", "new"]).unwrap();
+    let out = s
+        .cli(&[
+            "import",
+            "new",
+            &s.url("/old/"),
+            "--dists",
+            "focal",
+            "--keyring",
+            kf.to_str().unwrap(),
+            "--wait",
+        ])
+        .unwrap();
+    assert!(out.contains("imported 3 package file(s)"), "{out}");
+    let v = s.json(&["versions", "new"]);
+    assert_eq!(
+        v.as_array().unwrap().len(),
+        2,
+        "one version for the whole import: {v}"
+    );
+    let hits = s.json(&["repo", "packages", "new"]);
+    let mut names: Vec<String> = hits
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| {
+            format!(
+                "{} {}",
+                h["name"].as_str().unwrap(),
+                h["extra"].as_str().unwrap()
+            )
+        })
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "extra-tool focal/extra all",
+            "one focal/main amd64",
+            "two focal/main amd64"
+        ]
+    );
+    // The dist as upstream had it.
+    let dist = s.json(&["ls", "new", "dists/focal"]);
+    let def = dist["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "_dist")
+        .unwrap();
+    assert_eq!(def["value"]["suite"], "stable");
+    assert_eq!(
+        def["value"]["components"],
+        serde_json::json!(["main", "extra"])
+    );
+    // Again: nothing changes.
+    let out = s
+        .cli(&[
+            "import",
+            "new",
+            &s.url("/old/"),
+            "--dists",
+            "focal",
+            "--keyring",
+            kf.to_str().unwrap(),
+            "--wait",
+        ])
+        .unwrap();
+    assert!(out.contains("nothing changed"), "{out}");
+    // A wrong key: refused, nothing taken in.
+    let bad = s.dir.path().join("bad.asc");
+    std::fs::write(
+        &bad,
+        "-----BEGIN PGP PUBLIC KEY BLOCK-----\nbroken\n-----END PGP PUBLIC KEY BLOCK-----\n",
+    )
+    .unwrap();
+    assert!(
+        s.cli(&[
+            "import",
+            "new",
+            &s.url("/old/"),
+            "--dists",
+            "jammy",
+            "--keyring",
+            bad.to_str().unwrap(),
+            "--wait"
+        ])
+        .is_err()
+    );
+    assert_eq!(s.json(&["versions", "new"]).as_array().unwrap().len(), 2);
+}

@@ -849,29 +849,29 @@ pub fn run(
         },
         Cmd::Sync { repo, wait } => {
             let v = c.post(&format!("/api/v1/repos/{}/sync", enc(&repo)), &Value::Null)?;
-            let id = v["job"].as_i64().unwrap_or(0);
-            if !wait {
-                x.print(&v, |_| {
-                    println!("job {id} started; follow it with: pkgpod job {id}")
-                });
-                return Ok(());
-            }
-            let mut shown = 0;
-            loop {
-                let j = c.get(&format!("/api/v1/jobs/{id}"))?;
-                let log = j["log"].as_str().unwrap_or("");
-                if log.len() > shown {
-                    print!("{}", &log[shown..]);
-                    shown = log.len();
-                }
-                match j["state"].as_str() {
-                    Some("running" | "queued") => {
-                        std::thread::sleep(std::time::Duration::from_secs(1))
-                    }
-                    Some("ok") => return Ok(()),
-                    _ => return Err(CliError::other(format!("job {id}: {}", s(&j["summary"])))),
-                }
-            }
+            follow(&x, &v, wait)?;
+        }
+        Cmd::Import {
+            repo,
+            source,
+            dists,
+            components,
+            architectures,
+            keyring,
+            replace,
+            wait,
+        } => {
+            let keyring = match keyring {
+                Some(p) => std::fs::read_to_string(&p)
+                    .map_err(|e| CliError::usage(format!("{}: {e}", p.display())))?,
+                None => String::new(),
+            };
+            let v = c.post(
+                &format!("/api/v1/repos/{}/import", enc(&repo)),
+                &json!({"source": source, "dists": dists, "components": components,
+                        "architectures": architectures, "keyring": keyring, "replace": replace}),
+            )?;
+            follow(&x, &v, wait)?;
         }
         Cmd::Jobs { repo } => {
             let v = match repo {
@@ -940,6 +940,31 @@ pub fn run(
         }
     }
     Ok(())
+}
+
+/// Prints a started job, or waits for it and prints its log.
+fn follow(x: &Ctx, v: &Value, wait: bool) -> Result<(), CliError> {
+    let id = v["job"].as_i64().unwrap_or(0);
+    if !wait {
+        x.print(v, |_| {
+            println!("job {id} started; follow it with: pkgpod job {id}")
+        });
+        return Ok(());
+    }
+    let mut shown = 0;
+    loop {
+        let j = x.c.get(&format!("/api/v1/jobs/{id}"))?;
+        let log = j["log"].as_str().unwrap_or("");
+        if log.len() > shown {
+            print!("{}", &log[shown..]);
+            shown = log.len();
+        }
+        match j["state"].as_str() {
+            Some("running" | "queued") => std::thread::sleep(std::time::Duration::from_secs(1)),
+            Some("ok") => return Ok(()),
+            _ => return Err(CliError::other(format!("job {id}: {}", s(&j["summary"])))),
+        }
+    }
 }
 
 fn print_packages(v: &Value) {

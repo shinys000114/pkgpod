@@ -66,6 +66,26 @@
   </div>
 </details>
 {% endfor %}
+{% if format == "deb" %}
+<details class="card panel">
+  <summary>Import <span class="hint">take in an existing apt repository (aptly, reprepro, another server) as one version</span></summary>
+  <div class="panel-body">
+  <form hx-post="/c/r/{{ name }}/import" hx-target="next .result">
+    <div class="fields">
+      <label class="field wide"><span>source</span><input name="source" required placeholder="https://apt.example.org/ppa/"><small>The archive root, where dists/ is.</small></label>
+      <label class="field"><span>dists</span><input name="dists" required placeholder="noble, jammy"></label>
+      <label class="field"><span>components</span><input name="components" placeholder="all"></label>
+      <label class="field"><span>architectures</span><input name="architectures" placeholder="all"></label>
+      <label class="field wide"><span>keyring</span><textarea name="keyring" rows="4" spellcheck="false" placeholder="-----BEGIN PGP PUBLIC KEY BLOCK-----"></textarea><small>The upstream's public key; empty: signatures not checked.</small></label>
+      <label class="check field"><input type="checkbox" name="replace"> <span>replace</span><small>Replace package files of the same name with other content.</small></label>
+    </div>
+    <div class="form-foot"><button type="submit">Import</button></div>
+  </form>
+  <div class="result"></div>
+  <div hx-get="/r/{{ name }}/jobs" hx-trigger="load, every 5s"></div>
+  </div>
+</details>
+{% endif %}
 {% if !other_repos.is_empty() %}
 <details class="card panel">
   <summary>Promote <span class="hint">copy paths of this repository into another of the same format</span></summary>

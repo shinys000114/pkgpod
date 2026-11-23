@@ -133,35 +133,58 @@ impl Jobs {
     }
 }
 
+/// What a job runs: (all fine, summary, report) or why it failed.
+type Work = Box<
+    dyn FnOnce(
+            &App,
+            &RepoInfo,
+            &AtomicBool,
+            &(dyn Fn(&str) + Sync),
+        ) -> Result<(bool, String, Value), String>
+        + Send,
+>;
+
 /// Starts a sync of a mirror; returns the job id.
 pub fn start_sync(app: &Arc<App>, repo: &str, actor: &str) -> Result<i64> {
     let r = app.engine.repo(repo)?;
     if r.kind != Kind::Mirror {
         return Err(Error::Invalid(format!("{repo} is not a mirror")));
     }
+    start(
+        app,
+        r,
+        "sync",
+        actor,
+        Box::new(|app, r, cancel, log| sync(app, r, cancel, log)),
+    )
+}
+
+/// Starts a job of `kind` on a repository, one at a time per repository.
+pub fn start(app: &Arc<App>, r: RepoInfo, kind: &str, actor: &str, work: Work) -> Result<i64> {
+    let repo = r.name.clone();
     let cancel = Arc::new(AtomicBool::new(false));
     let id = {
         let mut running = app.jobs.running.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((id, _)) = running.get(repo) {
+        if let Some((id, _)) = running.get(&repo) {
             return Err(Error::Conflict(format!(
-                "{repo} is already syncing (job {id})"
+                "{repo} has a job running (job {id})"
             )));
         }
         let id = app.db.write(|tx| {
             tx.execute(
-                "INSERT INTO jobs (repo, kind, state, actor, created, started) VALUES (?1, 'sync', 'running', ?2, ?3, ?3)",
-                params![repo, actor, now()],
+                "INSERT INTO jobs (repo, kind, state, actor, created, started) VALUES (?1, ?2, 'running', ?3, ?4, ?4)",
+                params![repo, kind, actor, now()],
             )?;
             Ok::<_, rusqlite::Error>(tx.last_insert_rowid())
         })?;
-        running.insert(repo.to_string(), (id, cancel.clone()));
+        running.insert(repo.clone(), (id, cancel.clone()));
         id
     };
     let app2 = app.clone();
-    let repo2 = repo.to_string();
     let actor2 = actor.to_string();
+    let kind2 = kind.to_string();
     std::thread::Builder::new()
-        .name(format!("sync-{repo}"))
+        .name(format!("{kind}-{repo}"))
         .spawn(move || {
             let path = log_path(&app2, id);
             if let Some(d) = path.parent() {
@@ -174,8 +197,8 @@ pub fn start_sync(app: &Arc<App>, repo: &str, actor: &str) -> Result<i64> {
                     let _ = writeln!(f, "{t} {line}");
                 }
             };
-            log(&format!("sync of {repo2} started"));
-            let res = sync(&app2, &r, &cancel, &log);
+            log(&format!("{kind2} of {} started by {actor2}", r.name));
+            let res = work(&app2, &r, &cancel, &log);
             let (state, summary, report) = match res {
                 Ok((true, s, rep)) => ("ok", s, rep),
                 Ok((false, s, rep)) => ("failed", s, rep),
@@ -189,12 +212,8 @@ pub fn start_sync(app: &Arc<App>, repo: &str, actor: &str) -> Result<i64> {
                     params![state, now(), summary, report.to_string(), id],
                 )
             });
-            app2.jobs
-                .running
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&repo2);
-            app2.auth.audit(&actor2, "sync", &repo2, state);
+            app2.jobs.running.lock().unwrap_or_else(|e| e.into_inner()).remove(&r.name);
+            app2.auth.audit(&actor2, &kind2, &r.name, state);
         })
         .map_err(|e| Error::Invalid(format!("starting the job: {e}")))?;
     Ok(id)

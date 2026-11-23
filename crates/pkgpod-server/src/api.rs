@@ -302,6 +302,7 @@ pub fn router() -> Router<Arc<App>> {
             put(storage_set).delete(storage_delete),
         )
         .route("/api/v1/repos/{repo}/sync", post(sync))
+        .route("/api/v1/repos/{repo}/import", post(import))
         .route("/api/v1/repos/{repo}/jobs", get(repo_jobs))
         .route("/api/v1/jobs", get(all_jobs))
         .route("/api/v1/jobs/{id}", get(job))
@@ -524,6 +525,28 @@ const DOC: &[(&str, &str, &str)] = &[
         "delete",
         "/api/v1/storages/{name}",
         "Remove an unused storage (server admin).",
+    ),
+    (
+        "post",
+        "/api/v1/repos/{repo}/sync",
+        "Start a sync of a mirror (write); returns the job.",
+    ),
+    (
+        "post",
+        "/api/v1/repos/{repo}/import",
+        "Import an apt repository {source, dists, components?, architectures?, keyring?, replace?} as one version (write); returns the job.",
+    ),
+    (
+        "get",
+        "/api/v1/repos/{repo}/jobs",
+        "Recent jobs of a repository.",
+    ),
+    ("get", "/api/v1/jobs", "Recent jobs (server admin)."),
+    ("get", "/api/v1/jobs/{id}", "A job with its log."),
+    (
+        "post",
+        "/api/v1/jobs/{id}/cancel",
+        "Stop a running job (write).",
     ),
     (
         "post",
@@ -1801,4 +1824,22 @@ pub(crate) async fn job_cancel(
     app.auth
         .audit(c.name(), "sync cancel", &j.repo, &id.to_string());
     Ok(StatusCode::ACCEPTED)
+}
+
+pub(crate) async fn import(
+    State(app): St,
+    Who(c): Who,
+    Path(repo): Path<String>,
+    Json(req): Json<crate::import::ImportReq>,
+) -> Result<(StatusCode, Json<Value>)> {
+    let (c2, repo2) = (c.clone(), repo.clone());
+    blocking(&app, move |app| {
+        app.repo_for(&c2, &repo2, Role::Write)?;
+        Ok(())
+    })
+    .await?;
+    let id = crate::import::start(&app, &repo, req, c.name())?;
+    app.auth
+        .audit(c.name(), "import start", &repo, &id.to_string());
+    Ok((StatusCode::ACCEPTED, Json(json!({"job": id}))))
 }
