@@ -295,6 +295,7 @@ pub fn content_type(name: &str) -> &'static str {
         {
             "text/plain; charset=utf-8"
         }
+        _ if base == "key.asc" => "application/pgp-keys",
         Some("deb" | "udeb") => "application/vnd.debian.binary-package",
         Some("gpg" | "asc") => "application/pgp-signature",
         Some("gz" | "tgz") => "application/gzip",

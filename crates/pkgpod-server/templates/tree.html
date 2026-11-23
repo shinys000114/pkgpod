@@ -1,0 +1,28 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+<div class="card">
+  <div class="card-head">
+    <h2>{% for (seg, p) in crumbs %}<a href="#" hx-get="/r/{{ repo }}/tree?path={{ p|urlencode }}&version={{ version|urlencode }}{% if served %}&served=1{% endif %}" hx-target="#tab">{{ seg }}</a>{% if !loop.first %}/{% endif %}{% endfor %}</h2>
+    <form class="inline" hx-get="/r/{{ repo }}/tree" hx-target="#tab">
+      <input type="hidden" name="path" value="{{ path }}">
+      <input name="version" value="{{ version }}" placeholder="version or label" size="12">
+      <label class="check"><input type="checkbox" name="served" value="1"{% if served %} checked{% endif %}> served tree</label>
+      <button type="submit">Show</button>
+    </form>
+  </div>
+  {% if rows.is_empty() %}<p class="empty">Empty.</p>{% else %}
+  <div class="table-wrap"><table>
+    <thead><tr><th>Name</th><th class="num">Size</th><th>Details</th>{% if can_write %}<th></th>{% endif %}</tr></thead>
+    <tbody>
+    {% for r in rows %}
+    <tr>
+      <td class="wrap">{% if r.dir %}<a href="#" hx-get="/r/{{ repo }}/tree?path={{ r.path|urlencode }}&version={{ version|urlencode }}{% if served %}&served=1{% endif %}" hx-target="#tab">📁 {{ r.name }}/</a>{% else %}{{ r.name }}{% endif %}</td>
+      <td class="num">{{ r.size }}</td>
+      <td class="mono wrap muted">{{ r.detail }}</td>
+      {% if can_write %}<td class="acts"><form hx-post="/c/r/{{ repo }}/remove" hx-target="#tab-result"><input type="hidden" name="path" value="{{ r.path }}"><button class="link danger" type="submit">remove…</button></form></td>{% endif %}
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% endif %}
+  <div id="tab-result" class="card-body results"></div>
+</div>

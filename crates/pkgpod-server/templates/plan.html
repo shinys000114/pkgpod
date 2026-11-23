@@ -1,0 +1,12 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+<div class="plan{% if applied %} done{% endif %}">
+  <p><b>{% if applied %}Applied{% else %}Preview{% endif %}:</b> {{ summary }}{% if applied %}{% if version.is_empty() %} — nothing changed{% else %} — version {{ version }}{% endif %}{% endif %}</p>
+  {% if lines.is_empty() %}<p class="muted">No changes.</p>{% endif %}
+  <ul class="changes">{% for l in lines %}<li class="mono" data-sign="{{ l.sign }}">{{ l.sign }} {{ l.path }}</li>{% endfor %}</ul>
+  {% if more > 0 %}<p class="muted">… and {{ more }} more</p>{% endif %}
+  {% if !applied && !lines.is_empty() %}
+  <form hx-post="/c/plans/{{ id }}/apply" hx-target="closest .plan" hx-swap="outerHTML">
+    <button type="submit">Apply</button> <span class="muted">The plan applies only if nothing changed meanwhile.</span>
+  </form>
+  {% endif %}
+</div>

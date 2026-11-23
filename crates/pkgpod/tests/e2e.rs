@@ -249,7 +249,10 @@ fn deb_repository_with_apt() {
             std::fs::create_dir_all(a.join(d)).unwrap();
         }
         std::fs::write(a.join("status"), "").unwrap();
-        let key = s.cli(&["key", "public", "main"]).unwrap();
+        // The key is published next to what it signs.
+        let (st, key) = get(&s.url("/team/ppa/key.asc"), Some(("token", tok)));
+        assert_eq!(st, 200);
+        assert!(key.contains("BEGIN PGP PUBLIC KEY BLOCK"), "{key}");
         let kr = a.join("etc/keyrings/pkgpod.asc");
         std::fs::write(&kr, key).unwrap();
         let auth = a.join("etc/auth.conf.d/pkgpod.conf");
@@ -412,4 +415,127 @@ fn rights_and_errors() {
         .send()
         .unwrap();
     assert_eq!(r.status().as_u16(), 404);
+}
+
+#[test]
+fn console_login_pages_and_csrf() {
+    let s = Server::start();
+    s.cli(&["repo", "create", "web", "-s", "sign=false"])
+        .unwrap();
+    s.cli_in(
+        &["user", "add", "ann", "--admin", "--password-stdin"],
+        "ann-password",
+    )
+    .unwrap();
+    let c = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let cookie_of = |r: &reqwest::blocking::Response, name: &str| {
+        r.headers()
+            .get_all("set-cookie")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .find_map(|v| {
+                v.strip_prefix(&format!("{name}="))
+                    .map(|x| x.split(';').next().unwrap().to_string())
+            })
+    };
+    // Not logged in: to the login page.
+    let r = c.get(format!("{}/", s.api)).send().unwrap();
+    assert_eq!(r.status().as_u16(), 303);
+    let r = c.get(format!("{}/login", s.api)).send().unwrap();
+    let lc = cookie_of(&r, "pkgpod_login").unwrap();
+    let r = c
+        .post(format!("{}/login", s.api))
+        .header("cookie", format!("pkgpod_login={lc}"))
+        .form(&[
+            ("user", "ann"),
+            ("password", "ann-password"),
+            ("csrf", lc.as_str()),
+        ])
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 303);
+    let sid = cookie_of(&r, "pkgpod_session").expect("session cookie");
+    let page = |p: &str| {
+        let r = c
+            .get(format!("{}{p}", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .send()
+            .unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    let (st, home) = page("/");
+    assert_eq!(st, 200);
+    assert!(home.contains("href=\"/r/web\""), "{home}");
+    let csrf = home
+        .split("\"X-CSRF-Token\": \"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap()
+        .to_string();
+    for p in [
+        "/r/web",
+        "/r/web/tree?path=",
+        "/r/web/versions",
+        "/r/web/settings",
+        "/r/web/packages",
+        "/search",
+        "/account",
+        "/admin/people",
+        "/admin/server",
+    ] {
+        let (st, body) = page(p);
+        assert_eq!(st, 200, "{p}: {body}");
+    }
+    // A change needs the CSRF token.
+    let post = |token: Option<&str>| {
+        let mut r = c
+            .post(format!("{}/c/r/web/ops/dist-set", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .form(&[("name", "noble"), ("components", "main")]);
+        if let Some(t) = token {
+            r = r.header("x-csrf-token", t);
+        }
+        let r = r.send().unwrap();
+        r.text().unwrap()
+    };
+    assert!(post(None).contains("X-CSRF-Token"));
+    let preview = post(Some(&csrf));
+    assert!(
+        preview.contains("Preview") && preview.contains("dists/noble/_dist"),
+        "{preview}"
+    );
+    let id = preview
+        .split("/c/plans/")
+        .nth(1)
+        .unwrap()
+        .split('/')
+        .next()
+        .unwrap();
+    let r = c
+        .post(format!("{}/c/plans/{id}/apply", s.api))
+        .header("cookie", format!("pkgpod_session={sid}"))
+        .header("x-csrf-token", &csrf)
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(r.contains("Applied") && r.contains("version 2"), "{r}");
+    // Tokens are not for the console.
+    let tok = s.cli(&["token", "create", "x", "--write"]).unwrap();
+    let r = c
+        .post(format!("{}/login", s.api))
+        .header("cookie", format!("pkgpod_login={lc}"))
+        .form(&[
+            ("user", "admin"),
+            ("password", tok.trim()),
+            ("csrf", lc.as_str()),
+        ])
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200, "a token does not log in");
 }

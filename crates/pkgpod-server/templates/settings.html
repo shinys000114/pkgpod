@@ -1,0 +1,42 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+{% import "macros.html" as m %}
+<div class="card">
+  <div class="card-head"><h2>Settings</h2>{% if !can_admin %}<span class="hint">read only: changing them needs the admin role</span>{% endif %}</div>
+  <div class="card-body">
+  <form hx-post="/c/r/{{ repo }}/settings" hx-target="next .result">
+    {% call m::fields(fields) %}{% endcall %}
+    {% if can_admin %}<div class="form-foot"><button type="submit">Save</button> <button type="button" hx-post="/c/r/{{ repo }}/republish" hx-target="next .result">Republish</button></div>{% endif %}
+  </form>
+  <div class="result"></div>
+  </div>
+</div>
+{% if can_admin %}
+<div class="card">
+  <div class="card-head"><h2>Rights</h2><span class="hint">server admins may do everything; grants on * (Users &amp; teams) cover every repository</span></div>
+  {% if grants.is_empty() %}<p class="empty">No grants on this repository.</p>{% else %}
+  <div class="table-wrap"><table><thead><tr><th>Who</th><th>Role</th><th></th></tr></thead><tbody>
+  {% for g in grants %}<tr><td>{{ g.subject }}</td><td>{{ g.role }}</td><td class="acts"><button class="link danger" hx-post="/c/r/{{ repo }}/grants/{{ g.subject|urlencode }}/delete" hx-target="#tab">remove</button></td></tr>{% endfor %}
+  </tbody></table></div>
+  {% endif %}
+  <div class="card-body">
+  <form class="inline" hx-post="/c/r/{{ repo }}/grants" hx-target="#tab">
+    <select name="subject">{% for u in users %}<option value="user:{{ u }}">user {{ u }}</option>{% endfor %}{% for t in teams %}<option value="team:{{ t }}">team {{ t }}</option>{% endfor %}</select>
+    <select name="role"><option>read</option><option>write</option><option>admin</option></select>
+    <button type="submit">Grant</button>
+  </form>
+  </div>
+</div>
+{% endif %}
+{% if server_admin %}
+<details class="card panel">
+  <summary>Delete this repository</summary>
+  <div class="panel-body">
+  <form hx-post="/c/r/{{ repo }}/delete" hx-target="next .result">
+    <p class="warning">All its versions and labels go; files no other repository uses are removed at the next garbage collection.</p>
+    <label class="field"><span>Type its name</span><input name="confirm" required></label>
+    <div class="form-foot"><button class="danger" type="submit">Delete</button></div>
+  </form>
+  <div class="result"></div>
+  </div>
+</details>
+{% endif %}

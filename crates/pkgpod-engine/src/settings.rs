@@ -19,7 +19,11 @@ pub enum FieldKind {
     List,
     /// One of the given strings.
     Choice {
-        choices: Vec<&'static str>,
+        choices: Vec<String>,
+    },
+    /// Any of the given strings (a list).
+    Multi {
+        choices: Vec<String>,
     },
     /// Any JSON value (format editors such as deb's dists).
     Json,
@@ -75,9 +79,19 @@ impl Field {
     ) -> Field {
         Field {
             name,
-            kind: FieldKind::Choice { choices },
+            kind: FieldKind::Choice {
+                choices: choices.into_iter().map(String::from).collect(),
+            },
             help,
             default: json!(default),
+        }
+    }
+    pub fn multi(name: &'static str, choices: Vec<String>, help: &'static str) -> Field {
+        Field {
+            name,
+            kind: FieldKind::Multi { choices },
+            help,
+            default: json!([]),
         }
     }
     pub fn json(name: &'static str, default: Value, help: &'static str) -> Field {
@@ -170,8 +184,28 @@ fn coerce(f: &Field, x: &Value) -> Result<Value> {
                 .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>()
         ),
+        (FieldKind::Multi { .. }, Value::Array(_) | Value::String(_)) => {
+            let list = coerce(
+                &Field {
+                    kind: FieldKind::List,
+                    ..f.clone()
+                },
+                x,
+            )?;
+            if let FieldKind::Multi { choices } = &f.kind
+                && let Some(bad) = list
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .find(|v| !choices.iter().any(|c| c == v))
+            {
+                return Err(bad_choice(f, bad, choices));
+            }
+            list
+        }
         (FieldKind::Choice { choices }, Value::String(s)) => {
-            if choices.contains(&s.as_str()) {
+            if choices.iter().any(|c| c == s) {
                 x.clone()
             } else {
                 return Err(bad(&format!("one of {}", choices.join(", "))));
@@ -183,7 +217,16 @@ fn coerce(f: &Field, x: &Value) -> Result<Value> {
         (FieldKind::Integer, _) => return Err(bad("an integer")),
         (FieldKind::List, _) => return Err(bad("a list of strings")),
         (FieldKind::Choice { .. }, _) => return Err(bad("text")),
+        (FieldKind::Multi { .. }, _) => return Err(bad("a list of strings")),
     })
+}
+
+fn bad_choice(f: &Field, v: &str, choices: &[String]) -> Error {
+    Error::Invalid(format!(
+        "setting {}: {v:?} is not one of {}",
+        f.name,
+        choices.join(", ")
+    ))
 }
 
 /// `base` with the fields of `patch` replaced (a `null` resets one to

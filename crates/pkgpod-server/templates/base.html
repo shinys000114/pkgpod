@@ -1,0 +1,45 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"selfRequestsOnly":true}'>
+<title>{% block title %}pkgpod{% endblock %}</title>
+<link rel="stylesheet" href="{{ s.css }}">
+<script src="/ui/htmx-2.0.11.min.js"></script>
+</head>
+<body hx-headers='{"X-CSRF-Token": "{{ s.csrf }}"}'>
+{% if !s.user.is_empty() %}
+<div class="app">
+<aside class="side">
+  <a class="brand" href="/"><span class="logo">p</span>pkgpod</a>
+  <nav class="nav">
+    <a href="/"{% if s.section == "repos" %} aria-current="page"{% endif %}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg>Repositories</a>
+    <a href="/search"{% if s.section == "search" %} aria-current="page"{% endif %}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>Search</a>
+    <a href="/account"{% if s.section == "account" %} aria-current="page"{% endif %}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>Account &amp; tokens</a>
+    {% if s.admin %}<a href="/admin/people"{% if s.section == "people" %} aria-current="page"{% endif %}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7"/><path d="M18.5 14a6.5 6.5 0 0 1 3 6"/></svg>Users &amp; teams</a>
+    <a href="/admin/server"{% if s.section == "server" %} aria-current="page"{% endif %}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="7" rx="1.5"/><path d="M7 7.5h.01"/><path d="M7 16.5h.01"/></svg>Server</a>{% endif %}
+  </nav>
+  <div class="who">
+    <span><b>{{ s.user }}</b>{% if s.admin %}<span class="role">admin</span>{% endif %}</span>
+    <button hx-post="/logout">Log out</button>
+  </div>
+  <div class="muted ver">pkgpod {{ s.version }}</div>
+</aside>
+<main>
+{% block main %}{% endblock %}
+</main>
+</div>
+{% else %}
+<div class="login-wrap">
+{% block anon %}{% endblock %}
+</div>
+{% endif %}
+</body>
+</html>

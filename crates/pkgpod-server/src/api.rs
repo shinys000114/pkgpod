@@ -221,7 +221,7 @@ fn repo_json(app: &App, r: &RepoInfo, c: &Caller) -> Value {
 #[derive(Deserialize, Default)]
 pub struct ApplyQ {
     #[serde(default)]
-    apply: Option<String>,
+    pub(crate) apply: Option<String>,
 }
 
 impl ApplyQ {
@@ -516,7 +516,7 @@ const DOC: &[(&str, &str, &str)] = &[
     ("get", "/api/v1/audit", "Recent changes (server admin)."),
 ];
 
-async fn openapi() -> Json<Value> {
+pub(crate) async fn openapi() -> Json<Value> {
     let mut paths = serde_json::Map::new();
     for (m, p, s) in DOC {
         let e = paths.entry(p.to_string()).or_insert_with(|| json!({}));
@@ -534,7 +534,7 @@ async fn openapi() -> Json<Value> {
     }))
 }
 
-async fn status(Who(c): Who) -> Json<Value> {
+pub(crate) async fn status(Who(c): Who) -> Json<Value> {
     Json(json!({
         "pkgpod": pkgpod_base::version(),
         "user": c.user.as_ref().map(|u| &u.name),
@@ -542,7 +542,7 @@ async fn status(Who(c): Who) -> Json<Value> {
     }))
 }
 
-async fn formats(State(app): St) -> Json<Value> {
+pub(crate) async fn formats(State(app): St) -> Json<Value> {
     let v: Vec<Value> = app
         .engine
         .formats()
@@ -559,7 +559,7 @@ async fn formats(State(app): St) -> Json<Value> {
     Json(json!(v))
 }
 
-async fn repos(State(app): St, Who(c): Who) -> Result<Json<Value>> {
+pub(crate) async fn repos(State(app): St, Who(c): Who) -> Result<Json<Value>> {
     blocking(&app, move |app| {
         let v: Vec<Value> = app
             .engine
@@ -578,22 +578,22 @@ async fn repos(State(app): St, Who(c): Who) -> Result<Json<Value>> {
 }
 
 #[derive(Deserialize)]
-struct CreateReq {
-    name: String,
-    format: String,
+pub(crate) struct CreateReq {
+    pub(crate) name: String,
+    pub(crate) format: String,
     #[serde(default = "hosted")]
-    kind: String,
+    pub(crate) kind: String,
     #[serde(default)]
-    storage: Option<String>,
+    pub(crate) storage: Option<String>,
     #[serde(default)]
-    settings: Value,
+    pub(crate) settings: Value,
 }
 
 fn hosted() -> String {
     "hosted".into()
 }
 
-async fn repo_create(
+pub(crate) async fn repo_create(
     State(app): St,
     Who(c): Who,
     Json(req): Json<CreateReq>,
@@ -622,7 +622,11 @@ async fn repo_create(
     .await
 }
 
-async fn repo_get(State(app): St, Who(c): Who, Path(repo): Path<String>) -> Result<Json<Value>> {
+pub(crate) async fn repo_get(
+    State(app): St,
+    Who(c): Who,
+    Path(repo): Path<String>,
+) -> Result<Json<Value>> {
     blocking(&app, move |app| {
         let r = app.repo_for(&c, &repo, Role::Read)?;
         Ok(Json(repo_json(app, &r, &c)))
@@ -631,11 +635,11 @@ async fn repo_get(State(app): St, Who(c): Who, Path(repo): Path<String>) -> Resu
 }
 
 #[derive(Deserialize)]
-struct PatchReq {
-    settings: Value,
+pub(crate) struct PatchReq {
+    pub(crate) settings: Value,
 }
 
-async fn repo_patch(
+pub(crate) async fn repo_patch(
     State(app): St,
     Who(c): Who,
     Path(repo): Path<String>,
@@ -656,7 +660,11 @@ async fn repo_patch(
     .await
 }
 
-async fn repo_delete(State(app): St, Who(c): Who, Path(repo): Path<String>) -> Result<StatusCode> {
+pub(crate) async fn repo_delete(
+    State(app): St,
+    Who(c): Who,
+    Path(repo): Path<String>,
+) -> Result<StatusCode> {
     app.require_admin(&c)?;
     blocking(&app, move |app| {
         let r = app.engine.repo(&repo)?;
@@ -672,7 +680,11 @@ async fn repo_delete(State(app): St, Who(c): Who, Path(repo): Path<String>) -> R
     .await
 }
 
-async fn versions(State(app): St, Who(c): Who, Path(repo): Path<String>) -> Result<Json<Value>> {
+pub(crate) async fn versions(
+    State(app): St,
+    Who(c): Who,
+    Path(repo): Path<String>,
+) -> Result<Json<Value>> {
     blocking(&app, move |app| {
         app.repo_for(&c, &repo, Role::Read)?;
         Ok(Json(json!(app.engine.versions(&repo)?)))
@@ -680,7 +692,7 @@ async fn versions(State(app): St, Who(c): Who, Path(repo): Path<String>) -> Resu
     .await
 }
 
-async fn version(
+pub(crate) async fn version(
     State(app): St,
     Who(c): Who,
     Path((repo, seq)): Path<(String, String)>,
@@ -693,12 +705,12 @@ async fn version(
 }
 
 #[derive(Deserialize)]
-struct DiffQ {
-    from: String,
-    to: Option<String>,
+pub(crate) struct DiffQ {
+    pub(crate) from: String,
+    pub(crate) to: Option<String>,
 }
 
-async fn diff(
+pub(crate) async fn diff(
     State(app): St,
     Who(c): Who,
     Path(repo): Path<String>,
@@ -726,13 +738,13 @@ async fn diff(
 }
 
 #[derive(Deserialize, Default)]
-struct TreeQ {
+pub(crate) struct TreeQ {
     #[serde(default)]
-    path: String,
+    pub(crate) path: String,
     #[serde(default)]
-    version: Option<String>,
+    pub(crate) version: Option<String>,
     #[serde(default)]
-    served: Option<String>,
+    pub(crate) served: Option<String>,
 }
 
 /// Entries of a directory: of a version's state (or served) tree, or of
@@ -802,7 +814,7 @@ pub fn tree_entries(
     Ok(out)
 }
 
-async fn tree(
+pub(crate) async fn tree(
     State(app): St,
     Who(c): Who,
     Path(repo): Path<String>,
@@ -818,16 +830,16 @@ async fn tree(
 }
 
 #[derive(Deserialize, Default)]
-struct SearchQ {
+pub(crate) struct SearchQ {
     #[serde(default)]
-    q: String,
+    pub(crate) q: String,
     #[serde(default)]
-    repo: Option<String>,
+    pub(crate) repo: Option<String>,
     #[serde(default)]
-    limit: Option<usize>,
+    pub(crate) limit: Option<usize>,
 }
 
-async fn packages(
+pub(crate) async fn packages(
     State(app): St,
     Who(c): Who,
     Path(repo): Path<String>,
@@ -843,7 +855,11 @@ async fn packages(
     .await
 }
 
-async fn search(State(app): St, Who(c): Who, Query(q): Query<SearchQ>) -> Result<Json<Value>> {
+pub(crate) async fn search(
+    State(app): St,
+    Who(c): Who,
+    Query(q): Query<SearchQ>,
+) -> Result<Json<Value>> {
     blocking(&app, move |app| {
         let limit = q.limit.unwrap_or(200).min(2000);
         let hits = app.engine.search(&q.q, q.repo.as_deref(), limit * 4)?;
@@ -866,7 +882,7 @@ async fn search(State(app): St, Who(c): Who, Query(q): Query<SearchQ>) -> Result
     .await
 }
 
-async fn op(
+pub(crate) async fn op(
     State(app): St,
     Who(c): Who,
     Path((repo, op)): Path<(String, String)>,
@@ -883,11 +899,11 @@ async fn op(
 }
 
 #[derive(Deserialize)]
-struct RemoveReq {
-    paths: Vec<String>,
+pub(crate) struct RemoveReq {
+    pub(crate) paths: Vec<String>,
 }
 
-async fn remove(
+pub(crate) async fn remove(
     State(app): St,
     Who(c): Who,
     Path(repo): Path<String>,
@@ -903,11 +919,11 @@ async fn remove(
 }
 
 #[derive(Deserialize)]
-struct RollbackReq {
-    version: String,
+pub(crate) struct RollbackReq {
+    pub(crate) version: String,
 }
 
-async fn rollback(
+pub(crate) async fn rollback(
     State(app): St,
     Who(c): Who,
     Path(repo): Path<String>,
@@ -924,14 +940,14 @@ async fn rollback(
 }
 
 #[derive(Deserialize)]
-struct PromoteReq {
-    from: String,
+pub(crate) struct PromoteReq {
+    pub(crate) from: String,
     #[serde(default)]
-    version: Option<String>,
-    paths: Vec<String>,
+    pub(crate) version: Option<String>,
+    pub(crate) paths: Vec<String>,
 }
 
-async fn promote(
+pub(crate) async fn promote(
     State(app): St,
     Who(c): Who,
     Path(repo): Path<String>,
@@ -953,7 +969,11 @@ async fn promote(
     .await
 }
 
-async fn republish(State(app): St, Who(c): Who, Path(repo): Path<String>) -> Result<Json<Value>> {
+pub(crate) async fn republish(
+    State(app): St,
+    Who(c): Who,
+    Path(repo): Path<String>,
+) -> Result<Json<Value>> {
     blocking(&app, move |app| {
         app.repo_for(&c, &repo, Role::Write)?;
         let v = app.engine.republish(&repo, c.name())?;
@@ -962,7 +982,11 @@ async fn republish(State(app): St, Who(c): Who, Path(repo): Path<String>) -> Res
     .await
 }
 
-async fn plan_get(State(app): St, Who(c): Who, Path(id): Path<String>) -> Result<Json<Value>> {
+pub(crate) async fn plan_get(
+    State(app): St,
+    Who(c): Who,
+    Path(id): Path<String>,
+) -> Result<Json<Value>> {
     let p = app.plans.lock().unwrap_or_else(|e| e.into_inner());
     match p.get(&id) {
         Some(k) if k.owner == c.name() => Ok(Json(plan_json(&k.plan))),
@@ -970,7 +994,11 @@ async fn plan_get(State(app): St, Who(c): Who, Path(id): Path<String>) -> Result
     }
 }
 
-async fn plan_apply(State(app): St, Who(c): Who, Path(id): Path<String>) -> Result<Json<Value>> {
+pub(crate) async fn plan_apply(
+    State(app): St,
+    Who(c): Who,
+    Path(id): Path<String>,
+) -> Result<Json<Value>> {
     let plan = app.take_plan(&id, c.name())?;
     blocking(&app, move |app| {
         // Rights may have changed since the plan was made.
@@ -984,7 +1012,7 @@ async fn plan_apply(State(app): St, Who(c): Who, Path(id): Path<String>) -> Resu
 
 /// Takes an upload: a raw body (params in the query) or a multipart form
 /// (file fields, other fields as params).
-async fn upload(
+pub(crate) async fn upload(
     State(app): St,
     Who(c): Who,
     Path(repo): Path<String>,
@@ -1029,7 +1057,12 @@ async fn upload(
                     .await
                     .map_err(|e| Error::Invalid(e.to_string()))?;
                 if !text.is_empty() {
-                    params[name] = Value::String(text);
+                    // Repeated fields (checked boxes) make a list.
+                    let joined = match params.get(&name).and_then(Value::as_str) {
+                        Some(prev) => format!("{prev},{text}"),
+                        None => text,
+                    };
+                    params[name] = Value::String(joined);
                 }
             }
         }
@@ -1062,17 +1095,17 @@ async fn upload(
 }
 
 #[derive(Deserialize)]
-struct LabelReq {
-    name: String,
+pub(crate) struct LabelReq {
+    pub(crate) name: String,
     #[serde(default)]
-    version: Option<String>,
+    pub(crate) version: Option<String>,
     #[serde(default)]
-    note: String,
+    pub(crate) note: String,
     #[serde(default)]
-    force: bool,
+    pub(crate) force: bool,
 }
 
-async fn label(
+pub(crate) async fn label(
     State(app): St,
     Who(c): Who,
     Path(repo): Path<String>,
@@ -1098,7 +1131,7 @@ async fn label(
     .await
 }
 
-async fn unlabel(
+pub(crate) async fn unlabel(
     State(app): St,
     Who(c): Who,
     Path((repo, l)): Path<(String, String)>,
@@ -1112,7 +1145,11 @@ async fn unlabel(
     .await
 }
 
-async fn grants(State(app): St, Who(c): Who, Path(repo): Path<String>) -> Result<Json<Value>> {
+pub(crate) async fn grants(
+    State(app): St,
+    Who(c): Who,
+    Path(repo): Path<String>,
+) -> Result<Json<Value>> {
     blocking(&app, move |app| {
         app.repo_for(&c, &repo, Role::Admin)?;
         Ok(Json(json!(app.auth.grants(Some(&repo))?)))
@@ -1121,12 +1158,12 @@ async fn grants(State(app): St, Who(c): Who, Path(repo): Path<String>) -> Result
 }
 
 #[derive(Deserialize)]
-struct GrantReq {
-    subject: String,
-    role: String,
+pub(crate) struct GrantReq {
+    pub(crate) subject: String,
+    pub(crate) role: String,
 }
 
-async fn grant(
+pub(crate) async fn grant(
     State(app): St,
     Who(c): Who,
     Path(repo): Path<String>,
@@ -1151,7 +1188,7 @@ async fn grant(
     .await
 }
 
-async fn revoke(
+pub(crate) async fn revoke(
     State(app): St,
     Who(c): Who,
     Path((repo, subject)): Path<(String, String)>,
@@ -1169,7 +1206,11 @@ async fn revoke(
     .await
 }
 
-async fn repo_key(State(app): St, Who(c): Who, Path(repo): Path<String>) -> Result<Response> {
+pub(crate) async fn repo_key(
+    State(app): St,
+    Who(c): Who,
+    Path(repo): Path<String>,
+) -> Result<Response> {
     blocking(&app, move |app| {
         let r = app.repo_for(&c, &repo, Role::Read)?;
         let key = Some(r.setting_str("key")).filter(|k| !k.is_empty());
@@ -1181,18 +1222,18 @@ async fn repo_key(State(app): St, Who(c): Who, Path(repo): Path<String>) -> Resu
 
 // ---- people ----
 
-async fn me(State(app): St, Who(c): Who) -> Result<Json<Value>> {
+pub(crate) async fn me(State(app): St, Who(c): Who) -> Result<Json<Value>> {
     let u = app.require_user(&c)?;
     Ok(Json(json!({"user": u, "token": c.scope.is_some()})))
 }
 
 #[derive(Deserialize)]
-struct PasswordReq {
-    old: String,
-    new: String,
+pub(crate) struct PasswordReq {
+    pub(crate) old: String,
+    pub(crate) new: String,
 }
 
-async fn my_password(
+pub(crate) async fn my_password(
     State(app): St,
     Who(c): Who,
     Json(req): Json<PasswordReq>,
@@ -1214,20 +1255,20 @@ async fn my_password(
     .await
 }
 
-async fn users(State(app): St, Who(c): Who) -> Result<Json<Value>> {
+pub(crate) async fn users(State(app): St, Who(c): Who) -> Result<Json<Value>> {
     app.require_admin(&c)?;
     Ok(Json(json!(app.auth.users()?)))
 }
 
 #[derive(Deserialize)]
-struct UserReq {
-    name: String,
-    password: String,
+pub(crate) struct UserReq {
+    pub(crate) name: String,
+    pub(crate) password: String,
     #[serde(default)]
-    admin: bool,
+    pub(crate) admin: bool,
 }
 
-async fn user_create(
+pub(crate) async fn user_create(
     State(app): St,
     Who(c): Who,
     Json(req): Json<UserReq>,
@@ -1247,16 +1288,16 @@ async fn user_create(
 }
 
 #[derive(Deserialize)]
-struct UserPatch {
+pub(crate) struct UserPatch {
     #[serde(default)]
-    password: Option<String>,
+    pub(crate) password: Option<String>,
     #[serde(default)]
-    admin: Option<bool>,
+    pub(crate) admin: Option<bool>,
     #[serde(default)]
-    disabled: Option<bool>,
+    pub(crate) disabled: Option<bool>,
 }
 
-async fn user_patch(
+pub(crate) async fn user_patch(
     State(app): St,
     Who(c): Who,
     Path(user): Path<String>,
@@ -1274,38 +1315,50 @@ async fn user_patch(
     .await
 }
 
-async fn user_delete(State(app): St, Who(c): Who, Path(user): Path<String>) -> Result<StatusCode> {
+pub(crate) async fn user_delete(
+    State(app): St,
+    Who(c): Who,
+    Path(user): Path<String>,
+) -> Result<StatusCode> {
     app.require_admin(&c)?;
     app.auth.delete_user(&user)?;
     app.auth.audit(c.name(), "user delete", &user, "");
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn teams(State(app): St, Who(c): Who) -> Result<Json<Value>> {
+pub(crate) async fn teams(State(app): St, Who(c): Who) -> Result<Json<Value>> {
     app.require_user(&c)?;
     Ok(Json(json!(app.auth.teams()?)))
 }
 
 #[derive(Deserialize)]
-struct NameReq {
-    name: String,
+pub(crate) struct NameReq {
+    pub(crate) name: String,
 }
 
-async fn team_create(State(app): St, Who(c): Who, Json(req): Json<NameReq>) -> Result<StatusCode> {
+pub(crate) async fn team_create(
+    State(app): St,
+    Who(c): Who,
+    Json(req): Json<NameReq>,
+) -> Result<StatusCode> {
     app.require_admin(&c)?;
     app.auth.create_team(&req.name)?;
     app.auth.audit(c.name(), "team create", &req.name, "");
     Ok(StatusCode::CREATED)
 }
 
-async fn team_delete(State(app): St, Who(c): Who, Path(team): Path<String>) -> Result<StatusCode> {
+pub(crate) async fn team_delete(
+    State(app): St,
+    Who(c): Who,
+    Path(team): Path<String>,
+) -> Result<StatusCode> {
     app.require_admin(&c)?;
     app.auth.delete_team(&team)?;
     app.auth.audit(c.name(), "team delete", &team, "");
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn member_add(
+pub(crate) async fn member_add(
     State(app): St,
     Who(c): Who,
     Path((team, user)): Path<(String, String)>,
@@ -1317,7 +1370,7 @@ async fn member_add(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn member_remove(
+pub(crate) async fn member_remove(
     State(app): St,
     Who(c): Who,
     Path((team, user)): Path<(String, String)>,
@@ -1330,12 +1383,16 @@ async fn member_remove(
 }
 
 #[derive(Deserialize, Default)]
-struct AllQ {
+pub(crate) struct AllQ {
     #[serde(default)]
-    all: Option<String>,
+    pub(crate) all: Option<String>,
 }
 
-async fn tokens(State(app): St, Who(c): Who, Query(q): Query<AllQ>) -> Result<Json<Value>> {
+pub(crate) async fn tokens(
+    State(app): St,
+    Who(c): Who,
+    Query(q): Query<AllQ>,
+) -> Result<Json<Value>> {
     let u = app.require_user(&c)?;
     if q.all.is_some() {
         app.require_admin(&c)?;
@@ -1345,17 +1402,17 @@ async fn tokens(State(app): St, Who(c): Who, Query(q): Query<AllQ>) -> Result<Js
 }
 
 #[derive(Deserialize)]
-struct TokenReq {
-    name: String,
+pub(crate) struct TokenReq {
+    pub(crate) name: String,
     #[serde(default)]
-    repos: Vec<String>,
+    pub(crate) repos: Vec<String>,
     #[serde(default)]
-    write: bool,
+    pub(crate) write: bool,
     #[serde(default)]
-    expires_days: Option<i64>,
+    pub(crate) expires_days: Option<i64>,
 }
 
-async fn token_create(
+pub(crate) async fn token_create(
     State(app): St,
     Who(c): Who,
     Json(req): Json<TokenReq>,
@@ -1390,7 +1447,11 @@ async fn token_create(
     ))
 }
 
-async fn token_delete(State(app): St, Who(c): Who, Path(id): Path<i64>) -> Result<StatusCode> {
+pub(crate) async fn token_delete(
+    State(app): St,
+    Who(c): Who,
+    Path(id): Path<i64>,
+) -> Result<StatusCode> {
     let u = app.require_user(&c)?;
     let owner = if c.is_admin() {
         None
@@ -1405,7 +1466,7 @@ async fn token_delete(State(app): St, Who(c): Who, Path(id): Path<i64>) -> Resul
 
 // ---- server ----
 
-async fn listeners(State(app): St, Who(c): Who) -> Result<Json<Value>> {
+pub(crate) async fn listeners(State(app): St, Who(c): Who) -> Result<Json<Value>> {
     app.require_admin(&c)?;
     let v: Vec<Value> = crate::listeners::list(&app.db)?
         .into_iter()
@@ -1421,21 +1482,21 @@ async fn listeners(State(app): St, Who(c): Who) -> Result<Json<Value>> {
 }
 
 #[derive(Deserialize)]
-struct ListenerReq {
-    addr: String,
+pub(crate) struct ListenerReq {
+    pub(crate) addr: String,
     #[serde(default)]
-    cert: String,
+    pub(crate) cert: String,
     #[serde(default)]
-    key: String,
+    pub(crate) key: String,
     #[serde(default = "yes")]
-    enabled: bool,
+    pub(crate) enabled: bool,
 }
 
 fn yes() -> bool {
     true
 }
 
-async fn listener_set(
+pub(crate) async fn listener_set(
     State(app): St,
     Who(c): Who,
     Path(name): Path<String>,
@@ -1457,7 +1518,7 @@ async fn listener_set(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn listener_delete(
+pub(crate) async fn listener_delete(
     State(app): St,
     Who(c): Who,
     Path(name): Path<String>,
@@ -1469,21 +1530,21 @@ async fn listener_delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn keys(State(app): St, Who(c): Who) -> Result<Json<Value>> {
+pub(crate) async fn keys(State(app): St, Who(c): Who) -> Result<Json<Value>> {
     app.require_admin(&c)?;
     Ok(Json(json!(app.keys.list()?)))
 }
 
 #[derive(Deserialize)]
-struct KeyReq {
-    fingerprint: String,
+pub(crate) struct KeyReq {
+    pub(crate) fingerprint: String,
     #[serde(default)]
-    homedir: String,
+    pub(crate) homedir: String,
     #[serde(default)]
-    passphrase_file: String,
+    pub(crate) passphrase_file: String,
 }
 
-async fn key_set(
+pub(crate) async fn key_set(
     State(app): St,
     Who(c): Who,
     Path(name): Path<String>,
@@ -1497,7 +1558,11 @@ async fn key_set(
     Ok(Json(json!(k)))
 }
 
-async fn key_delete(State(app): St, Who(c): Who, Path(name): Path<String>) -> Result<StatusCode> {
+pub(crate) async fn key_delete(
+    State(app): St,
+    Who(c): Who,
+    Path(name): Path<String>,
+) -> Result<StatusCode> {
     app.require_admin(&c)?;
     app.keys.remove(&name)?;
     app.auth.audit(c.name(), "key delete", &name, "");
@@ -1505,11 +1570,11 @@ async fn key_delete(State(app): St, Who(c): Who, Path(name): Path<String>) -> Re
 }
 
 #[derive(Deserialize)]
-struct GenReq {
-    uid: String,
+pub(crate) struct GenReq {
+    pub(crate) uid: String,
 }
 
-async fn key_generate(
+pub(crate) async fn key_generate(
     State(app): St,
     Who(c): Who,
     Path(name): Path<String>,
@@ -1525,14 +1590,22 @@ async fn key_generate(
     .await
 }
 
-async fn key_default(State(app): St, Who(c): Who, Path(name): Path<String>) -> Result<StatusCode> {
+pub(crate) async fn key_default(
+    State(app): St,
+    Who(c): Who,
+    Path(name): Path<String>,
+) -> Result<StatusCode> {
     app.require_admin(&c)?;
     app.keys.set_default(&name)?;
     app.auth.audit(c.name(), "key default", &name, "");
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn key_public(State(app): St, Who(c): Who, Path(name): Path<String>) -> Result<Response> {
+pub(crate) async fn key_public(
+    State(app): St,
+    Who(c): Who,
+    Path(name): Path<String>,
+) -> Result<Response> {
     app.require_user(&c)?;
     blocking(&app, move |app| {
         let pk = app.keys.public_key(Some(&name))?;
@@ -1541,7 +1614,7 @@ async fn key_public(State(app): St, Who(c): Who, Path(name): Path<String>) -> Re
     .await
 }
 
-async fn storages(State(app): St, Who(c): Who) -> Result<Json<Value>> {
+pub(crate) async fn storages(State(app): St, Who(c): Who) -> Result<Json<Value>> {
     app.require_admin(&c)?;
     let v: Vec<Value> = app
         .engine
@@ -1553,11 +1626,11 @@ async fn storages(State(app): St, Who(c): Who) -> Result<Json<Value>> {
 }
 
 #[derive(Deserialize)]
-struct StorageReq {
-    path: String,
+pub(crate) struct StorageReq {
+    pub(crate) path: String,
 }
 
-async fn storage_set(
+pub(crate) async fn storage_set(
     State(app): St,
     Who(c): Who,
     Path(name): Path<String>,
@@ -1570,7 +1643,7 @@ async fn storage_set(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn storage_delete(
+pub(crate) async fn storage_delete(
     State(app): St,
     Who(c): Who,
     Path(name): Path<String>,
@@ -1582,14 +1655,18 @@ async fn storage_delete(
 }
 
 #[derive(Deserialize, Default)]
-struct GcReq {
+pub(crate) struct GcReq {
     #[serde(default)]
-    dry_run: bool,
+    pub(crate) dry_run: bool,
     #[serde(default)]
-    grace_hours: Option<u64>,
+    pub(crate) grace_hours: Option<u64>,
 }
 
-async fn gc(State(app): St, Who(c): Who, body: Option<Json<GcReq>>) -> Result<Json<Value>> {
+pub(crate) async fn gc(
+    State(app): St,
+    Who(c): Who,
+    body: Option<Json<GcReq>>,
+) -> Result<Json<Value>> {
     app.require_admin(&c)?;
     let req = body.map(|b| b.0).unwrap_or_default();
     blocking(&app, move |app| {
@@ -1608,7 +1685,7 @@ async fn gc(State(app): St, Who(c): Who, body: Option<Json<GcReq>>) -> Result<Js
     .await
 }
 
-async fn audit(State(app): St, Who(c): Who) -> Result<Json<Value>> {
+pub(crate) async fn audit(State(app): St, Who(c): Who) -> Result<Json<Value>> {
     app.require_admin(&c)?;
     Ok(Json(json!(app.auth.audit_log(500)?)))
 }
