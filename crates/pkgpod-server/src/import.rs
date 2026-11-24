@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use pkgpod_engine::{Kind, RepoInfo, Upload};
+use pkgpod_engine::{RepoInfo, Upload};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -86,7 +86,7 @@ pub fn start(app: &Arc<App>, repo: &str, req: ImportReq, actor: &str) -> Result<
             Box::new(move |app, r, cancel, log| run_oci(app, r, &req, &actor2, cancel, log)),
         );
     }
-    if r.format == "files" && r.kind != Kind::Mirror {
+    if r.format == "files" && r.kind.versioned() {
         let prefix = req.path.trim_matches('/').to_string();
         if !prefix.is_empty() {
             pkgpod_files::check_path(&prefix)?;
@@ -112,7 +112,7 @@ pub fn start(app: &Arc<App>, repo: &str, req: ImportReq, actor: &str) -> Result<
             }),
         );
     }
-    if r.format != "deb" || r.kind == Kind::Mirror {
+    if r.format != "deb" || !r.kind.versioned() {
         return Err(Error::Invalid(format!(
             "{repo} is not a hosted deb repository: imports go into one"
         )));

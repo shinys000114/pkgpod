@@ -84,8 +84,8 @@ fn schemas() -> Value {
         ),
         (
             "Kind",
-            json!({"type": "string", "enum": ["hosted", "import", "mirror"],
-                   "description": "hosted: uploads and operations; import: copied once, then hosted; mirror: follows an upstream, no versions."}),
+            json!({"type": "string", "enum": ["hosted", "import", "mirror", "group"],
+                   "description": "hosted: uploads and operations; import: copied once, then hosted; mirror: follows an upstream, no versions; group: reads its members in order (settings.members)."}),
         ),
         (
             "Role",

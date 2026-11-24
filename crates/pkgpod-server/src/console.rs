@@ -66,6 +66,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/r/{repo}/changes", get(changes_part))
         .route("/r/{repo}/settings", get(settings_part))
         .route("/r/{repo}/badges", get(badges_part))
+        .route("/r/{repo}/members", get(members_part))
         .route("/c/r/{repo}/badge-token", post(badge_token_new))
         .route("/c/r/{repo}/cleanup", post(cleanup))
         .route("/c/r/{repo}/badge-token/delete", post(badge_token_drop))
@@ -819,13 +820,20 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
         .engine
         .formats()
         .flat_map(|f| {
-            f.kinds()
-                .iter()
+            let mut kinds = f.kinds().to_vec();
+            if f.groups() {
+                kinds.push(Kind::Group);
+            }
+            kinds
+                .into_iter()
                 .map(|k| FormatChoice {
                     id: f.id().to_string(),
                     title: f.title().to_string(),
                     kind: k.as_str().to_string(),
-                    blurb: match (f.id(), *k) {
+                    blurb: match (f.id(), k) {
+                        (_, Kind::Group) => {
+                            "read other repositories of this format through one address"
+                        }
                         ("deb", Kind::Mirror) => "follow an apt archive; served as received",
                         ("deb", _) => "apt packages you upload, signed per version",
                         ("files", Kind::Mirror) => "follow a file server (rsync, HTTP)",
@@ -855,7 +863,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                     }
                     .to_string(),
                     fields: form_fields(
-                        &app.engine.fields(f.id(), *k).unwrap_or_default(),
+                        &app.engine.fields(f.id(), k).unwrap_or_default(),
                         &Value::Null,
                         "settings",
                         &hints,
@@ -2235,7 +2243,7 @@ fn usage(
                 }
             ),
         });
-        if r.kind != Kind::Mirror {
+        if r.kind.versioned() {
             out.push(UseLine {
                 label: "Upload".into(),
                 text: format!(
@@ -2442,6 +2450,17 @@ fn repo_tabs(r: &pkgpod_engine::RepoInfo, can_write: bool) -> Vec<TabLink> {
         part,
     };
     let mut v = Vec::new();
+    if r.kind == Kind::Group {
+        // A group holds nothing: what it reads, and how.
+        v.push(t("members", "Members", format!("/r/{n}/members")));
+        v.push(t("use", "How to use", format!("/r/{n}/use")));
+        v.push(t(
+            "settings",
+            "Settings & rights",
+            format!("/r/{n}/settings"),
+        ));
+        return v;
+    }
     let catalog = t(
         "packages",
         match r.format.as_str() {
@@ -2534,6 +2553,8 @@ async fn repo_page(
             "",
         ));
         stats.push(stat("From", r.setting_str("source").to_string(), ""));
+    } else if r.kind == Kind::Group {
+        stats.push(stat("Members", r.setting_list("members").join(", "), ""));
     } else {
         stats.push(stat(
             "Version",
@@ -2622,7 +2643,7 @@ fn use_render(
     render(&UsePart {
         repo: r.name.clone(),
         place: place.clone(),
-        can_write: role >= Some(Role::Write) && r.kind != Kind::Mirror,
+        can_write: role >= Some(Role::Write) && r.kind.versioned(),
         token_note,
         noun: match r.format.as_str() {
             "deb" => "dist",
@@ -2725,7 +2746,7 @@ async fn actions_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> Re
             .repos()
             .unwrap_or_default()
             .into_iter()
-            .filter(|o| o.format == r2.format && o.name != r2.name && o.kind != Kind::Mirror)
+            .filter(|o| o.format == r2.format && o.name != r2.name && o.kind.versioned())
             .filter(|o| {
                 app2.auth.role(&caller, &o.name, o.setting_bool("public")) >= Some(Role::Write)
             })
@@ -2898,7 +2919,8 @@ async fn tree_part(
         })
         .collect();
     let can_write = app.engine.repo(&repo).ok().and_then(|r| {
-        (r.kind != Kind::Mirror)
+        r.kind
+            .versioned()
             .then(|| app.auth.role(&v.caller, &repo, r.setting_bool("public")))
             .flatten()
     }) >= Some(Role::Write);
@@ -3311,7 +3333,7 @@ async fn mirror_packages(app: Arc<App>, v: Viewer, repo: String, q: MirrorQ) -> 
                 .repos()
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|o| o.format == "deb" && o.kind != Kind::Mirror)
+                .filter(|o| o.format == "deb" && o.kind.versioned())
                 .filter(|o| {
                     app2.auth.role(&caller, &o.name, o.setting_bool("public")) >= Some(Role::Write)
                 })
@@ -3443,7 +3465,7 @@ async fn packages_part(
             .unwrap_or(0);
     }
     let can_write = !matches!(r.format.as_str(), "npm" | "go" | "maven")
-        && r.kind != Kind::Mirror
+        && r.kind.versioned()
         && app.auth.role(&v.caller, &repo, r.setting_bool("public")) >= Some(Role::Write);
     if r.format == "oci" {
         // A digest's first 12 hex digits tell images apart.
@@ -3458,7 +3480,7 @@ async fn packages_part(
             .repos()
             .unwrap_or_default()
             .into_iter()
-            .filter(|o| o.format == r.format && o.name != r.name && o.kind != Kind::Mirror)
+            .filter(|o| o.format == r.format && o.name != r.name && o.kind.versioned())
             .filter(|o| {
                 app.auth.role(&v.caller, &o.name, o.setting_bool("public")) >= Some(Role::Write)
             })
@@ -3936,6 +3958,51 @@ pub struct GrantRow {
 }
 
 #[derive(Template)]
+#[template(path = "members.html")]
+struct MembersPart {
+    repo: String,
+    rows: Vec<MemberRow>,
+    can_admin: bool,
+}
+
+struct MemberRow {
+    name: String,
+    kind: String,
+    public: bool,
+    /// The viewer may open it (else it is read through the group only).
+    readable: bool,
+}
+
+async fn members_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> Response {
+    let r = match app.repo_for(&v.caller, &repo, Role::Read) {
+        Ok(r) => r,
+        Err(e) => return err_part(e),
+    };
+    let rows = r
+        .setting_list("members")
+        .into_iter()
+        .map(|m| {
+            let info = app.engine.repo(&m).ok();
+            let public = info.as_ref().is_some_and(|i| i.setting_bool("public"));
+            MemberRow {
+                kind: info
+                    .as_ref()
+                    .map_or("missing", |i| i.kind.as_str())
+                    .to_string(),
+                readable: info.is_some() && app.auth.role(&v.caller, &m, public).is_some(),
+                public,
+                name: m,
+            }
+        })
+        .collect();
+    render(&MembersPart {
+        can_admin: app.auth.role(&v.caller, &repo, r.setting_bool("public")) == Some(Role::Admin),
+        repo,
+        rows,
+    })
+}
+
+#[derive(Template)]
 #[template(path = "badges.html")]
 struct BadgesPart {
     repo: String,
@@ -4162,7 +4229,7 @@ async fn settings_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> R
         (vec![], vec![])
     };
     let public = r.setting_bool("public");
-    let cleanup = r.kind != Kind::Mirror
+    let cleanup = r.kind.versioned()
         && app.engine.format(&r.format).is_ok_and(|f| f.cleanup())
         && app.auth.role(&v.caller, &repo, public) >= Some(Role::Write);
     render(&SettingsPart {

@@ -160,6 +160,16 @@ Operations:
   more than `cleanup_max` versions is held for review. Removed versions
   come back by rollback while retention keeps the version before; the
   space is freed when it no longer does.
+- Group repositories for files, npm, PyPI, Maven, Go and Cargo
+  (`pkgpod repo create <name> -f <format> -k group -s members=a,b`): one
+  address that reads its members in order. For each package the first
+  member that has it answers alone (versions are not merged, so a
+  package further down never adds to or outranks it); listings, pypi's
+  project list and npm's and cargo's search show every member's.
+  Readers of a group read its members through it (anonymous readers of
+  a public group only its public members); only who may read a
+  repository makes it a member; a deleted member leaves its groups.
+  Publishing goes to a member.
 - `/metrics` on the management listener for Prometheus: repositories
   (those the caller may read), versions, packages, mirrors' syncs,
   files served and downloads since start.
