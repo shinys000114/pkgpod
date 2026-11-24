@@ -674,6 +674,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                         ("helm", _) => "Helm charts for helm (index.yaml)",
                         ("maven", _) => "Java artifacts for Maven and Gradle",
                         ("gems", _) => "Ruby gems for gem and bundler",
+                        ("arch", _) => "Arch packages for pacman, signed",
                         _ => "",
                     }
                     .to_string(),
@@ -890,6 +891,37 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String], host: &str) ->
         out.push(UseLine {
             label: "Note".into(),
             text: "pkgpod is no proxy: packages from npmjs need their own registry (a scope here, the rest from registry.npmjs.org). npm login is not offered; set the token in .npmrc. unpublish and deprecate are operations here.".into(),
+        });
+        return out;
+    }
+    if r.format == "arch" {
+        let server = if r.setting_bool("public") {
+            base.clone()
+        } else {
+            let (scheme, rest) = base.split_once("://").unwrap_or(("https", &base));
+            format!("{scheme}://token:<token>@{rest}")
+        };
+        let section = r.name.to_ascii_lowercase();
+        out.push(UseLine {
+            label: "Trust the key".into(),
+            text: format!(
+                "curl -fsSL {server}key.asc -o /tmp/pkgpod.asc\nsudo pacman-key --add /tmp/pkgpod.asc\nsudo pacman-key --lsign-key \"$(gpg --show-keys --with-colons /tmp/pkgpod.asc | awk -F: '/^fpr/{{print $10; exit}}')\""
+            ),
+        });
+        out.push(UseLine {
+            label: "/etc/pacman.conf".into(),
+            text: format!("[{section}]\nServer = {server}$repo/$arch"),
+        });
+        out.push(UseLine {
+            label: "Upload".into(),
+            text: format!(
+                "curl -u token:<token> -T hello-1.0-1-x86_64.pkg.tar.zst {base}upload\npkgpod upload {} hello-1.0-1-x86_64.pkg.tar.zst   # -s repository=<section> for another",
+                r.name
+            ),
+        });
+        out.push(UseLine {
+            label: "A labelled version".into(),
+            text: format!("Server = {server}@<label>/$repo/$arch"),
         });
         return out;
     }

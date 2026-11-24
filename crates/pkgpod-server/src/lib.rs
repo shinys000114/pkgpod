@@ -153,6 +153,7 @@ pub fn formats() -> Vec<Arc<dyn pkgpod_engine::Format>> {
         Arc::new(pkgpod_helm::Helm),
         Arc::new(pkgpod_maven::Maven),
         Arc::new(pkgpod_gems::Gems),
+        Arc::new(pkgpod_arch::Arch),
     ]
 }
 

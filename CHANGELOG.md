@@ -40,6 +40,10 @@ Formats:
 - **RubyGems**: `gem push` and `gem yank`; the compact index (versions,
   names, info) and marshalled gemspecs (quick/Marshal.4.8) made from
   each gem's metadata.
+- **Arch**: pacman repositories by name and architecture: the .db and
+  .files databases with the newest version of each package, packages
+  and databases signed with the repository's key, `any` packages in
+  every architecture.
 
 Everywhere: versions of every hosted repository with labels
 (`@label` addresses; `-/label/<label>/` for npm), diffs, rollback and
