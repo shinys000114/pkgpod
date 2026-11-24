@@ -165,6 +165,15 @@ pub fn text(app: &App, caller: &crate::auth::Caller) -> Result<String> {
         }
     }
     o.help(
+        "pkgpod_proxy_cache_bytes",
+        "gauge",
+        "What a proxy keeps of files fetched from its upstream.",
+    );
+    for r in repos.iter().filter(|r| r.kind == Kind::Proxy) {
+        let (files, _) = app.engine.cache_size(&r.name)?;
+        o.line("pkgpod_proxy_cache_bytes", &[("repo", &r.name)], files);
+    }
+    o.help(
         "pkgpod_served_files_total",
         "counter",
         "Files served whole to a GET (indexes too).",

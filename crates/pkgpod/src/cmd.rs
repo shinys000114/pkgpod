@@ -1103,6 +1103,57 @@ pub fn run(
                 }
             })?;
         }
+        Cmd::Cache {
+            repo,
+            action,
+            paths,
+        } => {
+            if action == "list" {
+                let prefix = paths.first().cloned().unwrap_or_default();
+                let v = c.get(&format!(
+                    "/api/v1/repos/{}/cache?prefix={}",
+                    enc(&repo),
+                    enc(&prefix)
+                ))?;
+                x.print(&v, |v| {
+                    println!("{} bytes of files cached", s(&v["files_bytes"]));
+                    let mut rows = vec![vec![
+                        "PATH".into(),
+                        "KIND".into(),
+                        "SIZE".into(),
+                        "PINNED".into(),
+                    ]];
+                    for r in v["rows"].as_array().into_iter().flatten() {
+                        rows.push(vec![
+                            s(&r["path"]),
+                            s(&r["kind"]),
+                            s(&r["size"]),
+                            if r["pinned"] == json!(true) {
+                                "yes"
+                            } else {
+                                ""
+                            }
+                            .into(),
+                        ]);
+                    }
+                    table(rows);
+                });
+            } else {
+                let v = c.post(
+                    &format!("/api/v1/repos/{}/cache/{}", enc(&repo), enc(&action)),
+                    &json!({"paths": paths}),
+                )?;
+                x.print(&v, |v| {
+                    if let Some(a) = v.as_array() {
+                        for r in a {
+                            println!("{}: {}", s(&r["path"]), s(&r["state"]));
+                        }
+                    } else {
+                        println!("{} changed", s(&v["changed"]));
+                    }
+                });
+            }
+        }
         Cmd::Downloads { repo, days, name } => {
             let v = c.get(&format!(
                 "/api/v1/repos/{}/downloads?days={days}&name={}",

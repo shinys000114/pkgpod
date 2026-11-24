@@ -62,9 +62,10 @@ Status: in development, nothing released.
   repository API v2): dart pub publish, get, retraction (tried with
   Dart 3.14).
 - Repositories are reached by their own addresses (host name and path);
-  a reverse proxy in front only provides certificates. There is no
-  pull-through proxy: packages from public registries are imported or
-  fetched from those registries alongside.
+  a reverse proxy in front only provides certificates.
+- Proxy repositories (Go so far): a public registry's packages fetched
+  when asked for and kept, managed by hand (pin, evict, prefetch, a size
+  limit), usable as the last member of a group.
 - Management: a web console, a JSON API (`/api/v1`, described at
   `/api/v1/openapi.json`) and the `pkgpod` command, with one rights
   model (users, teams, roles per repository, scoped tokens).

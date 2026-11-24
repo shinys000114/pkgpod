@@ -443,6 +443,19 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
         };
         return Box::pin(crate::group::serve(app, at, req)).await;
     }
+    if served.repo.kind == Kind::Proxy {
+        let at = At {
+            served,
+            role,
+            caller,
+            rel,
+            base,
+            route,
+            host,
+            raw_path,
+        };
+        return crate::proxy::serve(app, at, req).await;
+    }
     if served.repo.format == "npm" {
         // Tarball URLs are absolute: the address the request
         // came in on (behind a proxy, its scheme).

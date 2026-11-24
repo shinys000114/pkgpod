@@ -64,6 +64,7 @@ askama.workspace = true
 futures-util.workspace = true
 httpdate.workspace = true
 tempfile.workspace = true
+reqwest.workspace = true
 
 [dev-dependencies]
 pkgpod-deb = { workspace = true, features = ["testutil"] }

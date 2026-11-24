@@ -28,6 +28,7 @@ pub mod nuget;
 pub mod oci;
 pub mod openapi;
 pub mod promote;
+pub mod proxy;
 pub mod pub_api;
 pub mod pypi;
 pub mod resign;

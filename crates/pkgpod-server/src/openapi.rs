@@ -84,8 +84,8 @@ fn schemas() -> Value {
         ),
         (
             "Kind",
-            json!({"type": "string", "enum": ["hosted", "import", "mirror", "group"],
-                   "description": "hosted: uploads and operations; import: copied once, then hosted; mirror: follows an upstream, no versions; group: reads its members in order (settings.members)."}),
+            json!({"type": "string", "enum": ["hosted", "import", "mirror", "group", "proxy"],
+                   "description": "hosted: uploads and operations; import: copied once, then hosted; mirror: follows an upstream, no versions; group: reads its members in order (settings.members); proxy: fetches from settings.upstream when asked, and keeps it."}),
         ),
         (
             "Role",
@@ -450,6 +450,14 @@ fn schemas() -> Value {
                     "sync",
                     "ok",
                 ],
+            ),
+        ),
+        (
+            "CachePaths",
+            object(
+                "Paths of a proxy's cache.",
+                vec![("paths", array(string()))],
+                &["paths"],
             ),
         ),
         (
@@ -1112,6 +1120,24 @@ fn ops() -> Vec<Op> {
                 "summary": string(),
                 "total_changes": integer(),
             }, "required": ["removals", "notes", "summary", "total_changes"]})),
+        op("get", "/api/v1/repos/{repo}/cache", "cache_list", "A proxy's cache: what it fetched from its upstream, most recently used first.")
+            .query("prefix", string(), "Paths starting with this.")
+            .query("limit", integer(), "At most this many (default 500, at most 5000).")
+            .reply(200, "Its size and rows.", json!({"type": "object", "properties": {
+                "files_bytes": integer(), "bytes": integer(),
+                "rows": array(object("A cached path.", vec![
+                    ("path", string()), ("kind", text("file, meta (fetched again after metadata_minutes) or miss (not upstream)")),
+                    ("size", integer()), ("sha256", json!({"type": ["string", "null"]})),
+                    ("fetched", integer()), ("used", integer()), ("pinned", boolean()),
+                    ("name", string()), ("version", string()),
+                ], &["path", "kind", "size", "sha256", "fetched", "used", "pinned", "name", "version"])),
+            }, "required": ["files_bytes", "bytes", "rows"]})),
+        op("post", "/api/v1/repos/{repo}/cache/{action}", "cache_change", "pin, unpin (pinned files stay over the size limit), evict (forgotten; the blobs go at the next garbage collection) or prefetch (fetched now, as a client asking would) paths of a proxy's cache.")
+            .body("CachePaths")
+            .reply(200, "pin, unpin, evict: {changed}; prefetch: each path's state.", json!({"oneOf": [
+                {"type": "object", "properties": {"changed": integer()}, "required": ["changed"]},
+                array(object("A path prefetched.", vec![("path", string()), ("state", string())], &["path", "state"])),
+            ]})),
         op("get", "/api/v1/repos/{repo}/status", "repo_status", "A repository's state: version, packages, downloads, a mirror's syncs.")
             .query("package", string(), "A package's latest version and downloads too.")
             .reply(200, "The state.", sref("RepoStatus")),
@@ -1297,6 +1323,10 @@ fn path_param(path: &str, name: &str) -> (Value, &'static str) {
             "Operation name (the format's ops in GET /api/v1/formats).",
         ),
         "label" => (string(), "Label."),
+        "action" => (
+            json!({"type": "string", "enum": ["pin", "unpin", "evict", "prefetch"]}),
+            "What to do with the paths.",
+        ),
         "subject" => (string(), "user:<name> or team:<name>."),
         "id" if path.starts_with("/api/v1/plans/") => (string(), "Plan id."),
         "id" if path.starts_with("/api/v1/tokens/") => (integer(), "Token id."),

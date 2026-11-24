@@ -1,0 +1,26 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+<div class="card" id="cache">
+  <div class="card-head"><h2>Cache</h2><span class="hint">{{ total }} of files; files stay until evicted (pinned ones also over the size limit), metadata is asked for again after its time</span>
+    <form class="inline" hx-get="/r/{{ repo }}/cache" hx-target="#cache" hx-swap="outerHTML" hx-trigger="input delay:300ms, change">
+      <input type="search" name="q" value="{{ q }}" placeholder="path starts with" autocomplete="off" spellcheck="false">
+    </form>
+  </div>
+  {% if !note.is_empty() %}<p class="card-body small">{{ note }}</p>{% endif %}
+  {% if rows.is_empty() %}<p class="empty">Nothing cached{% if !q.is_empty() %} there{% endif %} yet: clients fetch through it, or prefetch below.</p>{% else %}
+  <div class="table-wrap"><table class="sortable">
+    <thead><tr><th>Path</th><th>Kind</th><th class="num">Size</th><th>Last used</th><th></th></tr></thead>
+    <tbody>{% for c in rows %}<tr>
+      <td class="mono-wrap">{{ c.path }}{% if c.pinned %} <span class="tag">pinned</span>{% endif %}</td><td>{{ c.kind }}</td><td class="num">{{ c.size }}</td><td class="nowrap muted">{{ c.used }}</td>
+      <td class="acts nowrap">{% if can_write %}{% if c.kind == "file" %}<button type="button" class="link" hx-post="/c/r/{{ repo }}/cache/{% if c.pinned %}unpin{% else %}pin{% endif %}" hx-vals='{"path": "{{ c.path }}"}' hx-target="#cache" hx-swap="outerHTML">{% if c.pinned %}unpin{% else %}pin{% endif %}</button> {% endif %}<button type="button" class="link danger" hx-post="/c/r/{{ repo }}/cache/evict" hx-vals='{"path": "{{ c.path }}"}' hx-target="#cache" hx-swap="outerHTML">evict</button>{% endif %}</td>
+    </tr>{% endfor %}</tbody>
+  </table></div>
+  {% endif %}
+  {% if can_write %}
+  <div class="card-body">
+  <form hx-post="/c/r/{{ repo }}/cache/prefetch" hx-target="#cache" hx-swap="outerHTML">
+    <label class="field wide"><span>Prefetch (a path a line, as clients ask for them)</span><textarea name="path" rows="2" placeholder="example.com/mod/@v/v1.2.3.zip" spellcheck="false"></textarea></label>
+    <div class="form-foot"><button type="submit">Fetch now</button></div>
+  </form>
+  </div>
+  {% endif %}
+</div>
