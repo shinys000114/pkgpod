@@ -383,6 +383,44 @@ mod tests {
             "Package: hello-ipk\nVersion: 1.0-1\nDepends: libc\nArchitecture: all\nInstalled-Size: 10\nFilename: hello-ipk_1.0-1_all.ipk\nSize: 99\nSHA256sum: ab\nDescription: A sample.\n More of it.\n"
         );
         assert!(read_package(b"nothing").is_err());
+        // Yocto's: an ar archive (as a .deb).
+        let tgz = |p: &str, d: &[u8]| {
+            let mut b = tar::Builder::new(flate2::write::GzEncoder::new(
+                Vec::new(),
+                flate2::Compression::fast(),
+            ));
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Regular);
+            h.set_size(d.len() as u64);
+            h.set_mode(0o644);
+            b.append_data(&mut h, p, d).unwrap();
+            b.into_inner().unwrap().finish().unwrap()
+        };
+        let mut ar = b"!<arch>\n".to_vec();
+        for (name, data) in [
+            ("debian-binary", b"2.0\n".to_vec()),
+            ("control.tar.gz", tgz("./control", CONTROL.as_bytes())),
+            ("data.tar.gz", tgz("./usr/share/hello", b"hi")),
+        ] {
+            ar.extend(
+                format!(
+                    "{:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n",
+                    name,
+                    0,
+                    0,
+                    0,
+                    100644,
+                    data.len()
+                )
+                .as_bytes(),
+            );
+            ar.extend(&data);
+            if data.len() % 2 == 1 {
+                ar.push(b'\n');
+            }
+        }
+        let c = read_package(&ar).unwrap();
+        assert_eq!(file_name(&c), "hello-ipk_1.0-1_all.ipk");
         assert!(
             check_feed("main").is_ok() && check_feed("../x").is_err() && check_feed("a/b").is_err()
         );

@@ -7814,6 +7814,15 @@ fn ipk_feeds_with_opkg() {
     assert!(ok && out.ends_with("first"), "{out}");
 }
 
+/// Waits for a listener of the server (a TLS one, after a restart).
+fn wait_port(port: u16) {
+    let t0 = Instant::now();
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(t0.elapsed() < Duration::from_secs(20), "port {port}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 const TERRAFORM_IMAGE: &str = "hashicorp/terraform:1.13";
 const TOFU_IMAGE: &str = "ghcr.io/opentofu/opentofu:1.10";
 /// The registry's host name in the clients' containers (module sources
@@ -8026,6 +8035,38 @@ fn terraform_registry_with_terraform_and_tofu() {
     .unwrap();
     let (ok, out) = run(TERRAFORM_IMAGE, "terraform", "run-label", "label.tfrc");
     assert!(ok && out.contains("MSG=hello pkgpod 1.0.0"), "{out}");
+    // The signed URLs: good as handed out, not when changed or moved.
+    let dl: serde_json::Value = c
+        .get(format!(
+            "https://{host}/tf/v1/providers/team/null/3.2.4/download/linux/amd64"
+        ))
+        .bearer_auth(&tok)
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    let signed = dl["shasums_url"].as_str().unwrap().to_string();
+    let status = |u: &str| c.get(u).send().unwrap().status().as_u16();
+    assert_eq!(status(&signed), 200, "{signed}");
+    let (path, sig) = signed.split_once("?sig=").unwrap();
+    let (until, mac) = sig.split_once('.').unwrap();
+    let flipped = if mac.ends_with('0') { "1" } else { "0" };
+    assert_eq!(
+        status(&format!(
+            "{path}?sig={until}.{}{flipped}",
+            &mac[..mac.len() - 1]
+        )),
+        401
+    );
+    assert_eq!(
+        status(&format!(
+            "{path}?sig={}.{mac}",
+            until.parse::<i64>().unwrap() + 3600
+        )),
+        401
+    );
+    assert_eq!(status(&format!("{path}.sig?sig={sig}")), 401);
+    assert_eq!(status(path), 401);
     // Without a token: refused.
     std::fs::write(work.join("none.tfrc"), "").unwrap();
     let (ok, out) = run(TERRAFORM_IMAGE, "terraform", "run-none", "none.tfrc");
@@ -8057,6 +8098,7 @@ fn terraform_registry_with_terraform_and_tofu() {
     s.cli(&["rm", "tf", "modules/team/greeting/null/1.1.0.tar.gz", "-y"])
         .unwrap();
     s.restart();
+    wait_port(port);
     let (ok, out) = run(TOFU_IMAGE, "tofu", "run-after", "rc.tfrc");
     assert!(ok && out.contains("MSG=hello pkgpod 1.0.0"), "{out}");
 }
@@ -8083,7 +8125,8 @@ fn galaxy_collections_with_ansible_galaxy() {
     let build = |ver: &str, extra: &str| {
         let script = format!(
             "set -e; rm -rf src-{ver}; mkdir src-{ver}; cd src-{ver}; ansible-galaxy collection init team.hello >/dev/null; cd team/hello; \
-             sed -i 's/^version: .*/version: {ver}/' galaxy.yml; mkdir -p plugins/modules; \
+             sed -i 's/^version: .*/version: {ver}/' galaxy.yml; mkdir -p plugins/modules files; \
+             head -c 6000000 /dev/urandom > files/blob.bin; \
              printf '#!/usr/bin/python\\nfrom ansible.module_utils.basic import AnsibleModule\\ndef main():\\n    m = AnsibleModule(argument_spec={{}})\\n    m.exit_json(changed=False, msg=\"hello {ver}{extra}\")\\nif __name__ == \"__main__\":\\n    main()\\n' > plugins/modules/greet.py; \
              ansible-galaxy collection build --force --output-path /work >/dev/null"
         );
@@ -8227,6 +8270,27 @@ fn conan_remote_with_conan_2() {
     // A label's remote: the revision it had.
     let (ok, out) = install(&format!("{url}@first/"));
     assert!(ok && out.contains("#define HELLO \"one\""), "{out}");
+    // A manifest alone (its files lost) brings in no revision.
+    let r = reqwest::blocking::Client::new()
+        .put(s.url("/cpp/v2/conans/lone/1.0/_/_/revisions/0123abcd/files/conanmanifest.txt"))
+        .bearer_auth(&tok)
+        .body("x")
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 409);
+    // The older conan uploads too (its own order of files).
+    let (ok, out) = docker_sh_in(
+        CONAN_OLD,
+        Some(&work),
+        &format!(
+            "{}mkdir -p /work/src2 && cd /work/src2 && \
+             printf 'from conan import ConanFile\\nclass O(ConanFile):\\n    name = \"other\"\\n    version = \"2.0\"\\n    package_type = \"header-library\"\\n' > conanfile.py && \
+             conan create . >/dev/null && conan upload 'other/2.0' -r pk -c && conan remove 'other/*' -c >/dev/null && \
+             conan install --requires other/2.0 -r pk >/dev/null && echo installed-other",
+            setup("old")
+        ),
+    );
+    assert!(ok && out.contains("installed-other"), "{out}");
     // Listed, with both revisions.
     let (ok, out) = docker_sh_in(
         CONAN_NEW,
@@ -8381,6 +8445,7 @@ fn swift_registry_with_swiftpm() {
                 "mkdir -p /tmp/G/Sources/Greeting && cd /tmp/G && \
                  printf '// swift-tools-version:5.9\\nimport PackageDescription\\nlet package = Package(name: \"Greeting\", products: [.library(name: \"Greeting\", targets: [\"Greeting\"])], targets: [.target(name: \"Greeting\")])\\n' > Package.swift && \
                  printf 'public func greet() -> String {{ \"{text}\" }}\\n' > Sources/Greeting/G.swift && \
+                 head -c 6000000 /dev/urandom > blob.bin && \
                  mkdir -p /tmp/scratch && printf '{{\"description\": \"Greetings\", \"repositoryURLs\": [\"https://git.example.invalid/team/Greeting.git\"]}}' > /tmp/meta.json && \
                  swift package-registry publish team.Greeting {ver} --url {url} --metadata-path /tmp/meta.json --scratch-directory /tmp/scratch"
             ),
@@ -8435,6 +8500,7 @@ fn swift_registry_with_swiftpm() {
     s.cli(&["rm", "sw", "team/greeting/1.1.0.zip", "-y"])
         .unwrap();
     s.restart();
+    wait_port(port);
     let (ok, out) = app(&url, &tok, resolve);
     assert!(ok && out.contains("\"version\" : \"1.0.0\""), "{out}");
 }
