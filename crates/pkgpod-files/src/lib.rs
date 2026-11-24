@@ -13,7 +13,7 @@ use pkgpod_base::Digest;
 use pkgpod_engine::format::OpSpec;
 use pkgpod_engine::settings::Field;
 use pkgpod_engine::tree::{Edit, Entry};
-use pkgpod_engine::{Cx, Error, Format, Item, Kind, Result, Upload};
+use pkgpod_engine::{Cx, Error, FormHints, Format, Item, Kind, Result, Upload};
 use serde_json::{Value, json};
 
 pub struct Files;
@@ -228,6 +228,35 @@ impl Format for Files {
                 "Replace a file at the same path with other content.",
             ),
         ]
+    }
+
+    fn form_hints(&self, objects: &pkgpod_engine::Objects, root: &Digest) -> FormHints {
+        let mut dirs = std::collections::BTreeSet::new();
+        let mut paths = std::collections::BTreeSet::new();
+        for (path, _) in objects.walk(root, "").unwrap_or_default() {
+            if paths.len() >= 2000 {
+                break;
+            }
+            let mut at = 0;
+            while let Some(i) = path[at..].find('/') {
+                at += i + 1;
+                dirs.insert(path[..at].to_string());
+            }
+            paths.insert(path);
+        }
+        let mut h = FormHints::default();
+        h.suggest
+            .insert("upload.path".into(), dirs.iter().cloned().collect());
+        h.suggest.insert(
+            "move.from".into(),
+            dirs.iter()
+                .map(|d| d.trim_end_matches('/').to_string())
+                .chain(paths)
+                .collect(),
+        );
+        h.suggest
+            .insert("move.to".into(), dirs.into_iter().collect());
+        h
     }
 
     fn ingest(&self, cx: &Cx, up: &Upload, p: &Value, e: &mut Edit) -> Result<String> {
