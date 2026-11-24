@@ -30,6 +30,12 @@ names and paths; users, teams, roles per repository and scoped tokens;
 a web console, the `/api/v1` API (described at `/api/v1/openapi.json`)
 and the `pkgpod` command.
 
+The console gives each repository one page: its address, state at a
+glance and tabs for its contents, versions, how its clients use it
+(commands with its address, to copy), uploads and changes, and settings.
+A new Debian repository can be made with its first dist, and a signing
+key from the same form when the server has none.
+
 Operations:
 
 - `pkgpod admin check [--deep]` checks that every version reads whole
