@@ -153,8 +153,9 @@ impl Engine {
     pub fn fields(&self, format: &str, kind: Kind) -> Result<Vec<Field>> {
         let mut f = settings::common(kind);
         let fmt = self.format(format)?;
-        if kind == Kind::Group {
-            // A group holds nothing: only which repositories it reads.
+        if matches!(kind, Kind::Group | Kind::Proxy) {
+            // A group holds nothing: only which repositories it reads; a
+            // proxy, where it fetches from and how long it keeps it.
             return Ok(f);
         }
         if kind.versioned() && fmt.cleanup() {
@@ -304,7 +305,7 @@ impl Engine {
             return Err(Error::Invalid("v2 is kept for the OCI registry API".into()));
         }
         let f = self.format(&n.format)?.clone();
-        let group = n.kind == Kind::Group && f.groups();
+        let group = (n.kind == Kind::Group && f.groups()) || (n.kind == Kind::Proxy && f.proxy());
         if !f.kinds().contains(&n.kind) && !group {
             return Err(Error::Invalid(format!(
                 "{} repositories cannot be of kind {}",
@@ -313,7 +314,7 @@ impl Engine {
             )));
         }
         let settings = settings::check(&self.fields(&n.format, n.kind)?, &n.settings)?;
-        if n.kind != Kind::Group {
+        if !matches!(n.kind, Kind::Group | Kind::Proxy) {
             f.check_settings(n.kind, &settings)?;
         }
         let storage = n.storage.unwrap_or_else(|| "main".into());
@@ -353,8 +354,8 @@ impl Engine {
         let repo = self.repo(&n.name)?;
         match repo.kind {
             Kind::Mirror => std::fs::create_dir_all(repo.tree_dir())?,
-            Kind::Group => {}
-            _ => {
+            Kind::Group | Kind::Proxy => {}
+            Kind::Hosted | Kind::Import => {
                 self.commit(
                     &repo,
                     None,
@@ -373,7 +374,7 @@ impl Engine {
         let r = self.repo(name)?;
         let merged = settings::merge(&r.settings, patch);
         let s = settings::check(&self.fields(&r.format, r.kind)?, &merged)?;
-        if r.kind != Kind::Group {
+        if !matches!(r.kind, Kind::Group | Kind::Proxy) {
             self.format(&r.format)?.check_settings(r.kind, &s)?;
         }
         self.db.write(|tx| {

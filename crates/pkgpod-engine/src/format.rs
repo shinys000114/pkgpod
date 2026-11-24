@@ -272,6 +272,10 @@ pub trait Format: Send + Sync {
     fn version_cmp(&self, a: &str, b: &str) -> std::cmp::Ordering {
         crate::version::cmp(a, b)
     }
+    /// Whether proxy repositories of this format are served.
+    fn proxy(&self) -> bool {
+        false
+    }
     /// Whether group repositories of this format are served.
     fn groups(&self) -> bool {
         false

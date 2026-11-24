@@ -76,6 +76,25 @@ CREATE INDEX catalog_sha ON catalog(repo, sha256);
 ALTER TABLE catalog ADD COLUMN added INTEGER NOT NULL DEFAULT 0;
 UPDATE catalog SET added = COALESCE((SELECT v.created FROM repos r JOIN versions v ON v.id = r.current WHERE r.id = catalog.repo), 0);
 ",
+    // A proxy repository's cache.
+    "
+CREATE TABLE cache (
+    repo INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    sha256 BLOB,
+    size INTEGER NOT NULL,
+    content_type TEXT NOT NULL,
+    etag TEXT NOT NULL,
+    last_modified TEXT NOT NULL,
+    fetched INTEGER NOT NULL,
+    used INTEGER NOT NULL,
+    pinned INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    version TEXT NOT NULL,
+    PRIMARY KEY (repo, path)
+) WITHOUT ROWID;
+",
 ];
 
 pub fn migrate(db: &Db) -> pkgpod_base::Result<()> {
@@ -93,6 +112,7 @@ mod tests {
             "df4988794dabd0b4",
             "a45564131072578a",
             "773df03be3316758",
+            "d234a8679beab376",
         ];
         let got: Vec<String> = super::STEPS
             .iter()

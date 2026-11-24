@@ -47,6 +47,14 @@ impl Engine {
         let mut objects = HashSet::new();
         let mut blobs: HashMap<String, HashSet<Digest>> = HashMap::new();
         for r in &repos {
+            if r.kind == crate::Kind::Proxy {
+                // What the cache names stays.
+                blobs
+                    .entry(r.storage.clone())
+                    .or_default()
+                    .extend(self.cache_blobs(r.id)?);
+                continue;
+            }
             if !r.kind.versioned() {
                 continue;
             }

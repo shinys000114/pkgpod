@@ -148,6 +148,27 @@ pub fn common(kind: crate::Kind) -> Vec<Field> {
         // Mirrors and groups have no versions to keep.
         v.retain(|f| !matches!(f.name, "keep_versions" | "keep_days"));
     }
+    if kind == crate::Kind::Proxy {
+        v.push(Field::text(
+            "upstream",
+            "",
+            "The registry it fetches from (its base URL, as clients would use it).",
+        ));
+        v.push(Field::int(
+            "metadata_minutes",
+            30,
+            "How long a document that changes upstream (a package's version list) is used before it is asked for again; when the upstream is not there, the last one is used.",
+        ));
+        v.push(Field::int(
+            "max_mib",
+            0,
+            "Files kept at most, in MiB (0: no limit): the least recently used unpinned ones go first.",
+        ));
+        v.push(Field::list(
+            "exclude",
+            "Names never asked for upstream (a * at the end matches the rest): your own packages' names, so they are not looked up in a public registry.",
+        ));
+    }
     if kind == crate::Kind::Group {
         v.push(Field::list(
             "members",
