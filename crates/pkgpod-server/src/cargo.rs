@@ -121,7 +121,10 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
                 return not_found();
             };
             let file = format!("{name}-{vers}.crate");
-            crate::serve::serve_blob(
+            crate::serve::serve_counted(
+                &app,
+                &a.repo.name,
+                "",
                 &a.repo.store().path(&sha256),
                 &sha256,
                 &file,

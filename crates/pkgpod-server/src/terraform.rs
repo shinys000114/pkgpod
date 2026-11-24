@@ -261,7 +261,10 @@ pub async fn read(
             match found {
                 Some(Entry::Blob { sha256, .. }) if !rel.iter().any(|x| x.starts_with('_')) => {
                     let name = rel.last().cloned().unwrap_or_default();
-                    crate::serve::serve_blob(
+                    crate::serve::serve_counted(
+                        app,
+                        &repo.name,
+                        "",
                         &repo.store().path(&sha256),
                         &sha256,
                         &name,

@@ -121,6 +121,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/c/storages", post(storage_set))
         .route("/c/storages/{name}/delete", post(storage_delete))
         .route("/c/gc", post(gc))
+        .route("/c/settings", post(settings_save_server))
         .route(
             "/ui/htmx-2.0.11.min.js",
             get(|| asset(HTMX, "text/javascript")),
@@ -2545,6 +2546,14 @@ async fn repo_page(
             "",
         ));
     }
+    let (app2, name2) = (app.clone(), r.name.clone());
+    let downloads = tokio::task::spawn_blocking(move || {
+        let _ = app2.stats.flush(&app2);
+        crate::stats::total(&app2, &name2, 30, None).unwrap_or(0)
+    })
+    .await
+    .unwrap_or(0);
+    stats.push(stat("Downloads, 30 days", downloads.to_string(), ""));
     stats.push(stat("Your role", role.clone(), ""));
     let urls = strs(&info["settings"]["urls"]);
     let routed_hint = urls.is_empty();
@@ -3127,6 +3136,8 @@ pub struct PkgRow {
     pub path: String,
     /// The file itself, in the stored tree.
     pub file: String,
+    /// Downloads in the last 30 days, when shown.
+    pub downloads: i64,
 }
 
 #[derive(Template)]
@@ -3147,6 +3158,8 @@ struct PackagesPart {
     title: &'static str,
     cols: [&'static str; 3],
     show_size: bool,
+    /// The rows' downloads in the last 30 days are shown.
+    show_downloads: bool,
 }
 
 /// What a repository's catalog count counts (a deb package is counted
@@ -3221,6 +3234,7 @@ fn pkg_rows(v: &Value) -> Vec<PkgRow> {
                 .unwrap_or_default(),
             path: package_path(&s(&h["path"])),
             file: s(&h["path"]),
+            downloads: 0,
         })
         .collect()
 }
@@ -3350,6 +3364,7 @@ async fn mirror_packages(app: Arc<App>, v: Viewer, repo: String, q: MirrorQ) -> 
                     size: crate::serve::human(p.size),
                     path: p.filename.clone(),
                     file: p.filename.clone(),
+                    downloads: 0,
                 })
                 .collect();
         }
@@ -3408,6 +3423,21 @@ async fn packages_part(
         .take(limit)
         .collect();
     let mut rows = pkg_rows(&json!(hits));
+    let (app2, name2) = (app.clone(), repo.clone());
+    let counts = tokio::task::spawn_blocking(move || {
+        let _ = app2.stats.flush(&app2);
+        crate::stats::by_package(&app2, &name2, 30)
+    })
+    .await
+    .ok()
+    .and_then(|x| x.ok())
+    .unwrap_or_default();
+    for row in &mut rows {
+        row.downloads = counts
+            .get(&(row.name.clone(), row.version.clone()))
+            .copied()
+            .unwrap_or(0);
+    }
     let can_write = !matches!(r.format.as_str(), "npm" | "go" | "maven")
         && r.kind != Kind::Mirror
         && app.auth.role(&v.caller, &repo, r.setting_bool("public")) >= Some(Role::Write);
@@ -3446,6 +3476,7 @@ async fn packages_part(
         title,
         cols,
         show_size,
+        show_downloads: true,
     })
 }
 
@@ -4137,6 +4168,7 @@ async fn search_rows(State(app): St, v: Viewer, Query(q): Query<QQ>) -> Response
                 title: "Packages",
                 cols: ["Name", "Version", "Where"],
                 show_size: true,
+                show_downloads: false,
             })
         }
         Err(e) => err_part(e),
@@ -4481,6 +4513,7 @@ struct ServerPage {
     audit: Vec<AuditRow>,
     data_dir: String,
     management: String,
+    downloads_days: i64,
 }
 
 async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
@@ -4550,6 +4583,7 @@ async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
         audit,
         data_dir: app.cfg.data_dir.display().to_string(),
         management: app.cfg.listen.clone(),
+        downloads_days: crate::stats::days_kept(&app),
     }))
 }
 
@@ -4685,6 +4719,31 @@ async fn gc(State(app): St, v: Viewer, Form(form): Form<Vec<(String, String)>>) 
                 s(&r["blobs"]),
                 crate::serve::human(r["bytes"].as_u64().unwrap_or(0))
             ),
+        ),
+        Err(e) => err_part(e),
+    }
+}
+
+async fn settings_save_server(
+    State(app): St,
+    v: Viewer,
+    Form(form): Form<Vec<(String, String)>>,
+) -> Response {
+    let days = match form_get(&form, "downloads_days").trim().parse::<i64>() {
+        Ok(d) => d,
+        Err(_) => return msg(false, "Days: a whole number."),
+    };
+    let req = api::SettingsReq {
+        downloads_days: Some(days),
+    };
+    match api::settings_patch(State(app), v.who(), Json(req)).await {
+        Ok(Json(r)) => msg(
+            true,
+            match r["downloads_days"].as_i64() {
+                Some(0) => "Downloads are not counted.".to_string(),
+                Some(d) => format!("Download counts are kept {d} days."),
+                None => "Saved.".to_string(),
+            },
         ),
         Err(e) => err_part(e),
     }

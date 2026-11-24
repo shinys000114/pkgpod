@@ -118,7 +118,10 @@ pub async fn handle(app: Arc<App>, mut a: Ask, req: Request) -> Response {
             };
             let stem = format!("{}.{}", id.to_ascii_lowercase(), ver.to_ascii_lowercase());
             if *file == format!("{stem}.nupkg") {
-                crate::serve::serve_blob(
+                crate::serve::serve_counted(
+                    &app,
+                    &a.repo.name,
+                    "",
                     &a.repo.store().path(&k.sha256),
                     &k.sha256,
                     file,
@@ -130,7 +133,10 @@ pub async fn handle(app: Arc<App>, mut a: Ask, req: Request) -> Response {
             } else if *file == format!("{stem}.nuspec") {
                 match k.nuspec() {
                     Some(d) => {
-                        crate::serve::serve_blob(
+                        crate::serve::serve_counted(
+                            &app,
+                            &a.repo.name,
+                            "",
                             &a.repo.store().path(&d),
                             &d,
                             file,

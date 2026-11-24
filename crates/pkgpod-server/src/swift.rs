@@ -188,9 +188,18 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
                     format!("{scope}.{name} {ver} not found"),
                 );
             };
-            let mut resp =
-                crate::serve::serve_blob(&a.repo.store().path(sha), sha, file, None, false, req)
-                    .await;
+            let mut resp = crate::serve::serve_counted(
+                &app,
+                &a.repo.name,
+                "",
+                &a.repo.store().path(sha),
+                sha,
+                file,
+                None,
+                false,
+                req,
+            )
+            .await;
             let h = resp.headers_mut();
             h.insert(
                 header::CONTENT_TYPE,

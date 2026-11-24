@@ -105,7 +105,10 @@ pub async fn read(
                 return not_found();
             };
             let name = format!("{ver}.{ext}");
-            let mut r = crate::serve::serve_blob(
+            let mut r = crate::serve::serve_counted(
+                app,
+                &repo.name,
+                &path,
                 &repo.store().path(&sha256),
                 &sha256,
                 &name,

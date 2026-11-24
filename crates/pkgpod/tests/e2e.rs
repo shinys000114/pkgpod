@@ -342,6 +342,19 @@ fn deb_repository_with_apt() {
             String::from_utf8_lossy(&out.stderr)
         );
         assert!(a.join("hello-e2e_1.0_all.deb").is_file());
+        // Downloads are counted by package (the pool file found by its
+        // hash), not the indexes apt read; a label's too.
+        let d = s.json(&["downloads", "ppa"]);
+        let n = |v: &str| {
+            d["packages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["name"] == "hello-e2e" && p["version"] == v)
+                .map(|p| p["n"].as_i64().unwrap())
+        };
+        assert_eq!((n("2.0"), n("1.0")), (Some(2), Some(1)), "{d}");
+        assert_eq!(d["total"], 3, "{d}");
     }
 
     // Rollback through a plan.
@@ -949,6 +962,11 @@ fn deb_mirror_of_a_hosted_repository() {
         None,
     );
     assert_eq!(st, 200);
+    // A mirror's pool packages are counted by their file names.
+    let d = s.json(&["downloads", "mir"]);
+    assert_eq!(d["packages"][0]["name"], "mirrored", "{d}");
+    assert_eq!(d["packages"][0]["version"], "1.0", "{d}");
+    assert_eq!(d["total"], 1, "{d}");
     // The mirror verbatim: the upstream's signature, checked by apt.
     let (_, inrel) = get(&s.url("/mir/dists/stable/InRelease"), None);
     assert!(inrel.contains("BEGIN PGP SIGNED MESSAGE"));
@@ -2192,6 +2210,24 @@ fn openapi_describes_what_the_api_sends() {
         None,
         200,
     );
+    let d = a.ok(
+        "get",
+        "/api/v1/repos/{repo}/downloads",
+        "/api/v1/repos/web/downloads?days=7&name=hello",
+        None,
+        200,
+    );
+    assert_eq!(d["daily"].as_array().unwrap().len(), 7, "{d}");
+    let st = a.ok("get", "/api/v1/settings", "/api/v1/settings", None, 200);
+    assert_eq!(st["downloads_days"], 365, "{st}");
+    let st = a.ok(
+        "patch",
+        "/api/v1/settings",
+        "/api/v1/settings",
+        Some(json!({"downloads_days": 400})),
+        200,
+    );
+    assert_eq!(st["downloads_days"], 400, "{st}");
     if have("dpkg-deb") {
         assert!(!v.as_array().unwrap().is_empty());
         assert!(!v2.as_array().unwrap().is_empty());
@@ -2623,6 +2659,124 @@ fn openapi_describes_what_the_api_sends() {
     );
     j.as_object_mut().unwrap().remove("log");
     assert!(validate(&doc, &job, &j, "").is_err(), "allOf: no log");
+}
+
+/// Downloads: what counts, and that the counts outlive a restart.
+#[test]
+fn download_counts() {
+    let mut s = Server::start();
+    s.cli(&["repo", "create", "f", "-f", "files", "-s", "public=true"])
+        .unwrap();
+    s.cli(&["repo", "create", "other", "-f", "files"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "f,other", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let c = reqwest::blocking::Client::new();
+    for (repo, path) in [
+        ("f", "tool/1.2/tool.tar.gz"),
+        ("f", "docs/readme.txt"),
+        ("other", "secret.txt"),
+    ] {
+        let r = c
+            .put(s.url(&format!("/{repo}/{path}")))
+            .basic_auth("token", Some(&tok))
+            .body("0123456789")
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 201);
+    }
+    let port = s.serve_port;
+    let get = |path: &str, h: &[(&str, &str)]| {
+        let mut b = c.get(format!("http://127.0.0.1:{port}{path}"));
+        for (k, v) in h {
+            b = b.header(*k, *v);
+        }
+        let r = b.send().unwrap();
+        let st = r.status().as_u16();
+        let etag = r
+            .headers()
+            .get("etag")
+            .map(|v| v.to_str().unwrap().to_string());
+        let _ = r.bytes();
+        (st, etag)
+    };
+    let tool = "/f/tool/1.2/tool.tar.gz";
+    let (st, etag) = get(tool, &[]);
+    assert_eq!(st, 200);
+    let etag = etag.unwrap();
+    // Counted: whole files, a range from the start, a range whose
+    // If-Range no longer holds (the whole file again).
+    assert_eq!(get(tool, &[]).0, 200);
+    assert_eq!(get(tool, &[("range", "bytes=0-3")]).0, 206);
+    assert_eq!(
+        get(tool, &[("range", "bytes=4-"), ("if-range", "\"other\"")]).0,
+        200
+    );
+    // Not counted: HEAD, 304, a resumed range, listings, refusals.
+    assert_eq!(c.head(s.url(tool)).send().unwrap().status(), 200);
+    assert_eq!(get(tool, &[("if-none-match", &etag)]).0, 304);
+    assert_eq!(get(tool, &[("range", "bytes=4-")]).0, 206);
+    assert_eq!(get("/f/tool/1.2/", &[]).0, 200);
+    assert_eq!(get("/other/secret.txt", &[]).0, 401);
+    assert_eq!(get("/f/docs/readme.txt", &[]).0, 200);
+
+    let d = s.json(&["downloads", "f"]);
+    assert_eq!(d["total"], 5, "{d}");
+    assert_eq!(d["packages"][0]["name"], "tool.tar.gz", "{d}");
+    assert_eq!(d["packages"][0]["version"], "1.2", "{d}");
+    assert_eq!(d["packages"][0]["n"], 4, "{d}");
+    assert_eq!(d["packages"][1]["name"], "readme.txt", "{d}");
+    assert_eq!(d["daily"].as_array().unwrap().len(), 30);
+    let one = s.json(&["downloads", "f", "--name", "readme.txt", "--days", "1"]);
+    assert_eq!(one["total"], 1, "{one}");
+    assert_eq!(s.json(&["downloads", "other"])["total"], 0);
+    // Only who may read the repository sees its counts.
+    let reader = s
+        .cli(&["token", "create", "r", "--repos", "other"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let base = s.api.clone();
+    let api = |path: &str, t: &str| {
+        c.get(format!("{base}{path}"))
+            .bearer_auth(t)
+            .send()
+            .unwrap()
+            .status()
+            .as_u16()
+    };
+    assert_eq!(api("/api/v1/repos/other/downloads", &reader), 200);
+    assert!(api("/api/v1/repos/f/downloads?days=0", &reader) == 400);
+    assert_eq!(api("/api/v1/settings", &reader), 403);
+
+    // Counted a moment ago and not read yet: written when the server
+    // stops.
+    assert_eq!(get("/f/docs/readme.txt", &[]).0, 200);
+    Command::new("kill")
+        .arg(s.child.id().to_string())
+        .status()
+        .unwrap();
+    let _ = s.child.wait();
+    s.restart();
+    let d = s.json(&["downloads", "f"]);
+    assert_eq!(d["total"], 6, "{d}");
+
+    // Kept 0 days: nothing counted.
+    let out = s.cli(&["settings", "--downloads-days", "0"]).unwrap();
+    assert!(out.contains("downloads_days = 0"), "{out}");
+    assert!(s.cli(&["settings", "--downloads-days", "9999"]).is_err());
+    assert_eq!(get("/f/docs/readme.txt", &[]).0, 200);
+    assert_eq!(s.json(&["downloads", "f"])["total"], 0);
+    s.cli(&["settings", "--downloads-days", "365"]).unwrap();
+
+    // A deleted repository's counts go with it.
+    assert_eq!(get("/f/docs/readme.txt", &[]).0, 200);
+    assert_eq!(s.json(&["downloads", "f"])["total"], 1);
+    s.cli(&["repo", "delete", "f", "-y"]).unwrap();
+    s.cli(&["repo", "create", "f", "-f", "files"]).unwrap();
+    assert_eq!(s.json(&["downloads", "f"])["total"], 0);
 }
 
 #[test]
@@ -3085,6 +3239,20 @@ fn oci_registry_protocol() {
         .send()
         .unwrap();
     assert_eq!(r.status().as_u16(), 200);
+    // Pulls counted: a GET of the tagged manifest by tag or by digest;
+    // not a HEAD, nor its blobs.
+    let r = reg
+        .req(
+            reqwest::Method::GET,
+            &format!("/v2/img/app/manifests/{digest}"),
+        )
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    let d = s.json(&["downloads", "img"]);
+    assert_eq!(d["total"], 2, "{d}");
+    assert_eq!(d["packages"][0]["name"], "app", "{d}");
+    assert_eq!(d["packages"][0]["version"], "1.0", "{d}");
     let r = reg
         .req(reqwest::Method::GET, &format!("/v2/img/app/blobs/{layer}"))
         .header("range", "bytes=0-9")
@@ -4013,6 +4181,20 @@ fn npm_publish_and_install() {
     let app = s.dir.path().join("app4");
     std::fs::create_dir_all(&app).unwrap();
     assert!(!npm(&anon, &app, &["install", "--no-audit", "hello-pkg"]).0);
+    // The tarballs fetched are counted, the packuments not. (Above, npm
+    // had them in the cache publish filled.)
+    assert_eq!(s.json(&["downloads", "js"])["total"], 0);
+    let fresh = s.dir.path().join("fresh");
+    std::fs::create_dir_all(&fresh).unwrap();
+    std::fs::copy(home.join("npmrc"), fresh.join("npmrc")).unwrap();
+    let app = s.dir.path().join("app5");
+    std::fs::create_dir_all(&app).unwrap();
+    let (ok, out) = npm(&fresh, &app, &["install", "--no-audit", "hello-pkg"]);
+    assert!(ok, "{out}");
+    let d = s.json(&["downloads", "js"]);
+    assert_eq!(d["total"], 1, "{d}");
+    assert_eq!(d["packages"][0]["name"], "hello-pkg", "{d}");
+    assert_eq!(d["packages"][0]["version"], "1.1.0", "{d}");
     let found = s.json(&["search", "hello-pkg"]);
     assert!(found.to_string().contains("1.1.0"), "{found}");
     // No READMEs in the kept manifests.

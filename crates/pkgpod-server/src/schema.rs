@@ -117,6 +117,18 @@ DELETE FROM listeners WHERE proto = 'ftp';
 ALTER TABLE listeners DROP COLUMN proto;
 ALTER TABLE listeners DROP COLUMN passive;
 ",
+    // Downloads by repository, day (days since 1970), package and version.
+    "
+CREATE TABLE downloads (
+    repo TEXT NOT NULL,
+    day INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    version TEXT NOT NULL,
+    n INTEGER NOT NULL,
+    PRIMARY KEY (repo, day, name, version)
+) WITHOUT ROWID;
+CREATE INDEX downloads_day ON downloads(day);
+",
 ];
 
 pub fn migrate(db: &Db) -> pkgpod_base::Result<()> {
@@ -136,6 +148,7 @@ mod tests {
             "4f91e61340d6bc43",
             "ea67331ae65ecf81",
             "af0a60b7120d6678",
+            "ecf508f3a5114520",
         ];
         let got: Vec<String> = super::STEPS
             .iter()

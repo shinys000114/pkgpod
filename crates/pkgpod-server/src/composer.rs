@@ -117,7 +117,10 @@ pub async fn read(
             let path = format!("{vendor}/{pkg}/{file}");
             match app.engine.objects().resolve(&v.root, &path) {
                 Ok(Some(Entry::Blob { sha256, .. })) => {
-                    crate::serve::serve_blob(
+                    crate::serve::serve_counted(
+                        app,
+                        &repo.name,
+                        &path,
                         &repo.store().path(&sha256),
                         &sha256,
                         file,

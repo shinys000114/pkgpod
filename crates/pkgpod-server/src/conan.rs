@@ -436,8 +436,18 @@ async fn file_op(
         .flatten();
         return match found {
             Some(sha) => {
-                crate::serve::serve_blob(&a.repo.store().path(&sha), &sha, file, None, false, req)
-                    .await
+                crate::serve::serve_counted(
+                    app,
+                    &a.repo.name,
+                    &path,
+                    &a.repo.store().path(&sha),
+                    &sha,
+                    file,
+                    None,
+                    false,
+                    req,
+                )
+                .await
             }
             None => text(StatusCode::NOT_FOUND, format!("{path} not found")),
         };

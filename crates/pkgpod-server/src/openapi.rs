@@ -373,6 +373,50 @@ fn schemas() -> Value {
             ),
         ),
         (
+            "Downloads",
+            object(
+                "Downloads over the last days (today included), in UTC days.",
+                vec![
+                    ("repo", string()),
+                    ("days", integer()),
+                    ("total", integer()),
+                    (
+                        "daily",
+                        array(object(
+                            "One day.",
+                            vec![("day", text("YYYY-MM-DD")), ("n", integer())],
+                            &["day", "n"],
+                        )),
+                    ),
+                    (
+                        "packages",
+                        array(object(
+                            "A package version, the most downloaded first (at most 100).",
+                            vec![
+                                ("name", string()),
+                                ("version", string()),
+                                ("n", integer()),
+                                ("last", text("The last day it was downloaded, YYYY-MM-DD.")),
+                            ],
+                            &["name", "version", "n", "last"],
+                        )),
+                    ),
+                ],
+                &["repo", "days", "total", "daily", "packages"],
+            ),
+        ),
+        (
+            "Settings",
+            object(
+                "The server's settings.",
+                vec![(
+                    "downloads_days",
+                    json!({"type": "integer", "minimum": 0, "maximum": 3650, "description": "Days download counts are kept (default 365); fewer removes the older ones, 0 counts nothing and removes them all."}),
+                )],
+                &[],
+            ),
+        ),
+        (
             "Uploaded",
             object(
                 "",
@@ -1009,6 +1053,15 @@ fn ops() -> Vec<Op> {
             .query("q", string(), "Name to look for; empty: all.")
             .query("limit", integer(), "At most this many (default 500, at most 5000).")
             .reply(200, "The packages.", array(sref("Package"))),
+        op("get", "/api/v1/repos/{repo}/downloads", "downloads", "Downloads by day and by package: files served whole to a GET (not HEAD, not a resumed range), packages only (no indexes); an image is counted when its tag is asked for.")
+            .query("days", integer(), "The last this many days, today included (default 30, at most 3650).")
+            .query("name", string(), "One package only.")
+            .reply(200, "The counts.", sref("Downloads")),
+        op("get", "/api/v1/settings", "settings_get", "The server's settings (server admin).")
+            .reply(200, "The settings.", sref("Settings")),
+        op("patch", "/api/v1/settings", "settings_patch", "Changes the server's settings (server admin); fields left out keep their values.")
+            .body("Settings")
+            .reply(200, "The settings now.", sref("Settings")),
         op("post", "/api/v1/repos/{repo}/ops/{op}", "op", "Plan (or with ?apply=1 apply) a format operation; body: its params.")
             .apply()
             .optional_body(

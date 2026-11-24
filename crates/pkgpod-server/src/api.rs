@@ -259,6 +259,8 @@ pub fn router() -> Router<Arc<App>> {
         .route("/api/v1/repos/{repo}/diff", get(diff))
         .route("/api/v1/repos/{repo}/tree", get(tree))
         .route("/api/v1/repos/{repo}/packages", get(packages))
+        .route("/api/v1/repos/{repo}/downloads", get(downloads))
+        .route("/api/v1/settings", get(settings_get).patch(settings_patch))
         .route("/api/v1/repos/{repo}/ops/{op}", post(op))
         .route(
             "/api/v1/repos/{repo}/upload",
@@ -419,6 +421,71 @@ pub(crate) async fn repo_get(
 }
 
 #[derive(Deserialize)]
+pub(crate) struct DownloadsQ {
+    #[serde(default)]
+    days: Option<i64>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// A repository's downloads: by day and by package.
+pub(crate) async fn downloads(
+    State(app): St,
+    Who(c): Who,
+    Path(repo): Path<String>,
+    Query(q): Query<DownloadsQ>,
+) -> Result<Json<Value>> {
+    blocking(&app, move |app| {
+        app.repo_for(&c, &repo, Role::Read)?;
+        let days = q.days.unwrap_or(30);
+        if !(1..=3650).contains(&days) {
+            return Err(Error::Invalid("days: 1 to 3650".into()));
+        }
+        let name = q.name.as_deref().filter(|n| !n.is_empty());
+        // What waits in memory too.
+        app.stats.flush(app)?;
+        Ok(Json(crate::stats::report(app, &repo, days, name, 100)?))
+    })
+    .await
+}
+
+fn settings_json(app: &App) -> Value {
+    json!({"downloads_days": crate::stats::days_kept(app)})
+}
+
+/// The server's settings (admins).
+pub(crate) async fn settings_get(State(app): St, Who(c): Who) -> Result<Json<Value>> {
+    app.require_admin(&c)?;
+    Ok(Json(settings_json(&app)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SettingsReq {
+    #[serde(default)]
+    pub(crate) downloads_days: Option<i64>,
+}
+
+pub(crate) async fn settings_patch(
+    State(app): St,
+    Who(c): Who,
+    Json(req): Json<SettingsReq>,
+) -> Result<Json<Value>> {
+    app.require_admin(&c)?;
+    blocking(&app, move |app| {
+        if let Some(d) = req.downloads_days {
+            crate::stats::check_days(d)?;
+            crate::keys::set_setting(&app.db, crate::stats::SETTING, Some(&d.to_string()))?;
+            crate::stats::trim(app, d)?;
+            app.auth
+                .audit(c.name(), "settings", "", &format!("downloads_days={d}"));
+        }
+        Ok(Json(settings_json(app)))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
 pub(crate) struct PatchReq {
     pub(crate) settings: Value,
 }
@@ -474,6 +541,7 @@ pub(crate) async fn repo_delete(
         app.engine.delete_repo(&repo)?;
         crate::oci::forget(app, &repo);
         app.auth.forget_repo(&repo)?;
+        app.stats.forget(app, &repo)?;
         // A mirror's received tree (perhaps an adopted multi-TB one) stays
         // unless asked for.
         let mut detail = String::new();
