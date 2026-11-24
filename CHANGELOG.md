@@ -133,6 +133,13 @@ Operations:
   `--mirrors`), while the server runs.
 - Stopping answers the requests in flight (30 s); the data survives the
   server being killed.
+- Download statistics: packages served whole to a GET are counted by
+  repository, day, package and version (indexes, HEAD, 304 and resumed
+  ranges are not; an image pull is a GET of the manifest its tag
+  names), written every few seconds and when the server stops, kept a
+  year by default (`pkgpod settings --downloads-days`). `pkgpod
+  downloads <repo>`, `GET /api/v1/repos/<repo>/downloads`, and the
+  console's overview and package list show them.
 
 Before 0.1.0 is tagged, to decide: whether `/api/v1` is under the same
 promise as the data, or may still change.

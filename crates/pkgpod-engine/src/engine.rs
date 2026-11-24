@@ -927,6 +927,38 @@ impl Engine {
 
     /// Packages whose name contains `q` (all if empty), in one repository
     /// or all.
+    /// The package (name, version) the current version's catalog lists
+    /// at `path`, or for a file with `sha` (served under another path).
+    pub fn catalog_item(
+        &self,
+        repo: &str,
+        path: &str,
+        sha: Option<&Digest>,
+    ) -> Result<Option<(String, String)>> {
+        Ok(self.db.read(|c| {
+            let by_path = c
+                .query_row(
+                    "SELECT c.name, c.version FROM catalog c JOIN repos r ON r.id = c.repo
+                     WHERE r.name = ?1 AND c.path = ?2",
+                    params![repo, path],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            match (by_path, sha) {
+                (Some(x), _) => Ok(Some(x)),
+                (None, Some(sha)) => c
+                    .query_row(
+                        "SELECT c.name, c.version FROM catalog c JOIN repos r ON r.id = c.repo
+                         WHERE r.name = ?1 AND c.sha256 = ?2 LIMIT 1",
+                        params![repo, sha],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional(),
+                (None, None) => Ok(None),
+            }
+        })?)
+    }
+
     pub fn search(&self, q: &str, repo: Option<&str>, limit: usize) -> Result<Vec<Found>> {
         let like = format!(
             "%{}%",

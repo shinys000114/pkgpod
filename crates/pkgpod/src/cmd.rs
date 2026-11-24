@@ -1006,6 +1006,45 @@ pub fn run(
                 print!("{}", j["log"].as_str().unwrap_or(""));
             });
         }
+        Cmd::Downloads { repo, days, name } => {
+            let v = c.get(&format!(
+                "/api/v1/repos/{}/downloads?days={days}&name={}",
+                enc(&repo),
+                enc(&name)
+            ))?;
+            x.print(&v, |v| {
+                println!("{} downloads in {} days", s(&v["total"]), s(&v["days"]));
+                let mut rows = vec![vec![
+                    "NAME".into(),
+                    "VERSION".into(),
+                    "DOWNLOADS".into(),
+                    "LAST".into(),
+                ]];
+                for p in v["packages"].as_array().into_iter().flatten() {
+                    rows.push(vec![
+                        s(&p["name"]),
+                        s(&p["version"]),
+                        s(&p["n"]),
+                        s(&p["last"]),
+                    ]);
+                }
+                table(rows);
+            });
+        }
+        Cmd::Settings { downloads_days } => {
+            let v = if downloads_days.is_some() {
+                c.send(
+                    Method::PATCH,
+                    "/api/v1/settings",
+                    &json!({"downloads_days": downloads_days}),
+                )?
+            } else {
+                c.get("/api/v1/settings")?
+            };
+            x.print(&v, |v| {
+                println!("downloads_days = {}", s(&v["downloads_days"]))
+            });
+        }
         Cmd::Gc {
             dry_run,
             grace_hours,

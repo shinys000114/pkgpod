@@ -284,8 +284,18 @@ async fn read(
             let Ok(Some(Entry::Blob { sha256, .. })) = entry else {
                 return not_found();
             };
-            crate::serve::serve_blob(&r.store().path(&sha256), &sha256, file, None, false, req)
-                .await
+            crate::serve::serve_counted(
+                app,
+                &r.name,
+                "",
+                &r.store().path(&sha256),
+                &sha256,
+                file,
+                None,
+                false,
+                req,
+            )
+            .await
         }
         _ => not_found(),
     }

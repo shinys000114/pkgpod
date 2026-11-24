@@ -848,7 +848,13 @@ async fn get(
             return r;
         }
         let files = s.repo.format == "files";
-        return serve_mirror(s.repo.tree_dir(), &rel, raw_path, files, req).await;
+        let counts = crate::stats::counts(req.method(), req.headers());
+        let r = serve_mirror(s.repo.tree_dir(), &rel, raw_path, files, req).await;
+        if !raw_path.ends_with('/') {
+            app.stats
+                .mirrored(counts, &r, &s.repo.name, &s.repo.format, &rel.join("/"));
+        }
+        return r;
     }
     let version = match rel.first().and_then(|f| f.strip_prefix('@')) {
         Some(label) => match app.labelled(&s.repo.name, label) {
@@ -948,7 +954,10 @@ async fn get(
         Entry::Blob { sha256, meta, .. } => {
             let mtime = meta.get("mtime").and_then(Value::as_i64);
             let files = s.repo.format == "files";
-            serve_blob(
+            serve_counted(
+                app,
+                &s.repo.name,
+                &rel_s,
                 &s.repo.store().path(&sha256),
                 &sha256,
                 &rel_s,
@@ -1051,6 +1060,26 @@ pub fn cache_control(rel: &str) -> &'static str {
 /// its Last-Modified, not the store file's, which a re-upload touches;
 /// `files`: a files repository's, served sandboxed (anyone may have
 /// uploaded the HTML).
+/// [`serve_blob`] for a repository's file, counted as a download when
+/// it is one (`path`: where its catalog row would be, if it is known).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn serve_counted(
+    app: &App,
+    repo: &str,
+    path: &str,
+    file: &std::path::Path,
+    sha: &Digest,
+    rel: &str,
+    mtime: Option<i64>,
+    files: bool,
+    req: Request,
+) -> Response {
+    let counts = crate::stats::counts(req.method(), req.headers());
+    let r = serve_blob(file, sha, rel, mtime, files, req).await;
+    app.stats.file(counts, &r, repo, path, Some(sha));
+    r
+}
+
 pub(crate) async fn serve_blob(
     file: &std::path::Path,
     sha: &Digest,

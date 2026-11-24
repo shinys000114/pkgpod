@@ -12,12 +12,12 @@
   {% if rows.is_empty() %}<p class="empty">{% if !q.is_empty() || !at.is_empty() %}Nothing matches.{% else %}Nothing here yet{% if !show_repo %}: see How to use for uploading{% endif %}.{% endif %}</p>{% else %}
   <form id="pkg-pick" hx-target="#pkg-result">
   <div class="table-wrap"><table class="sortable">
-    <thead><tr>{% if can_write %}<th class="pick"><input type="checkbox" class="pick-all" aria-label="choose all"></th>{% endif %}{% if show_repo %}<th>Repository</th>{% endif %}<th>{{ cols[0] }}</th><th>{{ cols[1] }}</th><th>{{ cols[2] }}</th>{% if show_size %}<th class="num">Size</th>{% endif %}<th></th></tr></thead>
+    <thead><tr>{% if can_write %}<th class="pick"><input type="checkbox" class="pick-all" aria-label="choose all"></th>{% endif %}{% if show_repo %}<th>Repository</th>{% endif %}<th>{{ cols[0] }}</th><th>{{ cols[1] }}</th><th>{{ cols[2] }}</th>{% if show_size %}<th class="num">Size</th>{% endif %}{% if show_downloads %}<th class="num" title="Downloads in the last 30 days">Downloads</th>{% endif %}<th></th></tr></thead>
     <tbody>
     {% for r in rows %}<tr>
       {% if can_write %}<td class="pick"><input type="checkbox" name="path" value="{{ r.path }}" aria-label="choose {{ r.name }} {{ r.version }}"></td>{% endif %}
       {% if show_repo %}<td><a href="/r/{{ r.repo }}">{{ r.repo }}</a></td>{% endif %}
-      <td>{% if show_repo %}<b>{{ r.name }}</b>{% else %}<button type="button" class="link pkg-name" hx-get="/r/{{ repo }}/pkg?path={{ r.file|urlencode }}" hx-target="#pkg-detail" title="Details">{{ r.name }}</button>{% endif %}</td><td class="mono wrap">{{ r.version }}</td><td class="muted mono-wrap">{{ r.extra }}</td>{% if show_size %}<td class="num" data-sort="{{ r.size }}">{{ r.size }}</td>{% endif %}
+      <td>{% if show_repo %}<b>{{ r.name }}</b>{% else %}<button type="button" class="link pkg-name" hx-get="/r/{{ repo }}/pkg?path={{ r.file|urlencode }}" hx-target="#pkg-detail" title="Details">{{ r.name }}</button>{% endif %}</td><td class="mono wrap">{{ r.version }}</td><td class="muted mono-wrap">{{ r.extra }}</td>{% if show_size %}<td class="num" data-sort="{{ r.size }}">{{ r.size }}</td>{% endif %}{% if show_downloads %}<td class="num">{{ r.downloads }}</td>{% endif %}
       <td class="acts nowrap"><a href="/r/{% if show_repo %}{{ r.repo }}{% else %}{{ repo }}{% endif %}/file?path={{ r.file|urlencode }}" download title="Download">download</a></td>
     </tr>{% endfor %}
     </tbody>

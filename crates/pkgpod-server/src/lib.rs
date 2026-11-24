@@ -31,6 +31,7 @@ pub mod routes;
 pub mod rsa_key;
 pub mod schema;
 pub mod serve;
+pub mod stats;
 pub mod swift;
 pub mod terraform;
 pub mod usign_key;
@@ -137,6 +138,7 @@ pub struct App {
     /// Conan revisions being uploaded: their files before the manifest.
     pub conan_staged: conan::Staged,
     pub resigner: resign::Resigner,
+    pub stats: stats::Stats,
     cache: Mutex<Cache>,
 }
 
@@ -222,6 +224,7 @@ impl App {
             plans: Mutex::new(HashMap::new()),
             conan_staged: conan::Staged::default(),
             resigner: resign::Resigner::default(),
+            stats: stats::Stats::default(),
             cache: Mutex::new(Cache::default()),
         }))
     }
@@ -307,6 +310,7 @@ pub async fn run(app: Arc<App>) -> Result<(), String> {
     jobs::recover(&app.db).map_err(|e| e.to_string())?;
     listeners::reconcile(&app);
     let sched = jobs::scheduler(app.clone());
+    let counts = stats::writer(app.clone());
     let gc = {
         let app = app.clone();
         tokio::spawn(async move {
@@ -380,6 +384,12 @@ pub async fn run(app: Arc<App>) -> Result<(), String> {
         r
     })
     .await;
+    // The downloads counted last.
+    counts.abort();
+    let app2 = app.clone();
+    if let Ok(Err(e)) = tokio::task::spawn_blocking(move || app2.stats.flush(&app2)).await {
+        tracing::warn!("download counts: {e}");
+    }
     match drained {
         Ok(r) => r.unwrap_or_else(|e| Err(e.to_string())),
         Err(_) => {

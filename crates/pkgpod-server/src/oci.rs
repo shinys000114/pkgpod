@@ -411,7 +411,48 @@ async fn get_manifest(cx: &Ctx, re: &str, head: bool) -> Response {
     set(&mut resp, "Docker-Content-Digest", &digest);
     set(&mut resp, "ETag", &format!("\"{digest}\""));
     set(&mut resp, "Docker-Distribution-API-Version", "registry/2.0");
+    // A pull, as Docker Hub counts one: a GET of the manifest a tag names
+    // (by the tag, or by its digest as docker asks after a HEAD), not of
+    // the platform's manifest an index leads to. A client that has the
+    // manifest already only asks with HEAD, and is not counted.
+    if !head {
+        let tag = if re.starts_with("sha256:") {
+            let (app, r, image) = (cx.app.clone(), cx.r.clone(), cx.image.clone());
+            blocking(move || tag_of(&app, &r, &image, &d))
+                .await
+                .flatten()
+        } else {
+            Some(re.to_string())
+        };
+        if let Some(tag) = tag {
+            cx.app.stats.named(
+                crate::stats::Counts::Whole,
+                &resp,
+                &cx.r.name,
+                &cx.image,
+                &tag,
+            );
+        }
+    }
     resp
+}
+
+/// The first tag of `image` that names the manifest `d`.
+fn tag_of(app: &App, r: &RepoInfo, image: &str, d: &Digest) -> Option<String> {
+    let v = app.engine.current(r).ok()??;
+    let objs = app.engine.objects();
+    let Entry::Dir { id } = objs
+        .resolve(&v.root, &format!("{image}/{}", pkgpod_oci::TAGS))
+        .ok()??
+    else {
+        return None;
+    };
+    let want = manifest_path(image, d);
+    objs.get(&id)
+        .ok()?
+        .iter()
+        .find(|(_, e)| matches!(e, Entry::Ref { target } if *target == want))
+        .map(|(tag, _)| tag.clone())
 }
 
 async fn put_manifest(cx: &Ctx, re: &str, req: Request) -> Response {

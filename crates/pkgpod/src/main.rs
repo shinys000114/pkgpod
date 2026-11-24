@@ -249,6 +249,22 @@ pub(crate) enum Cmd {
         #[arg(long)]
         cancel: bool,
     },
+    /// Downloads of a repository, by day and by package.
+    Downloads {
+        repo: String,
+        /// The last this many days, today included.
+        #[arg(long, default_value_t = 30)]
+        days: i64,
+        /// One package only.
+        #[arg(long, default_value = "")]
+        name: String,
+    },
+    /// Show the server's settings, or change them (server admin).
+    Settings {
+        /// Days download counts are kept (0: none counted).
+        #[arg(long)]
+        downloads_days: Option<i64>,
+    },
     /// Collect garbage.
     Gc {
         #[arg(long)]

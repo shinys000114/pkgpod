@@ -65,6 +65,10 @@ CREATE INDEX catalog_name ON catalog(name);
 CREATE TABLE format_notes (note TEXT PRIMARY KEY) WITHOUT ROWID;
 INSERT INTO format_notes VALUES ('directories in parts');
 ",
+    // Downloads are counted by the file served: its catalog row by hash.
+    "
+CREATE INDEX catalog_sha ON catalog(repo, sha256);
+",
 ];
 
 pub fn migrate(db: &Db) -> pkgpod_base::Result<()> {
@@ -77,7 +81,7 @@ mod tests {
     /// by the next. Changing a step fails here; a new step adds its hash.
     #[test]
     fn steps_are_only_ever_appended() {
-        let want: &[&str] = &["74f2eb1383deb982", "df4988794dabd0b4"];
+        let want: &[&str] = &["74f2eb1383deb982", "df4988794dabd0b4", "a45564131072578a"];
         let got: Vec<String> = super::STEPS
             .iter()
             .map(|s| pkgpod_base::Digest::of(s.as_bytes()).hex()[..16].to_string())

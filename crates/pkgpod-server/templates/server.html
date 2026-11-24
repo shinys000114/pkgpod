@@ -72,6 +72,16 @@
   </div>
 </div>
 <div class="card">
+  <div class="card-head"><h2>Download statistics</h2><span class="hint">files served whole are counted by package and day</span></div>
+  <div class="card-body">
+  <form class="inline" hx-post="/c/settings" hx-target="next .result">
+    Keep the counts <input type="number" name="downloads_days" value="{{ downloads_days }}" min="0" max="3650" size="5"> days <span class="muted small">(fewer removes older counts; 0 counts nothing)</span>
+    <button type="submit">Save</button>
+  </form>
+  <div class="result"></div>
+  </div>
+</div>
+<div class="card">
   <div class="card-head"><h2>Recent changes</h2></div>
   <div class="table-wrap"><table><thead><tr><th>When</th><th>Who</th><th>What</th><th>On</th><th>Details</th></tr></thead><tbody>
   {% for a in audit %}<tr><td class="nowrap">{{ a.when }}</td><td>{{ a.actor }}</td><td>{{ a.action }}</td><td>{{ a.target }}</td><td class="wrap muted">{{ a.detail }}</td></tr>{% endfor %}

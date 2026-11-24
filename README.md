@@ -68,6 +68,8 @@ Status: in development, nothing released.
 - Management: a web console, a JSON API (`/api/v1`, described at
   `/api/v1/openapi.json`) and the `pkgpod` command, with one rights
   model (users, teams, roles per repository, scoped tokens).
+- Download statistics by package, version and day (`pkgpod downloads
+  <repo>`), kept a year unless set otherwise.
 
 ## Quick start
 
