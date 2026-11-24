@@ -86,6 +86,25 @@ impl Server {
         s
     }
 
+    /// Stops the server and starts it again on the same data (a cold
+    /// start: nothing cached).
+    fn restart(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        self.child = Command::new(env!("CARGO_BIN_EXE_pkgpod"))
+            .args(["serve", "-c"])
+            .arg(self.dir.path().join("pkgpod.toml"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let t = Instant::now();
+        while std::net::TcpStream::connect(("127.0.0.1", self.serve_port)).is_err() {
+            assert!(t.elapsed() < Duration::from_secs(20), "no restart");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     fn cmd(&self) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_pkgpod"));
         c.env("XDG_CONFIG_HOME", self.dir.path().join("cfg"))
@@ -4059,4 +4078,54 @@ fn a_listener_moved_while_retrying_keeps_serving() {
     let ls = s.cli(&["listener", "list"]).unwrap();
     assert!(ls.contains("running"), "{ls}");
     drop(busy);
+}
+
+#[test]
+fn a_large_directory_survives_garbage_collection() {
+    let mut s = Server::start();
+    s.cli(&[
+        "repo",
+        "create",
+        "lots",
+        "-f",
+        "files",
+        "-s",
+        "public=true",
+        "-s",
+        "keep_versions=0",
+    ])
+    .unwrap();
+    let dir = s.dir.path().join("lots");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut files = Vec::new();
+    for i in 0..700 {
+        let p = dir.join(format!("f{i:04}.txt"));
+        std::fs::write(&p, format!("file {i}")).unwrap();
+        files.push(p.to_string_lossy().to_string());
+    }
+    let mut args = vec!["upload", "lots"];
+    args.extend(files.iter().map(String::as_str));
+    args.extend(["-s", "path=many/"]);
+    s.cli(&args).unwrap();
+    // A second version, so the first one's objects become garbage.
+    let extra = dir.join("extra.txt");
+    std::fs::write(&extra, "extra").unwrap();
+    s.cli(&[
+        "upload",
+        "lots",
+        extra.to_str().unwrap(),
+        "-s",
+        "path=many/",
+    ])
+    .unwrap();
+    let out = s.cli(&["gc", "--grace-hours", "0"]).unwrap();
+    assert!(out.contains("objects"), "{out}");
+    // Read back cold, from what the collection left.
+    s.restart();
+    for i in [0, 345, 699] {
+        let (st, body) = get(&s.url(&format!("/lots/many/f{i:04}.txt")), None);
+        assert_eq!((st, body), (200, format!("file {i}")));
+    }
+    let (_, listing) = get(&s.url("/lots/many/"), None);
+    assert!(listing.contains("f0699.txt") && listing.contains("extra.txt"));
 }

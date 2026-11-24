@@ -93,6 +93,69 @@ pub fn encode(t: &Tree) -> (Digest, Vec<u8>) {
     (Digest::of(&data), data)
 }
 
+/// Entries a directory object holds before it is split into parts.
+pub const SHARD_MAX: usize = 512;
+
+/// A large directory, stored as parts: entries by a byte of the sha256 of
+/// their name (`level`), each part a directory object of its own (split
+/// again on the next byte if it is still large). The key is the empty
+/// name, which no entry has, so a directory object is one or the other.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct Shard {
+    level: usize,
+    parts: BTreeMap<String, Digest>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ShardObject {
+    #[serde(rename = "")]
+    shard: Shard,
+}
+
+/// Is this encoded object a [`Shard`]? (Canonical JSON sorts the empty
+/// key first.)
+fn is_shard(data: &[u8]) -> bool {
+    data.starts_with(br#"{"":"#)
+}
+
+/// Encodes a directory at shard `level`: one object if it is small,
+/// else a shard and its parts. Returns its id; every object made is
+/// pushed to `out`.
+fn encode_at(t: &Tree, level: usize, out: &mut Vec<(Digest, Vec<u8>)>) -> Digest {
+    if t.len() <= SHARD_MAX || level >= 32 {
+        let (id, data) = encode(t);
+        out.push((id, data));
+        return id;
+    }
+    let mut groups: BTreeMap<String, Tree> = BTreeMap::new();
+    for (k, e) in t {
+        let b = Digest::of(k.as_bytes()).hex();
+        groups
+            .entry(b[level * 2..level * 2 + 2].to_string())
+            .or_default()
+            .insert(k.clone(), e.clone());
+    }
+    let parts = groups
+        .iter()
+        .map(|(b, g)| (b.clone(), encode_at(g, level + 1, out)))
+        .collect();
+    let data = serde_json::to_vec(&ShardObject {
+        shard: Shard { level, parts },
+    })
+    .expect("shards encode");
+    let id = Digest::of(&data);
+    out.push((id, data));
+    id
+}
+
+/// Encodes a directory as stored (sharded when large): its id and the
+/// objects to store.
+pub fn encode_dir(t: &Tree) -> (Digest, Vec<(Digest, Vec<u8>)>) {
+    let mut out = Vec::new();
+    let id = encode_at(t, 0, &mut out);
+    (id, out)
+}
+
 /// Digest of the empty tree.
 pub fn empty() -> Digest {
     encode(&Tree::new()).0
@@ -133,6 +196,57 @@ impl Objects {
         }
     }
 
+    fn data(&self, id: &Digest) -> Result<Vec<u8>> {
+        self.db
+            .read(|c| c.query_row("SELECT data FROM objects WHERE id = ?1", [id], |r| r.get(0)))
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Error::Corrupt(format!("tree object {id} is missing"))
+                }
+                e => e.into(),
+            })
+    }
+
+    /// The entries of a stored directory object, its parts merged.
+    fn load(&self, id: &Digest, into: &mut Tree) -> Result<()> {
+        let data = self.data(id)?;
+        if is_shard(&data) {
+            let s: ShardObject = serde_json::from_slice(&data)
+                .map_err(|e| Error::Corrupt(format!("tree object {id}: {e}")))?;
+            for p in s.shard.parts.values() {
+                self.load(p, into)?;
+            }
+            return Ok(());
+        }
+        let t: Tree = serde_json::from_slice(&data)
+            .map_err(|e| Error::Corrupt(format!("tree object {id}: {e}")))?;
+        if into.is_empty() {
+            *into = t;
+        } else {
+            into.extend(t);
+        }
+        Ok(())
+    }
+
+    /// The part objects a directory object is made of (none if it is
+    /// not sharded), at every level.
+    pub fn parts(&self, id: &Digest) -> Result<Vec<Digest>> {
+        let mut out = Vec::new();
+        if *id == empty() {
+            return Ok(out);
+        }
+        let data = self.data(id)?;
+        if is_shard(&data) {
+            let s: ShardObject = serde_json::from_slice(&data)
+                .map_err(|e| Error::Corrupt(format!("tree object {id}: {e}")))?;
+            for p in s.shard.parts.values() {
+                out.push(*p);
+                out.extend(self.parts(p)?);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn get(&self, id: &Digest) -> Result<Arc<Tree>> {
         if let Some(t) = self.cache.lock().unwrap_or_else(|e| e.into_inner()).get(id) {
             return Ok(t.clone());
@@ -140,17 +254,8 @@ impl Objects {
         if *id == empty() {
             return Ok(Arc::new(Tree::new()));
         }
-        let data: Vec<u8> = self
-            .db
-            .read(|c| c.query_row("SELECT data FROM objects WHERE id = ?1", [id], |r| r.get(0)))
-            .map_err(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => {
-                    Error::Corrupt(format!("tree object {id} is missing"))
-                }
-                e => e.into(),
-            })?;
-        let t: Tree = serde_json::from_slice(&data)
-            .map_err(|e| Error::Corrupt(format!("tree object {id}: {e}")))?;
+        let mut t = Tree::new();
+        self.load(id, &mut t)?;
         let t = Arc::new(t);
         let mut c = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         if c.len() >= CACHE {
@@ -182,8 +287,8 @@ impl Objects {
     }
 
     pub fn put(&self, t: &Tree) -> Result<Digest> {
-        let (id, data) = encode(t);
-        self.put_all(&[(id, data)])?;
+        let (id, objs) = encode_dir(t);
+        self.put_all(&objs)?;
         Ok(id)
     }
 
@@ -250,6 +355,10 @@ impl Objects {
     ) -> Result<()> {
         if !seen.insert(*root) {
             return Ok(());
+        }
+        // A large directory's parts are objects to keep too.
+        for p in self.parts(root)? {
+            seen.insert(p);
         }
         let t = self.get(root)?;
         for e in t.values() {
@@ -609,8 +718,8 @@ fn write_dir(d: &mut Dir, new: &mut Vec<(Digest, Vec<u8>)>) -> Result<Option<Dig
     if t.is_empty() {
         return Ok(None);
     }
-    let (id, data) = encode(&t);
-    new.push((id, data));
+    let (id, objs) = encode_dir(&t);
+    new.extend(objs);
     Ok(Some(id))
 }
 
@@ -699,6 +808,124 @@ mod tests {
         assert_eq!(e.get("d/one").unwrap(), Some(blob("1")));
         assert!(e.put("d/one/x", blob("x")).is_err());
         assert!(e.put("../x", blob("x")).is_err());
+    }
+
+    /// Object ids a directory is stored as (the top one and its parts).
+    fn stored(o: &Objects, id: &Digest) -> std::collections::HashSet<Digest> {
+        let mut s: std::collections::HashSet<Digest> = o.parts(id).unwrap().into_iter().collect();
+        s.insert(*id);
+        s
+    }
+
+    #[test]
+    fn large_directories_are_stored_in_parts() {
+        let (_d, o) = objs();
+        let mut e = Edit::new(&o, empty());
+        for i in 0..2000 {
+            e.put(&format!("big/f{i}"), blob(&format!("{i}"))).unwrap();
+        }
+        e.put("small", blob("s")).unwrap();
+        let r1 = e.finish().unwrap();
+        let Some(Entry::Dir { id: big1 }) = o.resolve(&r1, "big").unwrap() else {
+            panic!("no big");
+        };
+        assert!(o.parts(&big1).unwrap().len() > 100, "stored in parts");
+        assert_eq!(o.get(&big1).unwrap().len(), 2000);
+        assert_eq!(o.resolve(&r1, "big/f1234").unwrap(), Some(blob("1234")));
+        assert_eq!(o.walk(&r1, "").unwrap().len(), 2001);
+
+        // One more entry: the directory's top object and one part are new.
+        let mut e = Edit::new(&o, r1);
+        e.put("big/new", blob("n")).unwrap();
+        let r2 = e.finish().unwrap();
+        let Some(Entry::Dir { id: big2 }) = o.resolve(&r2, "big").unwrap() else {
+            panic!("no big");
+        };
+        let (a, b) = (stored(&o, &big1), stored(&o, &big2));
+        assert_eq!(b.difference(&a).count(), 2, "top and one part");
+        let d = o.diff(&r1, &r2).unwrap();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].path, "big/new");
+        // Shrunk below the limit: one object again.
+        let mut e = Edit::new(&o, r2);
+        for i in 0..1700 {
+            e.remove(&format!("big/f{i}")).unwrap();
+        }
+        let r3 = e.finish().unwrap();
+        let Some(Entry::Dir { id: big3 }) = o.resolve(&r3, "big").unwrap() else {
+            panic!("no big");
+        };
+        assert!(o.parts(&big3).unwrap().is_empty());
+        assert_eq!(o.get(&big3).unwrap().len(), 301);
+        // Same content, same id, however it was built.
+        let mut fresh = Tree::new();
+        for (k, v) in o.get(&big2).unwrap().iter() {
+            fresh.insert(k.clone(), v.clone());
+        }
+        assert_eq!(o.put(&fresh).unwrap(), big2);
+    }
+
+    #[test]
+    fn parts_split_again_when_one_byte_is_not_enough() {
+        let (_d, o) = objs();
+        // Names whose sha256 starts with the same byte: one part at the
+        // first level, too large, split on the next byte.
+        let names: Vec<String> = (0u64..)
+            .map(|i| format!("n{i}"))
+            .filter(|n| Digest::of(n.as_bytes()).hex().starts_with("00"))
+            .take(SHARD_MAX + 100)
+            .collect();
+        let mut e = Edit::new(&o, empty());
+        for n in &names {
+            e.put(&format!("d/{n}"), blob(n)).unwrap();
+        }
+        let r = e.finish().unwrap();
+        let Some(Entry::Dir { id }) = o.resolve(&r, "d").unwrap() else {
+            panic!("no d");
+        };
+        assert!(o.parts(&id).unwrap().len() > 2, "two levels");
+        assert_eq!(o.get(&id).unwrap().len(), names.len());
+        assert_eq!(
+            o.resolve(&r, &format!("d/{}", names[7])).unwrap(),
+            Some(blob(&names[7]))
+        );
+    }
+
+    #[test]
+    fn reach_keeps_the_parts() {
+        let (_d, o) = objs();
+        let mut e = Edit::new(&o, empty());
+        for i in 0..1500 {
+            e.put(&format!("x/y/{i}"), blob(&format!("{i}"))).unwrap();
+        }
+        let r = e.finish().unwrap();
+        // Something unreachable, then everything not reached goes.
+        let mut e = Edit::new(&o, empty());
+        e.put("gone/z", blob("z")).unwrap();
+        e.finish().unwrap();
+        let mut seen = std::collections::HashSet::new();
+        o.reach(&r, &mut seen, &mut |_| {}).unwrap();
+        let ids: Vec<Digest> =
+            o.db.read(|c| {
+                let mut st = c.prepare("SELECT id FROM objects")?;
+                let v = st
+                    .query_map([], |row| row.get(0))?
+                    .collect::<rusqlite::Result<Vec<Digest>>>()?;
+                Ok::<_, rusqlite::Error>(v)
+            })
+            .unwrap();
+        let gone: Vec<&Digest> = ids.iter().filter(|i| !seen.contains(*i)).collect();
+        assert!(!gone.is_empty());
+        o.db.write(|tx| {
+            for g in &gone {
+                tx.execute("DELETE FROM objects WHERE id = ?1", [g])?;
+            }
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+        // A cold reader still reads it all.
+        let cold = Objects::new(o.db.clone());
+        assert_eq!(cold.walk(&r, "").unwrap().len(), 1500);
     }
 
     #[test]
