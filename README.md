@@ -41,6 +41,8 @@ Status: in development, nothing released.
   (tried with pacman 7.1, `SigLevel = Required DatabaseRequired`).
 - **NuGet**: feeds for dotnet and NuGet (V3 API): push, restore,
   search, unlisting (tried with .NET 10).
+- **Composer**: repositories for PHP's composer (packages.json, p2
+  metadata), packages uploaded as zips (tried with Composer 2.11).
 - Repositories are reached by their own addresses (host name and path);
   a reverse proxy in front only provides certificates. There is no
   pull-through proxy: packages from public registries are imported or
@@ -81,7 +83,7 @@ Snapshots: `pkgpod label ppa release-1`, then
 repositories: `<address>/-/label/release-1/`).
 
 Other formats are made the same way (`pkgpod repo create <name> -f
-files|oci|pypi|npm|cargo|go|apk|rpm|helm|maven|gems|arch|nuget`); each repository's page in the console says how its
+files|oci|pypi|npm|cargo|go|apk|rpm|helm|maven|gems|arch|nuget|composer`); each repository's page in the console says how its
 clients use it.
 
 ## Backup, restore and upgrading

@@ -1,0 +1,19 @@
+[package]
+name = "pkgpod-composer"
+description = "pkgpod Composer format: PHP packages served as a Composer repository"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+pkgpod-base.workspace = true
+pkgpod-engine.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+jiff.workspace = true
+
+[dev-dependencies]
+pkgpod-base = { workspace = true, features = ["testutil"] }
