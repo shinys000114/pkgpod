@@ -2890,11 +2890,16 @@ struct Reg<'a> {
     c: reqwest::blocking::Client,
     base: String,
     tok: Option<&'a str>,
+    /// The Host asked for, when not the listener's address.
+    host: Option<&'a str>,
 }
 
 impl Reg<'_> {
     fn req(&self, m: reqwest::Method, path: &str) -> reqwest::blocking::RequestBuilder {
-        let r = self.c.request(m, format!("{}{path}", self.base));
+        let mut r = self.c.request(m, format!("{}{path}", self.base));
+        if let Some(h) = self.host {
+            r = r.header("host", h);
+        }
         match self.tok {
             Some(t) => r.basic_auth("token", Some(t)),
             None => r,
@@ -2992,11 +2997,13 @@ fn oci_registry_protocol() {
         c: reqwest::blocking::Client::new(),
         base: base.clone(),
         tok: Some(&tok),
+        host: None,
     };
     let anon = Reg {
         c: reqwest::blocking::Client::new(),
         base: base.clone(),
         tok: None,
+        host: None,
     };
     // The version check: 401 with a challenge without credentials.
     let r = anon.req(reqwest::Method::GET, "/v2/").send().unwrap();
@@ -3183,6 +3190,7 @@ fn oci_registry_protocol() {
         c: reqwest::blocking::Client::new(),
         base: base.clone(),
         tok: Some(&tok2),
+        host: None,
     };
     let r = reg2
         .req(reqwest::Method::GET, &format!("/v2/other/x/blobs/{layer}"))
@@ -3207,6 +3215,7 @@ fn oci_registry_protocol() {
         c: reqwest::blocking::Client::new(),
         base,
         tok: Some(&both),
+        host: None,
     };
     let r = reg3
         .req(
@@ -3459,6 +3468,7 @@ fn oci_import_of_chosen_images() {
         c: reqwest::blocking::Client::new(),
         base: s.url(""),
         tok: Some(&tok),
+        host: None,
     };
     // A two-platform image upstream.
     let mut kids = Vec::new();
@@ -6458,4 +6468,91 @@ fn npm_deprecate_and_unpublish_with_npm() {
         .send()
         .unwrap();
     assert_eq!(r.status().as_u16(), 404);
+}
+
+#[test]
+fn addresses_with_a_path_prefix() {
+    let s = Server::start();
+    for (name, format, url) in [
+        ("team", "oci", "http://reg.test/team/"),
+        ("rs", "cargo", "http://crates.test/team/"),
+        ("feed", "nuget", "http://nuget.test/feeds/main/"),
+    ] {
+        s.cli(&[
+            "repo",
+            "create",
+            name,
+            "-f",
+            format,
+            "-s",
+            "public=true",
+            "-s",
+            &format!("urls={url}"),
+        ])
+        .unwrap();
+    }
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "team", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    // OCI: /v2/ stays at the host's root; the address's path starts the
+    // image's name (reg.test/team/app).
+    let reg = Reg {
+        c: reqwest::blocking::Client::new(),
+        base: s.url(""),
+        tok: Some(&tok),
+        host: Some("reg.test"),
+    };
+    let cfg = reg.blob("team/app", b"{}");
+    let layer = reg.blob("team/app", b"layer");
+    let (st, out) = reg.manifest(
+        "team/app",
+        "1.0",
+        OCI_M,
+        &image_manifest(&cfg, &[(&layer, 5)], None),
+    );
+    assert_eq!(st, 201, "{out}");
+    let r = reg
+        .req(reqwest::Method::GET, "/v2/team/app/tags/list")
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert!(r.text().unwrap().contains("1.0"));
+    let r = reg
+        .req(reqwest::Method::GET, "/team/v2/app/tags/list")
+        .send()
+        .unwrap();
+    assert_ne!(r.status().as_u16(), 200, "not the registry under the path");
+    let elsewhere = Reg { host: None, ..reg };
+    let r = elsewhere
+        .req(reqwest::Method::GET, "/v2/team/app/tags/list")
+        .send()
+        .unwrap();
+    assert_ne!(r.status().as_u16(), 200, "an address is its host's only");
+    // cargo and NuGet hand their clients URLs under the address.
+    let c = reqwest::blocking::Client::new();
+    let on = |host: &str, path: &str| -> Value {
+        c.get(s.url(path))
+            .header("host", host)
+            .send()
+            .unwrap()
+            .json()
+            .unwrap()
+    };
+    let cfg = on("crates.test", "/team/index/config.json");
+    assert_eq!(cfg["dl"], "http://crates.test/team/api/v1/crates", "{cfg}");
+    assert_eq!(cfg["api"], "http://crates.test/team");
+    let idx = on("nuget.test", "/feeds/main/index.json");
+    let ids: Vec<&str> = idx["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["@id"].as_str().unwrap())
+        .collect();
+    assert!(
+        ids.iter()
+            .all(|i| i.starts_with("http://nuget.test/feeds/main/")),
+        "{ids:?}"
+    );
 }
