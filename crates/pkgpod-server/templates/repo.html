@@ -43,7 +43,7 @@
 </div>
 {% endif %}
 {% if can_write %}
-{% if format != "oci" %}
+{% if format != "oci" && format != "npm" %}
 <details class="card panel">
   <summary>Upload <span class="hint">files into the repository; each upload is a version</span></summary>
   <div class="panel-body">

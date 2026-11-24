@@ -3562,6 +3562,10 @@ fn pypi_with_pip() {
         "-y",
     ])
     .unwrap();
+    // The CLI's upload takes a wheel too.
+    let w3 = make_dist(&d, "cli-pkg", "3.0", "wheel", "", 0);
+    let out = s.cli(&["upload", "py", w3.to_str().unwrap()]).unwrap();
+    assert!(out.contains("added cli-pkg 3.0"), "{out}");
 
     // The index: HTML as asked, JSON for pip, names normalized.
     let c = reqwest::blocking::Client::new();
@@ -3656,4 +3660,344 @@ fn pypi_with_pip() {
     );
     let found = s.json(&["search", "foo"]);
     assert!(found.to_string().contains("(yanked)"), "{found}");
+}
+
+/// npm with its own home, config and cache under `dir`.
+fn npm(dir: &Path, cwd: &Path, args: &[&str]) -> (bool, String) {
+    let o = Command::new("npm")
+        .args(args)
+        .arg("--userconfig")
+        .arg(dir.join("npmrc"))
+        .arg("--cache")
+        .arg(dir.join("cache"))
+        .env("HOME", dir)
+        .env("NPM_CONFIG_UPDATE_NOTIFIER", "false")
+        .env_remove("NPM_CONFIG_REGISTRY")
+        .current_dir(cwd)
+        .output()
+        .unwrap();
+    (
+        o.status.success(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        ),
+    )
+}
+
+fn npm_package(dir: &Path, name: &str, version: &str) -> PathBuf {
+    let d = dir.join(format!("{}-{version}", name.replace('/', "_")));
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(
+        d.join("package.json"),
+        format!(r#"{{"name":"{name}","version":"{version}","main":"index.js","license":"MIT","description":"test"}}"#),
+    )
+    .unwrap();
+    std::fs::write(
+        d.join("index.js"),
+        format!("module.exports = {version:?};\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        d.join("README.md"),
+        format!("# {name}\n\n{}\n", "words ".repeat(200)),
+    )
+    .unwrap();
+    d
+}
+
+#[test]
+fn npm_publish_and_install() {
+    if !have("npm") {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&["repo", "create", "js", "-f", "npm"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "js", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let port = s.serve_port;
+    let reg = format!("http://127.0.0.1:{port}/js/");
+    let home = s.dir.path().join("npmhome");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("npmrc"),
+        format!("registry={reg}\n//127.0.0.1:{port}/js/:_authToken={tok}\n"),
+    )
+    .unwrap();
+    let src = s.dir.path().join("npmsrc");
+    for (n, v) in [("hello-pkg", "1.0.0"), ("@team/lib", "1.0.0")] {
+        let d = npm_package(&src, n, v);
+        let (ok, out) = npm(&home, &d, &["publish"]);
+        assert!(ok, "{out}");
+    }
+    s.cli(&["label", "js", "first"]).unwrap();
+    // A version is published once; another goes to beta, latest stays.
+    let d = npm_package(&src, "hello-pkg", "1.0.0");
+    std::fs::write(d.join("index.js"), "module.exports = 'changed';\n").unwrap();
+    let (ok, out) = npm(&home, &d, &["publish"]);
+    assert!(!ok, "republished: {out}");
+    let d = npm_package(&src, "hello-pkg", "1.1.0");
+    let (ok, out) = npm(&home, &d, &["publish", "--tag", "beta"]);
+    assert!(ok, "{out}");
+    let c = reqwest::blocking::Client::new();
+    let doc: Value = c
+        .get(format!("{reg}hello-pkg"))
+        .bearer_auth(&tok)
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(doc["dist-tags"]["latest"], "1.0.0", "{doc}");
+    assert_eq!(doc["dist-tags"]["beta"], "1.1.0");
+    assert_eq!(
+        doc["versions"]["1.0.0"]["dist"]["tarball"],
+        format!("{reg}hello-pkg/-/hello-pkg-1.0.0.tgz")
+    );
+    let scoped: Value = c
+        .get(format!("{reg}@team%2flib"))
+        .bearer_auth(&tok)
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(scoped["name"], "@team/lib");
+
+    // Install: latest of each, the scoped one too; npm sends the token
+    // to the tarball URLs it was given.
+    let app = s.dir.path().join("app1");
+    std::fs::create_dir_all(&app).unwrap();
+    let (ok, out) = npm(
+        &home,
+        &app,
+        &[
+            "install",
+            "--no-audit",
+            "--no-fund",
+            "hello-pkg",
+            "@team/lib",
+        ],
+    );
+    assert!(ok, "{out}");
+    let v = std::fs::read_to_string(app.join("node_modules/hello-pkg/index.js")).unwrap();
+    assert!(v.contains("1.0.0"), "{v}");
+    assert!(app.join("node_modules/@team/lib/index.js").is_file());
+    // dist-tag from the client moves latest.
+    let (ok, out) = npm(
+        &home,
+        &src,
+        &["dist-tag", "add", "hello-pkg@1.1.0", "latest"],
+    );
+    assert!(ok, "{out}");
+    let (ok, out) = npm(&home, &src, &["dist-tag", "ls", "hello-pkg"]);
+    assert!(ok && out.contains("latest: 1.1.0"), "{out}");
+    // An install as users run it (audit on): it works.
+    let app = s.dir.path().join("app2");
+    std::fs::create_dir_all(&app).unwrap();
+    let (ok, out) = npm(&home, &app, &["install", "hello-pkg"]);
+    assert!(ok, "{out}");
+    let v = std::fs::read_to_string(app.join("node_modules/hello-pkg/index.js")).unwrap();
+    assert!(v.contains("1.1.0"), "{v}");
+    // The label: as it was, through its own address.
+    let app = s.dir.path().join("app3");
+    std::fs::create_dir_all(&app).unwrap();
+    let at = format!("{reg}-/label/first/");
+    let (ok, out) = npm(
+        &home,
+        &app,
+        &["install", "--no-audit", "--registry", &at, "hello-pkg"],
+    );
+    assert!(ok, "{out}");
+    let v = std::fs::read_to_string(app.join("node_modules/hello-pkg/index.js")).unwrap();
+    assert!(v.contains("1.0.0"), "{v}");
+    // Without the token: nothing.
+    let anon = s.dir.path().join("anon");
+    std::fs::create_dir_all(&anon).unwrap();
+    std::fs::write(anon.join("npmrc"), format!("registry={reg}\n")).unwrap();
+    let app = s.dir.path().join("app4");
+    std::fs::create_dir_all(&app).unwrap();
+    assert!(!npm(&anon, &app, &["install", "--no-audit", "hello-pkg"]).0);
+    let found = s.json(&["search", "hello-pkg"]);
+    assert!(found.to_string().contains("1.1.0"), "{found}");
+    // No READMEs in the kept manifests.
+    let doc: Value = c
+        .get(format!("{reg}hello-pkg"))
+        .bearer_auth(&tok)
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert!(doc["versions"]["1.0.0"].get("readme").is_none(), "{doc}");
+    // Behind a proxy that says https.
+    let doc: Value = c
+        .get(format!("{reg}hello-pkg"))
+        .bearer_auth(&tok)
+        .header("x-forwarded-proto", "https")
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert!(
+        doc["versions"]["1.0.0"]["dist"]["tarball"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://")
+    );
+    // dist-tag rm from the client.
+    let (ok, out) = npm(&home, &src, &["dist-tag", "rm", "hello-pkg", "beta"]);
+    assert!(ok, "{out}");
+    let (_, out) = npm(&home, &src, &["dist-tag", "ls", "hello-pkg"]);
+    assert!(!out.contains("beta"), "{out}");
+
+    // A read-only token installs, audit on, and cannot publish.
+    let ro = s
+        .cli(&["token", "create", "ro", "--repos", "js"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let rohome = s.dir.path().join("rohome");
+    std::fs::create_dir_all(&rohome).unwrap();
+    std::fs::write(
+        rohome.join("npmrc"),
+        format!("registry={reg}\n//127.0.0.1:{port}/js/:_authToken={ro}\n"),
+    )
+    .unwrap();
+    let app = s.dir.path().join("app5");
+    std::fs::create_dir_all(&app).unwrap();
+    let (ok, out) = npm(&rohome, &app, &["install", "hello-pkg"]);
+    assert!(ok, "read-only install: {out}");
+    let d = npm_package(&src, "hello-pkg", "9.0.0");
+    assert!(!npm(&rohome, &d, &["publish"]).0);
+
+    // A public repository: anonymous installs, audit on.
+    s.cli(&["repo", "create", "pubjs", "-f", "npm", "-s", "public=true"])
+        .unwrap();
+    let pt = s
+        .cli(&["token", "create", "pub", "--repos", "pubjs", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let preg = format!("http://127.0.0.1:{port}/pubjs/");
+    let phome = s.dir.path().join("phome");
+    std::fs::create_dir_all(&phome).unwrap();
+    std::fs::write(
+        phome.join("npmrc"),
+        format!("registry={preg}\n//127.0.0.1:{port}/pubjs/:_authToken={pt}\n"),
+    )
+    .unwrap();
+    let d = npm_package(&s.dir.path().join("pubsrc"), "open-pkg", "1.0.0");
+    let (ok, out) = npm(&phome, &d, &["publish"]);
+    assert!(ok, "{out}");
+    let ahome = s.dir.path().join("ahome");
+    std::fs::create_dir_all(&ahome).unwrap();
+    std::fs::write(ahome.join("npmrc"), format!("registry={preg}\n")).unwrap();
+    let app = s.dir.path().join("app6");
+    std::fs::create_dir_all(&app).unwrap();
+    let (ok, out) = npm(&ahome, &app, &["install", "open-pkg"]);
+    assert!(ok, "anonymous install: {out}");
+    assert!(!npm(&ahome, &d, &["publish"]).0, "anonymous publish");
+
+    // A repository with an address: tarball URLs at that host, with the
+    // port asked.
+    s.cli(&[
+        "repo",
+        "create",
+        "rjs",
+        "-f",
+        "npm",
+        "-s",
+        "public=true",
+        "-s",
+        "urls=http://npm.test/",
+    ])
+    .unwrap();
+    let rt = s
+        .cli(&["token", "create", "r", "--repos", "rjs", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let tgz = b"not really a tarball".to_vec();
+    let (sha1, integrity) = npm_hashes(&tgz);
+    let body = serde_json::json!({
+        "name": "routed",
+        "versions": {"1.0.0": {"name": "routed", "version": "1.0.0", "dist": {"shasum": sha1, "integrity": integrity}}},
+        "dist-tags": {"latest": "1.0.0"},
+        "_attachments": {"routed-1.0.0.tgz": {"data": b64(&tgz), "length": tgz.len()}},
+    });
+    let host = format!("npm.test:{port}");
+    let r = c
+        .put(s.url("/routed"))
+        .header("host", &host)
+        .bearer_auth(&rt)
+        .json(&body)
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 201, "{}", r.text().unwrap());
+    let doc: Value = c
+        .get(s.url("/routed"))
+        .header("host", &host)
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    let url = doc["versions"]["1.0.0"]["dist"]["tarball"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(url, format!("http://{host}/routed/-/routed-1.0.0.tgz"));
+    let path = url
+        .trim_start_matches(&format!("http://{host}"))
+        .to_string();
+    let got = c
+        .get(s.url(&path))
+        .header("host", &host)
+        .send()
+        .unwrap()
+        .bytes()
+        .unwrap();
+    assert_eq!(got.as_ref(), tgz.as_slice());
+}
+
+fn b64(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for c in data.chunks(3) {
+        let n = (u32::from(c[0]) << 16)
+            | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*c.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            if i <= c.len() {
+                out.push(T[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// sha1 hex and sha512 integrity of a tarball, as npm computes them
+/// (with the system's tools, so the test does not share the server's
+/// code).
+fn npm_hashes(data: &[u8]) -> (String, String) {
+    let run = |args: &[&str]| {
+        use std::io::Write;
+        let mut ch = Command::new(args[0])
+            .args(&args[1..])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        ch.stdin.take().unwrap().write_all(data).unwrap();
+        ch.wait_with_output().unwrap().stdout
+    };
+    let sha1 = String::from_utf8(run(&["sha1sum"])).unwrap();
+    let raw = run(&["openssl", "dgst", "-sha512", "-binary"]);
+    (
+        sha1.split_whitespace().next().unwrap().to_string(),
+        format!("sha512-{}", b64(&raw)),
+    )
 }

@@ -12,6 +12,7 @@ pub mod import;
 pub mod jobs;
 pub mod keys;
 pub mod listeners;
+pub mod npm;
 pub mod oci;
 pub mod openapi;
 pub mod promote;
@@ -139,6 +140,7 @@ pub fn formats() -> Vec<Arc<dyn pkgpod_engine::Format>> {
         Arc::new(pkgpod_files::Files),
         Arc::new(pkgpod_oci::Oci),
         Arc::new(pkgpod_pypi::Pypi),
+        Arc::new(pkgpod_npm::Npm),
     ]
 }
 

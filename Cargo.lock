@@ -2438,6 +2438,7 @@ dependencies = [
  "pkgpod-engine",
  "pkgpod-files",
  "pkgpod-mirror",
+ "pkgpod-npm",
  "pkgpod-oci",
  "pkgpod-pypi",
  "reqwest",
