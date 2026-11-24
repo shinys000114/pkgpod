@@ -1173,14 +1173,14 @@ pub(crate) async fn upload(
     if files.is_empty() {
         return Err(Error::Invalid("no file in the upload".into()));
     }
+    // The files of one request are one upload: a source package comes
+    // with its parts, and several packages make one version.
     blocking(&app, move |app| {
-        let mut results = Vec::new();
-        for up in &files {
-            let out = app.engine.upload(&repo, up, &params, c.name())?;
-            app.auth.audit(c.name(), "upload", &repo, &out.summary);
-            results.push(json!({"summary": out.summary, "version": out.version.map(|v| v.seq)}));
-        }
-        Ok(Json(json!(results)))
+        let out = app.engine.upload_batch(&repo, &files, &params, c.name())?;
+        app.auth.audit(c.name(), "upload", &repo, &out.summary);
+        Ok(Json(
+            json!([{"summary": out.summary, "version": out.version.map(|v| v.seq)}]),
+        ))
     })
     .await
 }

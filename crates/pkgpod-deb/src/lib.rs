@@ -6,11 +6,13 @@
 
 pub mod control;
 pub mod deb;
+pub mod dsc;
 pub mod format;
 pub mod hash;
 pub mod index;
 pub mod pool;
 pub mod sign;
+pub mod source;
 pub mod verify;
 pub mod version;
 

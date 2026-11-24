@@ -205,6 +205,21 @@ pub trait Format: Send + Sync {
             self.id()
         )))
     }
+    /// Takes in the files of one upload together (a source package and
+    /// its parts); by default each on its own, in one version.
+    fn ingest_batch(
+        &self,
+        cx: &Cx,
+        ups: &[Upload],
+        params: &Value,
+        edit: &mut Edit,
+    ) -> Result<String> {
+        let mut out = Vec::new();
+        for up in ups {
+            out.push(self.ingest(cx, up, params, edit)?);
+        }
+        Ok(out.join("; "))
+    }
     /// Builds what clients are served for a version (a tree); `None`
     /// serves the state tree as it is.
     fn publish(&self, cx: &PublishCx) -> Result<Option<Digest>> {

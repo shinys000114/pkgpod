@@ -43,7 +43,7 @@ use crate::version;
 
 /// Bumped when the published layout changes, so no dist is reused from a
 /// version published by an older pkgpod.
-const GENERATOR: u32 = 1;
+const GENERATOR: u32 = 2;
 
 pub struct Deb;
 
@@ -215,6 +215,40 @@ fn pool_clashes(e: &mut Edit, comp: &str, file: &str, sha: &Digest) -> Result<Ve
     Ok(out)
 }
 
+/// Can the source directory `files` go to `path` (in component
+/// `comp`)? Complete, and no pool file of the same name with other
+/// content, there or in another directory of the same source.
+fn check_source_into(
+    e: &mut Edit,
+    path: &str,
+    comp: &str,
+    files: &BTreeMap<String, Entry>,
+) -> Result<()> {
+    let dir = path.rsplit('/').next().unwrap_or(path);
+    if let Some(p) = crate::source::problem(dir, files) {
+        return Err(Error::Invalid(p));
+    }
+    let (_, m) = crate::source::dsc_of(files).expect("checked");
+    let there = crate::source::files(e, path)?;
+    if !there.is_empty() && there != *files {
+        return Err(Error::Conflict(format!(
+            "{path} is already there with other content"
+        )));
+    }
+    for (name, x) in files {
+        if let Entry::Blob { sha256, .. } = x {
+            let cl = crate::source::clashes(e, comp, &m.source, name, sha256, &[path.to_string()])?;
+            if !cl.is_empty() {
+                return Err(Error::Conflict(format!(
+                    "{name} with other content is already in {}",
+                    cl.join(", ")
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Does `file` (`<name>_<version>_<arch>.deb`) match a package spec:
 /// `name`, `name_version` or `name_version_arch`?
 fn matches(spec: &str, m: &PkgMeta) -> bool {
@@ -226,6 +260,44 @@ fn matches(spec: &str, m: &PkgMeta) -> bool {
         [n, v, a] => *n == m.package && ver_ok(v) && *a == m.architecture,
         _ => false,
     }
+}
+
+/// Does a source package match a spec: `name_version_source`?
+fn matches_src(spec: &str, m: &crate::source::SrcMeta) -> bool {
+    let parts: Vec<&str> = spec.splitn(3, '_').collect();
+    match parts.as_slice() {
+        [n, v, "source"] => {
+            *n == m.source && (*v == m.version || *v == version::without_epoch(&m.version))
+        }
+        _ => false,
+    }
+}
+
+/// Source directories of `e` matching `specs` (all if `specs` is
+/// empty), with their leaves: (path, dist, component, dir, leaves).
+#[allow(clippy::type_complexity)]
+fn pick_sources(
+    e: &mut Edit,
+    specs: &[String],
+    only_d: &[String],
+    only_c: &[String],
+) -> Result<Vec<(String, String, String, String, BTreeMap<String, Entry>)>> {
+    let mut out = Vec::new();
+    for (path, d, c, n) in crate::source::dirs(e)? {
+        if (!only_d.is_empty() && !only_d.contains(&d))
+            || (!only_c.is_empty() && !only_c.contains(&c))
+        {
+            continue;
+        }
+        let files = crate::source::files(e, &path)?;
+        let Some((_, m)) = crate::source::dsc_of(&files) else {
+            continue;
+        };
+        if specs.is_empty() || specs.iter().any(|s| matches_src(s, &m)) {
+            out.push((path, d, c, n, files));
+        }
+    }
+    Ok(out)
 }
 
 fn str_list(v: &Value, k: &str) -> Vec<String> {
@@ -335,13 +407,23 @@ impl Deb {
                 gone.push(path);
             }
         }
+        let srcs = pick_sources(e, &specs, &only_d, &only_c)?;
+        let n_src = srcs.len();
+        gone.extend(srcs.into_iter().map(|x| x.0));
         if gone.is_empty() {
             return Err(Error::NotFound("no package matches".into()));
         }
         for g in &gone {
             e.remove(g)?;
         }
-        Ok(format!("removed {} package(s)", gone.len()))
+        Ok(if n_src == 0 {
+            format!("removed {} package(s)", gone.len())
+        } else {
+            format!(
+                "removed {} package(s) and {n_src} source package(s)",
+                gone.len() - n_src
+            )
+        })
     }
 
     fn copy(&self, p: &Value, e: &mut Edit, mv: bool) -> Result<String> {
@@ -372,7 +454,15 @@ impl Deb {
                 picked.push((path.clone(), format!("dists/{to}/{c}/{f}"), entry));
             }
         }
-        if picked.is_empty() {
+        let only_c: Vec<String> = if comp.is_empty() {
+            vec![]
+        } else {
+            vec![comp.to_string()]
+        };
+        // Source packages are named name_version_source; with no names,
+        // all of them go too.
+        let srcs = pick_sources(e, &specs, &[from.to_string()], &only_c)?;
+        if picked.is_empty() && srcs.is_empty() {
             return Err(Error::NotFound("no package matches".into()));
         }
         for (old, new, entry) in &picked {
@@ -381,10 +471,260 @@ impl Deb {
                 e.remove(old)?;
             }
         }
+        for (old, _, c, n, files) in &srcs {
+            if !to_def.components.iter().any(|x| x == c) {
+                return Err(Error::Invalid(format!("dist {to} has no component {c}")));
+            }
+            let new = format!("dists/{to}/{c}/{n}");
+            check_source_into(e, &new, c, files)?;
+            e.remove(&new)?;
+            for (name, x) in files {
+                e.put(&format!("{new}/{name}"), x.clone())?;
+            }
+            if mv {
+                e.remove(old)?;
+            }
+        }
+        let what = match (picked.len(), srcs.len()) {
+            (b, 0) => format!("{b} package(s)"),
+            (0, s) => format!("{s} source package(s)"),
+            (b, s) => format!("{b} package(s) and {s} source package(s)"),
+        };
         Ok(format!(
-            "{} {} package(s) from {from} to {to}",
-            if mv { "moved" } else { "copied" },
-            picked.len()
+            "{} {what} from {from} to {to}",
+            if mv { "moved" } else { "copied" }
+        ))
+    }
+
+    fn ingest_deb(&self, cx: &Cx, up: &Upload, p: &Value, e: &mut Edit) -> Result<String> {
+        let file = cx.store.path(&up.sha256);
+        let info = read_deb(&file)?;
+
+        if info.hashes.sha256 != up.sha256.hex() {
+            return Err(Error::Corrupt("uploaded file changed while read".into()));
+        }
+        let defs = dists(e)?;
+        if defs.is_empty() {
+            return Err(Error::Invalid(format!(
+                "{} has no dists yet: add one first (operation dist-set)",
+                cx.repo.name
+            )));
+        }
+        let mut targets = str_list(p, "dists");
+        if targets.is_empty() {
+            targets = defs.keys().cloned().collect();
+        }
+        let replace = bool_of(p, "replace");
+        let arch = info.architecture().to_string();
+        let filename = info.canonical_filename();
+        let source = info.source().to_string();
+        pool_dir("main", &source)?;
+        let meta = PkgMeta {
+            package: info.name().to_string(),
+            version: info.version().to_string(),
+            architecture: arch.clone(),
+            source,
+            control: info.control.to_text(),
+            md5: info.hashes.md5.clone(),
+            sha1: info.hashes.sha1.clone(),
+            sha512: info.hashes.sha512.clone(),
+        };
+        let entry = Entry::blob(
+            up.sha256,
+            up.size,
+            serde_json::to_value(&meta).expect("meta"),
+        );
+        let mut placed = Vec::new();
+        for d in &targets {
+            let def = defs
+                .get(d)
+                .ok_or_else(|| Error::NotFound(format!("{} has no dist {d}", cx.repo.name)))?;
+            let comp = match str_of(p, "component") {
+                "" if def.components.iter().any(|c| c == "main") => "main".to_string(),
+                "" => def.components[0].clone(),
+                c => c.to_string(),
+            };
+            if !def.components.contains(&comp) {
+                return Err(Error::Invalid(format!("dist {d} has no component {comp}")));
+            }
+            if arch != "all" && !def.architectures.is_empty() && !def.architectures.contains(&arch)
+            {
+                return Err(Error::Invalid(format!(
+                    "{filename} is {arch}; dist {d} publishes {}",
+                    def.architectures.join(" ")
+                )));
+            }
+            let clash = pool_clashes(e, &comp, &filename, &up.sha256)?;
+            if !clash.is_empty() {
+                if !replace {
+                    return Err(Error::Conflict(format!(
+                        "{filename} with other content is already in {}; upload with replace to replace it everywhere",
+                        clash.join(", ")
+                    )));
+                }
+                for c in clash {
+                    e.put(&c, entry.clone())?;
+                }
+            }
+            e.put(&format!("dists/{d}/{comp}/{filename}"), entry.clone())?;
+            placed.push(format!("{d}/{comp}"));
+        }
+        Ok(format!(
+            "added {} {} ({arch}) to {}",
+            meta.package,
+            meta.version,
+            placed.join(", ")
+        ))
+    }
+
+    /// Where an upload goes: (dist, component) for each target dist.
+    fn targets(&self, cx: &Cx, p: &Value, e: &mut Edit) -> Result<Vec<(String, String)>> {
+        let defs = dists(e)?;
+        if defs.is_empty() {
+            return Err(Error::Invalid(format!(
+                "{} has no dists yet: add one first (operation dist-set)",
+                cx.repo.name
+            )));
+        }
+        let mut targets = str_list(p, "dists");
+        if targets.is_empty() {
+            targets = defs.keys().cloned().collect();
+        }
+        let mut out = Vec::new();
+        for d in targets {
+            let def = defs
+                .get(&d)
+                .ok_or_else(|| Error::NotFound(format!("{} has no dist {d}", cx.repo.name)))?;
+            let comp = match str_of(p, "component") {
+                "" if def.components.iter().any(|c| c == "main") => "main".to_string(),
+                "" => def.components[0].clone(),
+                c => c.to_string(),
+            };
+            if !def.components.contains(&comp) {
+                return Err(Error::Invalid(format!("dist {d} has no component {comp}")));
+            }
+            out.push((d, comp));
+        }
+        Ok(out)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ingest_dsc(
+        &self,
+        cx: &Cx,
+        up: &Upload,
+        d: &crate::dsc::Dsc,
+        data: &[u8],
+        parts: &[&Upload],
+        claimed: &mut BTreeSet<Digest>,
+        p: &Value,
+        e: &mut Edit,
+    ) -> Result<String> {
+        use crate::source;
+        let replace = bool_of(p, "replace");
+        let h = hash_bytes(data);
+        let dsc_name = crate::dsc::dsc_name(&d.source, &d.version);
+        pool_dir("main", &d.source)?;
+        let meta = source::SrcMeta::new(
+            d,
+            crate::dsc::DscFile {
+                name: dsc_name.clone(),
+                size: up.size,
+                md5: h.md5,
+                sha1: h.sha1,
+                sha256: up.sha256.hex(),
+            },
+        );
+        let dir = source::dir_name(&d.source, &d.version);
+        let mut placed = Vec::new();
+        for (dist, comp) in self.targets(cx, p, e)? {
+            let mut leaves: BTreeMap<String, Entry> = BTreeMap::new();
+            leaves.insert(
+                dsc_name.clone(),
+                Entry::blob(
+                    up.sha256,
+                    up.size,
+                    serde_json::to_value(&meta).expect("meta"),
+                ),
+            );
+            for f in &d.files {
+                let entry = if let Some(u) = parts.iter().find(|u| u.sha256.hex() == f.sha256) {
+                    if u.size != f.size {
+                        return Err(Error::Invalid(format!(
+                            "{}: {} bytes, {dsc_name} says {}",
+                            f.name, u.size, f.size
+                        )));
+                    }
+                    claimed.insert(u.sha256);
+                    Entry::blob(u.sha256, u.size, Value::Null)
+                } else if let Some(x) = source::find_file(e, &comp, &d.source, f)? {
+                    x
+                } else {
+                    return Err(Error::Invalid(format!(
+                        "{dsc_name} lists {}, which is neither in this upload nor in {}: upload the .dsc together with its files",
+                        f.name, cx.repo.name
+                    )));
+                };
+                leaves.insert(f.name.clone(), entry);
+            }
+            let path = format!("dists/{dist}/{comp}/{dir}");
+            let shas = |m: &BTreeMap<String, Entry>| -> BTreeMap<String, Option<Digest>> {
+                m.iter()
+                    .map(|(n, x)| {
+                        (
+                            n.clone(),
+                            match x {
+                                Entry::Blob { sha256, .. } => Some(*sha256),
+                                _ => None,
+                            },
+                        )
+                    })
+                    .collect()
+            };
+            let want = shas(&leaves);
+            // The same source version with other content, here or in
+            // another dist: replaced everywhere, or refused.
+            let mut same = Vec::new();
+            for (other, _, c, n) in source::dirs(e)? {
+                if c == comp && n == dir && shas(&source::files(e, &other)?) != want {
+                    same.push(other);
+                }
+            }
+            if !same.is_empty() && !replace {
+                return Err(Error::Conflict(format!(
+                    "{dir} with other content is already in {}; upload with replace to replace it everywhere",
+                    same.join(", ")
+                )));
+            }
+            let mut skip = same.clone();
+            skip.push(path.clone());
+            for (name, x) in &leaves {
+                if let Entry::Blob { sha256, .. } = x {
+                    let cl = source::clashes(e, &comp, &d.source, name, sha256, &skip)?;
+                    if !cl.is_empty() {
+                        return Err(Error::Conflict(format!(
+                            "{name} with other content is already in {} (pool files are one per name)",
+                            cl.join(", ")
+                        )));
+                    }
+                }
+            }
+            if !same.contains(&path) {
+                same.push(path);
+            }
+            for target in &same {
+                e.remove(target)?;
+                for (name, x) in &leaves {
+                    e.put(&format!("{target}/{name}"), x.clone())?;
+                }
+            }
+            placed.push(format!("{dist}/{comp}"));
+        }
+        Ok(format!(
+            "added source {} {} to {}",
+            d.source,
+            d.version,
+            placed.join(", ")
         ))
     }
 }
@@ -563,89 +903,99 @@ impl Format for Deb {
     }
 
     fn ingest(&self, cx: &Cx, up: &Upload, p: &Value, e: &mut Edit) -> Result<String> {
-        let file = cx.store.path(&up.sha256);
-        let info = read_deb(&file)?;
-        if info.hashes.sha256 != up.sha256.hex() {
-            return Err(Error::Corrupt("uploaded file changed while read".into()));
+        self.ingest_batch(cx, std::slice::from_ref(up), p, e)
+    }
+
+    /// `.deb` files each on their own; a `.dsc` with the files it lists,
+    /// from the upload or (an orig tarball shared by revisions) from the
+    /// repository; a file no `.dsc` lists is refused.
+    fn ingest_batch(&self, cx: &Cx, ups: &[Upload], p: &Value, e: &mut Edit) -> Result<String> {
+        let mut debs = Vec::new();
+        let mut dscs = Vec::new();
+        let mut parts = Vec::new();
+        for up in ups {
+            let path = cx.store.path(&up.sha256);
+            let mut head = [0u8; 8];
+            let n = {
+                use std::io::Read;
+                let mut f = std::fs::File::open(&path)
+                    .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
+                f.read(&mut head).unwrap_or(0)
+            };
+            if head[..n] == *b"!<arch>\n" {
+                debs.push(up);
+                continue;
+            }
+            let named = up.filename.as_deref().is_some_and(|n| n.ends_with(".dsc"));
+            if (named || up.filename.is_none()) && up.size < (1 << 20) {
+                let data = std::fs::read(&path)
+                    .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
+                match crate::dsc::parse_dsc(&data) {
+                    Ok(d) => {
+                        dscs.push((up, d, data));
+                        continue;
+                    }
+                    Err(x) if named => {
+                        return Err(Error::Invalid(format!(
+                            "{}: {x}",
+                            up.filename.as_deref().unwrap_or("")
+                        )));
+                    }
+                    Err(_) => {}
+                }
+            }
+            parts.push(up);
         }
-        let defs = dists(e)?;
-        if defs.is_empty() {
+        let mut out = Vec::new();
+        for up in debs {
+            out.push(self.ingest_deb(cx, up, p, e)?);
+        }
+        let mut claimed = BTreeSet::new();
+        for (up, d, data) in &dscs {
+            out.push(self.ingest_dsc(cx, up, d, data, &parts, &mut claimed, p, e)?);
+        }
+        let left: Vec<String> = parts
+            .iter()
+            .filter(|u| !claimed.contains(&u.sha256))
+            .map(|u| u.filename.clone().unwrap_or_else(|| u.sha256.hex()))
+            .collect();
+        if !left.is_empty() {
             return Err(Error::Invalid(format!(
-                "{} has no dists yet: add one first (operation dist-set)",
-                cx.repo.name
+                "{}: not a .deb, and no .dsc of this upload lists it",
+                left.join(", ")
             )));
         }
-        let mut targets = str_list(p, "dists");
-        if targets.is_empty() {
-            targets = defs.keys().cloned().collect();
-        }
-        let replace = bool_of(p, "replace");
-        let arch = info.architecture().to_string();
-        let filename = info.canonical_filename();
-        let source = info.source().to_string();
-        pool_dir("main", &source)?;
-        let meta = PkgMeta {
-            package: info.name().to_string(),
-            version: info.version().to_string(),
-            architecture: arch.clone(),
-            source,
-            control: info.control.to_text(),
-            md5: info.hashes.md5.clone(),
-            sha1: info.hashes.sha1.clone(),
-            sha512: info.hashes.sha512.clone(),
-        };
-        let entry = Entry::blob(
-            up.sha256,
-            up.size,
-            serde_json::to_value(&meta).expect("meta"),
-        );
-        let mut placed = Vec::new();
-        for d in &targets {
-            let def = defs
-                .get(d)
-                .ok_or_else(|| Error::NotFound(format!("{} has no dist {d}", cx.repo.name)))?;
-            let comp = match str_of(p, "component") {
-                "" if def.components.iter().any(|c| c == "main") => "main".to_string(),
-                "" => def.components[0].clone(),
-                c => c.to_string(),
-            };
-            if !def.components.contains(&comp) {
-                return Err(Error::Invalid(format!("dist {d} has no component {comp}")));
-            }
-            if arch != "all" && !def.architectures.is_empty() && !def.architectures.contains(&arch)
-            {
-                return Err(Error::Invalid(format!(
-                    "{filename} is {arch}; dist {d} publishes {}",
-                    def.architectures.join(" ")
-                )));
-            }
-            let clash = pool_clashes(e, &comp, &filename, &up.sha256)?;
-            if !clash.is_empty() {
-                if !replace {
-                    return Err(Error::Conflict(format!(
-                        "{filename} with other content is already in {}; upload with replace to replace it everywhere",
-                        clash.join(", ")
-                    )));
-                }
-                for c in clash {
-                    e.put(&c, entry.clone())?;
-                }
-            }
-            e.put(&format!("dists/{d}/{comp}/{filename}"), entry.clone())?;
-            placed.push(format!("{d}/{comp}"));
-        }
-        Ok(format!(
-            "added {} {} ({arch}) to {}",
-            meta.package,
-            meta.version,
-            placed.join(", ")
-        ))
+        Ok(out.join("; "))
     }
 
     fn check_copy(&self, e: &mut Edit, paths: &[(String, Entry)]) -> Result<()> {
         let defs = dists(e)?;
+        // Source packages go whole: their leaves by directory.
+        let mut srcs: BTreeMap<(String, String, String), BTreeMap<String, Entry>> = BTreeMap::new();
         for (p, entry) in paths {
-            if p.ends_with("/_dist") {
+            if let Some((d, c, dir, f)) = crate::source::split_path(p) {
+                srcs.entry((d.into(), c.into(), dir.into()))
+                    .or_default()
+                    .insert(f.into(), entry.clone());
+            }
+        }
+        for ((d, c, dir), files) in &srcs {
+            let def = defs
+                .get(d)
+                .ok_or_else(|| Error::Invalid(format!("the target has no dist {d}")))?;
+            if !def.components.iter().any(|x| x == c) {
+                return Err(Error::Invalid(format!(
+                    "the target's dist {d} has no component {c}"
+                )));
+            }
+            check_source_into(e, &format!("dists/{d}/{c}/{dir}"), c, files).map_err(|x| {
+                Error::Invalid(format!(
+                    "{x} (a source package is promoted as its whole directory)"
+                ))
+            })?;
+        }
+        for (p, entry) in paths {
+            if p.ends_with("/_dist") || crate::source::split_path(p).is_some() {
                 continue;
             }
             let Some((d, c, f)) = split_pkg_path(p) else {
@@ -673,6 +1023,14 @@ impl Format for Deb {
     }
 
     fn catalog(&self, path: &str, entry: &Entry) -> Option<Item> {
+        if let Some((d, c, _, f)) = crate::source::split_path(path) {
+            let m = crate::source::meta(entry).filter(|_| f.ends_with(".dsc"))?;
+            return Some(Item {
+                name: m.source,
+                version: m.version,
+                extra: format!("{d}/{c} source"),
+            });
+        }
         let (d, c, _) = split_pkg_path(path)?;
         let (_, _, m) = pkg_meta(entry)?;
         Some(Item {
@@ -685,6 +1043,14 @@ impl Format for Deb {
     fn publish(&self, cx: &PublishCx) -> Result<Option<Digest>> {
         publish(cx)
     }
+}
+
+/// One source package in a dist being published.
+struct Src {
+    comp: String,
+    source: String,
+    version: String,
+    stanza: String,
 }
 
 /// One package in a dist being published.
@@ -721,11 +1087,24 @@ fn publish(cx: &PublishCx) -> Result<Option<Digest>> {
         let Some(Entry::Dir { id: dist_state }) = state.get(&format!("dists/{name}"))? else {
             continue;
         };
-        // Packages and their pool paths.
+        // Packages and their pool paths; source packages by directory.
         let mut pkgs = Vec::new();
+        let mut src_dirs: BTreeMap<(String, String), BTreeMap<String, Entry>> = BTreeMap::new();
         for (path, entry) in objs.walk(&dist_state, "")? {
             let (comp, _file) = match path.split_once('/') {
                 Some((c, f)) if !c.starts_with('_') && !f.contains('/') => (c, f),
+                Some((c, rest)) if !c.starts_with('_') => {
+                    if let Some((dir, f)) = rest.split_once('/')
+                        && dir.ends_with("_source")
+                        && !f.contains('/')
+                    {
+                        src_dirs
+                            .entry((c.to_string(), dir.to_string()))
+                            .or_default()
+                            .insert(f.to_string(), entry);
+                    }
+                    continue;
+                }
                 _ => continue,
             };
             let Some((sha256, size, m)) = pkg_meta(&entry) else {
@@ -761,6 +1140,28 @@ fn publish(cx: &PublishCx) -> Result<Option<Digest>> {
         for p in &pkgs {
             view.put(&p.pool, Entry::blob(p.sha256, p.size, Value::Null))?;
         }
+        let mut srcs = Vec::new();
+        for ((comp, dir), files) in &src_dirs {
+            if let Some(p) = crate::source::problem(dir, files) {
+                return Err(Error::Invalid(format!("dist {name}: {p}")));
+            }
+            let (_, m) = crate::source::dsc_of(files).expect("checked");
+            let pool = pool_dir(comp, &m.source)?;
+            for (f, x) in files {
+                if let Entry::Blob { sha256, size, .. } = x {
+                    view.put(
+                        &format!("{pool}/{f}"),
+                        Entry::blob(*sha256, *size, Value::Null),
+                    )?;
+                }
+            }
+            srcs.push(Src {
+                comp: comp.clone(),
+                stanza: crate::source::stanza(&m, &pool)?,
+                source: m.source,
+                version: m.version,
+            });
+        }
         let inputs = inputs_of(&dist_state);
         // Unchanged since the previous version (and no expiry): keep it.
         if valid_days == 0
@@ -773,7 +1174,7 @@ fn publish(cx: &PublishCx) -> Result<Option<Digest>> {
             view.put(&format!("dists/{name}"), old)?;
             continue;
         }
-        let gen_dist = generate_dist(cx, name, def, &pkgs, valid_days)?;
+        let gen_dist = generate_dist(cx, name, def, &pkgs, &srcs, valid_days)?;
         for (rel, data) in gen_dist {
             let (d, n) = cx.store.put_bytes(&data)?;
             view.put(
@@ -802,6 +1203,7 @@ fn generate_dist(
     name: &str,
     def: &DistDef,
     pkgs: &[Pkg],
+    srcs: &[Src],
     valid_days: i64,
 ) -> Result<Vec<(String, Vec<u8>)>> {
     let settings = &cx.repo.settings;
@@ -901,6 +1303,47 @@ fn generate_dist(
                 &mut out,
                 format!("{base}/Release"),
                 component_release(&meta, comp, arch).into_bytes(),
+                true,
+                false,
+            );
+        }
+    }
+    // Sources for every component once the dist has source packages, so
+    // a deb-src line for any of them works.
+    if !srcs.is_empty() {
+        for comp in &def.components {
+            let text = crate::source::sources_text(
+                srcs.iter()
+                    .filter(|s| &s.comp == comp)
+                    .map(|s| (s.source.clone(), s.version.clone(), s.stanza.clone()))
+                    .collect(),
+            );
+            let base = format!("{comp}/source");
+            add(
+                &mut out,
+                format!("{base}/Sources"),
+                text.clone().into_bytes(),
+                true,
+                true,
+            );
+            add(
+                &mut out,
+                format!("{base}/Sources.gz"),
+                gzip(text.as_bytes())?,
+                true,
+                true,
+            );
+            add(
+                &mut out,
+                format!("{base}/Sources.xz"),
+                xz(text.as_bytes())?,
+                true,
+                true,
+            );
+            add(
+                &mut out,
+                format!("{base}/Release"),
+                component_release(&meta, comp, "source").into_bytes(),
                 true,
                 false,
             );

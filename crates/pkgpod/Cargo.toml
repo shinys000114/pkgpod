@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 pkgpod-base.workspace = true
+pkgpod-deb.workspace = true
 pkgpod-server.workspace = true
 clap.workspace = true
 reqwest = { workspace = true, features = ["form"] }
