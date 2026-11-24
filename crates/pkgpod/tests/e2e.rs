@@ -586,7 +586,7 @@ fn console_login_pages_and_csrf() {
     // page, usage and actions open.
     let src = s.url("/web/");
     type Fields<'a> = &'a [(&'a str, &'a str)];
-    let choices: [(&str, &str, &str, Fields); 10] = [
+    let choices: [(&str, &str, &str, Fields); 11] = [
         ("deb", "hosted", "c-deb", &[("first_dist", "noble")]),
         (
             "deb",
@@ -602,6 +602,7 @@ fn console_login_pages_and_csrf() {
         ("cargo", "hosted", "c-cargo", &[]),
         ("go", "hosted", "c-go", &[]),
         ("apk", "hosted", "c-apk", &[]),
+        ("rpm", "hosted", "c-rpm", &[]),
     ];
     for (format, kind, name, extra) in choices {
         let mut form = vec![("format", format), ("kind", kind), ("name", name)];
@@ -4625,6 +4626,7 @@ fn serving_root_lists_trees_not_registries() {
         ("tree-files", "files"),
         ("tree-pypi", "pypi"),
         ("tree-apk", "apk"),
+        ("tree-rpm", "rpm"),
         ("reg-npm", "npm"),
         ("reg-oci", "oci"),
         ("reg-cargo", "cargo"),
@@ -4641,7 +4643,13 @@ fn serving_root_lists_trees_not_registries() {
     // The listing names what is browsed; registries answer their clients.
     let (st, root) = get(&s.url("/"), None);
     assert_eq!(st, 200);
-    for name in ["tree-deb", "tree-files", "tree-pypi", "tree-apk"] {
+    for name in [
+        "tree-deb",
+        "tree-files",
+        "tree-pypi",
+        "tree-apk",
+        "tree-rpm",
+    ] {
         assert!(root.contains(name), "{name}: {root}");
     }
     for name in ["reg-npm", "reg-oci", "reg-cargo", "reg-go", "hidden-oci"] {
@@ -5083,32 +5091,64 @@ fn go_modules_through_the_proxy() {
     }
 }
 
-/// Alpine images here (none is pulled): apk 2 and apk 3 where they are.
-/// With PKGPOD_REQUIRE_TOOLS (CI), having none fails instead of skipping.
-fn alpine_images() -> Vec<&'static str> {
+/// The images of `wanted` that are here (none is pulled). With
+/// PKGPOD_REQUIRE_TOOLS (CI), having none fails instead of skipping.
+fn images_here(wanted: &[&'static str]) -> Vec<&'static str> {
     if !have("docker") {
         return Vec::new();
     }
-    let here: Vec<&'static str> = [
+    let here: Vec<&'static str> = wanted
+        .iter()
+        .copied()
+        .filter(|i| {
+            Command::new("docker")
+                .args(["image", "inspect", i])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        })
+        .collect();
+    if here.is_empty() && std::env::var_os("PKGPOD_REQUIRE_TOOLS").is_some() {
+        panic!("none of {wanted:?} is here (docker pull it)");
+    }
+    here
+}
+
+/// Alpine images: apk 2 (3.22) and apk 3 (3.23).
+fn alpine_images() -> Vec<&'static str> {
+    images_here(&[
         "alpine:3.22",
         "caddy:2.10-alpine",
         "alpine:3.23",
         "nginx:1.29-alpine",
-    ]
-    .into_iter()
-    .filter(|i| {
-        Command::new("docker")
-            .args(["image", "inspect", i])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-    })
-    .collect();
-    if here.is_empty() && std::env::var_os("PKGPOD_REQUIRE_TOOLS").is_some() {
-        panic!("no Alpine image (docker pull alpine:3.22 alpine:3.23)");
-    }
-    here
+    ])
+}
+
+/// Runs `script` with sh in `image` on the host's network.
+fn docker_sh(image: &str, script: &str) -> (bool, String) {
+    let o = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "--network",
+            "host",
+            "--entrypoint",
+            "sh",
+            image,
+            "-c",
+            script,
+        ])
+        .output()
+        .unwrap();
+    (
+        o.status.success(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        ),
+    )
 }
 
 /// Runs `script` in `image` on the host's network, with `key` (when
@@ -5230,4 +5270,101 @@ fn alpine_packages_with_apk() {
         let (ok, out) = in_alpine(image, None, &script(""));
         assert!(!ok && out.contains("UNTRUSTED"), "{image}: {out}");
     }
+}
+
+#[test]
+fn rpm_packages_with_dnf() {
+    let images = images_here(&["fedora:43", "rockylinux:9"]);
+    if images.is_empty() || !have("gpg") {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&[
+        "key",
+        "generate",
+        "main",
+        "pkgpod e2e <e2e@example.invalid>",
+    ])
+    .unwrap();
+    s.cli(&["repo", "create", "rpms", "-f", "rpm"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "rpms", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../pkgpod-rpm/tests/fixtures");
+    let c = reqwest::blocking::Client::new();
+    let upload = |file: &str| {
+        let r = c
+            .put(s.url("/rpms/upload?group=el"))
+            .basic_auth("token", Some(&tok))
+            .body(std::fs::read(fixtures.join(file)).unwrap())
+            .send()
+            .unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    let (st, out) = upload("hello-rpm-1.0-1.noarch.rpm");
+    assert_eq!(st, 201, "{out}");
+    s.cli(&["label", "rpms", "first"]).unwrap();
+    for f in ["hello-rpm-1.1-1.noarch.rpm", "tool-rpm-0.1-1.x86_64.rpm"] {
+        let (st, out) = upload(f);
+        assert_eq!(st, 201, "{out}");
+    }
+    let base = s.url("/rpms/");
+    // dnf fetches gpgkey without the repository's username and password:
+    // they go in its URL.
+    let key_url = s
+        .url("/rpms/key.asc")
+        .replacen("http://", &format!("http://token:{tok}@"), 1);
+    let repo = |at: &str| {
+        format!(
+            "cat > /etc/yum.repos.d/pk.repo <<'EOF'\n[pk]\nname=pk\nbaseurl={base}{at}el/\n\
+             enabled=1\ngpgcheck=0\nrepo_gpgcheck=1\ngpgkey={key_url}\n\
+             username=token\npassword={tok}\nEOF\n"
+        )
+    };
+    for image in images {
+        let dnf = "dnf -y --disablerepo='*' --enablerepo=pk";
+        let (ok, out) = docker_sh(
+            image,
+            &format!(
+                "set -e\n{}{dnf} install tool-rpm\ntool-rpm\nhello-rpm",
+                repo("")
+            ),
+        );
+        assert!(
+            ok && out.contains("tool-rpm 0.1") && out.contains("hello-rpm 1.1"),
+            "{image}: {out}"
+        );
+        // A labelled version, as it was.
+        let (ok, out) = docker_sh(
+            image,
+            &format!(
+                "set -e\n{}{dnf} install hello-rpm\nhello-rpm",
+                repo("@first/")
+            ),
+        );
+        assert!(ok && out.contains("hello-rpm 1.0"), "{image}: {out}");
+    }
+    // The repodata parts live through a collection: repodata made again
+    // from them (unsigned now) after one, and a deep check.
+    s.cli(&["gc", "--grace-hours", "0"]).unwrap();
+    s.cli(&["repo", "set", "rpms", "sign=false"]).unwrap();
+    let r = c
+        .get(s.url("/rpms/el/repodata/repomd.xml"))
+        .basic_auth("token", Some(&tok))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert!(r.text().unwrap().contains("-primary.xml.gz"));
+    let (ok, out) = s.admin(&["check", "--deep"]);
+    assert!(ok, "{out}");
+    s.cli(&["repo", "set", "rpms", "sign=true"]).unwrap();
+    // What dnf checked with repo_gpgcheck.
+    let r = c
+        .get(s.url("/rpms/el/repodata/repomd.xml.asc"))
+        .basic_auth("token", Some(&tok))
+        .send()
+        .unwrap();
+    assert!(r.text().unwrap().contains("BEGIN PGP SIGNATURE"));
 }

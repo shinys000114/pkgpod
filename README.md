@@ -28,6 +28,8 @@ Status: in development, nothing released.
   zip (`git archive`).
 - **Alpine**: apk repositories by branch and repository, with an
   APKINDEX signed per version (tried with apk 2 and 3).
+- **RPM**: repositories for dnf and yum by group, with repodata made
+  and signed per version (tried with dnf 4 and 5).
 - Repositories are reached by their own addresses (host name and path);
   a reverse proxy in front only provides certificates. There is no
   pull-through proxy: packages from public registries are imported or
@@ -68,7 +70,7 @@ Snapshots: `pkgpod label ppa release-1`, then
 repositories: `<address>/-/label/release-1/`).
 
 Other formats are made the same way (`pkgpod repo create <name> -f
-files|oci|pypi|npm|cargo|go|apk`); each repository's page in the console says how its
+files|oci|pypi|npm|cargo|go|apk|rpm`); each repository's page in the console says how its
 clients use it.
 
 ## Backup, restore and upgrading

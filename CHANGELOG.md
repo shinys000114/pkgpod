@@ -30,6 +30,8 @@ Formats:
   APKINDEX per architecture signed with the server's RSA key (made on
   first use, kept in `<data_dir>/rsa` and backed up); noarch packages in
   every architecture.
+- **RPM**: packages by group, repodata (primary, filelists, other) as
+  createrepo_c makes it, repomd.xml signed for `repo_gpgcheck`.
 
 Everywhere: versions of every hosted repository with labels
 (`@label` addresses; `-/label/<label>/` for npm), diffs, rollback and
