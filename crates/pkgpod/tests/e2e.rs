@@ -676,6 +676,15 @@ fn deb_mirror_of_a_hosted_repository() {
         ])
         .unwrap_err();
     assert!(e.contains("not what its index says"), "{e}");
+    // The promoted copy is the repository's own, whatever the tree does.
+    let pw = std::fs::read_to_string(s.dir.path().join("data/admin-password")).unwrap();
+    let kept = reqwest::blocking::Client::new()
+        .get(s.url("/kept/pool/main/m/mirrored/mirrored_1.0_amd64.deb"))
+        .basic_auth("admin", Some(pw.trim()))
+        .send()
+        .unwrap();
+    assert_eq!(kept.status().as_u16(), 200);
+    assert_eq!(kept.bytes().unwrap().as_ref(), good.as_slice());
     std::fs::write(&pooled, good).unwrap();
 
     // A wrong keyring fails the sync and leaves the tree as it was.
@@ -971,6 +980,46 @@ fn resigned_deb_mirror_with_apt() {
     );
     let out = apt(&b, &["download", "resigned"]);
     assert!(!out.status.success());
+
+    // An unknown key is refused when set.
+    let e = s.cli(&["repo", "set", "mir", "key=nosuch"]).unwrap_err();
+    assert!(e.contains("nosuch"), "{e}");
+    // A component's Release is the tree's, not signed by us.
+    let (st, crel) = get(&s.url("/mir/dists/stable/main/binary-amd64/Release"), None);
+    assert_eq!(st, 200);
+    assert!(!crel.contains("PGP"), "{crel}");
+    assert_eq!(
+        get(
+            &s.url("/mir/dists/stable/main/binary-amd64/InRelease"),
+            None
+        )
+        .0,
+        404
+    );
+
+    // A tree received unchecked is checked before it is signed: with a
+    // keyring that is not the upstream's, nothing is signed.
+    s.cli(&[
+        "repo",
+        "create",
+        "raw",
+        "-k",
+        "mirror",
+        "-s",
+        &source,
+        "-s",
+        "dists=stable",
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let out = s.cli(&["sync", "raw", "--wait"]).unwrap();
+    assert!(out.contains("ok:"), "{out}");
+    let wrong = format!("keyring={our_key}");
+    s.cli(&["repo", "set", "raw", "resign=true", "key=ours", &wrong])
+        .unwrap();
+    assert_eq!(get(&s.url("/raw/dists/stable/InRelease"), None).0, 503);
+    assert_eq!(get(&s.url("/raw/dists/stable/Release.gpg"), None).0, 503);
 
     // A change of key is followed without a sync.
     s.cli(&["repo", "set", "mir", "key=main"]).unwrap();
