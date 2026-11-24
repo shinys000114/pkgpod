@@ -6556,3 +6556,42 @@ fn addresses_with_a_path_prefix() {
         "{ids:?}"
     );
 }
+
+#[test]
+fn helm_push_to_an_oci_repository() {
+    let images = images_here(&["alpine/helm:3.19.0", "alpine/helm:4.3.2"]);
+    if images.is_empty() {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&["repo", "create", "charts-oci", "-f", "oci"])
+        .unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "charts-oci", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let host = format!("127.0.0.1:{}", s.serve_port);
+    for (n, image) in images.into_iter().enumerate() {
+        let v = format!("0.{}.0", n + 1);
+        let (ok, out) = docker_sh(
+            image,
+            &format!(
+                "set -e; export HOME=/tmp; cd /tmp; helm create web >/dev/null; \
+                 sed -i 's/^version: .*/version: {v}/' web/Chart.yaml; helm package web >/dev/null; \
+                 helm registry login {host} --insecure --plain-http -u token -p {tok}; \
+                 helm push web-{v}.tgz oci://{host}/charts-oci --plain-http; \
+                 mkdir -p /tmp/got; helm pull oci://{host}/charts-oci/web --version {v} --plain-http -d /tmp/got; ls /tmp/got; \
+                 helm template x oci://{host}/charts-oci/web --version {v} --plain-http | grep -c '^kind: Deployment'"
+            ),
+        );
+        assert!(
+            ok && out.contains(&format!("web-{v}.tgz")),
+            "{image}: {out}"
+        );
+        assert!(
+            out.lines().any(|l| l == "1"),
+            "{image}: helm template: {out}"
+        );
+    }
+}
