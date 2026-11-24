@@ -30,7 +30,7 @@ use crate::serve::{At, percent_encode, status};
 use crate::{App, Error, Result, Served};
 
 /// Formats whose proxies are served.
-pub const FORMATS: &[&str] = &["go", "maven", "npm"];
+pub const FORMATS: &[&str] = &["go", "maven", "npm", "pypi"];
 
 /// Largest file fetched.
 pub const MAX_FILE: u64 = 4 << 30;
@@ -54,10 +54,42 @@ pub struct Asked {
     pub expect: Option<Expect>,
 }
 
+/// What to ask the upstream for a document in (pypi's JSON).
+fn accept(format: &str, a: &Asked) -> Option<&'static str> {
+    (format == "pypi" && a.kind == CacheKind::Meta).then_some("application/vnd.pypi.simple.v1+json")
+}
+
+/// `rel` as a URL against the document at `doc` (`../../files/x`).
+pub fn resolve(doc: &str, rel: &str) -> Option<String> {
+    if rel.starts_with("https://") || rel.starts_with("http://") {
+        return Some(rel.to_string());
+    }
+    let (scheme, rest) = doc.split_once("://")?;
+    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let mut segs: Vec<&str> = if rel.starts_with('/') {
+        Vec::new()
+    } else {
+        let mut v: Vec<&str> = path.split('/').collect();
+        v.pop();
+        v
+    };
+    for s in rel.trim_start_matches('/').split('/') {
+        match s {
+            ".." => {
+                segs.pop();
+            }
+            "." => {}
+            s => segs.push(s),
+        }
+    }
+    Some(format!("{scheme}://{host}/{}", segs.join("/")))
+}
+
 /// A digest a file must have.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expect {
     Sha1(String),
+    Sha256(String),
     Sha512(Vec<u8>),
 }
 
@@ -217,12 +249,60 @@ fn npm(rel: &[String]) -> Option<Asked> {
     }
 }
 
+/// PyPI's simple API: a project's page (metadata, asked for upstream in
+/// PEP 691 JSON; served as JSON or HTML, its files through here) and its
+/// files (`files/<project>/<file>`, with PEP 658 `.metadata`).
+fn pypi(rel: &[String]) -> Option<Asked> {
+    let a = |path: String, kind, name: String, version: String, count| Asked {
+        path,
+        kind,
+        name,
+        version,
+        count,
+        url: None,
+        expect: None,
+    };
+    match rel {
+        [s, p] if s == "simple" => {
+            let n = pkgpod_pypi::dist::normalize(p);
+            Some(a(
+                format!("simple/{n}/"),
+                CacheKind::Meta,
+                n,
+                String::new(),
+                false,
+            ))
+        }
+        [f, p, file] if f == "files" => {
+            let n = pkgpod_pypi::dist::normalize(p);
+            let meta = file.ends_with(".metadata");
+            let stem = file.trim_end_matches(".metadata");
+            let version = stem
+                .strip_suffix(".tar.gz")
+                .or_else(|| stem.strip_suffix(".zip"))
+                .and_then(|x| x.rsplit_once('-').map(|y| y.1))
+                .or_else(|| stem.strip_suffix(".whl").and_then(|x| x.split('-').nth(1)))
+                .unwrap_or("")
+                .to_string();
+            Some(a(
+                format!("files/{n}/{}", percent_encode(file)),
+                CacheKind::File,
+                n,
+                version,
+                !meta,
+            ))
+        }
+        _ => None,
+    }
+}
+
 /// What a request is, for a format.
 pub fn classify(format: &str, rel: &[String]) -> Option<Asked> {
     match format {
         "go" => go(rel),
         "maven" => maven(rel),
         "npm" => npm(rel),
+        "pypi" => pypi(rel),
         _ => None,
     }
 }
@@ -232,6 +312,11 @@ pub fn classify(format: &str, rel: &[String]) -> Option<Asked> {
 /// document's tarball URL and integrity). False if the upstream has no
 /// such file.
 async fn prepare(app: &Arc<App>, r: &RepoInfo, up: &Upstream, a: &mut Asked) -> Result<bool> {
+    if r.format == "pypi" && a.kind == CacheKind::Meta {
+        // The upstream is an index (…/simple/): its project page.
+        a.url = Some(format!("{}{}/", up.base, a.name));
+        return Ok(true);
+    }
     if a.kind != CacheKind::File {
         return Ok(true);
     }
@@ -308,6 +393,62 @@ async fn prepare(app: &Arc<App>, r: &RepoInfo, up: &Upstream, a: &mut Asked) -> 
             }
             Ok(false)
         }
+        "pypi" => {
+            let have = {
+                let (app2, name, path) = (app.clone(), r.name.clone(), a.path.clone());
+                tokio::task::spawn_blocking(move || app2.engine.cache_get(&name, &path))
+                    .await
+                    .map_err(|e| Error::Invalid(e.to_string()))??
+            };
+            if have.is_some_and(|h| h.kind == CacheKind::File) {
+                return Ok(true);
+            }
+            let doc_url = format!("{}{}/", up.base, a.name);
+            let doc = Asked {
+                path: format!("simple/{}/", a.name),
+                kind: CacheKind::Meta,
+                name: a.name.clone(),
+                version: String::new(),
+                count: false,
+                url: Some(doc_url.clone()),
+                expect: None,
+            };
+            let Got::Row(row) = get(app, r, up, &doc).await? else {
+                return Ok(false);
+            };
+            let Some(v) = read_json(r, &row).await else {
+                return Ok(false);
+            };
+            let file = a.path.rsplit('/').next().unwrap_or("").to_string();
+            let file = String::from_utf8_lossy(&crate::serve::percent_decode(&file)).into_owned();
+            let (want, meta) = match file.strip_suffix(".metadata") {
+                Some(f) => (f.to_string(), true),
+                None => (file.clone(), false),
+            };
+            for f in v["files"].as_array().into_iter().flatten() {
+                if f["filename"].as_str() != Some(want.as_str()) {
+                    continue;
+                }
+                let Some(u) = f["url"]
+                    .as_str()
+                    .and_then(|u| resolve(&doc_url, u.split('#').next().unwrap_or(u)))
+                else {
+                    return Ok(false);
+                };
+                let hashes = if meta {
+                    f.get("core-metadata")
+                        .or_else(|| f.get("dist-info-metadata"))
+                } else {
+                    f.get("hashes")
+                };
+                a.expect = hashes
+                    .and_then(|h| h["sha256"].as_str())
+                    .map(|h| Expect::Sha256(h.to_ascii_lowercase()));
+                a.url = Some(if meta { format!("{u}.metadata") } else { u });
+                return Ok(true);
+            }
+            Ok(false)
+        }
         _ => Ok(true),
     }
 }
@@ -327,6 +468,18 @@ fn hash_file(p: &std::path::Path, e: &Expect) -> std::io::Result<bool> {
     match e {
         Expect::Sha1(want) => {
             let mut h = sha1::Sha1::new();
+            loop {
+                let n = f.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                h.update(&buf[..n]);
+            }
+            let got: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+            Ok(&got == want)
+        }
+        Expect::Sha256(want) => {
+            let mut h = sha2::Sha256::new();
             loop {
                 let n = f.read(&mut buf)?;
                 if n == 0 {
@@ -364,6 +517,7 @@ fn name_doc(format: &str, name: &str) -> Option<String> {
         // Groups name a Maven artifact by its directory.
         "maven" => Some(format!("{name}/maven-metadata.xml")),
         "npm" => Some(npm_path(name)),
+        "pypi" => Some(format!("simple/{name}/")),
         _ => None,
     }
 }
@@ -470,6 +624,9 @@ async fn get(app: &Arc<App>, r: &RepoInfo, up: &Upstream, a: &Asked) -> Result<G
         .clone()
         .unwrap_or_else(|| format!("{}{}", up.base, a.path));
     let mut req = client().get(&url);
+    if let Some(a) = accept(&r.format, a) {
+        req = req.header(header::ACCEPT, a);
+    }
     if let Some(row) = have.as_ref().filter(|r| r.kind == CacheKind::Meta) {
         if !row.etag.is_empty() {
             req = req.header(header::IF_NONE_MATCH, &row.etag);
@@ -693,6 +850,21 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
             .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
         return resp;
     }
+    if r.format == "pypi" && a.kind == CacheKind::Meta {
+        let base = crate::serve::client_base(at.route.as_ref(), &at.host, &at.base, &req);
+        let Some(v) = read_json(&r, &row).await else {
+            return text(
+                StatusCode::BAD_GATEWAY,
+                "the upstream's project page is not PEP 691 JSON".into(),
+            );
+        };
+        let json = req
+            .headers()
+            .get(header::ACCEPT)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|a| a.contains("application/vnd.pypi.simple.v1+json"));
+        return pypi_page(&v, &base, &a.name, json, method == Method::HEAD);
+    }
     let counts = crate::stats::counts(req.method(), req.headers());
     let file = r.store().path(&sha);
     let name = at.rel.last().cloned().unwrap_or_default();
@@ -756,6 +928,63 @@ pub async fn prefetch(app: &Arc<App>, r: &RepoInfo, paths: &[String]) -> Result<
     Ok(out)
 }
 
+/// A project's page from its PEP 691 JSON, its files through here.
+fn pypi_page(v: &Value, base: &str, project: &str, json: bool, head: bool) -> Response {
+    let html = crate::serve::html;
+    let mut files = Vec::new();
+    let mut links = String::new();
+    for f in v["files"].as_array().into_iter().flatten() {
+        let Some(name) = f["filename"].as_str() else {
+            continue;
+        };
+        let url = format!("{base}files/{project}/{}", percent_encode(name));
+        let mut g = f.clone();
+        g["url"] = json!(url);
+        let sha = f["hashes"]["sha256"].as_str().unwrap_or("");
+        let mut a = format!("<a href=\"{}#sha256={}\"", html(&url), html(sha));
+        if let Some(r) = f["requires-python"].as_str() {
+            a.push_str(&format!(" data-requires-python=\"{}\"", html(r)));
+        }
+        match &f["yanked"] {
+            Value::String(y) => a.push_str(&format!(" data-yanked=\"{}\"", html(y))),
+            Value::Bool(true) => a.push_str(" data-yanked=\"\""),
+            _ => {}
+        }
+        if let Some(m) = f
+            .get("core-metadata")
+            .or_else(|| f.get("dist-info-metadata"))
+            .and_then(|m| m["sha256"].as_str())
+        {
+            a.push_str(&format!(
+                " data-core-metadata=\"sha256={0}\" data-dist-info-metadata=\"sha256={0}\"",
+                html(m)
+            ));
+        }
+        a.push_str(&format!(">{}</a><br/>\n", html(name)));
+        links.push_str(&a);
+        files.push(g);
+    }
+    let (ct, body) = if json {
+        let mut out = v.clone();
+        out["files"] = json!(files);
+        ("application/vnd.pypi.simple.v1+json", out.to_string())
+    } else {
+        (
+            "text/html; charset=utf-8",
+            format!(
+                "<!DOCTYPE html>\n<html>\n<head><meta name=\"pypi:repository-version\" content=\"1.0\"><title>Links for {0}</title></head>\n<body>\n<h1>Links for {0}</h1>\n{links}</body>\n</html>\n",
+                html(project)
+            ),
+        )
+    };
+    let mut r = Response::new(Body::from(if head { String::new() } else { body }));
+    r.headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(ct));
+    r.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    r
+}
+
 fn text(st: StatusCode, m: String) -> Response {
     let mut r = Response::new(Body::from(format!("{m}\n")));
     *r.status_mut() = st;
@@ -782,6 +1011,44 @@ mod tests {
 
     fn v(s: &[&str]) -> Vec<String> {
         s.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn urls_and_pypi() {
+        assert_eq!(
+            resolve("http://h/py/simple/foo/", "../../files/foo/foo-1.0.whl").as_deref(),
+            Some("http://h/py/files/foo/foo-1.0.whl")
+        );
+        assert_eq!(
+            resolve("http://h/a/b", "/x/y").as_deref(),
+            Some("http://h/x/y")
+        );
+        assert_eq!(
+            resolve("http://h/a/", "https://o/z").as_deref(),
+            Some("https://o/z")
+        );
+        let a = classify("pypi", &v(&["simple", "Foo.Bar"])).unwrap();
+        assert_eq!(
+            (a.kind, a.name.as_str(), a.path.as_str()),
+            (CacheKind::Meta, "foo-bar", "simple/foo-bar/")
+        );
+        let a = classify(
+            "pypi",
+            &v(&["files", "foo-bar", "foo_bar-1.2-py3-none-any.whl"]),
+        )
+        .unwrap();
+        assert_eq!(
+            (a.kind, a.version.as_str(), a.count),
+            (CacheKind::File, "1.2", true)
+        );
+        let a = classify("pypi", &v(&["files", "foo-bar", "foo_bar-1.2.tar.gz"])).unwrap();
+        assert_eq!(a.version, "1.2");
+        let a = classify(
+            "pypi",
+            &v(&["files", "foo-bar", "foo_bar-1.2-py3-none-any.whl.metadata"]),
+        )
+        .unwrap();
+        assert!(!a.count);
     }
 
     #[test]

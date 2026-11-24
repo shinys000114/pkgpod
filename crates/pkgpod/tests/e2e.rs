@@ -3047,7 +3047,11 @@ fn download_counts() {
         .unwrap()
         .trim()
         .to_string();
-    let c = reqwest::blocking::Client::new();
+    // No pooled connections: the server restarts on the same port.
+    let c = reqwest::blocking::Client::builder()
+        .pool_max_idle_per_host(0)
+        .build()
+        .unwrap();
     for (repo, path) in [
         ("f", "tool/1.2/tool.tar.gz"),
         ("f", "docs/readme.txt"),
@@ -4618,6 +4622,116 @@ fn npm_proxy_cache() {
     assert_eq!(r.status().as_u16(), 502);
     let cache = s.json(&["cache", "bp"]).to_string();
     assert!(!cache.contains("bad-1.0.0.tgz"), "{cache}");
+}
+
+/// A PyPI proxy of another pkgpod's index, with pip.
+#[test]
+fn pypi_proxy_cache() {
+    if !have("python3")
+        || !Command::new("python3")
+            .args(["-m", "pip", "--version"])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    {
+        return;
+    }
+    let up = Server::start();
+    up.cli(&["repo", "create", "py", "-f", "pypi", "-s", "public=true"])
+        .unwrap();
+    let ut = up
+        .cli(&["token", "create", "w", "--repos", "py", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let d = up.dir.path().join("dists");
+    std::fs::create_dir_all(&d).unwrap();
+    for (v, kind) in [("1.0", "wheel"), ("1.0", "sdist"), ("1.1", "wheel")] {
+        let f = make_dist(&d, "Foo.Bar_baz", v, kind, "", 0);
+        let (st, body) = twine_upload(&up.url("/py/"), Some(("__token__", &ut)), &f);
+        assert_eq!(st, 200, "{body}");
+    }
+    let s = Server::start();
+    s.cli(&[
+        "repo",
+        "create",
+        "pp",
+        "-f",
+        "pypi",
+        "-k",
+        "proxy",
+        "-s",
+        &format!("upstream={}", up.url("/py/simple/")),
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let index = s.url("/pp/simple/");
+    let (ok, out) = pip(
+        &["--index-url", &index, "foo-bar-baz==1.0"],
+        &s.dir.path().join("t1"),
+    );
+    assert!(ok, "{out}");
+    let v = std::fs::read_to_string(s.dir.path().join("t1/foo_bar_baz/__init__.py")).unwrap();
+    assert!(v.contains("'1.0'"), "{v}");
+    // The page links files through here, with their hashes.
+    let page = reqwest::blocking::get(s.url("/pp/simple/foo-bar-baz/"))
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(
+        page.contains(&format!(
+            "href=\"{}files/foo-bar-baz/foo_bar_baz-1.1-",
+            s.url("/pp/")
+        )),
+        "{page}"
+    );
+    assert!(page.contains("#sha256="), "{page}");
+    assert_eq!(s.json(&["downloads", "pp"])["total"], 1);
+    // With the upstream gone, from the cache.
+    drop(up);
+    let (ok, out) = pip(
+        &["--index-url", &index, "foo-bar-baz==1.0"],
+        &s.dir.path().join("t2"),
+    );
+    assert!(ok, "{out}");
+    // A file whose hash is not the page's.
+    let sport = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let doc = serde_json::json!({
+        "meta": {"api-version": "1.0"}, "name": "bad",
+        "files": [{"filename": "bad-1.0.tar.gz", "url": format!("http://127.0.0.1:{sport}/files/bad-1.0.tar.gz"),
+                   "hashes": {"sha256": "0".repeat(64)}}],
+    });
+    stub_upstream_on(
+        sport,
+        vec![
+            ("/simple/bad/".into(), doc.to_string().into_bytes()),
+            ("/files/bad-1.0.tar.gz".into(), b"not it".to_vec()),
+        ],
+    );
+    s.cli(&[
+        "repo",
+        "create",
+        "bp",
+        "-f",
+        "pypi",
+        "-k",
+        "proxy",
+        "-s",
+        &format!("upstream=http://127.0.0.1:{sport}/simple/"),
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let r = reqwest::blocking::get(s.url("/bp/files/bad/bad-1.0.tar.gz")).unwrap();
+    assert_eq!(r.status().as_u16(), 502);
+    assert!(
+        !s.json(&["cache", "bp"])
+            .to_string()
+            .contains("bad-1.0.tar.gz")
+    );
 }
 
 #[test]
