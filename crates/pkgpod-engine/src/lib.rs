@@ -7,6 +7,7 @@
 //! Formats plug in through [`format::Format`]; the engine never looks
 //! inside a blob.
 
+pub mod cache;
 pub mod check;
 pub mod format;
 pub mod schema;
@@ -62,6 +63,9 @@ pub enum Kind {
     /// Reads other repositories of its format (its members) in order;
     /// holds nothing itself.
     Group,
+    /// Fetches from an upstream registry when asked, and keeps what it
+    /// fetched (a cache, managed by hand); no versions.
+    Proxy,
 }
 
 impl Kind {
@@ -71,6 +75,7 @@ impl Kind {
             Kind::Import => "import",
             Kind::Mirror => "mirror",
             Kind::Group => "group",
+            Kind::Proxy => "proxy",
         }
     }
 
@@ -80,12 +85,13 @@ impl Kind {
             "import" => Kind::Import,
             "mirror" => Kind::Mirror,
             "group" => Kind::Group,
+            "proxy" => Kind::Proxy,
             _ => return Err(Error::Invalid(format!("unknown repository kind {s:?}"))),
         })
     }
 
     pub fn versioned(&self) -> bool {
-        !matches!(self, Kind::Mirror | Kind::Group)
+        !matches!(self, Kind::Mirror | Kind::Group | Kind::Proxy)
     }
 }
 
