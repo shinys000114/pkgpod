@@ -370,8 +370,9 @@ pub async fn run(app: Arc<App>) -> Result<(), String> {
     };
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     tracing::info!("pkgpod {}: management on {addr}", pkgpod_base::version());
-    let mut mgmt =
-        tokio::spawn(async move { listeners::serve_router(&addr, tls, mgmt, stop_rx).await });
+    let mut mgmt = tokio::spawn(async move {
+        listeners::serve_router("management: console and API", &addr, tls, mgmt, stop_rx).await
+    });
     tokio::select! {
         r = &mut mgmt => {
             // The management listener could not start (or failed).

@@ -352,19 +352,33 @@ impl Engine {
             })?;
         self.bump();
         let repo = self.repo(&n.name)?;
-        match repo.kind {
-            Kind::Mirror => std::fs::create_dir_all(repo.tree_dir())?,
-            Kind::Group | Kind::Proxy => {}
-            Kind::Hosted | Kind::Import => {
-                self.commit(
+        let made = match repo.kind {
+            Kind::Mirror => std::fs::create_dir_all(repo.tree_dir()).map_err(|e| {
+                Error::Invalid(format!(
+                    "{}: making its tree {}: {e}",
+                    n.name,
+                    repo.tree_dir().display()
+                ))
+            }),
+            Kind::Group | Kind::Proxy => Ok(()),
+            Kind::Hosted | Kind::Import => self
+                .commit(
                     &repo,
                     None,
                     tree::empty(),
                     "repository created",
                     actor,
                     true,
-                )?;
-            }
+                )
+                .map(|_| ()),
+        };
+        if let Err(e) = made {
+            // Not half there: a repository without its tree or first
+            // version is not one.
+            self.db
+                .write(|tx| tx.execute("DELETE FROM repos WHERE id = ?1", [repo.id]))?;
+            self.bump();
+            return Err(e);
         }
         self.repo(&n.name)
     }

@@ -261,6 +261,37 @@ fn mirrors_have_no_versions() {
     assert!(e.plan_remove("m", &["x".into()], "t").is_err());
 }
 
+/// A mirror whose tree cannot be made is not left half there.
+#[test]
+fn a_repository_that_cannot_be_made_is_not_there() {
+    use std::os::unix::fs::PermissionsExt;
+    let (d, e) = engine();
+    let ro = d.path().join("ro");
+    std::fs::create_dir_all(&ro).unwrap();
+    std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+    e.set_storage("ro", &ro).unwrap();
+    let err = e
+        .create_repo(
+            NewRepo {
+                name: "m".into(),
+                format: "toy".into(),
+                kind: Kind::Mirror,
+                storage: Some("ro".into()),
+                settings: json!({}),
+            },
+            "t",
+        )
+        .unwrap_err()
+        .to_string();
+    std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        err.contains("making its tree") && err.contains("ro/trees/m"),
+        "{err}"
+    );
+    assert!(e.repo("m").is_err());
+    assert!(e.repos().unwrap().is_empty());
+}
+
 #[test]
 fn retention_and_gc() {
     let (_d, e) = engine();
