@@ -161,6 +161,18 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
     let Some(path) = segments(&raw_path) else {
         return status(StatusCode::BAD_REQUEST);
     };
+    // A browser sends cached Basic credentials with a form posted from any
+    // site; it also says where the form came from. Writes from another
+    // origin are refused (clients outside browsers send no Origin).
+    if !matches!(method, Method::GET | Method::HEAD)
+        && let Some(origin) = req
+            .headers()
+            .get(header::ORIGIN)
+            .and_then(|v| v.to_str().ok())
+        && origin.split_once("://").map(|x| x.1) != Some(host.as_str())
+    {
+        return status(StatusCode::FORBIDDEN);
+    }
     // Checking a password is slow on purpose: off the async threads.
     let caller = if req.headers().contains_key(header::AUTHORIZATION) {
         let (app2, h) = (app.clone(), req.headers().clone());
@@ -590,9 +602,15 @@ pub(crate) async fn serve_blob(
         header::CONTENT_TYPE,
         HeaderValue::from_static(content_type(rel)),
     );
+    // A files repository's path may get other content any time: always
+    // revalidated (cheap, by ETag).
     h.insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static(cache_control(rel)),
+        HeaderValue::from_static(if files {
+            "no-cache"
+        } else {
+            cache_control(rel)
+        }),
     );
     h.insert(header::ETAG, HeaderValue::from_str(&etag).expect("hex"));
     match modified {
@@ -606,14 +624,14 @@ pub(crate) async fn serve_blob(
             h.remove(header::LAST_MODIFIED);
         }
     }
-    if files {
-        sandbox(h);
-    }
+    // Whatever was uploaded (an HTML page in a source package, say) is
+    // never run in the server's origin.
+    sandbox(h);
     r
 }
 
-/// Files anyone with write access put there: not run in the origin of
-/// the console or of other repositories.
+/// Content anyone with write access put there (or an upstream did): not
+/// run in the origin of the console or of other repositories.
 fn sandbox(h: &mut HeaderMap) {
     h.insert(
         header::CONTENT_SECURITY_POLICY,
@@ -788,12 +806,14 @@ async fn serve_mirror(
     if r.status().is_success() {
         r.headers_mut().insert(
             header::CACHE_CONTROL,
-            HeaderValue::from_static(cache_control(&rel_s)),
+            HeaderValue::from_static(if files {
+                "no-cache"
+            } else {
+                cache_control(&rel_s)
+            }),
         );
     }
-    if files {
-        sandbox(r.headers_mut());
-    }
+    sandbox(r.headers_mut());
     r
 }
 

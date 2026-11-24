@@ -2365,6 +2365,7 @@ fn files_hosted() {
     let r = c.get(s.url("/f/tools/v1/tool.tar.gz")).send().unwrap();
     assert_eq!(r.status().as_u16(), 200);
     assert_eq!(r.headers()["content-security-policy"], "sandbox");
+    assert_eq!(r.headers()["cache-control"], "no-cache");
     let lm = r.headers()["last-modified"].to_str().unwrap().to_string();
     assert_eq!(r.bytes().unwrap().as_ref(), b"tool one");
     // Since then: not modified, by our time.
@@ -2433,6 +2434,24 @@ fn files_hosted() {
     assert_eq!(put("tools/v1/tool.tar.gz/inner", b"x").0, 409);
     assert_eq!(put("@first/x", b"x").0, 400);
     assert_eq!(put("a/b?path=c/d", b"x").0, 400);
+    // A write from a page of another site (a browser sends the credentials
+    // it has, and where the page came from) is refused.
+    let r = c
+        .put(s.url("/f/from-elsewhere.txt"))
+        .basic_auth("token", Some(&tok))
+        .header("origin", "http://evil.example")
+        .body("x")
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 403);
+    let r = c
+        .put(s.url("/f/from-here.txt"))
+        .basic_auth("token", Some(&tok))
+        .header("origin", s.url("").trim_end_matches('/'))
+        .body("x")
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 201);
     assert_eq!(
         get(&s.url("/f/tools/v1/tool.tar.gz"), None).1,
         "tool one, changed"
@@ -3069,6 +3088,22 @@ fn oci_registry_protocol() {
             .unwrap();
         assert_eq!(r.status().as_u16(), 400, "{bad}");
     }
+
+    // Open uploads are bounded per repository.
+    let mut started = 0;
+    loop {
+        let r = reg
+            .req(reqwest::Method::POST, "/v2/img/many/blobs/uploads/")
+            .send()
+            .unwrap();
+        if r.status().as_u16() != 202 {
+            assert_eq!(r.status().as_u16(), 429);
+            break;
+        }
+        started += 1;
+        assert!(started <= 64, "no bound");
+    }
+    assert_eq!(started, 64);
 
     // Another repository: neither sees nor mounts img's blobs without
     // read access to img.
@@ -4441,6 +4476,8 @@ fn backup_while_working_then_restore() {
         .get("last-modified")
         .map(|v| v.to_str().unwrap().to_string())
         .unwrap_or_else(httpdate_now);
+    assert_eq!(r.headers()["content-security-policy"], "sandbox");
+    assert_eq!(r.headers()["x-content-type-options"], "nosniff");
     let before = r.text().unwrap();
     // And takes uploads, signed with that key.
     let two = build_deb(&debs, "after", "1.0", "amd64", "xz", "");

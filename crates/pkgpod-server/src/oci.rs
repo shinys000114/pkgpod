@@ -43,6 +43,9 @@ use crate::auth::{Caller, Role};
 const MAX_BLOB: u64 = 16 << 30;
 /// Upload sessions older than this are dropped.
 const SESSION_TTL: i64 = 86400;
+/// Upload sessions open at once, per repository and in all.
+const MAX_SESSIONS_REPO: usize = 64;
+const MAX_SESSIONS: usize = 1024;
 
 /// An OCI error reply.
 fn oci_err(st: StatusCode, code: &str, msg: impl Into<String>) -> Response {
@@ -694,6 +697,16 @@ async fn start_upload(cx: &Ctx, req: Request) -> Response {
     let now = pkgpod_base::now();
     let mut s = sessions().lock().unwrap_or_else(|e| e.into_inner());
     s.retain(|_, x| now - x.created < SESSION_TTL);
+    // Each open upload holds a file: bounded per repository and in all.
+    if s.len() >= MAX_SESSIONS
+        || s.values().filter(|x| x.repo == cx.r.name).count() >= MAX_SESSIONS_REPO
+    {
+        return oci_err(
+            StatusCode::TOO_MANY_REQUESTS,
+            "TOOMANYREQUESTS",
+            "too many uploads in progress; try again",
+        );
+    }
     s.insert(
         id.clone(),
         Session {
