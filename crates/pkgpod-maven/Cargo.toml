@@ -1,0 +1,18 @@
+[package]
+name = "pkgpod-maven"
+description = "pkgpod Maven format: Maven repositories (mvn deploy, Gradle) with metadata and checksums made here"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+pkgpod-base.workspace = true
+pkgpod-engine.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+md-5.workspace = true
+jiff.workspace = true

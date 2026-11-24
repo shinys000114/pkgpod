@@ -586,7 +586,7 @@ fn console_login_pages_and_csrf() {
     // page, usage and actions open.
     let src = s.url("/web/");
     type Fields<'a> = &'a [(&'a str, &'a str)];
-    let choices: [(&str, &str, &str, Fields); 12] = [
+    let choices: [(&str, &str, &str, Fields); 13] = [
         ("deb", "hosted", "c-deb", &[("first_dist", "noble")]),
         (
             "deb",
@@ -604,6 +604,7 @@ fn console_login_pages_and_csrf() {
         ("apk", "hosted", "c-apk", &[]),
         ("rpm", "hosted", "c-rpm", &[]),
         ("helm", "hosted", "c-helm", &[]),
+        ("maven", "hosted", "c-maven", &[]),
     ];
     for (format, kind, name, extra) in choices {
         let mut form = vec![("format", format), ("kind", kind), ("name", name)];
@@ -4629,6 +4630,7 @@ fn serving_root_lists_trees_not_registries() {
         ("tree-apk", "apk"),
         ("tree-rpm", "rpm"),
         ("tree-helm", "helm"),
+        ("tree-maven", "maven"),
         ("reg-npm", "npm"),
         ("reg-oci", "oci"),
         ("reg-cargo", "cargo"),
@@ -4652,6 +4654,7 @@ fn serving_root_lists_trees_not_registries() {
         "tree-apk",
         "tree-rpm",
         "tree-helm",
+        "tree-maven",
     ] {
         assert!(root.contains(name), "{name}: {root}");
     }
@@ -5448,4 +5451,163 @@ fn helm_charts_with_helm() {
             "{image}: helm template: {out}"
         );
     }
+}
+
+/// Runs mvn's `script` in the Maven image with `work` at /work. Plugins
+/// from Maven Central are kept between runs in the volume pkgpod-e2e-m2;
+/// what the tests deploy has a group of its own each run, so nothing
+/// kept there stands in for the server.
+fn mvn_sh(work: &Path, script: &str) -> (bool, String) {
+    let uid = rustix::process::getuid().as_raw();
+    let gid = rustix::process::getgid().as_raw();
+    let o = Command::new("docker")
+        .args(["run", "--rm", "--network", "host", "--entrypoint", "sh"])
+        .arg("-v")
+        .arg(format!("{}:/work", work.display()))
+        .args(["-v", "pkgpod-e2e-m2:/m2", "-w", "/work", MAVEN_IMAGE, "-c"])
+        .arg(format!(
+            "{script}; s=$?; chown -R {uid}:{gid} /work; exit $s"
+        ))
+        .output()
+        .unwrap();
+    (
+        o.status.success(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        ),
+    )
+}
+
+const MAVEN_IMAGE: &str = "maven:3.9-eclipse-temurin-21";
+
+#[test]
+fn maven_deploy_and_depend() {
+    if images_here(&[MAVEN_IMAGE]).is_empty() {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&["repo", "create", "mvn", "-f", "maven"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "mvn", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let base = s.url("/mvn/");
+    let group = format!("org.example.t{}", std::process::id());
+    let work = s.dir.path().join("mvnwork");
+    let project = |dir: &str, version: &str, body: &str, extra: &str| {
+        let d = work.join(dir);
+        std::fs::create_dir_all(d.join("src/main/java/demo")).unwrap();
+        std::fs::write(
+            d.join("pom.xml"),
+            format!(
+                "<project xmlns=\"http://maven.apache.org/POM/4.0.0\">\n<modelVersion>4.0.0</modelVersion>\n\
+                 <groupId>{group}</groupId><artifactId>{dir}</artifactId><version>{version}</version>\n\
+                 <properties><maven.compiler.release>17</maven.compiler.release>\
+                 <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding></properties>\n{extra}\n</project>\n"
+            ),
+        )
+        .unwrap();
+        let class = body
+            .split_whitespace()
+            .skip_while(|w| *w != "class")
+            .nth(1)
+            .unwrap();
+        std::fs::write(d.join(format!("src/main/java/demo/{class}.java")), body).unwrap();
+    };
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(
+        work.join("settings.xml"),
+        format!(
+            "<settings><servers><server><id>pk</id><username>token</username>\
+             <password>{tok}</password></server><server><id>first</id><username>token</username>\
+             <password>{tok}</password></server></servers></settings>\n"
+        ),
+    )
+    .unwrap();
+    let deploy_to = format!(
+        "<distributionManagement><repository><id>pk</id><url>{base}</url></repository>\
+         <snapshotRepository><id>pk</id><url>{base}</url></snapshotRepository></distributionManagement>"
+    );
+    // What is fetched is kept apart by the repository it came from, so
+    // one repository's artifacts do not stand in for another's.
+    let mvn = "mvn -B -q -s /work/settings.xml -Dmaven.repo.local=/m2 -Dmaven.test.skip=true \
+               -Daether.enhancedLocalRepository.split=true \
+               -Daether.enhancedLocalRepository.splitRemoteRepository=true";
+    let deploy = |version: &str, method: &str| {
+        project(
+            "greet",
+            version,
+            &format!(
+                "package demo; public class Greet {{ public static String {method}() {{ return \"{version}\"; }} }}\n"
+            ),
+            &deploy_to,
+        );
+        // Not installed locally: what the projects below get comes from
+        // the server.
+        mvn_sh(
+            &work,
+            &format!("cd greet && {mvn} -Dmaven.install.skip=true deploy"),
+        )
+    };
+    let (ok, out) = deploy("1.0.0", "hello");
+    assert!(ok, "{out}");
+    s.cli(&["label", "mvn", "first"]).unwrap();
+    for _ in 0..2 {
+        let (ok, out) = deploy("1.1.0-SNAPSHOT", "hello2");
+        assert!(ok, "{out}");
+    }
+    // A release is deployed once.
+    let (ok, out) = deploy("1.0.0", "changed");
+    assert!(!ok && out.contains("409"), "{out}");
+    let c = reqwest::blocking::Client::new();
+    let get = |p: &str| {
+        c.get(format!("{base}{p}"))
+            .basic_auth("token", Some(&tok))
+            .send()
+            .unwrap()
+            .text()
+            .unwrap()
+    };
+    let gpath = group.replace('.', "/");
+    let meta = get(&format!("{gpath}/greet/maven-metadata.xml"));
+    assert!(
+        meta.contains("<release>1.0.0</release>")
+            && meta.contains("<version>1.1.0-SNAPSHOT</version>"),
+        "{meta}"
+    );
+    let snap = get(&format!("{gpath}/greet/1.1.0-SNAPSHOT/maven-metadata.xml"));
+    assert!(snap.contains("<buildNumber>2</buildNumber>"), "{snap}");
+    let sha1 = get(&format!("{gpath}/greet/maven-metadata.xml.sha1"));
+    assert_eq!(sha1.len(), 40, "{sha1}");
+    // Projects that depend on it: the release, and the latest SNAPSHOT
+    // build (hello2 is only there); a label's repository has the release
+    // only (a repository id of its own: maven keeps what it fetched apart
+    // by the repository it came from).
+    let depend = |dir: &str, version: &str, call: &str, at: &str| {
+        let id = if at.is_empty() { "pk" } else { "first" };
+        let repos = format!(
+            "<repositories><repository><id>{id}</id><url>{base}{at}</url>\
+             <snapshots><enabled>true</enabled></snapshots></repository></repositories>\
+             <dependencies><dependency><groupId>{group}</groupId><artifactId>greet</artifactId>\
+             <version>{version}</version></dependency></dependencies>"
+        );
+        project(
+            dir,
+            "1.0.0",
+            &format!("package demo; public class App {{ String s = Greet.{call}(); }}\n"),
+            &repos,
+        );
+        mvn_sh(&work, &format!("cd {dir} && {mvn} compile"))
+    };
+    let (ok, out) = depend("app1", "1.0.0", "hello", "");
+    assert!(ok, "{out}");
+    let (ok, out) = depend("app2", "1.1.0-SNAPSHOT", "hello2", "");
+    assert!(ok, "{out}");
+    let (ok, out) = depend("app3", "1.0.0", "hello", "@first/");
+    assert!(ok, "{out}");
+    let (ok, _) = depend("app4", "1.1.0-SNAPSHOT", "hello2", "@first/");
+    assert!(!ok, "the label has no SNAPSHOT");
 }

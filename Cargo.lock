@@ -2426,6 +2426,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pkgpod-maven"
+version = "0.0.0"
+dependencies = [
+ "jiff",
+ "md-5 0.11.0",
+ "pkgpod-base",
+ "pkgpod-engine",
+ "serde_json",
+ "sha1 0.11.0",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "pkgpod-mirror"
 version = "0.0.0"
 dependencies = [
@@ -2513,6 +2526,7 @@ dependencies = [
  "pkgpod-files",
  "pkgpod-go",
  "pkgpod-helm",
+ "pkgpod-maven",
  "pkgpod-mirror",
  "pkgpod-npm",
  "pkgpod-oci",
