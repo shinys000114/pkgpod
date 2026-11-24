@@ -1,0 +1,21 @@
+[package]
+name = "pkgpod-conda"
+description = "pkgpod Conda format: conda channels with repodata per subdir"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+pkgpod-base.workspace = true
+pkgpod-engine.workspace = true
+serde_json.workspace = true
+tar.workspace = true
+zstd.workspace = true
+bzip2.workspace = true
+md-5.workspace = true
+
+[dev-dependencies]
+pkgpod-base = { workspace = true, features = ["testutil"] }

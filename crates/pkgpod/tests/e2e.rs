@@ -581,7 +581,7 @@ fn console_login_pages_and_csrf() {
     // page, usage and actions open.
     let src = s.url("/web/");
     type Fields<'a> = &'a [(&'a str, &'a str)];
-    let choices: [(&str, &str, &str, Fields); 17] = [
+    let choices: [(&str, &str, &str, Fields); 18] = [
         ("deb", "hosted", "c-deb", &[("first_dist", "noble")]),
         (
             "deb",
@@ -604,6 +604,7 @@ fn console_login_pages_and_csrf() {
         ("arch", "hosted", "c-arch", &[]),
         ("nuget", "hosted", "c-nuget", &[]),
         ("composer", "hosted", "c-composer", &[]),
+        ("conda", "hosted", "c-conda", &[]),
     ];
     for (format, kind, name, extra) in choices {
         let mut form = vec![("format", format), ("kind", kind), ("name", name)];
@@ -4652,6 +4653,7 @@ fn serving_root_lists_trees_not_registries() {
         ("tree-rpm", "rpm"),
         ("tree-helm", "helm"),
         ("tree-maven", "maven"),
+        ("tree-conda", "conda"),
         ("tree-gems", "gems"),
         ("tree-arch", "arch"),
         ("reg-npm", "npm"),
@@ -4680,6 +4682,7 @@ fn serving_root_lists_trees_not_registries() {
         "tree-rpm",
         "tree-helm",
         "tree-maven",
+        "tree-conda",
         "tree-gems",
         "tree-arch",
     ] {
@@ -6839,4 +6842,126 @@ fn composer_packages_with_composer() {
     assert!(ok && out.contains("acme/hello 1.0.0"), "{out}");
     let (ok, _) = docker_sh(COMPOSER_IMAGE, &project("@first/", "1.1.0"));
     assert!(!ok, "the label has no 1.1.0");
+}
+
+const MINIFORGE_IMAGE: &str = "condaforge/miniforge3:latest";
+const MICROMAMBA_IMAGE: &str = "mambaorg/micromamba:2.3.3";
+
+#[test]
+fn conda_channel_with_conda_and_micromamba() {
+    if images_here(&[MINIFORGE_IMAGE]).is_empty() {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&["repo", "create", "chan", "-f", "conda"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "chan", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    // Package directories, packed by cph (conda-package-handling) as
+    // conda-build does: .conda and .tar.bz2.
+    let work = s.dir.path().join("condawork");
+    let mut pack = String::from("set -e; cd /work\n");
+    for (name, ver, subdir, deps, ext) in [
+        ("hello-pk", "1.0", "noarch", "[]", "conda"),
+        ("hello-pk", "1.1", "noarch", "[]", "tar.bz2"),
+        (
+            "tool-pk",
+            "0.1",
+            "linux-64",
+            "[\"hello-pk >=1.0\"]",
+            "conda",
+        ),
+    ] {
+        let d = work.join(format!("{name}-{ver}"));
+        std::fs::create_dir_all(d.join("info")).unwrap();
+        std::fs::create_dir_all(d.join("bin")).unwrap();
+        let script = format!("#!/bin/sh\necho {name} {ver}\n");
+        let bin = d.join("bin").join(name);
+        std::fs::write(&bin, &script).unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let noarch = if subdir == "noarch" {
+            r#""noarch": "generic","#
+        } else {
+            r#""arch": "x86_64", "platform": "linux","#
+        };
+        std::fs::write(
+            d.join("info/index.json"),
+            format!(
+                r#"{{"name": "{name}", "version": "{ver}", "build": "0", "build_number": 0, "depends": {deps}, {noarch} "subdir": "{subdir}", "license": "MIT", "timestamp": 1700000000000}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("info/paths.json"),
+            format!(
+                r#"{{"paths": [{{"_path": "bin/{name}", "path_type": "hardlink", "sha256": "{}", "size_in_bytes": {}}}], "paths_version": 1}}"#,
+                pkgpod_base::Digest::of(script.as_bytes()).hex(),
+                script.len()
+            ),
+        )
+        .unwrap();
+        std::fs::write(d.join("info/files"), format!("bin/{name}\n")).unwrap();
+        pack.push_str(&format!(
+            "cph create {name}-{ver} {name}-{ver}-0.{ext} >/dev/null\n"
+        ));
+    }
+    let (ok, out) = docker_sh_in(MINIFORGE_IMAGE, Some(&work), &pack);
+    assert!(ok, "{out}");
+    let c = reqwest::blocking::Client::new();
+    let upload = |file: &str| {
+        let r = c
+            .put(s.url("/chan/upload"))
+            .basic_auth("token", Some(&tok))
+            .body(std::fs::read(work.join(file)).unwrap())
+            .send()
+            .unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    let (st, out) = upload("hello-pk-1.0-0.conda");
+    assert_eq!(st, 201, "{out}");
+    s.cli(&["label", "chan", "first"]).unwrap();
+    for f in ["hello-pk-1.1-0.tar.bz2", "tool-pk-0.1-0.conda"] {
+        let (st, out) = upload(f);
+        assert_eq!(st, 201, "{out}");
+    }
+    let chan = s
+        .url("/chan/")
+        .replacen("http://", &format!("http://token:{tok}@"), 1);
+    // conda: the dependency comes along, the newest version.
+    let (ok, out) = docker_sh(
+        MINIFORGE_IMAGE,
+        &format!(
+            "set -e; conda create -y -q -p /tmp/env --override-channels -c {chan} tool-pk >/dev/null; \
+             /tmp/env/bin/tool-pk; /tmp/env/bin/hello-pk"
+        ),
+    );
+    assert!(
+        ok && out.contains("tool-pk 0.1") && out.contains("hello-pk 1.1"),
+        "{out}"
+    );
+    // A label's channel, as it was.
+    let (ok, out) = docker_sh(
+        MINIFORGE_IMAGE,
+        &format!(
+            "set -e; conda create -y -q -p /tmp/env --override-channels -c {chan}@first/ hello-pk >/dev/null; \
+             /tmp/env/bin/hello-pk"
+        ),
+    );
+    assert!(ok && out.contains("hello-pk 1.0"), "{out}");
+    if !images_here(&[MICROMAMBA_IMAGE]).is_empty() {
+        let (ok, out) = docker_sh(
+            MICROMAMBA_IMAGE,
+            &format!(
+                "set -e; micromamba -r /tmp/mm create -y -q -n t --override-channels -c {chan} tool-pk >/dev/null; \
+                 micromamba -r /tmp/mm run -n t tool-pk; micromamba -r /tmp/mm run -n t hello-pk"
+            ),
+        );
+        assert!(
+            ok && out.contains("tool-pk 0.1") && out.contains("hello-pk 1.1"),
+            "{out}"
+        );
+    }
 }

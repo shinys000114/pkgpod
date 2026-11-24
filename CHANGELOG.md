@@ -56,6 +56,9 @@ Formats:
 - **Composer**: packages.json and p2 metadata made per request; packages
   uploaded as zips (composer.json at their top or in one directory), the
   version from the upload or composer.json.
+- **Conda**: channels with a repodata.json per subdir (noarch and the
+  usual platforms always), `.conda` and `.tar.bz2` packages read for
+  their info/index.json.
 
 Everywhere: versions of every hosted repository with labels
 (`@label` addresses; `-/label/<label>/` for npm), diffs, rollback and
