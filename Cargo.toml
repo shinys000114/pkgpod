@@ -23,6 +23,7 @@ pkgpod-cargo = { path = "crates/pkgpod-cargo" }
 pkgpod-go = { path = "crates/pkgpod-go" }
 pkgpod-apk = { path = "crates/pkgpod-apk" }
 pkgpod-rpm = { path = "crates/pkgpod-rpm" }
+pkgpod-helm = { path = "crates/pkgpod-helm" }
 pkgpod-mirror = { path = "crates/pkgpod-mirror" }
 pkgpod-server = { path = "crates/pkgpod-server" }
 clap = { version = "4.6", features = ["derive", "env"] }
@@ -49,6 +50,7 @@ glob = "0.3"
 semver = "1"
 crc32fast = "1"
 rsa = "0.9"
+yaml-rust2 = "0.13"
 base64 = "0.22"
 httpdate = "1"
 mimalloc = { version = "0.1", default-features = false }

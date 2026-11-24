@@ -671,6 +671,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                         ("go", _) => "Go modules for go (GOPROXY)",
                         ("apk", _) => "Alpine packages for apk, signed per version",
                         ("rpm", _) => "RPM packages for dnf and yum, signed repodata",
+                        ("helm", _) => "Helm charts for helm (index.yaml)",
                         _ => "",
                     }
                     .to_string(),
@@ -887,6 +888,39 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String], host: &str) ->
         out.push(UseLine {
             label: "Note".into(),
             text: "pkgpod is no proxy: packages from npmjs need their own registry (a scope here, the rest from registry.npmjs.org). npm login is not offered; set the token in .npmrc. unpublish and deprecate are operations here.".into(),
+        });
+        return out;
+    }
+    if r.format == "helm" {
+        let login = if r.setting_bool("public") {
+            String::new()
+        } else {
+            " --username token --password <token>".into()
+        };
+        out.push(UseLine {
+            label: "Add the repository".into(),
+            text: format!(
+                "helm repo add {} {base}{login}\nhelm repo update\nhelm search repo {}/",
+                r.name, r.name
+            ),
+        });
+        out.push(UseLine {
+            label: "Install".into(),
+            text: format!(
+                "helm install <release> {}/<chart> --version <version>",
+                r.name
+            ),
+        });
+        out.push(UseLine {
+            label: "Upload".into(),
+            text: format!(
+                "helm package <chart dir>\ncurl -u token:<token> -T <chart>-<version>.tgz {base}upload\npkgpod upload {} <chart>-<version>.tgz",
+                r.name
+            ),
+        });
+        out.push(UseLine {
+            label: "A labelled version".into(),
+            text: format!("helm repo add {}-<label> {base}@<label>/{login}", r.name),
         });
         return out;
     }
@@ -1725,6 +1759,7 @@ fn catalog_words(format: &str) -> (&'static str, [&'static str; 3], bool) {
         "npm" => ("Packages", ["Package", "Version", "Note"], true),
         "cargo" => ("Crates", ["Crate", "Version", "Note"], true),
         "go" => ("Modules", ["Module", "Version", "Note"], true),
+        "helm" => ("Charts", ["Chart", "Version", "Note"], true),
         "deb" => ("Packages", ["Package", "Version", "Where"], true),
         _ => ("Packages", ["Package", "Version", "Where"], true),
     }

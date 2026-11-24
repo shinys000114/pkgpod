@@ -144,6 +144,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "arraydeque"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
+
+[[package]]
 name = "askama"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2406,6 +2412,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pkgpod-helm"
+version = "0.0.0"
+dependencies = [
+ "flate2",
+ "jiff",
+ "pkgpod-base",
+ "pkgpod-engine",
+ "semver",
+ "serde_json",
+ "tar",
+ "yaml-rust2",
+]
+
+[[package]]
 name = "pkgpod-mirror"
 version = "0.0.0"
 dependencies = [
@@ -2492,6 +2512,7 @@ dependencies = [
  "pkgpod-engine",
  "pkgpod-files",
  "pkgpod-go",
+ "pkgpod-helm",
  "pkgpod-mirror",
  "pkgpod-npm",
  "pkgpod-oci",
@@ -4133,6 +4154,17 @@ dependencies = [
  "rand_core 0.6.4",
  "serde",
  "zeroize",
+]
+
+[[package]]
+name = "yaml-rust2"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a8af4469040402b7fe43c26575bab9a3069f0717c4a2931ecf4fb8728ee4cec"
+dependencies = [
+ "arraydeque",
+ "encoding_rs",
+ "hashlink",
 ]
 
 [[package]]
