@@ -329,17 +329,37 @@ fn bool_of(v: &Value, k: &str) -> bool {
 }
 
 impl Deb {
+    /// Adds a dist, or changes one: what `p` leaves out keeps its value
+    /// (an empty value is the default).
     fn dist_set(&self, p: &Value, e: &mut Edit) -> Result<String> {
         let name = str_of(p, "name");
         check_name("dist", name)?;
-        let mut components = str_list(p, "components");
+        let had = dists(e)?.remove(name);
+        let old = had.clone().unwrap_or_default();
+        let given = |k: &str| p.get(k).is_some();
+        let text = |k: &str, was: &str| {
+            if given(k) {
+                str_of(p, k).trim().to_string()
+            } else {
+                was.to_string()
+            }
+        };
+        let mut components = if given("components") || had.is_none() {
+            str_list(p, "components")
+        } else {
+            old.components.clone()
+        };
         if components.is_empty() {
             components.push("main".into());
         }
         for c in &components {
             check_name("component", c)?;
         }
-        let architectures = str_list(p, "architectures");
+        let architectures = if given("architectures") {
+            str_list(p, "architectures")
+        } else {
+            old.architectures.clone()
+        };
         for a in &architectures {
             check_name("architecture", a)?;
             if a == "all" {
@@ -348,18 +368,18 @@ impl Deb {
                 ));
             }
         }
+        let flag = |k: &str, was: bool| if given(k) { bool_of(p, k) } else { was };
         let def = DistDef {
-            suite: str_of(p, "suite").to_string(),
-            codename: str_of(p, "codename").to_string(),
+            suite: text("suite", &old.suite),
+            codename: text("codename", &old.codename),
             components: components.clone(),
             architectures,
-            origin: str_of(p, "origin").to_string(),
-            label: str_of(p, "label").to_string(),
-            description: str_of(p, "description").to_string(),
-            not_automatic: bool_of(p, "not_automatic"),
-            but_automatic_upgrades: bool_of(p, "but_automatic_upgrades"),
+            origin: text("origin", &old.origin),
+            label: text("label", &old.label),
+            description: text("description", &old.description),
+            not_automatic: flag("not_automatic", old.not_automatic),
+            but_automatic_upgrades: flag("but_automatic_upgrades", old.but_automatic_upgrades),
         };
-        let had = dists(e)?.remove(name);
         let mut dropped = Vec::new();
         for (c, _) in e.list(&format!("dists/{name}"))? {
             if !c.starts_with('_') && !components.contains(&c) {
@@ -373,13 +393,57 @@ impl Deb {
                 value: serde_json::to_value(&def).expect("dist encodes"),
             },
         )?;
-        let mut s = if had.is_some() {
-            format!("dist {name} changed")
+        let Some(old) = had else {
+            return Ok(format!("dist {name} added ({})", components.join(", ")));
+        };
+        let mut what = Vec::new();
+        let mut diff = |k: &str, a: String, b: String| {
+            if a != b {
+                let show = |s: &str| {
+                    if s.is_empty() {
+                        "-".to_string()
+                    } else {
+                        s.to_string()
+                    }
+                };
+                what.push(format!("{k} {} -> {}", show(&a), show(&b)));
+            }
+        };
+        diff(
+            "components",
+            old.components.join(","),
+            def.components.join(","),
+        );
+        diff(
+            "architectures",
+            old.architectures.join(","),
+            def.architectures.join(","),
+        );
+        diff("suite", old.suite, def.suite);
+        diff("codename", old.codename, def.codename);
+        diff("origin", old.origin, def.origin);
+        diff("label", old.label, def.label);
+        diff("description", old.description, def.description);
+        diff(
+            "not_automatic",
+            old.not_automatic.to_string(),
+            def.not_automatic.to_string(),
+        );
+        diff(
+            "but_automatic_upgrades",
+            old.but_automatic_upgrades.to_string(),
+            def.but_automatic_upgrades.to_string(),
+        );
+        let mut s = if what.is_empty() {
+            format!("dist {name} unchanged")
         } else {
-            format!("dist {name} added ({})", components.join(", "))
+            format!("dist {name}: {}", what.join("; "))
         };
         if !dropped.is_empty() {
-            s.push_str(&format!("; components removed: {}", dropped.join(", ")));
+            s.push_str(&format!(
+                "; removed with their packages: {}",
+                dropped.join(", ")
+            ));
         }
         Ok(s)
     }
@@ -794,7 +858,7 @@ impl Format for Deb {
         vec![
             OpSpec {
                 name: "dist-set",
-                help: "Add a dist or change one. Components no longer listed are removed with their packages.",
+                help: "Add a dist or change one; what is left out keeps its value, and components no longer listed are removed with their packages.",
                 params: vec![
                     Field::text("name", "", "The dist (dists/<name>)."),
                     Field::list("components", "Components; empty: main."),
