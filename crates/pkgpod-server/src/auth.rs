@@ -778,12 +778,22 @@ impl Auth {
     }
 
     pub fn audit_log(&self, limit: usize) -> Result<Vec<serde_json::Value>> {
+        self.audit_where(None, limit)
+    }
+
+    /// What was done to `target` (a repository), newest first.
+    pub fn audit_for(&self, target: &str, limit: usize) -> Result<Vec<serde_json::Value>> {
+        self.audit_where(Some(target), limit)
+    }
+
+    fn audit_where(&self, target: Option<&str>, limit: usize) -> Result<Vec<serde_json::Value>> {
         Ok(self.db.read(|c| {
             let mut st = c.prepare(
-                "SELECT time, actor, action, target, detail FROM audit ORDER BY id DESC LIMIT ?1",
+                "SELECT time, actor, action, target, detail FROM audit \
+                 WHERE ?2 IS NULL OR target = ?2 ORDER BY id DESC LIMIT ?1",
             )?;
             let v = st
-                .query_map([limit as i64], |r| {
+                .query_map(rusqlite::params![limit as i64, target], |r| {
                     Ok(serde_json::json!({
                         "time": r.get::<_, i64>(0)?,
                         "actor": r.get::<_, String>(1)?,

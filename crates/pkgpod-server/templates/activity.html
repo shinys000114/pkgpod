@@ -1,0 +1,12 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+<div class="card">
+  <div class="card-head"><h2>Activity</h2><span class="hint">uploads, changes, labels, settings and rights of this repository, newest first</span></div>
+  {% if rows.is_empty() %}<p class="empty">Nothing yet.</p>{% else %}
+  <div class="table-wrap"><table>
+    <thead><tr><th>When</th><th>Who</th><th>What</th><th>Details</th></tr></thead>
+    <tbody>
+    {% for a in rows %}<tr><td class="nowrap">{{ a.when }}</td><td>{{ a.actor }}</td><td class="nowrap">{{ a.action }}</td><td class="wrap muted">{{ a.detail }}</td></tr>{% endfor %}
+    </tbody>
+  </table></div>
+  {% endif %}
+</div>

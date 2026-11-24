@@ -1,30 +1,42 @@
 {# SPDX-License-Identifier: AGPL-3.0-only #}
 <div class="card">
   <div class="card-head"><h2>Versions</h2><span class="hint">every change is a version; labels name snapshots, served at …/@label/</span></div>
-  <div class="card-body">
-    <form class="inline" hx-get="/r/{{ repo }}/diff" hx-target="#ver-result">
-      Compare <input name="from" size="8" placeholder="from" required> with <input name="to" size="8" placeholder="current"> <button type="submit">Diff</button>
-    </form>
+  <div class="card-body ver-tools">
+    <span class="muted small">Tick two versions to compare them, or one to see it against the current.</span>
+    <button type="button" class="ver-compare" data-repo="{{ repo }}" disabled>Compare</button>
     {% if can_write %}
     <form class="inline" hx-post="/c/r/{{ repo }}/labels" hx-target="#tab">
-      Label <input name="version" size="6" placeholder="current"> as <input name="name" size="14" placeholder="release-1" required> <input name="note" size="18" placeholder="note">
+      Label <input id="label-version" name="version" size="6" placeholder="current" autocomplete="off"> as <input name="name" size="14" placeholder="release-1" required autocomplete="off" autocapitalize="off" spellcheck="false"> <input name="note" size="18" placeholder="note">
       <label class="check"><input type="checkbox" name="force"> move if it exists</label> <button type="submit">Label</button>
     </form>
     {% endif %}
   </div>
   <div id="ver-result" class="card-body results"></div>
-  <div class="table-wrap"><table>
-    <thead><tr><th class="num">Version</th><th>When</th><th>By</th><th>Summary</th><th>Labels</th><th></th></tr></thead>
+  <div class="table-wrap"><table class="versions">
+    <thead><tr><th class="pick"></th><th class="num">Version</th><th>When</th><th>By</th><th>Summary</th><th>Labels</th><th></th></tr></thead>
     <tbody>
     {% for v in rows %}<tr>
+      <td class="pick"><input type="checkbox" class="ver-pick" value="{{ v.seq }}" aria-label="choose version {{ v.seq }}"></td>
       <td class="num"><b>{{ v.seq }}</b>{% if v.current %} <span class="tag accent">current</span>{% endif %}</td>
       <td class="nowrap">{{ v.when }}</td><td>{{ v.actor }}</td><td class="wrap">{{ v.summary }}</td>
       <td>{% for l in v.labels %}<span class="tag">{{ l }}</span>{% if can_write %}<button class="link danger" hx-post="/c/r/{{ repo }}/labels/{{ l|urlencode }}/delete" hx-target="#tab" hx-confirm="Remove label {{ l }}?">×</button>{% endif %} {% endfor %}</td>
       <td class="acts nowrap">
         <button class="link" hx-get="/r/{{ repo }}/changes?from={{ v.seq }}" hx-target="#ver-result">changes</button>
+        {% if can_write %}<button class="link fill" type="button" data-for="label-version" data-value="{{ v.seq }}">label…</button>{% endif %}
         {% if can_write && !v.current %}<form class="inline" hx-post="/c/r/{{ repo }}/rollback" hx-target="#ver-result"><input type="hidden" name="version" value="{{ v.seq }}"><button class="link" type="submit">roll back to…</button></form>{% endif %}
       </td>
     </tr>{% endfor %}
     </tbody>
   </table></div>
 </div>
+{% if !labels.is_empty() %}
+<div class="card">
+  <div class="card-head"><h2>Labels</h2><span class="hint">each a read-only address of its version</span></div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Label</th><th class="num">Version</th><th>Address</th></tr></thead>
+    <tbody>
+    {% for (l, seq, url) in labels %}<tr><td><span class="tag">{{ l }}</span></td><td class="num">{{ seq }}</td><td class="mono small"><span class="copy-src">{{ url }}</span> <button class="copy link" type="button">Copy</button></td></tr>{% endfor %}
+    </tbody>
+  </table></div>
+</div>
+{% endif %}

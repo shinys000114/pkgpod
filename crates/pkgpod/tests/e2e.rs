@@ -7564,3 +7564,39 @@ fn console_packages_filter_download_details_bulk() {
         "{plan}"
     );
 }
+
+#[test]
+fn console_versions_labels_and_activity() {
+    let s = Server::start();
+    let (c, sid, _csrf) = console_session(&s, "ver", "ver-password");
+    let text = |p: &str| {
+        c.get(format!("{}{p}", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .send()
+            .unwrap()
+            .text()
+            .unwrap()
+    };
+    s.cli(&["repo", "create", "f", "-f", "files"]).unwrap();
+    let dir = s.dir.path().join("vf");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a.txt"), "a").unwrap();
+    s.cli(&["upload", "f", dir.join("a.txt").to_str().unwrap()])
+        .unwrap();
+    s.cli(&["label", "f", "first"]).unwrap();
+    // Versions to tick and compare; labels with their addresses.
+    let v = text("/r/f/versions");
+    assert!(
+        v.contains("class=\"ver-pick\" value=\"2\"")
+            && v.contains("data-for=\"label-version\" data-value=\"2\"")
+            && v.contains("/f/@first/</span>"),
+        "{v}"
+    );
+    let d = text("/r/f/diff?from=1&to=2");
+    assert!(d.contains("a.txt"), "{d}");
+    // What was done to it, for those who may change it.
+    let a = text("/r/f/activity");
+    assert!(a.contains("upload") && a.contains("label"), "{a}");
+    let shell = text("/r/f");
+    assert!(shell.contains("/r/f/activity"), "{shell}");
+}
