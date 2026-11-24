@@ -7,6 +7,7 @@
 //! ```text
 //! dists/<dist>/_dist                      value: suite, codename, components, ...
 //! dists/<dist>/<component>/<file>.deb     blob: the package, control data as metadata
+//! extra/<path>                             blob: another file, served at <path>
 //! ```
 //!
 //! Each version publishes the tree apt reads:
@@ -17,6 +18,7 @@
 //! dists/<dist>/<component>/binary-<arch>/by-hash/SHA256/<sha256>
 //! pool/<component>/<prefix>/<source>/<file>.deb
 //! key.asc                                  the public key (signed repositories)
+//! <path>                                   the other files (a README, a keyring)
 //! ```
 //!
 //! A dist whose state and inputs did not change keeps the indexes (and
@@ -345,6 +347,28 @@ fn str_list(v: &Value, k: &str) -> Vec<String> {
             .collect(),
         _ => vec![],
     }
+}
+
+/// Where the other files of a repository are kept in its state.
+const EXTRA: &str = "extra";
+
+/// A path for another file beside the archive: relative, plain segments,
+/// and none of what the archive itself publishes.
+fn check_extra(path: &str) -> Result<()> {
+    let bad = |why: &str| Err(Error::Invalid(format!("{path:?}: {why}")));
+    if path.is_empty() {
+        return bad("empty");
+    }
+    for seg in path.split('/') {
+        if seg.is_empty() || seg == "." || seg == ".." || seg.starts_with(".pkgpod") {
+            return bad("not a plain relative path");
+        }
+    }
+    let first = path.split('/').next().unwrap_or("");
+    if ["dists", "pool"].contains(&first) || path == "key.asc" {
+        return bad("the archive publishes that path itself");
+    }
+    Ok(())
 }
 
 fn str_of<'a>(v: &'a Value, k: &str) -> &'a str {
@@ -934,6 +958,11 @@ impl Format for Deb {
                 ],
             },
             OpSpec {
+                name: "file-remove",
+                help: "Remove another file (put with an upload's path), such as a README.",
+                params: vec![Field::text("path", "", "Its path, as served.")],
+            },
+            OpSpec {
                 name: "dist-remove",
                 help: "Remove a dist with its packages.",
                 params: vec![Field::text("name", "", "The dist.")],
@@ -994,6 +1023,14 @@ impl Format for Deb {
                 }
                 Ok(format!("dist {name} removed"))
             }
+            "file-remove" => {
+                let path = str_of(p, "path").trim().trim_matches('/');
+                check_extra(path)?;
+                if !e.remove(&format!("{EXTRA}/{path}"))? {
+                    return Err(Error::NotFound(format!("no file {path}")));
+                }
+                Ok(format!("{path} removed"))
+            }
             "remove" => self.remove(p, e),
             "copy" => self.copy(p, e, false),
             "move" => self.copy(p, e, true),
@@ -1021,6 +1058,11 @@ impl Format for Deb {
                 "replace",
                 false,
                 "Replace a package file of the same name with other content, everywhere.",
+            ),
+            Field::text(
+                "path",
+                "",
+                "Not a package: put the file at this path beside dists/ and pool/ (a README, a keyring).",
             ),
         ]
     }
@@ -1095,6 +1137,21 @@ impl Format for Deb {
     /// from the upload or (an orig tarball shared by revisions) from the
     /// repository; a file no `.dsc` lists is refused.
     fn ingest_batch(&self, cx: &Cx, ups: &[Upload], p: &Value, e: &mut Edit) -> Result<String> {
+        let extra = str_of(p, "path").trim().trim_matches('/');
+        if !extra.is_empty() {
+            check_extra(extra)?;
+            let [up] = ups else {
+                return Err(Error::Invalid("a path takes one file".into()));
+            };
+            let at = format!("{EXTRA}/{extra}");
+            let same =
+                matches!(e.get(&at)?, Some(Entry::Blob { sha256, .. }) if sha256 == up.sha256);
+            if same {
+                return Ok(format!("{extra} unchanged"));
+            }
+            e.put(&at, Entry::blob(up.sha256, up.size, Value::Null))?;
+            return Ok(format!("{extra} put beside the archive"));
+        }
         let mut debs = Vec::new();
         let mut dscs = Vec::new();
         let mut parts = Vec::new();
@@ -1408,6 +1465,12 @@ fn publish(cx: &PublishCx) -> Result<Option<Digest>> {
     {
         let (d, n) = cx.store.put_bytes(&k)?;
         view.put("key.asc", Entry::blob(d, n, Value::Null))?;
+    }
+    // The other files, where they were put.
+    for (path, entry) in state.walk(EXTRA)? {
+        if let Some(rel) = path.strip_prefix(&format!("{EXTRA}/")) {
+            view.put(rel, entry)?;
+        }
     }
     Ok(Some(view.finish()?))
 }
