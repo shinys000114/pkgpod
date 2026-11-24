@@ -83,6 +83,16 @@ picking a dist or listener to change fills in its settings; changing a
 dist (`dist-set`, from the console or the command) changes only what is
 given.
 
+The console also: makes a Debian repository with all its dists (a
+group a line) or one like another; shows How to use for a chosen dist,
+group or branch, with a package the repository has and, on request, a
+token made for it; downloads, filters, sorts and looks into packages,
+and removes or promotes several at once; finds repositories; takes
+dropped files to upload, with progress; compares ticked versions and
+lists labels' addresses; has an Activity tab, a live sync view, who
+has access and why, storage use, the server at a glance, a light/dark
+switch and keyboard tabs.
+
 Signing keys are kept by pkgpod itself: OpenPGP keys are generated
 (Ed25519) or imported (`pkgpod key import`, as `gpg
 --export-secret-keys --armor` writes them, with their passphrase) and
