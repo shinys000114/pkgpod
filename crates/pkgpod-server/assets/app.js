@@ -3,6 +3,44 @@
 // form in from what was picked (a dist's settings when its name is).
 (function () {
   "use strict";
+  // The theme: as the system has it, or as chosen here (this browser
+  // only). Set before the page is drawn: this file is loaded in <head>.
+  var THEMES = ["system", "light", "dark"];
+  function getTheme() {
+    try {
+      return localStorage.getItem("pkgpod-theme") || "system";
+    } catch (e) {
+      return "system";
+    }
+  }
+  function applyTheme(t) {
+    if (t === "light" || t === "dark") {
+      document.documentElement.setAttribute("data-theme", t);
+    } else {
+      document.documentElement.removeAttribute("data-theme");
+    }
+    document.querySelectorAll(".theme-switch").forEach(function (b) {
+      b.textContent = "Theme: " + t;
+    });
+  }
+  applyTheme(getTheme());
+  document.addEventListener("DOMContentLoaded", function () {
+    applyTheme(getTheme());
+  });
+  // Tabs: arrow keys, Home and End move between them and open the one
+  // reached.
+  document.addEventListener("keydown", function (ev) {
+    var tab = ev.target.closest && ev.target.closest('[role="tablist"] [role="tab"]');
+    if (!tab) return;
+    var tabs = Array.prototype.slice.call(tab.parentElement.querySelectorAll('[role="tab"]'));
+    var i = tabs.indexOf(tab);
+    var to = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[ev.key];
+    if (to === undefined) return;
+    ev.preventDefault();
+    var next = tabs[(to + tabs.length) % tabs.length];
+    next.focus();
+    next.click();
+  });
   // Over plain http on a LAN address there is no navigator.clipboard.
   function fallback(text, done) {
     var t = document.createElement("textarea");
@@ -229,6 +267,17 @@
           b.textContent = label;
         }, 1400);
       });
+      return;
+    }
+    var sw = ev.target.closest("button.theme-switch");
+    if (sw) {
+      var next = THEMES[(THEMES.indexOf(getTheme()) + 1) % THEMES.length];
+      try {
+        localStorage.setItem("pkgpod-theme", next);
+      } catch (e) {
+        /* not kept: this page only */
+      }
+      applyTheme(next);
       return;
     }
     // Compare the versions ticked (one: against the current).
