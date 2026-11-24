@@ -1437,3 +1437,828 @@ fn indexes_by_hash_stay_while_versions_change() {
         assert!(reads > 8, "{reads} reads");
     });
 }
+
+/// Checks `v` against `schema`: the part of JSON Schema the OpenAPI
+/// document uses (type, properties, required, additionalProperties,
+/// items, enum, $ref, allOf, anyOf, oneOf).
+fn validate(doc: &Value, schema: &Value, v: &Value, at: &str) -> Result<(), String> {
+    let Some(s) = schema.as_object() else {
+        return Err(format!("{at}: schema {schema} is not an object"));
+    };
+    if let Some(r) = s.get("$ref").and_then(Value::as_str) {
+        let target = r
+            .strip_prefix('#')
+            .and_then(|p| doc.pointer(p))
+            .ok_or_else(|| format!("{at}: {r} does not resolve"))?;
+        validate(doc, target, v, at)?;
+    }
+    if let Some(all) = s.get("allOf").and_then(Value::as_array) {
+        for x in all {
+            validate(doc, x, v, at)?;
+        }
+    }
+    if let Some(any) = s.get("anyOf").and_then(Value::as_array) {
+        let errs: Vec<String> = any
+            .iter()
+            .filter_map(|x| validate(doc, x, v, at).err())
+            .collect();
+        if errs.len() == any.len() {
+            return Err(format!("{at}: matches none of anyOf: {}", errs.join("; ")));
+        }
+    }
+    if let Some(one) = s.get("oneOf").and_then(Value::as_array) {
+        let n = one
+            .iter()
+            .filter(|x| validate(doc, x, v, at).is_ok())
+            .count();
+        if n != 1 {
+            return Err(format!("{at}: {v} matches {n} of oneOf, not one"));
+        }
+    }
+    if let Some(e) = s.get("enum").and_then(Value::as_array)
+        && !e.contains(v)
+    {
+        return Err(format!("{at}: {v} is not one of {e:?}"));
+    }
+    if let Some(t) = s.get("type") {
+        let types: Vec<&str> = match t {
+            Value::String(t) => vec![t.as_str()],
+            Value::Array(a) => a.iter().filter_map(Value::as_str).collect(),
+            _ => return Err(format!("{at}: bad type {t}")),
+        };
+        let is = |t: &str| match t {
+            "null" => v.is_null(),
+            "boolean" => v.is_boolean(),
+            "integer" => v.is_i64() || v.is_u64(),
+            "number" => v.is_number(),
+            "string" => v.is_string(),
+            "array" => v.is_array(),
+            "object" => v.is_object(),
+            _ => false,
+        };
+        if !types.iter().any(|t| is(t)) {
+            return Err(format!("{at}: {v} is not {types:?}"));
+        }
+    }
+    if let Some(o) = v.as_object() {
+        if let Some(req) = s.get("required").and_then(Value::as_array) {
+            for r in req.iter().filter_map(Value::as_str) {
+                if !o.contains_key(r) {
+                    return Err(format!("{at}: required {r} is missing in {v}"));
+                }
+            }
+        }
+        let props = s.get("properties").and_then(Value::as_object);
+        for (k, x) in o {
+            match props.and_then(|p| p.get(k)) {
+                Some(ps) => validate(doc, ps, x, &format!("{at}.{k}"))?,
+                None => {
+                    if let Some(ap) = s.get("additionalProperties").filter(|a| a.is_object()) {
+                        validate(doc, ap, x, &format!("{at}.{k}"))?;
+                    }
+                }
+            }
+        }
+    }
+    if let (Some(a), Some(items)) = (v.as_array(), s.get("items")) {
+        for (i, x) in a.iter().enumerate() {
+            validate(doc, items, x, &format!("{at}[{i}]"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Calls the API and checks each reply against the OpenAPI document.
+struct Checked<'a> {
+    s: &'a Server,
+    doc: Value,
+    c: reqwest::blocking::Client,
+    admin: String,
+    seen: std::cell::RefCell<std::collections::BTreeSet<(String, String)>>,
+}
+
+impl Checked<'_> {
+    /// A request as admin.
+    fn req(&self, m: &str, path: &str) -> reqwest::blocking::RequestBuilder {
+        self.anon(m, path).basic_auth("admin", Some(&self.admin))
+    }
+
+    fn anon(&self, m: &str, path: &str) -> reqwest::blocking::RequestBuilder {
+        let m = reqwest::Method::from_bytes(m.to_uppercase().as_bytes()).unwrap();
+        self.c.request(m, format!("{}{path}", self.s.api))
+    }
+
+    /// Sends `r` (method `m` on the path template `tmpl`); checks the
+    /// reply against what the document says for its status.
+    fn check(&self, m: &str, tmpl: &str, r: reqwest::blocking::RequestBuilder) -> (u16, Value) {
+        let r = r.send().unwrap();
+        let st = r.status().as_u16();
+        let ct = r
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let text = r.text().unwrap();
+        let at = format!("{m} {tmpl} -> {st}");
+        let op = self
+            .doc
+            .pointer(&format!(
+                "/paths/{}/{m}",
+                tmpl.replace('~', "~0").replace('/', "~1")
+            ))
+            .unwrap_or_else(|| panic!("{m} {tmpl} is not documented"));
+        let rs = &op["responses"];
+        let mut resp = match rs.get(st.to_string()) {
+            Some(x) => x,
+            None if st >= 400 => &rs["default"],
+            None => panic!("{at}: status not documented: {text}"),
+        };
+        if let Some(p) = resp["$ref"].as_str() {
+            resp = self.doc.pointer(&p[1..]).expect("response $ref");
+        }
+        self.seen
+            .borrow_mut()
+            .insert((m.to_string(), tmpl.to_string()));
+        let Some(content) = resp.get("content").and_then(Value::as_object) else {
+            assert!(text.is_empty(), "{at}: documented without a body: {text}");
+            return (st, Value::Null);
+        };
+        let (mime, media) = content
+            .iter()
+            .find(|(k, _)| ct.starts_with(k.as_str()))
+            .unwrap_or_else(|| panic!("{at}: content type {ct:?} not documented"));
+        let v = if mime == "application/json" {
+            serde_json::from_str(&text).unwrap_or_else(|e| panic!("{at}: {e}: {text}"))
+        } else {
+            Value::String(text)
+        };
+        if let Err(e) = validate(&self.doc, &media["schema"], &v, "") {
+            panic!("{at}: {e}");
+        }
+        (st, v)
+    }
+
+    /// As admin, with a JSON body if given; the status must be `want`.
+    fn ok(&self, m: &str, tmpl: &str, path: &str, body: Option<Value>, want: u16) -> Value {
+        let mut r = self.req(m, path);
+        if let Some(b) = body {
+            r = r.json(&b);
+        }
+        let (st, v) = self.check(m, tmpl, r);
+        assert_eq!(st, want, "{m} {path}: {v}");
+        v
+    }
+}
+
+#[test]
+fn openapi_describes_what_the_api_sends() {
+    use serde_json::json;
+    let s = Server::start();
+    let c = reqwest::blocking::Client::new();
+    let doc: Value = c
+        .get(format!("{}/api/v1/openapi.json", s.api))
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(doc["openapi"], "3.1.0");
+    let admin = std::fs::read_to_string(s.dir.path().join("data/admin-password"))
+        .unwrap()
+        .trim()
+        .to_string();
+    let a = Checked {
+        s: &s,
+        doc: doc.clone(),
+        c,
+        admin,
+        seen: Default::default(),
+    };
+    let tools = have("dpkg-deb") && have("gpg");
+
+    let (st, _) = a.check(
+        "get",
+        "/api/v1/openapi.json",
+        a.anon("get", "/api/v1/openapi.json"),
+    );
+    assert_eq!(st, 200);
+    let (st, v) = a.check("get", "/api/v1/status", a.anon("get", "/api/v1/status"));
+    assert_eq!((st, &v["user"]), (200, &Value::Null));
+    let v = a.ok("get", "/api/v1/status", "/api/v1/status", None, 200);
+    assert_eq!(v["user"], "admin");
+    let v = a.ok("get", "/api/v1/formats", "/api/v1/formats", None, 200);
+    assert!(!v.as_array().unwrap().is_empty());
+
+    // Repositories.
+    let repos = "/api/v1/repos";
+    for (body, name) in [
+        (
+            json!({"name": "web", "format": "deb", "settings": {"sign": false}}),
+            "web",
+        ),
+        (
+            json!({"name": "b", "format": "deb", "kind": "hosted", "storage": null, "settings": {"sign": false}}),
+            "b",
+        ),
+        (
+            json!({"name": "imp", "format": "deb", "settings": {"sign": false}}),
+            "imp",
+        ),
+        (
+            json!({"name": "mir", "format": "deb", "kind": "mirror", "settings": {"source": "http://127.0.0.1:9/", "dists": ["x"]}}),
+            "mir",
+        ),
+    ] {
+        let v = a.ok("post", repos, repos, Some(body), 201);
+        assert_eq!(v["name"], name);
+    }
+    let v = a.ok("get", repos, repos, None, 200);
+    assert_eq!(v.as_array().unwrap().len(), 4);
+    let repo = "/api/v1/repos/{repo}";
+    let web = a.ok("get", repo, "/api/v1/repos/web", None, 200);
+    let v = a.ok(
+        "patch",
+        repo,
+        "/api/v1/repos/web",
+        Some(json!({"settings": {"description": "web packages"}})),
+        200,
+    );
+    assert_eq!(v["settings"]["description"], "web packages");
+
+    // Plans: kept, shown, applied; or applied at once.
+    let ops = "/api/v1/repos/{repo}/ops/{op}";
+    let v = a.ok(
+        "post",
+        ops,
+        "/api/v1/repos/web/ops/dist-set",
+        Some(json!({"name": "noble", "components": ["main"]})),
+        200,
+    );
+    let id = v["plan"].as_str().expect("a kept plan").to_string();
+    assert!(v["total_changes"].as_u64().unwrap() > 0, "{v}");
+    let v = a.ok(
+        "get",
+        "/api/v1/plans/{id}",
+        &format!("/api/v1/plans/{id}"),
+        None,
+        200,
+    );
+    assert!(!v["changes"].as_array().unwrap().is_empty());
+    let v = a.ok(
+        "post",
+        "/api/v1/plans/{id}/apply",
+        &format!("/api/v1/plans/{id}/apply"),
+        None,
+        200,
+    );
+    assert!(v["version"].is_i64(), "{v}");
+    let v = a.ok(
+        "post",
+        ops,
+        "/api/v1/repos/web/ops/dist-set?apply=1",
+        Some(json!({"name": "jammy"})),
+        200,
+    );
+    assert_eq!(v["applied"], true);
+
+    // Uploads, raw and as a form.
+    let upload = "/api/v1/repos/{repo}/upload";
+    if have("dpkg-deb") {
+        let debs = s.dir.path().join("debs");
+        std::fs::create_dir_all(&debs).unwrap();
+        let one = build_deb(&debs, "hello-api", "1.0", "all", "xz", "");
+        let r = a
+            .req(
+                "post",
+                "/api/v1/repos/web/upload?filename=hello-api_1.0_all.deb&dists=noble",
+            )
+            .header("content-type", "application/octet-stream")
+            .body(std::fs::read(&one).unwrap());
+        let (st, v) = a.check("post", upload, r);
+        assert_eq!(st, 200, "{v}");
+        assert_eq!(v.as_array().unwrap().len(), 1);
+        let two = build_deb(&debs, "hello-api", "2.0", "all", "xz", "");
+        let form = reqwest::blocking::multipart::Form::new()
+            .text("dists", "noble")
+            .file("file", &two)
+            .unwrap();
+        let (st, v) = a.check(
+            "post",
+            upload,
+            a.req("post", "/api/v1/repos/web/upload").multipart(form),
+        );
+        assert_eq!(st, 200, "{v}");
+        assert!(v[0]["version"].is_i64(), "{v}");
+    }
+
+    // Versions, diffs, trees, packages.
+    let v = a.ok(
+        "get",
+        "/api/v1/repos/{repo}/versions",
+        "/api/v1/repos/web/versions",
+        None,
+        200,
+    );
+    let vs = v.as_array().unwrap();
+    assert!(vs.len() >= 2, "{v}");
+    let oldest = vs.last().unwrap()["seq"].as_i64().unwrap();
+    let v = a.ok(
+        "get",
+        "/api/v1/repos/{repo}/versions/{seq}",
+        &format!("/api/v1/repos/web/versions/{oldest}"),
+        None,
+        200,
+    );
+    assert_eq!(v["seq"], oldest);
+    let v = a.ok(
+        "get",
+        "/api/v1/repos/{repo}/diff",
+        &format!("/api/v1/repos/web/diff?from={oldest}"),
+        None,
+        200,
+    );
+    assert!(!v["changes"].as_array().unwrap().is_empty(), "{v}");
+    let tree = "/api/v1/repos/{repo}/tree";
+    let v = a.ok("get", tree, "/api/v1/repos/web/tree?path=", None, 200);
+    let entries = v["entries"].as_array().unwrap();
+    assert!(!entries.is_empty(), "{v}");
+    let top = entries[0]["name"].as_str().unwrap().to_string();
+    let v = a.ok("get", tree, "/api/v1/repos/web/tree?served=1", None, 200);
+    assert!(!v["entries"].as_array().unwrap().is_empty(), "{v}");
+    if have("dpkg-deb") {
+        // Down to the files, with their metadata; every kind of entry.
+        let mut dirs = vec![String::new()];
+        let mut kinds = std::collections::BTreeSet::new();
+        let mut file = None;
+        while let Some(path) = dirs.pop() {
+            let v = a.ok(
+                "get",
+                tree,
+                &format!("/api/v1/repos/web/tree?path={path}"),
+                None,
+                200,
+            );
+            for e in v["entries"].as_array().unwrap() {
+                let name = e["name"].as_str().unwrap();
+                kinds.insert(e["type"].as_str().unwrap().to_string());
+                match e["type"].as_str() {
+                    Some("dir") => dirs.push(format!("{path}{name}/")),
+                    Some("file") if file.is_none() => file = Some(e.clone()),
+                    _ => {}
+                }
+            }
+        }
+        let file = file.expect("a file in the tree");
+        assert!(kinds.contains("dir"), "{kinds:?}");
+        assert!(file["sha256"].is_string(), "{file}");
+    }
+    let mtree = s.dir.path().join("data/storages/main/trees/mir");
+    std::fs::create_dir_all(mtree.join("dists")).unwrap();
+    std::fs::write(mtree.join("README"), "mirror\n").unwrap();
+    let v = a.ok("get", tree, "/api/v1/repos/mir/tree", None, 200);
+    let es = v["entries"].as_array().unwrap();
+    assert_eq!(es.len(), 2, "{v}");
+    assert!(es[1]["mtime"].is_i64(), "{v}");
+    let v = a.ok(
+        "get",
+        "/api/v1/repos/{repo}/packages",
+        "/api/v1/repos/web/packages?q=hello&limit=10",
+        None,
+        200,
+    );
+    let v2 = a.ok(
+        "get",
+        "/api/v1/search",
+        "/api/v1/search?q=hello&repo=web",
+        None,
+        200,
+    );
+    if have("dpkg-deb") {
+        assert!(!v.as_array().unwrap().is_empty());
+        assert!(!v2.as_array().unwrap().is_empty());
+    }
+
+    // More plans.
+    let v = a.ok(
+        "post",
+        "/api/v1/repos/{repo}/remove",
+        "/api/v1/repos/web/remove",
+        Some(json!({"paths": [top]})),
+        200,
+    );
+    assert!(v["plan"].is_string(), "{v}");
+    let v = a.ok(
+        "post",
+        "/api/v1/repos/{repo}/rollback",
+        "/api/v1/repos/web/rollback",
+        Some(json!({"version": oldest.to_string()})),
+        200,
+    );
+    assert!(v["plan"].is_string(), "{v}");
+    a.ok(
+        "post",
+        ops,
+        "/api/v1/repos/b/ops/dist-set?apply=yes",
+        Some(json!({"name": "noble"})),
+        200,
+    );
+    let v = a.ok(
+        "post",
+        "/api/v1/repos/{repo}/promote",
+        "/api/v1/repos/b/promote",
+        Some(json!({"from": "web", "paths": [top]})),
+        200,
+    );
+    assert!(v["plan"].is_string(), "{v}");
+    let v = a.ok(
+        "post",
+        "/api/v1/repos/{repo}/republish",
+        "/api/v1/repos/web/republish",
+        None,
+        200,
+    );
+    // Publishing the same again makes no version.
+    assert_eq!(v, json!({"version": null}));
+    let v = a.ok(
+        "post",
+        "/api/v1/repos/{repo}/labels",
+        "/api/v1/repos/web/labels",
+        Some(json!({"name": "stable", "note": "for the API test"})),
+        200,
+    );
+    assert_eq!(v["labels"], json!(["stable"]));
+    a.ok(
+        "delete",
+        "/api/v1/repos/{repo}/labels/{label}",
+        "/api/v1/repos/web/labels/stable",
+        None,
+        204,
+    );
+
+    // People and rights.
+    let v = a.ok(
+        "post",
+        "/api/v1/users",
+        "/api/v1/users",
+        Some(json!({"name": "dev", "password": "dev-password-1"})),
+        201,
+    );
+    assert_eq!(v["admin"], false);
+    let v = a.ok(
+        "patch",
+        "/api/v1/users/{user}",
+        "/api/v1/users/dev",
+        Some(json!({"disabled": false, "admin": null})),
+        200,
+    );
+    assert_eq!(v["name"], "dev");
+    let v = a.ok("get", "/api/v1/users", "/api/v1/users", None, 200);
+    assert_eq!(v.as_array().unwrap().len(), 2);
+    let v = a.ok("get", "/api/v1/me", "/api/v1/me", None, 200);
+    assert_eq!(
+        (&v["user"]["name"], &v["token"]),
+        (&json!("admin"), &json!(false))
+    );
+    let (st, v) = a.check(
+        "get",
+        "/api/v1/me",
+        a.anon("get", "/api/v1/me")
+            .basic_auth("dev", Some("dev-password-1")),
+    );
+    assert_eq!((st, &v["user"]["name"]), (200, &json!("dev")));
+    let (st, _) = a.check(
+        "post",
+        "/api/v1/me/password",
+        a.anon("post", "/api/v1/me/password")
+            .basic_auth("dev", Some("dev-password-1"))
+            .json(&json!({"old": "dev-password-1", "new": "dev-password-2"})),
+    );
+    assert_eq!(st, 204);
+    a.ok(
+        "post",
+        "/api/v1/teams",
+        "/api/v1/teams",
+        Some(json!({"name": "devs"})),
+        201,
+    );
+    let member = "/api/v1/teams/{team}/members/{user}";
+    a.ok("put", member, "/api/v1/teams/devs/members/dev", None, 204);
+    let v = a.ok("get", "/api/v1/teams", "/api/v1/teams", None, 200);
+    assert_eq!(v, json!([{"name": "devs", "members": ["dev"]}]));
+    let grants = "/api/v1/repos/{repo}/grants";
+    a.ok(
+        "put",
+        grants,
+        "/api/v1/repos/web/grants",
+        Some(json!({"subject": "team:devs", "role": "read"})),
+        204,
+    );
+    let v = a.ok("get", grants, "/api/v1/repos/web/grants", None, 200);
+    assert_eq!(v.as_array().unwrap().len(), 1, "{v}");
+    a.ok(
+        "delete",
+        "/api/v1/repos/{repo}/grants/{subject}",
+        "/api/v1/repos/web/grants/team:devs",
+        None,
+        204,
+    );
+    let tokens = "/api/v1/tokens";
+    let v = a.ok(
+        "post",
+        tokens,
+        tokens,
+        Some(json!({"name": "ci", "repos": ["web"], "write": true, "expires_days": 30})),
+        201,
+    );
+    let tid = v["info"]["id"].as_i64().unwrap();
+    assert!(v["info"]["expires"].is_i64(), "{v}");
+    let (st, v) = a.check(
+        "get",
+        "/api/v1/me",
+        a.anon("get", "/api/v1/me")
+            .bearer_auth(v["token"].as_str().unwrap()),
+    );
+    assert_eq!((st, &v["token"]), (200, &json!(true)));
+    // The CLI's login made one too.
+    let v = a.ok("get", tokens, tokens, None, 200);
+    assert_eq!(v.as_array().unwrap().len(), 2, "{v}");
+    let v = a.ok("get", tokens, "/api/v1/tokens?all=1", None, 200);
+    let ci = v.as_array().unwrap().iter().find(|t| t["id"] == tid);
+    assert!(ci.expect("the new token")["used"].is_i64(), "{v}");
+    a.ok(
+        "delete",
+        "/api/v1/tokens/{id}",
+        &format!("/api/v1/tokens/{tid}"),
+        None,
+        204,
+    );
+    a.ok(
+        "delete",
+        member,
+        "/api/v1/teams/devs/members/dev",
+        None,
+        204,
+    );
+    a.ok(
+        "delete",
+        "/api/v1/teams/{team}",
+        "/api/v1/teams/devs",
+        None,
+        204,
+    );
+    a.ok(
+        "delete",
+        "/api/v1/users/{user}",
+        "/api/v1/users/dev",
+        None,
+        204,
+    );
+
+    // The server.
+    let v = a.ok("get", "/api/v1/listeners", "/api/v1/listeners", None, 200);
+    assert_eq!(v[0]["running"], true, "{v}");
+    let listener = "/api/v1/listeners/{name}";
+    a.ok(
+        "put",
+        listener,
+        "/api/v1/listeners/extra",
+        Some(json!({"addr": format!("127.0.0.1:{}", free_port()), "enabled": false})),
+        204,
+    );
+    a.ok("delete", listener, "/api/v1/listeners/extra", None, 204);
+    if have("gpg") {
+        let v = a.ok(
+            "post",
+            "/api/v1/keys/{name}/generate",
+            "/api/v1/keys/main/generate",
+            Some(json!({"uid": "pkgpod api <api@example.invalid>"})),
+            200,
+        );
+        let fpr = v["fingerprint"].as_str().unwrap().to_string();
+        let key = "/api/v1/keys/{name}";
+        let v = a.ok(
+            "put",
+            key,
+            "/api/v1/keys/again",
+            Some(json!({"fingerprint": fpr})),
+            200,
+        );
+        assert_eq!(v["name"], "again");
+        a.ok(
+            "post",
+            "/api/v1/keys/{name}/default",
+            "/api/v1/keys/main/default",
+            None,
+            204,
+        );
+        let v = a.ok("get", "/api/v1/keys", "/api/v1/keys", None, 200);
+        assert_eq!(v.as_array().unwrap().len(), 2, "{v}");
+        let v = a.ok(
+            "get",
+            "/api/v1/keys/{name}/public",
+            "/api/v1/keys/main/public",
+            None,
+            200,
+        );
+        assert!(v.as_str().unwrap().contains("BEGIN PGP PUBLIC KEY"));
+        let v = a.ok(
+            "get",
+            "/api/v1/repos/{repo}/key",
+            "/api/v1/repos/web/key",
+            None,
+            200,
+        );
+        assert!(v.as_str().unwrap().contains("BEGIN PGP PUBLIC KEY"));
+        a.ok("delete", key, "/api/v1/keys/again", None, 204);
+    }
+    let v = a.ok("get", "/api/v1/storages", "/api/v1/storages", None, 200);
+    assert_eq!(v[0]["name"], "main", "{v}");
+    let storage = "/api/v1/storages/{name}";
+    let extra = s.dir.path().join("extra-storage");
+    a.ok(
+        "put",
+        storage,
+        "/api/v1/storages/extra",
+        Some(json!({"path": extra.to_str().unwrap()})),
+        204,
+    );
+    a.ok("delete", storage, "/api/v1/storages/extra", None, 204);
+
+    // Jobs: a sync and an import of upstreams that are not there.
+    let v = a.ok(
+        "post",
+        "/api/v1/repos/{repo}/sync",
+        "/api/v1/repos/mir/sync",
+        None,
+        202,
+    );
+    let sync = v["job"].as_i64().unwrap();
+    let v = a.ok(
+        "post",
+        "/api/v1/repos/{repo}/import",
+        "/api/v1/repos/imp/import",
+        Some(json!({"source": "http://127.0.0.1:9/", "dists": ["x"]})),
+        202,
+    );
+    let import = v["job"].as_i64().unwrap();
+    for id in [sync, import] {
+        let t = Instant::now();
+        loop {
+            let v = a.ok(
+                "get",
+                "/api/v1/jobs/{id}",
+                &format!("/api/v1/jobs/{id}"),
+                None,
+                200,
+            );
+            if v["state"] != "running" {
+                assert_eq!(v["state"], "failed", "{v}");
+                assert!(v["finished"].is_i64(), "{v}");
+                break;
+            }
+            assert!(t.elapsed() < Duration::from_secs(30), "job {id} still runs");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    let (st, v) = a.check(
+        "post",
+        "/api/v1/jobs/{id}/cancel",
+        a.req("post", &format!("/api/v1/jobs/{sync}/cancel")),
+    );
+    assert_eq!(st, 409, "not running any more: {v}");
+    let v = a.ok(
+        "get",
+        "/api/v1/repos/{repo}/jobs",
+        "/api/v1/repos/mir/jobs",
+        None,
+        200,
+    );
+    assert_eq!(v.as_array().unwrap().len(), 1, "{v}");
+    let v = a.ok("get", "/api/v1/jobs", "/api/v1/jobs", None, 200);
+    assert_eq!(v.as_array().unwrap().len(), 2, "{v}");
+    let v = a.ok(
+        "post",
+        "/api/v1/gc",
+        "/api/v1/gc",
+        Some(json!({"dry_run": true})),
+        200,
+    );
+    assert_eq!(v["dry_run"], true);
+    let v = a.ok("get", "/api/v1/audit", "/api/v1/audit", None, 200);
+    assert!(v.as_array().unwrap().len() > 10, "{v}");
+
+    // Errors are documented too.
+    let v = a.ok("get", repo, "/api/v1/repos/nothing", None, 404);
+    assert!(v["error"].as_str().unwrap().contains("nothing"), "{v}");
+    let (st, _) = a.check("get", "/api/v1/users", a.anon("get", "/api/v1/users"));
+    assert_eq!(st, 401);
+    let v = a.ok(
+        "post",
+        "/api/v1/repos/{repo}/sync",
+        "/api/v1/repos/web/sync",
+        None,
+        400,
+    );
+    assert!(v["error"].is_string(), "{v}");
+
+    // Rejected before the handler: plain text.
+    for (m, tmpl, path, body, want) in [
+        (
+            "delete",
+            "/api/v1/tokens/{id}",
+            "/api/v1/tokens/abc",
+            None,
+            400,
+        ),
+        (
+            "get",
+            "/api/v1/repos/{repo}/diff",
+            "/api/v1/repos/web/diff",
+            None,
+            400,
+        ),
+        ("post", repos, repos, Some(json!({"name": "c"})), 422),
+        (
+            "post",
+            repos,
+            repos,
+            Some(json!({"name": 1, "format": "deb"})),
+            422,
+        ),
+    ] {
+        let v = a.ok(m, tmpl, path, body, want);
+        assert!(v.as_str().is_some_and(|t| !t.is_empty()), "{m} {path}: {v}");
+    }
+    let (st, v) = a.check(
+        "post",
+        repos,
+        a.req("post", repos)
+            .header("content-type", "application/json")
+            .body("{"),
+    );
+    assert_eq!(st, 400, "{v}");
+    let (st, v) = a.check("post", repos, a.req("post", repos).body("{}"));
+    assert_eq!(st, 415, "{v}");
+
+    a.ok("delete", repo, "/api/v1/repos/b", None, 204);
+    a.ok("delete", repo, "/api/v1/repos/mir?remove_tree=1", None, 204);
+    assert!(!mtree.exists());
+
+    // Every route was called.
+    if tools {
+        let mut all = std::collections::BTreeSet::new();
+        for (p, item) in doc["paths"].as_object().unwrap() {
+            for m in item.as_object().unwrap().keys() {
+                all.insert((m.clone(), p.clone()));
+            }
+        }
+        let seen = a.seen.borrow();
+        let missed: Vec<_> = all.difference(&seen).collect();
+        assert!(missed.is_empty(), "not called: {missed:?}");
+    }
+
+    // And the checks catch what does not match.
+    let schema = json!({"$ref": "#/components/schemas/Repo"});
+    assert_eq!(validate(&doc, &schema, &web, ""), Ok(()));
+    let mut bad = web.clone();
+    bad.as_object_mut().unwrap().remove("name");
+    assert!(validate(&doc, &schema, &bad, "").is_err(), "missing name");
+    let mut bad = web.clone();
+    bad["version"] = json!("one");
+    assert!(
+        validate(&doc, &schema, &bad, "").is_err(),
+        "version not a number"
+    );
+    let mut bad = web.clone();
+    bad["kind"] = json!("other");
+    assert!(
+        validate(&doc, &schema, &bad, "").is_err(),
+        "kind not a kind"
+    );
+    let mut bad = web.clone();
+    bad["role"] = json!("owner");
+    assert!(
+        validate(&doc, &schema, &bad, "").is_err(),
+        "role not a role"
+    );
+    let list = json!({"type": "array", "items": schema});
+    assert!(
+        validate(&doc, &list, &json!([web, {}]), "").is_err(),
+        "an item"
+    );
+    let reply = json!({"$ref": "#/components/schemas/PlanReply"});
+    assert!(
+        validate(&doc, &reply, &json!({"summary": "x"}), "").is_err(),
+        "neither"
+    );
+    let job = json!({"$ref": "#/components/schemas/JobDetail"});
+    let mut j = a.ok(
+        "get",
+        "/api/v1/jobs/{id}",
+        &format!("/api/v1/jobs/{import}"),
+        None,
+        200,
+    );
+    j.as_object_mut().unwrap().remove("log");
+    assert!(validate(&doc, &job, &j, "").is_err(), "allOf: no log");
+}
