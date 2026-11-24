@@ -494,6 +494,13 @@ fn settings_hints(app: &App) -> pkgpod_engine::FormHints {
 /// checked choices a list, JSON fields parsed. Names not in the schema
 /// are left out.
 fn form_json(fields: &[Field], form: &[(String, String)]) -> Result<Value> {
+    form_values(fields, form, false)
+}
+
+/// The fields a form sent, by the schema; with `sparse`, a field not sent
+/// is left out (an unticked box too, unless sent as `false`), so an
+/// operation leaves what it was not given as it is.
+fn form_values(fields: &[Field], form: &[(String, String)], sparse: bool) -> Result<Value> {
     let mut m = serde_json::Map::new();
     for f in fields {
         let vals: Vec<&str> = form
@@ -501,6 +508,9 @@ fn form_json(fields: &[Field], form: &[(String, String)]) -> Result<Value> {
             .filter(|(k, _)| k == f.name)
             .map(|(_, v)| v.as_str())
             .collect();
+        if sparse && vals.is_empty() {
+            continue;
+        }
         let v = match &f.kind {
             FieldKind::Bool => json!(vals.iter().any(|v| matches!(*v, "on" | "true" | "1"))),
             FieldKind::Multi { .. } => {
@@ -2719,7 +2729,8 @@ async fn op(
         .and_then(|f| f.ops().into_iter().find(|o| o.name == opname))
         .map(|o| o.params)
         .unwrap_or_default();
-    let params = match form_json(&fields, &form) {
+    // Only what the form sent: the console sends the fields changed.
+    let params = match form_values(&fields, &form, true) {
         Ok(p) => p,
         Err(e) => return err_part(e),
     };
