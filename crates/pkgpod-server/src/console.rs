@@ -65,6 +65,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/r/{repo}/changes", get(changes_part))
         .route("/r/{repo}/settings", get(settings_part))
         .route("/r/{repo}/use", get(use_part))
+        .route("/c/r/{repo}/use-token", post(use_token))
         .route("/r/{repo}/actions", get(actions_part))
         .route("/c/repos", post(repo_create))
         .route("/c/r/{repo}/ops/{op}", post(op))
@@ -979,6 +980,14 @@ pub struct TabLink {
 #[template(path = "use.html")]
 struct UsePart {
     repo: String,
+    /// The place shown (kept when a token is made).
+    place: String,
+    /// The viewer may upload here (a token for it may write).
+    can_write: bool,
+    /// Set when the commands carry a token just made.
+    token_note: String,
+    /// What the places are called.
+    noun: &'static str,
     /// Dists to show the usage for, the one shown marked.
     dists: Vec<(String, bool)>,
     usage: Vec<UseLine>,
@@ -1050,21 +1059,95 @@ fn base_url(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String], host: &str)
 }
 
 /// How clients use a repository (the format's lines).
-/// The dists a deb repository's usage can be shown for.
-fn usage_dists(app: &App, r: &pkgpod_engine::RepoInfo) -> Vec<String> {
-    if r.format != "deb" {
-        return Vec::new();
+/// Usage with a real name from the repository's catalog where install
+/// and depend lines say `<package>` (or `<crate>`, `<gem>`, ...).
+fn with_names(app: &App, r: &pkgpod_engine::RepoInfo, mut lines: Vec<UseLine>) -> Vec<UseLine> {
+    let Some(item) = app
+        .engine
+        .search("", Some(&r.name), 1)
+        .ok()
+        .and_then(|v| v.into_iter().next())
+    else {
+        return lines;
+    };
+    for l in &mut lines {
+        let lab = l.label.to_lowercase();
+        if !(lab.starts_with("install")
+            || lab.contains("depend")
+            || lab.starts_with("gemfile")
+            || lab.starts_with("publish and install")
+            || lab.starts_with("repository"))
+        {
+            continue;
+        }
+        for ph in [
+            "<package>",
+            "<project>",
+            "<crate>",
+            "<gem>",
+            "<chart>",
+            "<module>",
+        ] {
+            l.text = l.text.replace(ph, &item.name);
+        }
     }
-    if r.kind == Kind::Mirror {
+    lines
+}
+
+/// The dist people use: one with packages, else the first.
+fn deb_default_dist(app: &App, r: &pkgpod_engine::RepoInfo, dists: &[String]) -> String {
+    let root = app.engine.current(r).ok().flatten().map(|v| v.root);
+    let has_packages = |d: &str| {
+        root.and_then(|root| {
+            app.engine
+                .objects()
+                .dir(&root, &format!("dists/{d}"))
+                .ok()
+                .flatten()
+        })
+        .is_some_and(|t| t.iter().any(|(k, e)| !k.starts_with('_') && e.is_dir()))
+    };
+    dists
+        .iter()
+        .find(|d| has_packages(d))
+        .or(dists.first())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Where a repository's usage can be shown for: a deb repository's
+/// dists, an rpm one's groups, an apk one's branch/repository pairs, an
+/// arch one's repositories (what its clients name in their addresses).
+fn usage_places(app: &App, r: &pkgpod_engine::RepoInfo) -> Vec<String> {
+    if r.format == "deb" && r.kind == Kind::Mirror {
         return crate::mirror_pkgs::tree_index(&r.tree_dir()).0;
     }
-    app.engine
-        .current(r)
-        .ok()
-        .flatten()
-        .and_then(|v| app.engine.objects().dir(&v.root, "dists").ok().flatten())
-        .map(|t| t.keys().cloned().collect())
-        .unwrap_or_default()
+    let Some(root) = app.engine.current(r).ok().flatten().map(|v| v.root) else {
+        return Vec::new();
+    };
+    let objects = app.engine.objects();
+    let dirs = |path: &str| -> Vec<String> {
+        objects
+            .dir(&root, path)
+            .ok()
+            .flatten()
+            .map(|t| {
+                t.iter()
+                    .filter(|(k, e)| e.is_dir() && !k.starts_with('_'))
+                    .map(|(k, _)| k.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    match r.format.as_str() {
+        "deb" => dirs("dists"),
+        "rpm" | "arch" => dirs(""),
+        "apk" => dirs("")
+            .into_iter()
+            .flat_map(|b| dirs(&b).into_iter().map(move |rp| format!("{b}/{rp}")))
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// How clients use a repository; `want`: the dist to show it for (deb).
@@ -1269,7 +1352,11 @@ fn usage(
             let (scheme, rest) = base.split_once("://").unwrap_or(("https", &base));
             format!("{scheme}://token:<token>@{rest}")
         };
-        let section = r.name.to_ascii_lowercase();
+        let section = if want.is_empty() {
+            r.name.to_ascii_lowercase()
+        } else {
+            want.to_string()
+        };
         let signed = r.setting_bool("sign");
         if signed {
             out.push(UseLine {
@@ -1293,8 +1380,18 @@ fn usage(
         out.push(UseLine {
             label: "Upload".into(),
             text: format!(
-                "curl -u token:<token> -T hello-1.0-1-x86_64.pkg.tar.zst {base}upload\npkgpod upload {} hello-1.0-1-x86_64.pkg.tar.zst   # -s repository=<section> for another",
-                r.name
+                "curl -u token:<token> -T hello-1.0-1-x86_64.pkg.tar.zst '{base}upload{}'\npkgpod upload {} hello-1.0-1-x86_64.pkg.tar.zst{}",
+                if section == r.name.to_ascii_lowercase() {
+                    String::new()
+                } else {
+                    format!("?repository={section}")
+                },
+                r.name,
+                if section == r.name.to_ascii_lowercase() {
+                    "   # -s repository=<section> for another".to_string()
+                } else {
+                    format!(" -s repository={section}")
+                }
             ),
         });
         out.push(UseLine {
@@ -1397,6 +1494,8 @@ fn usage(
         return out;
     }
     if r.format == "rpm" {
+        let group = if want.is_empty() { "<group>" } else { want };
+        let eg = if want.is_empty() { "el9" } else { want };
         let id = r.name.replace('.', "-");
         let public = r.setting_bool("public");
         // dnf fetches gpgkey without username and password: a private
@@ -1414,7 +1513,7 @@ fn usage(
             "repo_gpgcheck=0".to_string()
         };
         let mut repo = format!(
-            "[pkgpod-{id}]\nname={}\nbaseurl={base}<group>/\nenabled=1\ngpgcheck=0\n{check}",
+            "[pkgpod-{id}]\nname={}\nbaseurl={base}{group}/\nenabled=1\ngpgcheck=0\n{check}",
             r.name
         );
         if !public {
@@ -1423,23 +1522,27 @@ fn usage(
         out.push(UseLine {
             label: format!("/etc/yum.repos.d/{id}.repo"),
             text: format!(
-                "{repo}\n# or fetch it: curl -o /etc/yum.repos.d/{id}.repo {base}<group>.repo"
+                "{repo}\n# or fetch it: curl -o /etc/yum.repos.d/{id}.repo {base}{group}.repo"
             ),
         });
         out.push(UseLine {
             label: "Install".into(),
-            text: "dnf install <package>   # the group: e.g. el9, fc43 or main".into(),
+            text: if want.is_empty() {
+                "dnf install <package>   # the group: e.g. el9, fc43 or main".into()
+            } else {
+                "dnf install <package>".into()
+            },
         });
         out.push(UseLine {
             label: "Upload".into(),
             text: format!(
-                "curl -u token:<token> -T hello-1.0-1.x86_64.rpm '{base}upload?group=el9'\npkgpod upload {} hello-1.0-1.x86_64.rpm -s group=el9",
+                "curl -u token:<token> -T hello-1.0-1.x86_64.rpm '{base}upload?group={eg}'\npkgpod upload {} hello-1.0-1.x86_64.rpm -s group={eg}",
                 r.name
             ),
         });
         out.push(UseLine {
             label: "A labelled version".into(),
-            text: format!("baseurl={base}@<label>/<group>/"),
+            text: format!("baseurl={base}@<label>/{group}/"),
         });
         return out;
     }
@@ -1460,22 +1563,32 @@ fn usage(
             label: "Key".into(),
             text: format!("wget -O /etc/apk/keys/{key} {repo_url}{key}"),
         });
+        // The branch/repository chosen, else placeholders.
+        let (at, eg, branch, repository) = match want.split_once('/') {
+            Some((b, rp)) if !want.is_empty() => (want.to_string(), String::new(), b, rp),
+            _ => (
+                "<branch>/<repository>".to_string(),
+                "   # e.g. v3.22/main".to_string(),
+                "v3.22",
+                "main",
+            ),
+        };
         out.push(UseLine {
             label: "Repository".into(),
             text: format!(
-                "echo {repo_url}<branch>/<repository> >> /etc/apk/repositories   # e.g. v3.22/main\napk update && apk add <package>"
+                "echo {repo_url}{at} >> /etc/apk/repositories{eg}\napk update && apk add <package>"
             ),
         });
         out.push(UseLine {
             label: "Upload".into(),
             text: format!(
-                "curl -u token:<token> -T hello-1.0-r0.apk '{base}upload?branch=v3.22&repository=main'\npkgpod upload {} hello-1.0-r0.apk -s branch=v3.22 -s repository=main",
+                "curl -u token:<token> -T hello-1.0-r0.apk '{base}upload?branch={branch}&repository={repository}'\npkgpod upload {} hello-1.0-r0.apk -s branch={branch} -s repository={repository}",
                 r.name
             ),
         });
         out.push(UseLine {
             label: "A labelled version".into(),
-            text: format!("{repo_url}@<label>/<branch>/<repository>"),
+            text: format!("{repo_url}@<label>/{at}"),
         });
         return out;
     }
@@ -1710,28 +1823,13 @@ fn usage(
             .and_then(|v| app.engine.objects().dir(&v.root, "dists").ok().flatten())
             .map(|t| t.keys().cloned().collect())
             .unwrap_or_default();
-        // The dist people use: one with packages, else the first.
-        let has_packages = |d: &str| {
-            app.engine
-                .current(r)
-                .ok()
-                .flatten()
-                .and_then(|v| {
-                    app.engine
-                        .objects()
-                        .dir(&v.root, &format!("dists/{d}"))
-                        .ok()
-                        .flatten()
-                })
-                .is_some_and(|t| t.iter().any(|(k, e)| !k.starts_with('_') && e.is_dir()))
+        let dist = if dists.iter().any(|d| d == want) {
+            want.to_string()
+        } else {
+            Some(deb_default_dist(app, r, &dists))
+                .filter(|d| !d.is_empty())
+                .unwrap_or_else(|| "<dist>".into())
         };
-        let dist = dists
-            .iter()
-            .find(|d| *d == want)
-            .or_else(|| dists.iter().find(|d| has_packages(d)))
-            .or(dists.first())
-            .cloned()
-            .unwrap_or_else(|| "<dist>".into());
         let mut e = pkgpod_engine::Edit::new(
             app.engine.objects(),
             app.engine
@@ -1773,6 +1871,10 @@ fn usage(
                 "echo 'deb{opt} {base} {dist} {comps}' | sudo tee /etc/apt/sources.list.d/{}.list",
                 r.name
             ),
+        });
+        out.push(UseLine {
+            label: "Install".into(),
+            text: "sudo apt update && sudo apt install <package>".into(),
         });
         out.push(UseLine {
             label: "Or as deb822 (apt 2.x)".into(),
@@ -2000,6 +2102,57 @@ struct UseQ {
     dist: String,
 }
 
+/// The How to use part for `place` (empty: the default), with `token` in
+/// place of `<token>` when one was just made.
+fn use_render(
+    app: &Arc<App>,
+    caller: &Caller,
+    r: &pkgpod_engine::RepoInfo,
+    want: &str,
+    host: &str,
+    token: Option<(&str, String)>,
+) -> Response {
+    let urls: Vec<String> = r.setting_list("urls");
+    let places = usage_places(app, r);
+    // The one asked for; a deb repository's default is one with packages.
+    let place = if places.iter().any(|p| p == want) {
+        want.to_string()
+    } else if r.format == "deb" {
+        deb_default_dist(app, r, &places)
+    } else {
+        places.first().cloned().unwrap_or_default()
+    };
+    let mut usage = with_names(app, r, usage(app, r, &urls, host, &place));
+    let mut token_note = String::new();
+    if let Some((t, note)) = token {
+        for u in &mut usage {
+            u.text = u.text.replace("<token>", t);
+        }
+        token_note = note;
+    }
+    let role = app.auth.role(caller, &r.name, r.setting_bool("public"));
+    render(&UsePart {
+        repo: r.name.clone(),
+        place: place.clone(),
+        can_write: role >= Some(Role::Write) && r.kind != Kind::Mirror,
+        token_note,
+        noun: match r.format.as_str() {
+            "deb" => "dist",
+            "rpm" => "group",
+            "apk" => "branch/repository",
+            _ => "repository",
+        },
+        dists: places
+            .into_iter()
+            .map(|d| {
+                let on = d == place;
+                (d, on)
+            })
+            .collect(),
+        usage,
+    })
+}
+
 async fn use_part(
     State(app): St,
     v: Viewer,
@@ -2011,26 +2164,62 @@ async fn use_part(
         Ok(r) => r,
         Err(e) => return err_part(e),
     };
-    let urls: Vec<String> = r.setting_list("urls");
-    let usage = usage(&app, &r, &urls, &host_of(&headers), &q.dist);
-    // The dist the commands name (the Source line's).
-    let shown = usage
-        .iter()
-        .find(|u| u.label == "Source")
-        .map(|u| u.text.clone())
-        .unwrap_or_default();
-    let dists = usage_dists(&app, &r)
-        .into_iter()
-        .map(|d| {
-            let on = shown.contains(&format!(" {d} "));
-            (d, on)
-        })
-        .collect();
-    render(&UsePart {
-        repo: r.name.clone(),
-        dists,
-        usage,
-    })
+    use_render(&app, &v.caller, &r, &q.dist, &host_of(&headers), None)
+}
+
+/// Makes a token for this repository only (read, or write when asked and
+/// allowed) and shows the commands with it, once.
+async fn use_token(
+    State(app): St,
+    v: Viewer,
+    Path(repo): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<Vec<(String, String)>>,
+) -> Response {
+    let write = form_get(&form, "write") == "on";
+    let r = match app.repo_for(
+        &v.caller,
+        &repo,
+        if write { Role::Write } else { Role::Read },
+    ) {
+        Ok(r) => r,
+        Err(e) => return err_part(e),
+    };
+    let days: i64 = form_get(&form, "days").parse().unwrap_or(90);
+    let name = format!(
+        "{repo} {} ({})",
+        if write { "upload" } else { "read" },
+        when(Some(pkgpod_base::now()))
+    );
+    let req = api::TokenReq {
+        name: name.clone(),
+        repos: vec![repo.clone()],
+        write,
+        expires_days: Some(days).filter(|d| *d > 0),
+    };
+    match api::token_create(State(app.clone()), v.who(), Json(req)).await {
+        Ok((_, Json(t))) => {
+            let token = s(&t["token"]);
+            let note = format!(
+                "These commands carry the token \"{name}\" ({}, {}); it is shown only now. Delete it under Account & tokens.",
+                if write { "may upload" } else { "read only" },
+                if days > 0 {
+                    format!("expires in {days} days")
+                } else {
+                    "never expires".into()
+                }
+            );
+            use_render(
+                &app,
+                &v.caller,
+                &r,
+                form_get(&form, "place"),
+                &host_of(&headers),
+                Some((&token, note)),
+            )
+        }
+        Err(e) => err_part(e),
+    }
 }
 
 async fn actions_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> Response {

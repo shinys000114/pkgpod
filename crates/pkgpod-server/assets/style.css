@@ -488,3 +488,5 @@ form:not(:has(select[name="proto"] option[value="ftp"]:checked)) .only-ftp { dis
 .dist-switch button.link.on { background: var(--accent-soft); color: var(--fg); }
 .login .first-login { margin: .6rem 0 0; line-height: 1.45; }
 .repos .desc { white-space: normal; max-width: 26rem; }
+.token-fill { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; padding-bottom: 0; }
+.token-fill select { width: auto; }

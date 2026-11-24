@@ -7397,3 +7397,81 @@ fn pub_packages_with_dart() {
             .starts_with("Bearer")
     );
 }
+
+#[test]
+fn console_how_to_use_places_names_and_a_token() {
+    let s = Server::start();
+    let (c, sid, csrf) = console_session(&s, "use", "use-password");
+    let page = |p: &str| {
+        c.get(format!("{}{p}", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .send()
+            .unwrap()
+            .text()
+            .unwrap()
+    };
+    // An rpm repository's groups to choose, the packages named.
+    s.cli(&["repo", "create", "r", "-f", "rpm", "-s", "sign=false"])
+        .unwrap();
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../pkgpod-rpm/tests/fixtures");
+    for (f, g) in [
+        ("hello-rpm-1.0-1.noarch.rpm", "el9"),
+        ("tool-rpm-0.1-1.x86_64.rpm", "fc43"),
+    ] {
+        s.cli(&[
+            "upload",
+            "r",
+            fixtures.join(f).to_str().unwrap(),
+            "-s",
+            &format!("group={g}"),
+        ])
+        .unwrap();
+    }
+    let use_page = page("/r/r/use?dist=fc43");
+    assert!(
+        use_page.contains("For the group")
+            && use_page.contains("/r/fc43/\nenabled=1")
+            && use_page.contains("dnf install hello-rpm"),
+        "{use_page}"
+    );
+    assert!(page("/r/r/use").contains("/r/el9/\nenabled=1"));
+    // A token made for the commands: in them, for this repository only.
+    s.cli(&["repo", "create", "d", "-s", "sign=false"]).unwrap();
+    s.cli(&["op", "d", "dist-set", "name=jammy noble", "-y"])
+        .unwrap();
+    let r = c
+        .post(format!("{}/c/r/d/use-token", s.api))
+        .header("cookie", format!("pkgpod_session={sid}"))
+        .header("x-csrf-token", &csrf)
+        .form(&[("place", "noble"), ("days", "30")])
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(
+        r.contains("shown only now") && r.contains(" noble main") && !r.contains("&lt;token&gt;"),
+        "{r}"
+    );
+    let token = r
+        .split("-u token:")
+        .nth(1)
+        .unwrap()
+        .split([' ', '&', '\''])
+        .next()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        get(&s.url("/d/dists/noble/Release"), Some(("token", &token))).0,
+        200
+    );
+    assert_eq!(
+        get(
+            &s.url("/r/el9/repodata/repomd.xml"),
+            Some(("token", &token))
+        )
+        .0,
+        404
+    );
+    let tokens = s.cli(&["token", "list", "--all"]).unwrap();
+    assert!(tokens.contains("d read ("), "{tokens}");
+}
