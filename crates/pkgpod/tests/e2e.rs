@@ -7475,3 +7475,85 @@ fn console_how_to_use_places_names_and_a_token() {
     let tokens = s.cli(&["token", "list", "--all"]).unwrap();
     assert!(tokens.contains("d read ("), "{tokens}");
 }
+
+#[test]
+fn console_packages_filter_download_details_bulk() {
+    let s = Server::start();
+    let (c, sid, csrf) = console_session(&s, "pk", "pk-password");
+    let page = |p: &str| {
+        let r = c
+            .get(format!("{}{p}", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .send()
+            .unwrap();
+        let cd = r
+            .headers()
+            .get("content-disposition")
+            .map(|v| v.to_str().unwrap().to_string());
+        (r.status().as_u16(), cd, r.bytes().unwrap().to_vec())
+    };
+    let text = |p: &str| String::from_utf8(page(p).2).unwrap();
+    s.cli(&["repo", "create", "r", "-f", "rpm", "-s", "sign=false"])
+        .unwrap();
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../pkgpod-rpm/tests/fixtures");
+    for (f, g) in [
+        ("hello-rpm-1.0-1.noarch.rpm", "el9"),
+        ("hello-rpm-1.1-1.noarch.rpm", "el9"),
+        ("tool-rpm-0.1-1.x86_64.rpm", "fc43"),
+    ] {
+        s.cli(&[
+            "upload",
+            "r",
+            fixtures.join(f).to_str().unwrap(),
+            "-s",
+            &format!("group={g}"),
+        ])
+        .unwrap();
+    }
+    // Filtered by where it is, before the rows are cut.
+    let fc = text("/r/r/packages?at=fc43%20(x86_64)");
+    assert!(
+        fc.contains("tool-rpm") && !fc.contains(">hello-rpm<"),
+        "{fc}"
+    );
+    assert!(text("/r/r/packages").contains("<option>fc43 (x86_64)</option>"));
+    // Downloaded through the console, as an attachment.
+    let (st, cd, body) = page("/r/r/file?path=el9%2Fhello-rpm-1.0-1.noarch.rpm");
+    assert_eq!(st, 200);
+    assert!(cd.unwrap().starts_with("attachment;"));
+    assert_eq!(
+        body,
+        std::fs::read(fixtures.join("hello-rpm-1.0-1.noarch.rpm")).unwrap()
+    );
+    assert_eq!(page("/r/r/file?path=el9%2Fnothing.rpm").0, 404);
+    // Details: when it came, its digest.
+    let d = text("/r/r/pkg?path=el9%2Fhello-rpm-1.0-1.noarch.rpm");
+    assert!(
+        d.contains("Came in") && d.contains("version 2 ·") && d.contains("SHA-256"),
+        "{d}"
+    );
+    // Browse as served: each file's address to copy.
+    let b = text("/r/r/tree?path=el9/Packages");
+    assert!(
+        b.contains("copy address") && b.contains("/r/el9/Packages/hello-rpm-1.1-1.noarch.rpm"),
+        "{b}"
+    );
+    // Several rows removed in one plan.
+    let plan = c
+        .post(format!("{}/c/r/r/remove", s.api))
+        .header("cookie", format!("pkgpod_session={sid}"))
+        .header("x-csrf-token", &csrf)
+        .form(&[
+            ("path", "el9/hello-rpm-1.0-1.noarch.rpm"),
+            ("path", "fc43/tool-rpm-0.1-1.x86_64.rpm"),
+        ])
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(
+        plan.contains("- el9/hello-rpm-1.0-1.noarch.rpm")
+            && plan.contains("- fc43/tool-rpm-0.1-1.x86_64.rpm"),
+        "{plan}"
+    );
+}

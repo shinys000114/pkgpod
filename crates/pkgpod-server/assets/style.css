@@ -490,3 +490,21 @@ form:not(:has(select[name="proto"] option[value="ftp"]:checked)) .only-ftp { dis
 .repos .desc { white-space: normal; max-width: 26rem; }
 .token-fill { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; padding-bottom: 0; }
 .token-fill select { width: auto; }
+/* Packages: filters, chosen rows, details. */
+.pkg-filter input[type="search"] { width: 14rem; }
+.pkg-filter select { width: auto; max-width: 16rem; }
+th.pick, td.pick { width: 2rem; }
+table.sortable th:not(.pick) { cursor: pointer; user-select: none; }
+table.sortable th[aria-sort="ascending"]::after { content: " ▲"; font-size: 10px; }
+table.sortable th[aria-sort="descending"]::after { content: " ▼"; font-size: 10px; }
+.bulk { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+.bulk select { width: auto; }
+button.link.pkg-name { font-weight: 600; color: var(--fg); padding: 0; }
+button.link.pkg-name:hover { color: var(--accent); background: none; }
+.pkg-detail { margin: 0 1.1rem 1rem; border: 1px solid var(--line); border-radius: var(--radius); padding: .8rem 1rem; background: var(--surface-2); }
+.pkg-detail-head { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; margin-bottom: .5rem; }
+.pkg-detail-head b { flex: 1; }
+dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; margin: 0 0 .6rem; font-size: 13px; }
+dl.kv dt { color: var(--muted); }
+dl.kv dd { margin: 0; }
+pre.meta { max-height: 18rem; overflow: auto; }

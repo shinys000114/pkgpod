@@ -1,0 +1,13 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+<div class="pkg-detail">
+  <div class="pkg-detail-head"><b class="mono-wrap">{{ path }}</b>
+    <a class="button" href="/r/{{ repo }}/file?path={{ path|urlencode }}" download>Download</a>
+    <button type="button" class="link close-detail">close</button></div>
+  <dl class="kv">
+    <dt>Size</dt><dd>{{ size }}</dd>
+    <dt>SHA-256</dt><dd class="mono-wrap">{{ sha256 }}</dd>
+    <dt>Came in</dt><dd>{% if added.is_empty() %}before the last {{ looked }} versions{% else %}{{ added }}{% endif %}</dd>
+    <dt>Labels</dt><dd>{% if labels.is_empty() %}<span class="muted">none</span>{% else %}{% for l in labels %}<span class="tag">{{ l }}</span> {% endfor %}{% endif %}</dd>
+  </dl>
+  <pre class="log meta">{{ meta }}</pre>
+</div>
