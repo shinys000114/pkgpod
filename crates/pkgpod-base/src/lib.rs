@@ -7,6 +7,7 @@
 pub mod db;
 pub mod digest;
 pub mod store;
+pub mod zip;
 
 use std::sync::OnceLock;
 

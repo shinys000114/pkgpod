@@ -2344,6 +2344,8 @@ dependencies = [
 name = "pkgpod-base"
 version = "0.0.0"
 dependencies = [
+ "crc32fast",
+ "flate2",
  "getrandom 0.4.3",
  "rusqlite",
  "serde",
@@ -2430,8 +2432,6 @@ dependencies = [
 name = "pkgpod-go"
 version = "0.0.0"
 dependencies = [
- "crc32fast",
- "flate2",
  "jiff",
  "pkgpod-base",
  "pkgpod-engine",
