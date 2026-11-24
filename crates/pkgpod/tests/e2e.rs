@@ -3435,3 +3435,225 @@ fn oci_import_of_chosen_images() {
         .is_err()
     );
 }
+
+fn make_dist(
+    dir: &Path,
+    name: &str,
+    version: &str,
+    kind: &str,
+    requires: &str,
+    pad: usize,
+) -> PathBuf {
+    let o = Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/make_dist.py"
+        ))
+        .arg(dir)
+        .args([name, version, kind, requires, &pad.to_string()])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    PathBuf::from(String::from_utf8_lossy(&o.stdout).trim())
+}
+
+/// An upload as twine sends it.
+fn twine_upload(url: &str, auth: Option<(&str, &str)>, file: &Path) -> (u16, String) {
+    let data = std::fs::read(file).unwrap();
+    let sha = pkgpod_deb::hash::hash_bytes(&data).sha256;
+    let fname = file.file_name().unwrap().to_string_lossy().to_string();
+    let form = reqwest::blocking::multipart::Form::new()
+        .text(":action", "file_upload")
+        .text("protocol_version", "1")
+        .text("name", "ignored")
+        .text("version", "ignored")
+        .text("sha256_digest", sha)
+        .part(
+            "content",
+            reqwest::blocking::multipart::Part::bytes(data).file_name(fname),
+        );
+    let mut r = reqwest::blocking::Client::new().post(url).multipart(form);
+    if let Some((u, p)) = auth {
+        r = r.basic_auth(u, Some(p));
+    }
+    let r = r.send().unwrap();
+    (r.status().as_u16(), r.text().unwrap())
+}
+
+fn pip(args: &[&str], target: &Path) -> (bool, String) {
+    let o = Command::new("python3")
+        .args([
+            "-m",
+            "pip",
+            "install",
+            "--isolated",
+            "--no-cache-dir",
+            "--no-input",
+            "--disable-pip-version-check",
+            "--no-deps",
+            "--target",
+        ])
+        .arg(target)
+        .args(args)
+        .output()
+        .unwrap();
+    (
+        o.status.success(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        ),
+    )
+}
+
+#[test]
+fn pypi_with_pip() {
+    if !have("python3")
+        || !Command::new("python3")
+            .args(["-m", "pip", "--version"])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&["repo", "create", "py", "-f", "pypi"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "py", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let auth = Some(("__token__", tok.as_str()));
+    let up = s.url("/py/");
+    let d = s.dir.path().join("dists");
+    std::fs::create_dir_all(&d).unwrap();
+    let w10 = make_dist(&d, "Foo.Bar_baz", "1.0", "wheel", "", 0);
+    let (st, body) = twine_upload(&up, auth, &w10);
+    assert_eq!(st, 200, "{body}");
+    s.cli(&["label", "py", "first"]).unwrap();
+    for (v, req) in [("1.1", ""), ("2.0", ">=99")] {
+        let w = make_dist(&d, "Foo.Bar_baz", v, "wheel", req, 0);
+        assert_eq!(twine_upload(&up, auth, &w).0, 200);
+    }
+    let sd = make_dist(&d, "Foo.Bar_baz", "1.0", "sdist", "", 0);
+    let (st, body) = twine_upload(&format!("{up}legacy/"), auth, &sd);
+    assert_eq!(st, 200, "{body}");
+    // The same file again changes nothing; other content is refused.
+    assert_eq!(twine_upload(&up, auth, &w10).0, 200);
+    let other = s.dir.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let w10b = make_dist(&other, "Foo.Bar_baz", "1.0", "wheel", "", 10);
+    let (st, body) = twine_upload(&up, auth, &w10b);
+    assert_eq!(st, 400);
+    assert!(body.contains("already exists"), "{body}");
+    assert_eq!(twine_upload(&up, None, &w10).0, 401, "anonymous");
+    // Bigger than a form's default limit, through the serving listener.
+    let big = make_dist(&d, "big-pkg", "1.0", "wheel", "", 3 << 20);
+    let (st, body) = twine_upload(&up, auth, &big);
+    assert_eq!(st, 200, "{body}");
+    s.cli(&[
+        "op",
+        "py",
+        "yank",
+        "project=foo-bar-baz",
+        "version=1.1",
+        "reason=broken <b>",
+        "-y",
+    ])
+    .unwrap();
+
+    // The index: HTML as asked, JSON for pip, names normalized.
+    let c = reqwest::blocking::Client::new();
+    let r = c
+        .get(s.url("/py/simple/foo-bar-baz/"))
+        .basic_auth("__token__", Some(&tok))
+        .header("accept", "text/html")
+        .send()
+        .unwrap();
+    assert_eq!(r.headers()["cache-control"], "no-cache");
+    let html = r.text().unwrap();
+    assert!(html.contains("data-yanked=\"broken &lt;b&gt;\""), "{html}");
+    assert!(html.contains("data-requires-python=\"&gt;=99\""), "{html}");
+    assert!(html.contains("data-core-metadata=\"sha256="), "{html}");
+    assert!(html.contains("foo_bar_baz-1.0.tar.gz#sha256="), "{html}");
+    let r = c
+        .get(s.url("/py/simple/foo-bar-baz/"))
+        .basic_auth("__token__", Some(&tok))
+        .header(
+            "accept",
+            "application/vnd.pypi.simple.v1+json, text/html; q=0.01",
+        )
+        .send()
+        .unwrap();
+    assert_eq!(
+        r.headers()["content-type"],
+        "application/vnd.pypi.simple.v1+json"
+    );
+    let j: Value = r.json().unwrap();
+    let wheel = j["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["filename"] == "foo_bar_baz-1.0-py3-none-any.whl")
+        .unwrap();
+    let md = wheel["core-metadata"]["sha256"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let meta = c
+        .get(s.url("/py/files/foo-bar-baz/foo_bar_baz-1.0-py3-none-any.whl.metadata"))
+        .basic_auth("__token__", Some(&tok))
+        .send()
+        .unwrap()
+        .bytes()
+        .unwrap();
+    assert_eq!(pkgpod_deb::hash::hash_bytes(&meta).sha256, md);
+    let r = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap()
+        .get(s.url("/py/simple/Foo.Bar_baz/"))
+        .basic_auth("__token__", Some(&tok))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 308);
+    assert_eq!(r.headers()["location"], "/py/simple/foo-bar-baz/");
+
+    // pip: the newest it may have (2.0 needs Python 99, 1.1 is yanked).
+    let port = s.serve_port;
+    let index = format!("http://__token__:{tok}@127.0.0.1:{port}/py/simple/");
+    let t = s.dir.path().join("t1");
+    let (ok, out) = pip(&["--index-url", &index, "foo-bar-baz"], &t);
+    assert!(ok, "{out}");
+    let v = std::fs::read_to_string(t.join("foo_bar_baz/__init__.py")).unwrap();
+    assert!(v.contains("'1.0'"), "{v}");
+    // A yanked release when asked for exactly.
+    let t = s.dir.path().join("t2");
+    let (ok, out) = pip(&["--index-url", &index, "foo-bar-baz==1.1"], &t);
+    assert!(ok, "{out}");
+    assert!(
+        std::fs::read_to_string(t.join("foo_bar_baz/__init__.py"))
+            .unwrap()
+            .contains("'1.1'")
+    );
+    // The label: the index as it was.
+    let t = s.dir.path().join("t3");
+    let at = format!("http://__token__:{tok}@127.0.0.1:{port}/py/@first/simple/");
+    assert!(!pip(&["--index-url", &at, "foo-bar-baz==1.1"], &t).0);
+    assert!(pip(&["--index-url", &at, "foo-bar-baz==1.0"], &t).0);
+    // Without credentials: nothing.
+    let t = s.dir.path().join("t4");
+    let anon = format!("http://127.0.0.1:{port}/py/simple/");
+    assert!(!pip(&["--index-url", &anon, "foo-bar-baz"], &t).0);
+    // The big one installs whole.
+    let t = s.dir.path().join("t5");
+    let (ok, out) = pip(&["--index-url", &index, "big-pkg"], &t);
+    assert!(ok, "{out}");
+    assert_eq!(
+        std::fs::metadata(t.join("big_pkg/pad.bin")).unwrap().len(),
+        3 << 20
+    );
+    let found = s.json(&["search", "foo"]);
+    assert!(found.to_string().contains("(yanked)"), "{found}");
+}

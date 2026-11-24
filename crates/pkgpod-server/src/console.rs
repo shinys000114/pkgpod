@@ -675,6 +675,40 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String]) -> Vec<UseLine
         format!("http://{addr}/{}/", r.name)
     });
     let mut out = Vec::new();
+    if r.format == "pypi" {
+        let public = r.setting_bool("public");
+        let index = if public {
+            format!("{base}simple/")
+        } else {
+            let (scheme, rest) = base.split_once("://").unwrap_or(("https", &base));
+            format!("{scheme}://__token__:<token>@{rest}simple/")
+        };
+        out.push(UseLine {
+            label: "Install".into(),
+            text: format!(
+                "pip install --index-url {index} <project>\n# packages from PyPI as well (pkgpod is no proxy): add --extra-index-url https://pypi.org/simple/"
+            ),
+        });
+        out.push(UseLine {
+            label: "pip.conf".into(),
+            text: format!("[global]\nindex-url = {index}"),
+        });
+        out.push(UseLine {
+            label: "Upload".into(),
+            text: format!(
+                "twine upload --repository-url {base} -u __token__ -p <token> dist/*\npkgpod upload {} dist/*",
+                r.name
+            ),
+        });
+        out.push(UseLine {
+            label: "A labelled version".into(),
+            text: format!(
+                "pip install --index-url {}@<label>/simple/ <project>",
+                index.trim_end_matches("simple/")
+            ),
+        });
+        return out;
+    }
     if r.format == "oci" {
         // host[:port] and the path that starts image names.
         let rest = base.split_once("://").map_or(base.as_str(), |x| x.1);

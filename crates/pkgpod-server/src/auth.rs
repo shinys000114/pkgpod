@@ -341,7 +341,8 @@ impl Auth {
         if password.starts_with(TOKEN_PREFIX) {
             let c = self.token(password)?;
             let owner = c.user.as_ref()?;
-            if name.is_empty() || name == owner.name || name == "token" {
+            // "__token__" as PyPI clients (twine, uv) send it.
+            if name.is_empty() || name == owner.name || name == "token" || name == "__token__" {
                 return Some(c);
             }
             return None;
