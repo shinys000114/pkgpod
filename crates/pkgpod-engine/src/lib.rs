@@ -17,7 +17,7 @@ mod engine;
 mod gc;
 
 pub use engine::{Engine, Found, NewRepo, Outcome, Plan, Version};
-pub use format::{Cx, Format, Item, PublishCx, RepoInfo, Signer, Upload};
+pub use format::{Cx, FormHints, Format, Item, PublishCx, RepoInfo, Signer, Upload};
 pub use gc::GcReport;
 pub use tree::{Change, Edit, Entry, Objects};
 

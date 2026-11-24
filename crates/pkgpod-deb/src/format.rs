@@ -27,7 +27,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use pkgpod_base::Digest;
 use pkgpod_engine::settings::Field;
 use pkgpod_engine::tree::{Edit, Entry};
-use pkgpod_engine::{Cx, Error, Format, Item, Kind, PublishCx, Result, Upload};
+use pkgpod_engine::{Cx, Error, FormHints, Format, Item, Kind, PublishCx, Result, Upload};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
@@ -974,6 +974,68 @@ impl Format for Deb {
                 "Replace a package file of the same name with other content, everywhere.",
             ),
         ]
+    }
+
+    fn form_hints(&self, objects: &pkgpod_engine::Objects, root: &Digest) -> FormHints {
+        let mut e = Edit::new(objects, *root);
+        let defs = dists(&mut e).unwrap_or_default();
+        let mut h = FormHints::default();
+        let names: Vec<String> = defs.keys().cloned().collect();
+        for k in [
+            "dist-set.name",
+            "dist-remove.name",
+            "remove.dists",
+            "copy.from",
+            "copy.to",
+            "move.from",
+            "move.to",
+        ] {
+            h.suggest.insert(k.into(), names.clone());
+        }
+        let mut comps = std::collections::BTreeSet::new();
+        let mut archs = std::collections::BTreeSet::new();
+        for d in defs.values() {
+            comps.extend(d.components.iter().cloned());
+            archs.extend(d.architectures.iter().cloned());
+        }
+        let mut pkgs = std::collections::BTreeSet::new();
+        for (path, entry) in e.walk("dists").unwrap_or_default() {
+            if split_pkg_path(&path).is_none() {
+                continue;
+            }
+            if let Some((_, _, m)) = pkg_meta(&entry) {
+                if m.architecture != "all" {
+                    archs.insert(m.architecture.clone());
+                }
+                if pkgs.len() < 2000 {
+                    pkgs.insert(m.package.clone());
+                    pkgs.insert(format!("{}_{}", m.package, m.version));
+                }
+            }
+        }
+        let comps: Vec<String> = comps.into_iter().collect();
+        for k in [
+            "upload.component",
+            "remove.components",
+            "copy.component",
+            "move.component",
+            "dist-set.components",
+        ] {
+            h.suggest.insert(k.into(), comps.clone());
+        }
+        h.suggest
+            .insert("dist-set.architectures".into(), archs.into_iter().collect());
+        let pkgs: Vec<String> = pkgs.into_iter().collect();
+        for k in ["remove.packages", "copy.packages", "move.packages"] {
+            h.suggest.insert(k.into(), pkgs.clone());
+        }
+        h.prefill.insert(
+            "dist-set.name".into(),
+            defs.into_iter()
+                .map(|(n, d)| (n, serde_json::to_value(&d).expect("dist encodes")))
+                .collect(),
+        );
+        h
     }
 
     fn ingest(&self, cx: &Cx, up: &Upload, p: &Value, e: &mut Edit) -> Result<String> {

@@ -7,6 +7,7 @@
 //! what the paths of its trees mean, how uploads and operations change
 //! them, and what clients are served for a version.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use pkgpod_base::Digest;
@@ -171,6 +172,19 @@ pub struct OpSpec {
     pub params: Vec<Field>,
 }
 
+/// What the console's forms offer for a repository in a given state.
+/// Keys are `<form>.<field>`, the form being an operation's name or
+/// `upload`.
+#[derive(Debug, Clone, Default)]
+pub struct FormHints {
+    /// Values to pick from (a field still takes any value).
+    pub suggest: BTreeMap<String, Vec<String>>,
+    /// When the field takes one of these values, the other fields of its
+    /// form are filled in with these (a dist's settings when its name is
+    /// picked to change it).
+    pub prefill: BTreeMap<String, BTreeMap<String, Value>>,
+}
+
 pub trait Format: Send + Sync {
     /// Short name (`deb`).
     fn id(&self) -> &'static str;
@@ -207,6 +221,12 @@ pub trait Format: Send + Sync {
     fn upload_fields(&self, objects: &Objects, root: &Digest) -> Vec<Field> {
         let _ = (objects, root);
         vec![]
+    }
+    /// What the console's forms of a repository whose current state is
+    /// `root` offer: existing names to pick, values to fill in.
+    fn form_hints(&self, objects: &Objects, root: &Digest) -> FormHints {
+        let _ = (objects, root);
+        FormHints::default()
     }
     /// Takes in an uploaded file; returns a summary.
     fn ingest(&self, cx: &Cx, up: &Upload, params: &Value, edit: &mut Edit) -> Result<String> {
