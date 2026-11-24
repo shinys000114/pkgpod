@@ -31,6 +31,20 @@ pub struct ImportReq {
     /// files: paths left out (as a files mirror's excludes).
     #[serde(default)]
     pub excludes: Vec<String>,
+    /// oci: the images, `name[:tag]` or `name@sha256:...`, of the
+    /// registry `source` (`https://host`, `docker.io`).
+    #[serde(default)]
+    pub images: Vec<String>,
+    /// oci: only these platforms of multi-platform images
+    /// (`linux/amd64`, `linux/arm64/v8`); empty: all.
+    #[serde(default)]
+    pub platforms: Vec<String>,
+    /// oci: credentials for the source registry, if it needs them (not
+    /// kept).
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub password: String,
     /// Empty: all the Release lists.
     #[serde(default)]
     pub components: Vec<String>,
@@ -55,6 +69,23 @@ fn yes() -> bool {
 /// Starts an import job into a hosted deb repository.
 pub fn start(app: &Arc<App>, repo: &str, req: ImportReq, actor: &str) -> Result<i64> {
     let r = app.engine.repo(repo)?;
+    if r.format == "oci" {
+        if req.images.is_empty() {
+            return Err(Error::Invalid("name the images to import".into()));
+        }
+        for i in &req.images {
+            pkgpod_mirror::oci::parse_ref(&req.source, i)
+                .map_err(|e| Error::Invalid(e.to_string()))?;
+        }
+        let actor2 = actor.to_string();
+        return crate::jobs::start(
+            app,
+            r,
+            "import",
+            actor,
+            Box::new(move |app, r, cancel, log| run_oci(app, r, &req, &actor2, cancel, log)),
+        );
+    }
     if r.format == "files" && r.kind != Kind::Mirror {
         let prefix = req.path.trim_matches('/').to_string();
         if !prefix.is_empty() {
@@ -513,4 +544,173 @@ fn run_files(
     let _ = std::fs::remove_dir_all(&staging);
     let _ = std::fs::remove_dir_all(&state);
     res
+}
+
+/// Does a descriptor's platform match `os/arch[/variant]`?
+fn platform_matches(desc: &Value, want: &str) -> bool {
+    let p = &desc["platform"];
+    let mut it = want.split('/');
+    let (os, arch, variant) = (it.next(), it.next(), it.next());
+    p["os"].as_str() == os
+        && p["architecture"].as_str() == arch
+        && variant.is_none_or(|v| p["variant"].as_str() == Some(v))
+}
+
+/// A manifest fetched for an import, with what it takes.
+struct Fetched {
+    image: String,
+    digest: pkgpod_base::Digest,
+    size: u64,
+    parsed: pkgpod_oci::Parsed,
+}
+
+/// Imports chosen images from a registry into an OCI repository as one
+/// version: manifests (an index's children, or only the chosen
+/// platforms'), their blobs, and the tags.
+fn run_oci(
+    app: &App,
+    r: &RepoInfo,
+    req: &ImportReq,
+    actor: &str,
+    cancel: &AtomicBool,
+    log: &(dyn Fn(&str) + Sync),
+) -> Result<(bool, String, Value), String> {
+    use pkgpod_mirror::oci::{Registry, parse_ref};
+    let creds = (!req.username.is_empty()).then(|| (req.username.clone(), req.password.clone()));
+    let reg = Registry::new(creds).map_err(|e| e.to_string())?;
+    let store = r.store();
+    let prefix = req.path.trim_matches('/').to_string();
+    let mut manifests: Vec<Fetched> = Vec::new();
+    let mut tags: Vec<(String, String, pkgpod_base::Digest)> = Vec::new();
+    let mut blobs = 0usize;
+    let interrupted = || cancel.load(Ordering::Relaxed);
+    // Stores a manifest body and fetches what it names.
+    let mut take = |ir: &pkgpod_mirror::oci::ImageRef,
+                    image: &str,
+                    body: &[u8],
+                    mt: &str,
+                    manifests: &mut Vec<Fetched>|
+     -> Result<pkgpod_base::Digest, String> {
+        let parsed = pkgpod_oci::parse_manifest(body, Some(mt)).map_err(|e| e.to_string())?;
+        for b in &parsed.blobs {
+            if interrupted() {
+                return Err("interrupted".into());
+            }
+            if store.has(b) {
+                continue;
+            }
+            let d = format!("sha256:{}", b.hex());
+            let mut inc = store.incoming().map_err(|e| e.to_string())?;
+            let n = reg.blob(ir, &d, &mut inc).map_err(|e| e.to_string())?;
+            store
+                .commit(inc, Some(b))
+                .map_err(|e| format!("{d}: {e}"))?;
+            log(&format!(
+                "{image}: blob {} ({})",
+                &d[..19],
+                crate::serve::human(n)
+            ));
+            blobs += 1;
+        }
+        let (digest, size) = store.put_bytes(body).map_err(|e| e.to_string())?;
+        manifests.push(Fetched {
+            image: image.to_string(),
+            digest,
+            size,
+            parsed,
+        });
+        Ok(digest)
+    };
+    for spec in &req.images {
+        let ir = parse_ref(&req.source, spec).map_err(|e| e.to_string())?;
+        let image = if prefix.is_empty() {
+            ir.name.clone()
+        } else {
+            format!("{prefix}/{}", ir.name)
+        };
+        pkgpod_oci::check_name(&image).map_err(|e| e.to_string())?;
+        log(&format!(
+            "{spec}: {}/v2/{}/manifests/{}",
+            ir.base, ir.name, ir.reference
+        ));
+        let (body, mt, _) = reg
+            .manifest(&ir, &ir.reference)
+            .map_err(|e| e.to_string())?;
+        let top = pkgpod_oci::parse_manifest(&body, Some(&mt)).map_err(|e| e.to_string())?;
+        let tagged = if top.is_index() {
+            let v: Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
+            let descs: Vec<Value> = v["manifests"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|d| {
+                    req.platforms.is_empty() || req.platforms.iter().any(|p| platform_matches(d, p))
+                })
+                .collect();
+            if descs.is_empty() {
+                return Err(format!(
+                    "{spec}: no manifest for {}",
+                    req.platforms.join(", ")
+                ));
+            }
+            let mut kids = Vec::new();
+            for d in &descs {
+                let cd = d["digest"].as_str().unwrap_or("");
+                let (cb, cmt, _) = reg.manifest(&ir, cd).map_err(|e| e.to_string())?;
+                kids.push(take(&ir, &image, &cb, &cmt, &mut manifests)?);
+            }
+            if req.platforms.is_empty() {
+                take(&ir, &image, &body, &mt, &mut manifests)?
+            } else if kids.len() == 1 {
+                // One platform: its manifest is the image.
+                kids[0]
+            } else {
+                // Several: an index of those (no index with missing
+                // children is stored).
+                let mut idx = v.clone();
+                idx["manifests"] = Value::Array(descs);
+                let b = serde_json::to_vec(&idx).map_err(|e| e.to_string())?;
+                take(&ir, &image, &b, &mt, &mut manifests)?
+            }
+        } else {
+            take(&ir, &image, &body, &mt, &mut manifests)?
+        };
+        if !ir.reference.starts_with("sha256:") {
+            tags.push((image.clone(), ir.reference.clone(), tagged));
+        }
+    }
+    let (n_img, n_man) = (req.images.len(), manifests.len());
+    let source = req.source.trim().to_string();
+    let out = app
+        .engine
+        .change(&r.name, actor, |_, e| {
+            for m in &manifests {
+                e.put(
+                    &pkgpod_oci::manifest_path(&m.image, &m.digest),
+                    pkgpod_engine::tree::Entry::blob(m.digest, m.size, m.parsed.meta()),
+                )?;
+            }
+            for (image, tag, d) in &tags {
+                e.put(
+                    &pkgpod_oci::tag_path(image, tag),
+                    pkgpod_engine::tree::Entry::Ref {
+                        target: pkgpod_oci::manifest_path(image, d),
+                    },
+                )?;
+            }
+            Ok(format!(
+                "imported {n_img} image(s) from {source} ({n_man} manifest(s))"
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let summary = match &out.version {
+        Some(v) => format!("{}: version {}", out.summary, v.seq),
+        None => format!("{}: nothing changed", out.summary),
+    };
+    Ok((
+        true,
+        summary,
+        json!({"images": n_img, "manifests": n_man, "blobs_fetched": blobs}),
+    ))
 }

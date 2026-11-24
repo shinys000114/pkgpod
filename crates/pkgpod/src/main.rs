@@ -212,6 +212,17 @@ pub(crate) enum Cmd {
         /// files: paths left out (rsync-like patterns).
         #[arg(long = "exclude", value_delimiter = ',')]
         excludes: Vec<String>,
+        /// oci: images of the registry SOURCE (https://host, docker.io):
+        /// name[:tag] or name@sha256:...
+        #[arg(long = "image", value_delimiter = ',')]
+        images: Vec<String>,
+        /// oci: only these platforms (linux/amd64, linux/arm64/v8).
+        #[arg(long = "platform", value_delimiter = ',')]
+        platforms: Vec<String>,
+        /// oci: a user for the source registry; the password is read
+        /// from standard input.
+        #[arg(long)]
+        username: Option<String>,
         #[arg(long, value_delimiter = ',')]
         components: Vec<String>,
         #[arg(long, value_delimiter = ',')]

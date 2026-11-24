@@ -844,7 +844,22 @@ fn schemas() -> Value {
                         "dists",
                         json!({"type": "array", "items": {"type": "string"}, "description": "deb (required there): the dists to import."}),
                     ),
-                    ("path", text("files: where the tree goes; empty: the top.")),
+                    (
+                        "path",
+                        text(
+                            "files: where the tree goes; oci: put before the image names; empty: none.",
+                        ),
+                    ),
+                    (
+                        "images",
+                        json!({"type": "array", "items": {"type": "string"}, "description": "oci (required there): name[:tag] or name@sha256:... of the registry source."}),
+                    ),
+                    (
+                        "platforms",
+                        json!({"type": "array", "items": {"type": "string"}, "description": "oci: only these platforms (linux/amd64); empty: all."}),
+                    ),
+                    ("username", text("oci: a user for the source registry.")),
+                    ("password", text("oci: its password; not kept.")),
                     (
                         "excludes",
                         json!({"type": "array", "items": {"type": "string"}, "description": "files: paths left out, rsync-like."}),

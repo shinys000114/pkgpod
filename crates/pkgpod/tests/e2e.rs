@@ -3291,3 +3291,147 @@ fn v2_paths_stay_with_file_trees() {
     let r = c.get(s.url("/v2/")).send().unwrap();
     assert_eq!(r.status().as_u16(), 401, "the registry on other hosts");
 }
+
+#[test]
+fn oci_import_of_chosen_images() {
+    let s = Server::start();
+    s.cli(&["repo", "create", "src", "-f", "oci"]).unwrap();
+    s.cli(&["repo", "create", "dst", "-f", "oci"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "src,dst", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let reg = Reg {
+        c: reqwest::blocking::Client::new(),
+        base: s.url(""),
+        tok: Some(&tok),
+    };
+    // A two-platform image upstream.
+    let mut kids = Vec::new();
+    for arch in ["amd64", "arm64"] {
+        let cfg = reg.blob("src/app", format!("{{\"arch\":\"{arch}\"}}").as_bytes());
+        let layer = reg.blob("src/app", format!("layer for {arch}").as_bytes());
+        let m = image_manifest(&cfg, &[(&layer, 13)], None);
+        let (st, d) = reg.manifest(
+            "src/app",
+            &format!(
+                "sha256:{}",
+                pkgpod_deb::hash::hash_bytes(m.as_bytes()).sha256
+            ),
+            OCI_M,
+            &m,
+        );
+        assert_eq!(st, 201, "{d}");
+        kids.push(format!(
+            r#"{{"mediaType":"{OCI_M}","digest":"{d}","size":{},"platform":{{"os":"linux","architecture":"{arch}"}}}}"#,
+            m.len()
+        ));
+    }
+    let index = format!(
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{}]}}"#,
+        kids.join(",")
+    );
+    let (st, idx) = reg.manifest(
+        "src/app",
+        "multi",
+        "application/vnd.oci.image.index.v1+json",
+        &index,
+    );
+    assert_eq!(st, 201, "{idx}");
+
+    let source = s.url("");
+    // Without credentials a private registry says no: the job fails.
+    assert!(
+        s.cli(&[
+            "import",
+            "dst",
+            &source,
+            "--image",
+            "src/app:multi",
+            "--wait"
+        ])
+        .is_err()
+    );
+    // All platforms: the index as it was, with its children.
+    let out = s
+        .cli_in(
+            &[
+                "import",
+                "dst",
+                &source,
+                "--image",
+                "src/app:multi",
+                "--username",
+                "token",
+                "--wait",
+            ],
+            &tok,
+        )
+        .unwrap();
+    assert!(out.contains("imported 1 image(s)"), "{out}");
+    let r = reg
+        .req(reqwest::Method::GET, "/v2/dst/src/app/manifests/multi")
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(r.headers()["docker-content-digest"], idx.as_str());
+    // One platform, under a path: its manifest is the image.
+    let out = s
+        .cli_in(
+            &[
+                "import",
+                "dst",
+                &source,
+                "--image",
+                "src/app:multi",
+                "--platform",
+                "linux/arm64",
+                "--path",
+                "only-arm",
+                "--username",
+                "token",
+                "--wait",
+            ],
+            &tok,
+        )
+        .unwrap();
+    assert!(out.contains("imported"), "{out}");
+    let r = reg
+        .req(
+            reqwest::Method::GET,
+            "/v2/dst/only-arm/src/app/manifests/multi",
+        )
+        .send()
+        .unwrap();
+    assert_eq!(r.headers()["content-type"], OCI_M);
+    let body: Value = r.json().unwrap();
+    let layer = body["layers"][0]["digest"].as_str().unwrap().to_string();
+    let r = reg
+        .req(
+            reqwest::Method::GET,
+            &format!("/v2/dst/only-arm/src/app/blobs/{layer}"),
+        )
+        .send()
+        .unwrap();
+    assert_eq!(r.text().unwrap(), "layer for arm64");
+    // A platform the image does not have fails the job.
+    assert!(
+        s.cli_in(
+            &[
+                "import",
+                "dst",
+                &source,
+                "--image",
+                "src/app:multi",
+                "--platform",
+                "linux/s390x",
+                "--username",
+                "token",
+                "--wait"
+            ],
+            &tok,
+        )
+        .is_err()
+    );
+}
