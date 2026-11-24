@@ -243,5 +243,33 @@ fn conflicts_operations_and_rollback() {
         .unwrap();
     assert!(f.served("dists/a/main/binary-all/Packages").is_none());
     assert!(f.op("dist-set", json!({"name": "bad/name"})).is_err());
+
+    // Changing one thing of a dist keeps the others; the version says
+    // what changed.
+    f.op(
+        "dist-set",
+        json!({"name": "c", "components": ["main", "extra"], "origin": "O"}),
+    )
+    .unwrap();
+    f.op("dist-set", json!({"name": "c", "label": "L"}))
+        .unwrap();
+    let rel = String::from_utf8(f.served("dists/c/Release").unwrap()).unwrap();
+    assert!(
+        rel.contains("Components: main extra\n")
+            && rel.contains("Origin: O\n")
+            && rel.contains("Label: L\n"),
+        "{rel}"
+    );
+    let v = f.e.versions("ppa").unwrap();
+    assert!(
+        v.iter().any(|v| v.summary == "dist c: label - -> L"),
+        "{:?}",
+        v.iter().map(|v| &v.summary).collect::<Vec<_>>()
+    );
+    // An empty value is the default again.
+    f.op("dist-set", json!({"name": "c", "components": ""}))
+        .unwrap();
+    let rel = String::from_utf8(f.served("dists/c/Release").unwrap()).unwrap();
+    assert!(rel.contains("Components: main\n"), "{rel}");
     assert!(f.op("dist-remove", json!({"name": "zzz"})).is_err());
 }
