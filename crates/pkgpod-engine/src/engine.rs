@@ -424,6 +424,12 @@ impl Engine {
         self.versions_where(r.id, "?2 = ?2", 0)
     }
 
+    /// Versions made since `since` (unix seconds), newest first.
+    pub fn versions_since(&self, name: &str, since: i64) -> Result<Vec<Version>> {
+        let r = self.repo(name)?;
+        self.versions_where(r.id, "v.created >= ?2", since)
+    }
+
     pub fn version(&self, name: &str, seq: i64) -> Result<Version> {
         let r = self.repo(name)?;
         self.versions_where(r.id, "v.seq = ?2", seq)?
