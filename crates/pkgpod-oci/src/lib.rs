@@ -398,6 +398,10 @@ impl Format for Oci {
         true
     }
 
+    fn proxy_upstream(&self) -> &'static str {
+        "docker.io"
+    }
+
     fn id(&self) -> &'static str {
         "oci"
     }

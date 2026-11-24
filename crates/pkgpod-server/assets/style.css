@@ -357,7 +357,10 @@ form.login button { width: 100%; padding: .6rem; margin-top: .3rem; }
 
 /* In-flight requests (htmx adds .htmx-request; its own injected styles are
    off for the CSP). */
-.htmx-request, button.htmx-request { opacity: .6; cursor: progress; }
+/* Dimmed only when a request takes a moment, so quick ones do not flicker;
+   a refresh on a timer is not waited for and never dims what is read. */
+.htmx-request, button.htmx-request { opacity: .6; cursor: progress; transition: opacity .15s ease .25s; }
+[hx-trigger*="every"].htmx-request { opacity: 1; cursor: auto; transition: none; }
 button.htmx-request::after { content: "…"; }
 .mt { margin-top: 1.1rem; }
 .card-body.results { padding-top: 0; }
@@ -480,6 +483,8 @@ button.copy.done { color: var(--ok); border-color: var(--ok); }
 
 /* The new repository chooser: radio choices, the chosen one's form. */
 .chooser { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(210px, 100%), 1fr)); gap: .6rem; }
+.chooser-kind { margin: 1rem 1rem 0; font-size: 14px; font-weight: 650; }
+.chooser-kind .hint { font-weight: 400; margin-left: .4rem; }
 .chooser .choice-input { position: absolute; opacity: 0; pointer-events: none; width: 1px; height: 1px; margin: 0; }
 .chooser .choice { display: flex; flex-direction: column; gap: .35rem; padding: .7rem .8rem; border: 1px solid var(--line);
   border-radius: var(--radius); cursor: pointer; background: var(--surface); }

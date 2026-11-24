@@ -149,11 +149,15 @@ pub fn common(kind: crate::Kind) -> Vec<Field> {
         v.retain(|f| !matches!(f.name, "keep_versions" | "keep_days"));
     }
     if kind == crate::Kind::Proxy {
-        v.push(Field::text(
-            "upstream",
-            "",
-            "The registry it fetches from (its base URL, as clients would use it).",
-        ));
+        // What it is a proxy of comes first.
+        v.insert(
+            0,
+            Field::text(
+                "upstream",
+                "",
+                "The registry it fetches from (its base URL, as clients would use it).",
+            ),
+        );
         v.push(Field::int(
             "metadata_minutes",
             30,
@@ -170,7 +174,7 @@ pub fn common(kind: crate::Kind) -> Vec<Field> {
         ));
     }
     if kind == crate::Kind::Group {
-        v.push(Field::list(
+        v.insert(0, Field::list(
             "members",
             "Repositories of the same format it reads, in this order: for each package, the first that has it answers alone.",
         ));

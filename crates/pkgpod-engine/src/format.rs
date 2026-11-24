@@ -276,6 +276,11 @@ pub trait Format: Send + Sync {
     fn proxy(&self) -> bool {
         false
     }
+    /// The public registry a proxy of this format fetches from unless
+    /// told otherwise.
+    fn proxy_upstream(&self) -> &'static str {
+        ""
+    }
     /// Whether group repositories of this format are served.
     fn groups(&self) -> bool {
         false

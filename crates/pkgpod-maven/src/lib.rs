@@ -310,6 +310,10 @@ impl Format for Maven {
         true
     }
 
+    fn proxy_upstream(&self) -> &'static str {
+        "https://repo1.maven.org/maven2/"
+    }
+
     fn id(&self) -> &'static str {
         "maven"
     }

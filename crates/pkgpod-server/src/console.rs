@@ -104,6 +104,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/r/{repo}/jobs", get(jobs_part))
         .route("/jobs/{id}", get(job_page))
         .route("/jobs/{id}/log", get(job_log))
+        .route("/jobs/{id}/stream", get(job_stream))
         .route("/c/jobs/{id}/cancel", post(job_cancel))
         .route("/search", get(search_page))
         .route("/search/rows", get(search_rows))
@@ -345,6 +346,14 @@ fn label_of(name: &str) -> String {
         "udebs" => "Installer packages (udebs)",
         "ignore_missing" => "Missing files allowed",
         "key" => "Signing key",
+        "max_mib" => "Size limit (MiB)",
+        "metadata_minutes" => "Metadata kept (minutes)",
+        "exclude" => "Never asked upstream",
+        "cleanup_keep_last" => "Keep newest (cleanup)",
+        "cleanup_prerelease_days" => "Pre-releases kept days (cleanup)",
+        "cleanup_unused_days" => "Unused kept days (cleanup)",
+        "cleanup_max" => "Most removed a day (cleanup)",
+        "downloads_days" => "Download counts kept (days)",
         _ => "",
     };
     if !fixed.is_empty() {
@@ -695,6 +704,46 @@ pub struct RepoRow {
 }
 
 /// A form to make a repository of a format and kind.
+/// The new-repository choices of one kind.
+pub struct KindChoices {
+    pub kind: String,
+    pub title: &'static str,
+    pub hint: &'static str,
+    pub formats: Vec<FormatChoice>,
+}
+
+fn kind_rank(kind: &str) -> u8 {
+    match kind {
+        "hosted" => 0,
+        "import" => 1,
+        "mirror" => 2,
+        "proxy" => 3,
+        _ => 4,
+    }
+}
+
+fn kind_words(kind: &str) -> (&'static str, &'static str) {
+    match kind {
+        "hosted" => (
+            "Your own packages",
+            "uploaded by you and your CI; every change a version",
+        ),
+        "import" => ("Imported", "copied once from elsewhere, then yours"),
+        "mirror" => (
+            "Mirrors",
+            "follow an upstream archive or file server, served as received",
+        ),
+        "proxy" => (
+            "Proxy caches",
+            "fetch from a public registry when asked, and keep it",
+        ),
+        _ => (
+            "Groups",
+            "one address that reads other repositories of the format in order",
+        ),
+    }
+}
+
 pub struct FormatChoice {
     pub id: String,
     pub title: String,
@@ -711,7 +760,8 @@ struct IndexPage {
     /// Formats in the list (id, title), for its filter.
     present: Vec<(String, String)>,
     repos: Vec<RepoRow>,
-    formats: Vec<FormatChoice>,
+    /// The new-repository choices, by kind.
+    kinds: Vec<KindChoices>,
     storages: Vec<String>,
     /// A signing key exists (signed Debian repositories need one).
     has_key: bool,
@@ -839,6 +889,22 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                         (_, Kind::Group) => {
                             "read other repositories of this format through one address"
                         }
+                        ("oci", Kind::Proxy) => {
+                            "Docker Hub, ghcr.io, …: images pulled through here and kept"
+                        }
+                        ("npm", Kind::Proxy) => {
+                            "registry.npmjs.org: packages installed through here and kept"
+                        }
+                        ("pypi", Kind::Proxy) => {
+                            "pypi.org: packages installed through here and kept"
+                        }
+                        ("maven", Kind::Proxy) => {
+                            "Maven Central: artifacts resolved through here and kept"
+                        }
+                        ("go", Kind::Proxy) => {
+                            "proxy.golang.org: modules fetched through here and kept"
+                        }
+                        ("cargo", Kind::Proxy) => "crates.io: crates fetched through here and kept",
                         (_, Kind::Proxy) => "fetch from a registry when asked, and keep it",
                         ("deb", Kind::Mirror) => "follow an apt archive; served as received",
                         ("deb", _) => "apt packages you upload, signed per version",
@@ -878,10 +944,28 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                 .collect::<Vec<_>>()
         })
         .collect();
-    // By the names people read; hosted Debian first chosen.
+    // By what a repository does, then the names people read; hosted
+    // Debian first chosen.
     let mut formats: Vec<FormatChoice> = formats;
-    formats
-        .sort_by(|a, b| (a.title.to_lowercase(), &a.kind).cmp(&(b.title.to_lowercase(), &b.kind)));
+    formats.sort_by(|a, b| {
+        (kind_rank(&a.kind), a.title.to_lowercase())
+            .cmp(&(kind_rank(&b.kind), b.title.to_lowercase()))
+    });
+    let mut kinds: Vec<KindChoices> = Vec::new();
+    for f in formats {
+        match kinds.last_mut() {
+            Some(k) if k.kind == f.kind => k.formats.push(f),
+            _ => {
+                let (title, hint) = kind_words(&f.kind);
+                kinds.push(KindChoices {
+                    kind: f.kind.clone(),
+                    title,
+                    hint,
+                    formats: vec![f],
+                })
+            }
+        }
+    }
     let storages = if v.caller.is_admin() {
         app.engine.storages()?.into_iter().map(|(n, _)| n).collect()
     } else {
@@ -899,7 +983,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
         s: v.shell("repos"),
         present,
         repos,
-        formats,
+        kinds,
         storages,
         has_key: !app.keys.list()?.is_empty(),
         key_uid: format!(
@@ -5179,6 +5263,7 @@ struct JobPage {
     job: JobRow,
     repo: String,
     log: String,
+    from: usize,
     running: bool,
     id: i64,
     state: String,
@@ -5196,6 +5281,7 @@ async fn job_page(State(app): St, v: Viewer, Path(id): Path<i64>) -> Result<Resp
         running: job.state == "running",
         repo: job.repo.clone(),
         job: job_row(&job),
+        from: log.len(),
         log,
     }))
 }
@@ -5205,6 +5291,8 @@ async fn job_page(State(app): St, v: Viewer, Path(id): Path<i64>) -> Result<Resp
 struct JobLog {
     id: i64,
     log: String,
+    /// Where the stream goes on from (the log's length in bytes).
+    from: usize,
     running: bool,
     state: String,
 }
@@ -5213,15 +5301,96 @@ async fn job_log(State(app): St, v: Viewer, Path(id): Path<i64>) -> Response {
     match api::job(State(app), v.who(), Path(id)).await {
         Ok(Json(j)) => {
             let state = s(&j["state"]);
+            let log = s(&j["log"]);
             render(&JobLog {
                 id,
-                log: s(&j["log"]),
+                from: log.len(),
+                log,
                 running: state == "running",
                 state,
             })
         }
         Err(e) => err_part(e),
     }
+}
+
+#[derive(Deserialize, Default)]
+struct StreamQ {
+    #[serde(default)]
+    from: u64,
+}
+
+/// A running job's log as it grows, as Server-Sent Events: `log` events
+/// carry the lines written after byte `from` (whole lines only), and an
+/// `end` event the job's final state, after which the stream ends.
+async fn job_stream(
+    State(app): St,
+    v: Viewer,
+    Path(id): Path<i64>,
+    Query(q): Query<StreamQ>,
+    headers: HeaderMap,
+) -> Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    // A browser coming back says where it was.
+    let from = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(q.from);
+    // Who may read the job's repository may read its log.
+    if let Err(e) = api::job(State(app.clone()), v.who(), Path(id)).await {
+        return err_part(e);
+    }
+    let path = crate::jobs::log_path(&app, id);
+    let start = (app, path, from, false);
+    let stream = futures_util::stream::unfold(start, move |(app, path, from, done)| async move {
+        if done {
+            return None;
+        }
+        loop {
+            let (path2, app2) = (path.clone(), app.clone());
+            let (chunk, state) = tokio::task::spawn_blocking(move || {
+                use std::io::{Read, Seek, SeekFrom};
+                let mut buf = Vec::new();
+                if let Ok(mut f) = std::fs::File::open(&path2)
+                    && f.seek(SeekFrom::Start(from)).is_ok()
+                {
+                    let _ = f.take(1 << 20).read_to_end(&mut buf);
+                }
+                // Whole lines only: the rest comes with the next read.
+                let end = buf.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+                buf.truncate(end);
+                let state = crate::jobs::get(&app2.db, id)
+                    .map(|j| j.state)
+                    .unwrap_or_default();
+                (buf, state)
+            })
+            .await
+            .unwrap_or_default();
+            if !chunk.is_empty() {
+                let next = from + chunk.len() as u64;
+                let text = String::from_utf8_lossy(&chunk)
+                    .trim_end_matches('\n')
+                    .to_string();
+                let ev = Event::default()
+                    .event("log")
+                    .id(next.to_string())
+                    .data(text);
+                return Some((
+                    Ok::<_, std::convert::Infallible>(ev),
+                    (app, path, next, false),
+                ));
+            }
+            if state != "running" && state != "queued" {
+                let ev = Event::default().event("end").data(state);
+                return Some((Ok(ev), (app, path, from, true)));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        }
+    });
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 async fn job_cancel(State(app): St, v: Viewer, Path(id): Path<i64>) -> Response {

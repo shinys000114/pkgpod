@@ -512,6 +512,10 @@ impl Format for Npm {
         true
     }
 
+    fn proxy_upstream(&self) -> &'static str {
+        "https://registry.npmjs.org/"
+    }
+
     fn id(&self) -> &'static str {
         "npm"
     }

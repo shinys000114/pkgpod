@@ -323,6 +323,10 @@ impl Format for Go {
         true
     }
 
+    fn proxy_upstream(&self) -> &'static str {
+        "https://proxy.golang.org/"
+    }
+
     fn id(&self) -> &'static str {
         "go"
     }

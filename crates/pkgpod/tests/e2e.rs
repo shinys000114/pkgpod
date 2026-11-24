@@ -1292,6 +1292,30 @@ fn deb_mirror_of_a_hosted_repository() {
     assert!(inrel.contains("BEGIN PGP SIGNED MESSAGE"));
     let jobs = s.json(&["jobs", "mir"]);
     assert_eq!(jobs[0]["state"], "ok");
+    // The console streams a job's log (Server-Sent Events): its lines
+    // from where the page had it, then the state, and the stream ends.
+    let (cc, sid, _) = console_session(&s, "logs", "logs-password");
+    let stream = |from: usize| {
+        let r = cc
+            .get(format!(
+                "{}/jobs/{}/stream?from={from}",
+                s.api, jobs[0]["id"]
+            ))
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .send()
+            .unwrap();
+        let ct = r.headers()["content-type"].to_str().unwrap().to_string();
+        (ct, r.text().unwrap())
+    };
+    let (ct, all) = stream(0);
+    assert_eq!(ct, "text/event-stream");
+    assert!(all.contains("event: log") && all.contains("ok:"), "{all}");
+    assert!(all.trim_end().ends_with("event: end\ndata: ok"), "{all}");
+    let log = s.json(&["job", &jobs[0]["id"].to_string()]);
+    let len = log["log"].as_str().map_or(0, str::len);
+    let (_, rest) = stream(len);
+    assert!(!rest.contains("event: log"), "{rest}");
+    assert!(rest.contains("event: end"), "{rest}");
     // Its status and badge: the last sync.
     let st = s.json(&["status", "mir"]);
     assert_eq!(st["ok"], true, "{st}");
