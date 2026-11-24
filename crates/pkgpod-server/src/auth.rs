@@ -154,12 +154,35 @@ pub fn hash_password(password: &str) -> Result<String> {
         .map_err(|e| Error::Invalid(format!("hashing the password: {e}")))
 }
 
+/// Password checks at once: each takes ~19 MiB and a fraction of a
+/// second on purpose, so a flood of guesses waits its turn instead of
+/// taking the machine.
+const CHECKS_AT_ONCE: usize = 4;
+
+/// How long a check waits for its turn before it counts as failed.
+const CHECK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 fn verify_password(password: &str, hash: &str) -> bool {
-    PasswordHash::new(hash).is_ok_and(|h| {
+    static SLOTS: (Mutex<usize>, std::sync::Condvar) = (Mutex::new(0), std::sync::Condvar::new());
+    let (lock, cv) = &SLOTS;
+    {
+        let busy = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut busy, to) = cv
+            .wait_timeout_while(busy, CHECK_WAIT, |b| *b >= CHECKS_AT_ONCE)
+            .unwrap_or_else(|e| e.into_inner());
+        if to.timed_out() && *busy >= CHECKS_AT_ONCE {
+            return false;
+        }
+        *busy += 1;
+    }
+    let ok = PasswordHash::new(hash).is_ok_and(|h| {
         Argon2::default()
             .verify_password(password.as_bytes(), &h)
             .is_ok()
-    })
+    });
+    *lock.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+    cv.notify_one();
+    ok
 }
 
 /// Hash of a password nobody has, checked for unknown users so a failed
