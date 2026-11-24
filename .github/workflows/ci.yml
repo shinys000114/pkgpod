@@ -44,7 +44,8 @@ jobs:
           for i in alpine:3.22 alpine:3.23 fedora:43 rockylinux:9 \
                    alpine/helm:3.19.0 alpine/helm:4.3.2 maven:3.9-eclipse-temurin-21 \
                    ruby:3.4-slim archlinux:latest mcr.microsoft.com/dotnet/sdk:10.0 \
-                   composer:2 condaforge/miniforge3:latest mambaorg/micromamba:2.3.3; do
+                   composer:2 condaforge/miniforge3:latest mambaorg/micromamba:2.3.3 \
+                   r-base:latest; do
             docker pull -q "$i"
           done
       - name: Tests with real apt

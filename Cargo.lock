@@ -2393,6 +2393,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pkgpod-cran"
+version = "0.0.0"
+dependencies = [
+ "flate2",
+ "md-5 0.11.0",
+ "pkgpod-base",
+ "pkgpod-engine",
+ "serde_json",
+ "tar",
+]
+
+[[package]]
 name = "pkgpod-deb"
 version = "0.0.0"
 dependencies = [
@@ -2588,6 +2600,7 @@ dependencies = [
  "pkgpod-cargo",
  "pkgpod-composer",
  "pkgpod-conda",
+ "pkgpod-cran",
  "pkgpod-deb",
  "pkgpod-engine",
  "pkgpod-files",
