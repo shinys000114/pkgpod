@@ -28,7 +28,28 @@
   </div>
 </div>
 {% endif %}
+{% if can_admin %}
+<div class="card">
+  <div class="card-head"><h2>Who has access</h2><span class="hint">as the server decides it: server admins, grants here and on *, through teams{% if public %}; anyone may read (public){% endif %}</span></div>
+  {% if access.is_empty() %}<p class="empty">Nobody but anonymous readers.</p>{% else %}
+  <div class="table-wrap"><table>
+    <thead><tr><th>User</th><th>Role</th><th>From</th></tr></thead>
+    <tbody>{% for a in access %}<tr><td>{{ a.user }}</td><td><span class="tag">{{ a.role }}</span></td><td class="muted wrap">{{ a.from }}</td></tr>{% endfor %}</tbody>
+  </table></div>
+  {% endif %}
+</div>
+{% endif %}
 {% if server_admin %}
+<details class="card panel">
+  <summary>Make a repository like this one <span class="hint">same format and settings (a Debian repository's dists too); its own name and address</span></summary>
+  <div class="panel-body">
+  <form class="inline" hx-post="/c/r/{{ repo }}/copy" hx-target="next .result">
+    <input name="name" required placeholder="new name" pattern="[a-z0-9][a-z0-9._-]*" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <button type="submit">Make it</button>
+  </form>
+  <div class="result"></div>
+  </div>
+</details>
 <details class="card panel">
   <summary>Delete this repository</summary>
   <div class="panel-body">

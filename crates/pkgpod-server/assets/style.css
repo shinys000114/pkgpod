@@ -521,3 +521,5 @@ pre.meta { max-height: 18rem; overflow: auto; }
 .live-job .live-head { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-bottom: .4rem; }
 .live-job progress { width: 14rem; height: .55rem; accent-color: var(--accent); }
 pre.live-tail { max-height: 13rem; overflow: auto; font-size: 12px; }
+.stats.glance { margin-bottom: 1rem; }
+details.inline-list summary { cursor: pointer; color: var(--accent); }

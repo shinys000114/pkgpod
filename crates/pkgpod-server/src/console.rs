@@ -66,6 +66,8 @@ pub fn router() -> Router<Arc<App>> {
         .route("/r/{repo}/changes", get(changes_part))
         .route("/r/{repo}/settings", get(settings_part))
         .route("/r/{repo}/use", get(use_part))
+        .route("/c/r/{repo}/copy", post(repo_copy))
+        .route("/admin/usage", get(usage_part))
         .route("/r/{repo}/activity", get(activity_part))
         .route("/r/{repo}/file", get(file_download))
         .route("/r/{repo}/pkg", get(pkg_detail))
@@ -951,6 +953,284 @@ async fn repo_create(
             resp
         }
         Err(e) => err_part(e),
+    }
+}
+
+/// A new repository like `repo`: its format, kind, storage and settings
+/// (not its addresses, which are its own), and a deb repository's dists.
+async fn repo_copy(
+    State(app): St,
+    v: Viewer,
+    Path(repo): Path<String>,
+    Form(form): Form<Vec<(String, String)>>,
+) -> Response {
+    if let Err(e) = app.require_admin(&v.caller) {
+        return err_part(e);
+    }
+    let r = match app.engine.repo(&repo) {
+        Ok(r) => r,
+        Err(e) => return err_part(e.into()),
+    };
+    let mut settings = r.settings.clone();
+    if let Some(o) = settings.as_object_mut() {
+        o.remove("urls");
+    }
+    let name = form_get(&form, "name").trim().to_string();
+    let req = api::CreateReq {
+        name: name.clone(),
+        format: r.format.clone(),
+        kind: r.kind.as_str().to_string(),
+        storage: Some(r.storage.clone()),
+        settings,
+    };
+    let dists = if r.format == "deb" && r.kind == Kind::Hosted {
+        let root = app
+            .engine
+            .current(&r)
+            .ok()
+            .flatten()
+            .map(|v| v.root)
+            .unwrap_or_else(pkgpod_engine::tree::empty);
+        let mut e = pkgpod_engine::Edit::new(app.engine.objects(), root);
+        pkgpod_deb::format::dists(&mut e).unwrap_or_default()
+    } else {
+        Default::default()
+    };
+    if let Err(e) = api::repo_create(State(app.clone()), v.who(), Json(req)).await {
+        return err_part(e);
+    }
+    if !dists.is_empty() {
+        let (app2, name2, actor) = (app.clone(), name.clone(), v.caller.name().to_string());
+        let made = tokio::task::spawn_blocking(move || {
+            let f = app2.engine.format("deb")?.clone();
+            app2.engine.change(&name2, &actor, |cx, e| {
+                let mut done = Vec::new();
+                for (d, def) in &dists {
+                    let mut p = serde_json::to_value(def).expect("dist encodes");
+                    p["name"] = json!(d);
+                    done.push(f.op(cx, "dist-set", &p, e)?);
+                }
+                Ok(done.join("; "))
+            })
+        })
+        .await;
+        match made {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return msg(false, format!("created {name}, but not its dists: {e}")),
+            Err(e) => return msg(false, e.to_string()),
+        }
+    }
+    let mut resp = msg(true, format!("created {name} like {repo}"));
+    if let Ok(h) = HeaderValue::from_str(&format!("/r/{name}")) {
+        resp.headers_mut().insert("HX-Redirect", h);
+    }
+    resp
+}
+
+pub struct UsageRow {
+    pub name: String,
+    pub format: String,
+    /// What its current version uses, and all its versions (or a
+    /// mirror's tree on disk).
+    pub now: String,
+    pub all: String,
+}
+
+/// The server at a glance: listeners, keys, the last garbage
+/// collection, free disk, mirror syncs.
+fn server_glance(
+    app: &App,
+    listeners: &[ListenerRow],
+    keys: &[KeyRow],
+    storages: &[(String, String)],
+) -> Vec<(String, String, String)> {
+    let mut g = Vec::new();
+    let up = listeners.iter().filter(|l| l.ok).count();
+    let failed: Vec<&str> = listeners
+        .iter()
+        .filter(|l| l.state.starts_with("failed"))
+        .map(|l| l.name.as_str())
+        .collect();
+    g.push((
+        "Listeners".to_string(),
+        if failed.is_empty() {
+            format!("{up} of {} running", listeners.len())
+        } else {
+            format!("{} failed", failed.join(", "))
+        },
+        if failed.is_empty() { "ok" } else { "bad" }.to_string(),
+    ));
+    let missing = keys.iter().filter(|k| k.missing).count();
+    g.push((
+        "Signing keys".to_string(),
+        match (keys.len(), missing) {
+            (0, _) => "none".to_string(),
+            (n, 0) => format!(
+                "{n}, default {}",
+                keys.iter()
+                    .find(|k| k.default)
+                    .map_or("-", |k| k.name.as_str())
+            ),
+            (n, m) => format!("{n}, {m} without its secret key"),
+        },
+        if keys.is_empty() || missing > 0 {
+            "bad"
+        } else {
+            "ok"
+        }
+        .to_string(),
+    ));
+    let gc = app
+        .auth
+        .audit_log(2000)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|a| a["action"] == "gc");
+    g.push((
+        "Last garbage collection".to_string(),
+        match &gc {
+            Some(a) => format!("{} · {}", when(a["time"].as_i64()), s(&a["detail"])),
+            None => "not yet (daily, from an hour after start)".to_string(),
+        },
+        String::new(),
+    ));
+    for (n, p) in storages {
+        if let Ok(st) = rustix::fs::statvfs(std::path::Path::new(p)) {
+            let free = st.f_bavail * st.f_frsize;
+            let size = st.f_blocks * st.f_frsize;
+            let low = size > 0 && free * 10 < size;
+            g.push((
+                format!("Free in storage {n}"),
+                format!(
+                    "{} of {}",
+                    crate::serve::human(free),
+                    crate::serve::human(size)
+                ),
+                if low { "bad" } else { "ok" }.to_string(),
+            ));
+        }
+    }
+    let day_ago = pkgpod_base::now() - 86400;
+    let jobs = crate::jobs::list(&app.db, None, 500).unwrap_or_default();
+    let running = jobs.iter().filter(|j| j.state == "running").count();
+    let failed = jobs
+        .iter()
+        .filter(|j| j.state == "failed" && j.finished.unwrap_or(0) > day_ago)
+        .count();
+    g.push((
+        "Syncs and imports".to_string(),
+        format!("{running} running, {failed} failed in the last day"),
+        if failed > 0 { "bad" } else { "ok" }.to_string(),
+    ));
+    g
+}
+
+#[derive(Template)]
+#[template(path = "usage.html")]
+struct UsagePart {
+    rows: Vec<UsageRow>,
+    total: String,
+    unique: String,
+    saved: String,
+    capped: bool,
+}
+
+/// What each repository's content takes: its current version's blobs, all
+/// its versions' (each blob counted once), a mirror's tree; across hosted
+/// repositories, what the shared store saves. Counted when asked.
+async fn usage_part(State(app): St, v: Viewer) -> Response {
+    if let Err(e) = app.require_admin(&v.caller) {
+        return err_part(e);
+    }
+    let app2 = app.clone();
+    let res = tokio::task::spawn_blocking(move || -> Result<UsagePart> {
+        use std::collections::{HashMap, HashSet};
+        let objects = app2.engine.objects();
+        let mut rows = Vec::new();
+        let mut everyone: HashMap<pkgpod_base::Digest, u64> = HashMap::new();
+        let (mut mirrors, mut hosted, mut capped) = (0u64, 0u64, false);
+        for r in app2.engine.repos()? {
+            if r.kind == Kind::Mirror {
+                let (mut n, mut bytes) = (0u64, 0u64);
+                let mut stack = vec![r.tree_dir()];
+                while let Some(d) = stack.pop() {
+                    let Ok(rd) = std::fs::read_dir(&d) else {
+                        continue;
+                    };
+                    for e in rd.flatten() {
+                        n += 1;
+                        if n > 500_000 {
+                            capped = true;
+                            break;
+                        }
+                        match e.file_type() {
+                            Ok(t) if t.is_dir() => stack.push(e.path()),
+                            Ok(t) if t.is_file() => {
+                                bytes += e.metadata().map(|m| m.len()).unwrap_or(0)
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                mirrors += bytes;
+                rows.push(UsageRow {
+                    name: r.name.clone(),
+                    format: r.format.clone(),
+                    now: crate::serve::human(bytes),
+                    all: String::new(),
+                });
+                continue;
+            }
+            let sum = |roots: &[pkgpod_base::Digest]| -> Result<HashMap<pkgpod_base::Digest, u64>> {
+                let mut seen = HashSet::new();
+                let mut blobs = HashMap::new();
+                for root in roots {
+                    objects.reach(root, &mut seen, &mut |e| {
+                        if let Entry::Blob { sha256, size, .. } = e {
+                            blobs.insert(*sha256, *size);
+                        }
+                    })?;
+                }
+                Ok(blobs)
+            };
+            let cur: Vec<_> = app2
+                .engine
+                .current(&r)?
+                .map(|v| vec![v.root, v.served()])
+                .unwrap_or_default();
+            let all: Vec<_> = app2
+                .engine
+                .versions(&r.name)?
+                .into_iter()
+                .flat_map(|v| [v.root, v.served()])
+                .collect();
+            let now = sum(&cur)?;
+            let every = sum(&all)?;
+            let bytes: u64 = every.values().sum();
+            hosted += bytes;
+            everyone.extend(every);
+            rows.push(UsageRow {
+                name: r.name.clone(),
+                format: r.format.clone(),
+                now: crate::serve::human(now.values().sum()),
+                all: crate::serve::human(bytes),
+            });
+        }
+        // A blob two repositories have is stored once.
+        let unique: u64 = everyone.values().sum();
+        Ok(UsagePart {
+            rows,
+            total: crate::serve::human(unique + mirrors),
+            unique: crate::serve::human(unique),
+            saved: crate::serve::human(hosted.saturating_sub(unique)),
+            capped,
+        })
+    })
+    .await;
+    match res {
+        Ok(Ok(u)) => render(&u),
+        Ok(Err(e)) => err_part(e),
+        Err(e) => msg(false, e.to_string()),
     }
 }
 
@@ -3413,6 +3693,66 @@ struct SettingsPart {
     server_admin: bool,
     users: Vec<String>,
     teams: Vec<String>,
+    /// Who may do what here, as enforced, and why.
+    access: Vec<AccessRow>,
+    public: bool,
+}
+
+pub struct AccessRow {
+    pub user: String,
+    pub role: String,
+    pub from: String,
+}
+
+/// Each user's role on `repo` as `Auth::role` gives it (what is
+/// enforced), with the grants it comes from.
+fn access_rows(app: &App, repo: &str, public: bool) -> Vec<AccessRow> {
+    let grants: Vec<crate::auth::Grant> = app
+        .auth
+        .grants(Some(repo))
+        .unwrap_or_default()
+        .into_iter()
+        .chain(app.auth.grants(Some("*")).unwrap_or_default())
+        .collect();
+    let teams = app.auth.teams().unwrap_or_default();
+    let mut out = Vec::new();
+    for u in app.auth.users().unwrap_or_default() {
+        if u.disabled {
+            continue;
+        }
+        let caller = Caller {
+            user: Some(u.clone()),
+            scope: None,
+        };
+        let Some(role) = app.auth.role(&caller, repo, public) else {
+            continue;
+        };
+        let mut from: Vec<String> = Vec::new();
+        if u.admin {
+            from.push("server admin".into());
+        }
+        for g in &grants {
+            let on = if g.repo == "*" { "on *" } else { "here" };
+            if g.subject == format!("user:{}", u.name) {
+                from.push(format!("{} {on}", g.role.as_str()));
+            } else if let Some(t) = g.subject.strip_prefix("team:")
+                && teams
+                    .iter()
+                    .any(|x| x.name == t && x.members.contains(&u.name))
+            {
+                from.push(format!("{} {on}, team {t}", g.role.as_str()));
+            }
+        }
+        if from.is_empty() && public {
+            from.push("public".into());
+        }
+        out.push(AccessRow {
+            user: u.name,
+            role: role.as_str().to_string(),
+            from: from.join("; "),
+        });
+    }
+    out
 }
 
 async fn settings_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> Response {
@@ -3460,7 +3800,14 @@ async fn settings_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> R
     } else {
         (vec![], vec![])
     };
+    let public = r.setting_bool("public");
     render(&SettingsPart {
+        access: if can_admin {
+            access_rows(&app, &repo, public)
+        } else {
+            Vec::new()
+        },
+        public,
         repo,
         fields,
         grants,
@@ -3730,6 +4077,8 @@ pub struct UserRow {
     pub admin: bool,
     pub disabled: bool,
     pub created: String,
+    /// Repositories the user may use, with the role (as enforced).
+    pub repos: Vec<(String, String)>,
 }
 
 pub struct TeamRow {
@@ -3750,11 +4099,27 @@ struct PeoplePage {
 
 async fn people_page(State(app): St, v: Viewer) -> Result<Response> {
     app.require_admin(&v.caller)?;
+    let all = app.engine.repos()?;
     let users: Vec<UserRow> = app
         .auth
         .users()?
         .into_iter()
         .map(|u| UserRow {
+            repos: if u.admin {
+                Vec::new()
+            } else {
+                let caller = Caller {
+                    user: Some(u.clone()),
+                    scope: None,
+                };
+                all.iter()
+                    .filter_map(|r| {
+                        app.auth
+                            .role(&caller, &r.name, false)
+                            .map(|role| (r.name.clone(), role.as_str().to_string()))
+                    })
+                    .collect()
+            },
             name: u.name,
             admin: u.admin,
             disabled: u.disabled,
@@ -3920,6 +4285,8 @@ fn audit_row(a: &Value) -> AuditRow {
 #[template(path = "server.html")]
 struct ServerPage {
     s: Shell,
+    /// At a glance: (label, value, state).
+    glance: Vec<(String, String, String)>,
     listener_prefill: String,
     listeners: Vec<ListenerRow>,
     keys: Vec<KeyRow>,
@@ -3945,7 +4312,7 @@ async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
             .collect::<serde_json::Map<String, Value>>(),
     )
     .expect("json");
-    let listeners = all
+    let listeners: Vec<ListenerRow> = all
         .into_iter()
         .map(|l| {
             let running = app.listeners.is_running(&l.name);
@@ -3972,7 +4339,7 @@ async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
             }
         })
         .collect();
-    let keys = app
+    let keys: Vec<KeyRow> = app
         .keys
         .list()?
         .into_iter()
@@ -3984,15 +4351,17 @@ async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
             missing: k.missing,
         })
         .collect();
-    let storages = app
+    let storages: Vec<(String, String)> = app
         .engine
         .storages()?
         .into_iter()
         .map(|(n, p)| (n, p.display().to_string()))
         .collect();
-    let audit = app.auth.audit_log(100)?.iter().map(audit_row).collect();
+    let audit: Vec<AuditRow> = app.auth.audit_log(100)?.iter().map(audit_row).collect();
+    let glance = server_glance(&app, &listeners, &keys, &storages);
     Ok(render(&ServerPage {
         s: v.shell("server"),
+        glance,
         listener_prefill,
         listeners,
         keys,

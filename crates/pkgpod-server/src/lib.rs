@@ -309,13 +309,21 @@ pub async fn run(app: Arc<App>) -> Result<(), String> {
                 match tokio::task::spawn_blocking(move || e.gc(Duration::from_secs(86400), false))
                     .await
                 {
-                    Ok(Ok(r)) => tracing::info!(
-                        "gc: {} versions, {} objects, {} blobs ({} bytes) removed",
-                        r.versions,
-                        r.objects,
-                        r.blobs,
-                        r.bytes
-                    ),
+                    Ok(Ok(r)) => {
+                        tracing::info!(
+                            "gc: {} versions, {} objects, {} blobs ({} bytes) removed",
+                            r.versions,
+                            r.objects,
+                            r.blobs,
+                            r.bytes
+                        );
+                        app.auth.audit(
+                            "pkgpod",
+                            "gc",
+                            "",
+                            &format!("daily: {} blobs, {} bytes", r.blobs, r.bytes),
+                        );
+                    }
                     Ok(Err(e)) => tracing::error!("gc: {e}"),
                     Err(e) => tracing::error!("gc: {e}"),
                 }
