@@ -845,6 +845,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                         ("terraform", _) => "providers and modules for Terraform and OpenTofu",
                         ("galaxy", _) => "Ansible collections for ansible-galaxy",
                         ("conan", _) => "C and C++ packages for Conan 2",
+                        ("swift", _) => "a Swift package registry for SwiftPM",
                         _ => "",
                     }
                     .to_string(),
@@ -1484,6 +1485,35 @@ fn usage(
         out.push(UseLine {
             label: "Note".into(),
             text: "pkgpod is no proxy: packages from npmjs need their own registry (a scope here, the rest from registry.npmjs.org). npm login is not offered; set the token in .npmrc. unpublish and deprecate are operations here.".into(),
+        });
+        return out;
+    }
+    if r.format == "swift" {
+        out.push(UseLine {
+            label: "Set the registry and log in".into(),
+            text: format!(
+                "swift package-registry set {base}\nswift package-registry login {base} --token <token>"
+            ),
+        });
+        out.push(UseLine {
+            label: "Package.swift: depend".into(),
+            text: ".package(id: \"<scope>.<name>\", from: \"1.0.0\")".into(),
+        });
+        out.push(UseLine {
+            label: "Publish".into(),
+            text: format!("swift package-registry publish <scope>.<name> 1.0.0 --url {base}"),
+        });
+        out.push(UseLine {
+            label: "Unsigned releases (.swiftpm/configuration/registries.json)".into(),
+            text: "\"security\": { \"default\": { \"signing\": { \"onUnsigned\": \"silentAllow\" } } }".into(),
+        });
+        out.push(UseLine {
+            label: "A labelled version".into(),
+            text: format!("swift package-registry set {base}@<label>/"),
+        });
+        out.push(UseLine {
+            label: "Note".into(),
+            text: "SwiftPM wants the registry over https.".into(),
         });
         return out;
     }
@@ -3157,6 +3187,7 @@ fn catalog_words(format: &str) -> (&'static str, [&'static str; 3], bool) {
             ["Reference", "Revision", "Kind"],
             true,
         ),
+        "swift" => ("Packages", ["Package", "Version", "Note"], true),
         "deb" => ("Packages", ["Package", "Version", "Where"], true),
         _ => ("Packages", ["Package", "Version", "Where"], true),
     }

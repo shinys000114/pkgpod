@@ -32,6 +32,7 @@ pub mod routes;
 pub mod rsa_key;
 pub mod schema;
 pub mod serve;
+pub mod swift;
 pub mod terraform;
 pub mod usign_key;
 
@@ -173,6 +174,7 @@ pub fn formats() -> Vec<Arc<dyn pkgpod_engine::Format>> {
         Arc::new(pkgpod_terraform::Terraform),
         Arc::new(pkgpod_galaxy::Galaxy),
         Arc::new(pkgpod_conan::Conan),
+        Arc::new(pkgpod_swift::Swift),
     ]
 }
 

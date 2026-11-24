@@ -56,6 +56,8 @@ Status: in development, nothing released.
   install (Galaxy API v3; tried with ansible-core 2.21 and 2.18).
 - **Conan**: a Conan 2 remote, recipe and package revisions (tried with
   Conan 2.34 and 2.0).
+- **Swift**: a Swift package registry (SE-0292) for SwiftPM's publish
+  and package ids (tried with Swift 6.1).
 - **Pub**: repositories for Dart and Flutter packages (hosted pub
   repository API v2): dart pub publish, get, retraction (tried with
   Dart 3.14).
@@ -99,7 +101,7 @@ Snapshots: `pkgpod label ppa release-1`, then
 repositories: `<address>/-/label/release-1/`).
 
 Other formats are made the same way (`pkgpod repo create <name> -f
-files|oci|pypi|npm|cargo|go|apk|rpm|helm|maven|gems|arch|nuget|composer|conda|cran|pub|ipk|terraform|galaxy|conan`); each repository's page in the console says how its
+files|oci|pypi|npm|cargo|go|apk|rpm|helm|maven|gems|arch|nuget|composer|conda|cran|pub|ipk|terraform|galaxy|conan|swift`); each repository's page in the console says how its
 clients use it.
 
 ## Backup, restore and upgrading

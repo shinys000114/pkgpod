@@ -37,6 +37,7 @@ pkgpod-ipk.workspace = true
 pkgpod-terraform.workspace = true
 pkgpod-galaxy.workspace = true
 pkgpod-conan.workspace = true
+pkgpod-swift.workspace = true
 pkgpod-mirror.workspace = true
 axum.workspace = true
 tokio.workspace = true

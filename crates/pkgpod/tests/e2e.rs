@@ -736,7 +736,7 @@ fn console_login_pages_and_csrf() {
     // page, usage and actions open.
     let src = s.url("/web/");
     type Fields<'a> = &'a [(&'a str, &'a str)];
-    let choices: [(&str, &str, &str, Fields); 24] = [
+    let choices: [(&str, &str, &str, Fields); 25] = [
         (
             "deb",
             "hosted",
@@ -774,6 +774,7 @@ fn console_login_pages_and_csrf() {
         ("terraform", "hosted", "c-terraform", &[]),
         ("galaxy", "hosted", "c-galaxy", &[]),
         ("conan", "hosted", "c-conan", &[]),
+        ("swift", "hosted", "c-swift", &[]),
     ];
     for (format, kind, name, extra) in choices {
         let mut form = vec![("format", format), ("kind", kind), ("name", name)];
@@ -4878,6 +4879,7 @@ fn serving_root_lists_trees_not_registries() {
         ("reg-terraform", "terraform"),
         ("reg-galaxy", "galaxy"),
         ("reg-conan", "conan"),
+        ("reg-swift", "swift"),
         ("reg-pub", "pub"),
         ("reg-go", "go"),
     ] {
@@ -4919,6 +4921,7 @@ fn serving_root_lists_trees_not_registries() {
         "reg-terraform",
         "reg-galaxy",
         "reg-conan",
+        "reg-swift",
         "hidden-oci",
     ] {
         assert!(!root.contains(name), "{name}: {root}");
@@ -8256,4 +8259,182 @@ fn conan_remote_with_conan_2() {
     s.restart();
     let (ok, out) = install(&url);
     assert!(ok && out.contains("#define HELLO \"one\""), "{out}");
+}
+
+const SWIFT_IMAGE: &str = "pkgpod-e2e/swift:6.1";
+
+/// The Swift image (swift:6.1 with zip, which publishing needs), built
+/// when missing.
+fn swift_image() -> bool {
+    if !have("docker") || images_here(&["swift:6.1"]).is_empty() {
+        return false;
+    }
+    if images_here(&[SWIFT_IMAGE]).is_empty() {
+        let mut c = Command::new("docker")
+            .args(["build", "-q", "-t", SWIFT_IMAGE, "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        c.stdin
+            .take()
+            .unwrap()
+            .write_all(b"FROM swift:6.1\nRUN apt-get update -qq && apt-get install -y -qq zip unzip >/dev/null && rm -rf /var/lib/apt/lists/*\n")
+            .unwrap();
+        assert!(c.wait().unwrap().success(), "building {SWIFT_IMAGE}");
+    }
+    true
+}
+
+#[test]
+fn swift_registry_with_swiftpm() {
+    if !swift_image() {
+        return;
+    }
+    let mut s = Server::start();
+    let work = s.dir.path().join("swift");
+    std::fs::create_dir_all(&work).unwrap();
+    // https, as SwiftPM wants: a listener with a certificate for 127.0.0.1.
+    let (cert, key) = (work.join("ca.pem"), work.join("key.pem"));
+    let o = Command::new("openssl")
+        .args([
+            "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+        ])
+        .args([
+            "-subj",
+            "/CN=127.0.0.1",
+            "-addext",
+            "subjectAltName=IP:127.0.0.1",
+        ])
+        .arg("-keyout")
+        .arg(&key)
+        .arg("-out")
+        .arg(&cert)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let port = free_port();
+    s.cli(&[
+        "listener",
+        "set",
+        "tls",
+        &format!("127.0.0.1:{port}"),
+        "--cert",
+        cert.to_str().unwrap(),
+        "--key",
+        key.to_str().unwrap(),
+    ])
+    .unwrap();
+    let t0 = Instant::now();
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(t0.elapsed() < Duration::from_secs(10), "the TLS listener");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    s.cli(&["repo", "create", "sw", "-f", "swift"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "sw", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let url = format!("https://127.0.0.1:{port}/sw/");
+    // In the container as root (the CA into its store), /work read-only:
+    // the registry set, logged in, unsigned packages allowed.
+    let swift = |registry: &str, token: &str, script: &str| {
+        let full = format!(
+            "set -e; cp /work/ca.pem /usr/local/share/ca-certificates/pkgpod.crt && update-ca-certificates >/dev/null 2>&1; \
+             swift package-registry set --global {registry} >/dev/null; \
+             {login}\
+             sed -i 's/\"version\" : 1/\"security\" : {{ \"default\" : {{ \"signing\" : {{ \"onUnsigned\" : \"silentAllow\" }} }} }},\\n  \"version\" : 1/' ~/.swiftpm/configuration/registries.json; \
+             {script}",
+            login = if token.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "swift package-registry login {registry} --token {token} --no-confirm >/dev/null; "
+                )
+            }
+        );
+        let o = Command::new("docker")
+            .args(["run", "--rm", "--network", "host", "--entrypoint", "sh"])
+            .arg("-v")
+            .arg(format!("{}:/work:ro", work.display()))
+            .arg(SWIFT_IMAGE)
+            .arg("-c")
+            .arg(full)
+            .output()
+            .unwrap();
+        (
+            o.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            ),
+        )
+    };
+    let publish = |ver: &str, text: &str| {
+        swift(
+            &url,
+            &tok,
+            &format!(
+                "mkdir -p /tmp/G/Sources/Greeting && cd /tmp/G && \
+                 printf '// swift-tools-version:5.9\\nimport PackageDescription\\nlet package = Package(name: \"Greeting\", products: [.library(name: \"Greeting\", targets: [\"Greeting\"])], targets: [.target(name: \"Greeting\")])\\n' > Package.swift && \
+                 printf 'public func greet() -> String {{ \"{text}\" }}\\n' > Sources/Greeting/G.swift && \
+                 mkdir -p /tmp/scratch && printf '{{\"description\": \"Greetings\", \"repositoryURLs\": [\"https://git.example.invalid/team/Greeting.git\"]}}' > /tmp/meta.json && \
+                 swift package-registry publish team.Greeting {ver} --url {url} --metadata-path /tmp/meta.json --scratch-directory /tmp/scratch"
+            ),
+        )
+    };
+    let (ok, out) = publish("1.0.0", "hello 1.0.0");
+    assert!(ok && out.contains("successfully published"), "{out}");
+    s.cli(&["label", "sw", "first"]).unwrap();
+    let (ok, out) = publish("1.1.0", "hello 1.1.0");
+    assert!(ok && out.contains("successfully published"), "{out}");
+    // An app that depends on it by id: built and run; or just resolved.
+    let app = |registry: &str, token: &str, then: &str| {
+        swift(
+            registry,
+            token,
+            &format!(
+                "mkdir -p /tmp/A/Sources/App && cd /tmp/A && \
+                 printf '// swift-tools-version:5.9\\nimport PackageDescription\\nlet package = Package(name: \"App\", dependencies: [.package(id: \"team.Greeting\", from: \"1.0.0\")], targets: [.executableTarget(name: \"App\", dependencies: [.product(name: \"Greeting\", package: \"team.Greeting\")])])\\n' > Package.swift && \
+                 printf 'import Greeting\\nprint(greet())\\n' > Sources/App/main.swift && {then}"
+            ),
+        )
+    };
+    let (ok, out) = app(&url, &tok, "swift run -q App 2>&1");
+    assert!(ok && out.contains("hello 1.1.0"), "{out}");
+    // A label's registry: the release it had.
+    let resolve =
+        "swift package resolve >/dev/null && grep -o '\"version\" : \"[0-9.]*\"' Package.resolved";
+    let (ok, out) = app(&format!("{url}@first/"), &tok, resolve);
+    assert!(ok && out.contains("\"version\" : \"1.0.0\""), "{out}");
+    // Without a token: refused.
+    let (ok, out) = app(&url, "", resolve);
+    assert!(!ok, "{out}");
+    // Identifiers by the repository URL the metadata named.
+    let c = reqwest::blocking::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap();
+    let r = c
+        .get(format!(
+            "{url}identifiers?url=https://git.example.invalid/team/Greeting"
+        ))
+        .bearer_auth(&tok)
+        .header("Accept", "application/vnd.swift.registry.v1+json")
+        .send()
+        .unwrap();
+    assert_eq!(r.headers()["content-version"], "1");
+    assert!(r.text().unwrap().contains("team.Greeting"));
+    // A release is published once.
+    let (ok, out) = publish("1.1.0", "changed");
+    assert!(!ok && out.contains("already exists"), "{out}");
+    // Removed: the older one; after a restart, the same.
+    s.cli(&["rm", "sw", "team/greeting/1.1.0.zip", "-y"])
+        .unwrap();
+    s.restart();
+    let (ok, out) = app(&url, &tok, resolve);
+    assert!(ok && out.contains("\"version\" : \"1.0.0\""), "{out}");
 }

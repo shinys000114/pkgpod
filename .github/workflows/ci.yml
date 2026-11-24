@@ -47,7 +47,7 @@ jobs:
                    composer:2 condaforge/miniforge3:latest mambaorg/micromamba:2.3.3 \
                    r-base:latest dart:stable openwrt/rootfs:x86-64-openwrt-24.10 \
                    hashicorp/terraform:1.13 ghcr.io/opentofu/opentofu:1.10 \
-                   alpine/ansible:2.21.0 alpine/ansible:2.18.6 python:3.12-slim; do
+                   alpine/ansible:2.21.0 alpine/ansible:2.18.6 python:3.12-slim swift:6.1; do
             docker pull -q "$i"
           done
       - name: Tests with real apt
