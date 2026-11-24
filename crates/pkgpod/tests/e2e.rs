@@ -602,7 +602,15 @@ fn console_login_pages_and_csrf() {
     let src = s.url("/web/");
     type Fields<'a> = &'a [(&'a str, &'a str)];
     let choices: [(&str, &str, &str, Fields); 20] = [
-        ("deb", "hosted", "c-deb", &[("first_dist", "noble")]),
+        (
+            "deb",
+            "hosted",
+            "c-deb",
+            &[(
+                "dists",
+                "noble\nfocal jammy: rockchip, amlogic\nresolute: internal-realtek",
+            )],
+        ),
         (
             "deb",
             "mirror",
@@ -653,8 +661,34 @@ fn console_login_pages_and_csrf() {
             assert_eq!(st, 200, "/r/{name}{p}: {body}");
         }
     }
-    let (_, usage) = page("/r/c-deb/use");
+    let (_, usage) = page("/r/c-deb/use?dist=noble");
     assert!(usage.contains(" noble main"), "{usage}");
+    // The dists made with it, in one version.
+    let v = s.json(&["versions", "c-deb"]);
+    assert_eq!(
+        v[0]["summary"],
+        "dist noble added (main); dist focal added (rockchip, amlogic); dist jammy added (rockchip, amlogic); dist resolute added (internal-realtek)",
+        "{v}"
+    );
+    let (_, usage) = page("/r/c-deb/use?dist=resolute");
+    assert!(usage.contains(" resolute internal-realtek"), "{usage}");
+    // Bad dists make no repository.
+    let r = c
+        .post(format!("{}/c/repos", s.api))
+        .header("cookie", format!("pkgpod_session={sid}"))
+        .header("x-csrf-token", &csrf)
+        .form(&[
+            ("format", "deb"),
+            ("kind", "hosted"),
+            ("name", "baddists"),
+            ("dists", "noble\nnoble: main"),
+        ])
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(r.contains("named twice"), "{r}");
+    assert!(s.cli(&["repo", "show", "baddists"]).is_err());
     // An http mirror without dists is refused when made.
     let r = c
         .post(format!("{}/c/repos", s.api))
