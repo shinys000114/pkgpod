@@ -49,6 +49,9 @@ Status: in development, nothing released.
   older versions in the archive (tried with R 4.6).
 - **ipk**: opkg feeds for OpenWrt and Yocto, Packages signed with
   usign (tried with OpenWrt 24.10's opkg, check_signature on).
+- **Terraform/OpenTofu**: a registry of providers (signed SHA256SUMS)
+  and modules, found through service discovery on its host (tried with
+  Terraform 1.13 and OpenTofu 1.10).
 - **Pub**: repositories for Dart and Flutter packages (hosted pub
   repository API v2): dart pub publish, get, retraction (tried with
   Dart 3.14).
@@ -92,7 +95,7 @@ Snapshots: `pkgpod label ppa release-1`, then
 repositories: `<address>/-/label/release-1/`).
 
 Other formats are made the same way (`pkgpod repo create <name> -f
-files|oci|pypi|npm|cargo|go|apk|rpm|helm|maven|gems|arch|nuget|composer|conda|cran|pub|ipk`); each repository's page in the console says how its
+files|oci|pypi|npm|cargo|go|apk|rpm|helm|maven|gems|arch|nuget|composer|conda|cran|pub|ipk|terraform`); each repository's page in the console says how its
 clients use it.
 
 ## Backup, restore and upgrading

@@ -214,7 +214,7 @@ password=<token>
 fn browsable(format: &str) -> bool {
     !matches!(
         format,
-        "npm" | "oci" | "cargo" | "go" | "nuget" | "composer" | "pub"
+        "npm" | "oci" | "cargo" | "go" | "nuget" | "composer" | "pub" | "terraform"
     )
 }
 
@@ -295,6 +295,15 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
         Ok(t) => t,
         Err(e) => return e.into_response(),
     };
+    // Terraform's and OpenTofu's service discovery, at the host's root.
+    if path.len() == 2
+        && path[0] == ".well-known"
+        && path[1] == "terraform.json"
+        && matches!(method, Method::GET | Method::HEAD)
+        && let Some(prefix) = table.terraform_prefix(&host)
+    {
+        return crate::terraform::discovery(&prefix);
+    }
     if registry && crate::oci::claims(&table, &host, &path[1..]) {
         let rest = path[1..].to_vec();
         return match crate::oci::handle(app.clone(), caller.clone(), &host, &rest, req).await {
@@ -375,6 +384,41 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
                     role,
                 };
                 return crate::npm::handle(app, ask, req).await;
+            }
+            if served.repo.format == "terraform" && matches!(method, Method::GET | Method::HEAD) {
+                // A module archive through a signed URL needs no token.
+                if role.is_none()
+                    && !crate::terraform::signed_ok(
+                        &app,
+                        &served.repo.name,
+                        &rel.join("/"),
+                        req.uri().query().unwrap_or(""),
+                    )
+                {
+                    return deny(&caller);
+                }
+                let mut base_url = client_base(route.as_ref(), &host, &base, &req);
+                let mut rel = rel;
+                let mut version = served.current.clone();
+                if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
+                    let Ok(v) = app.labelled(&served.repo.name, label) else {
+                        return status(StatusCode::NOT_FOUND);
+                    };
+                    base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
+                    version = Some(v);
+                    rel.remove(0);
+                }
+                if rel.is_empty() {
+                    return client_note(
+                        StatusCode::OK,
+                        format!(
+                            "{}: a Terraform/OpenTofu registry.\n\n  source = \"<host>/<namespace>/<type>\"\n\nIts providers and modules are listed in pkgpod's console.\n",
+                            served.repo.name
+                        ),
+                    );
+                }
+                return crate::terraform::read(&app, &served.repo, version, &rel, &base_url, req)
+                    .await;
             }
             if served.repo.format == "composer" && matches!(method, Method::GET | Method::HEAD) {
                 if role.is_none() {

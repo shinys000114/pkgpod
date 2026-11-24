@@ -66,6 +66,12 @@ Formats:
   Packages, Packages.gz and a usign Packages.sig per feed (the server's
   usign key, made on first use and backed up), the newest version of
   each package listed, every version kept.
+- **Terraform/OpenTofu**: the provider and module registry protocols;
+  `/.well-known/terraform.json` at a host's root names the repository
+  serving it; each provider version's SHA256SUMS is signed (binary
+  detached) with the repository's key; the packages, sums and module
+  archives the clients fetch without a token are reached by short-lived
+  signed URLs.
 - **Pub**: Dart and Flutter packages with the hosted pub repository API
   (v2): package documents made per request, dart pub publish with the
   outcome told at the finalizing URL, retract and unretract.

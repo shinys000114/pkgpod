@@ -75,6 +75,9 @@ pub struct Table {
     pub unrouted: BTreeSet<String>,
     /// OCI repositories (reached through `/v2/` at a host root).
     pub oci: BTreeSet<String>,
+    /// Terraform repositories (found through `/.well-known/terraform.json`
+    /// at a host root).
+    pub terraform: BTreeSet<String>,
 }
 
 /// What a request resolved to.
@@ -132,6 +135,9 @@ impl Table {
             if r.format == "oci" {
                 t.oci.insert(r.name.clone());
             }
+            if r.format == "terraform" {
+                t.terraform.insert(r.name.clone());
+            }
             let urls = r.setting_list("urls");
             if urls.is_empty() {
                 t.unrouted.insert(r.name.clone());
@@ -149,6 +155,33 @@ impl Table {
             }
         }
         t
+    }
+
+    /// Where on `host` the Terraform registry is, for service discovery
+    /// (`/` or `/<segments>/`): the Terraform repository with an address
+    /// on the host (the shortest), else one without addresses (the first
+    /// by name).
+    pub fn terraform_prefix(&self, host: &str) -> Option<String> {
+        let host = host.to_ascii_lowercase();
+        let path = |segs: &[String]| {
+            if segs.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{}/", segs.join("/"))
+            }
+        };
+        if let Some(r) = self
+            .routes
+            .iter()
+            .filter(|r| self.terraform.contains(&r.repo) && host_matches(&r.host, &host))
+            .min_by_key(|r| r.prefix.len())
+        {
+            return Some(path(&r.prefix));
+        }
+        self.unrouted
+            .iter()
+            .find(|r| self.terraform.contains(*r))
+            .map(|r| path(std::slice::from_ref(r)))
     }
 
     /// Another repository already has this address.

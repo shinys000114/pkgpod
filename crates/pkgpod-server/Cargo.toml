@@ -33,6 +33,7 @@ pkgpod-conda.workspace = true
 pkgpod-cran.workspace = true
 pkgpod-pub.workspace = true
 pkgpod-ipk.workspace = true
+pkgpod-terraform.workspace = true
 pkgpod-mirror.workspace = true
 axum.workspace = true
 tokio.workspace = true

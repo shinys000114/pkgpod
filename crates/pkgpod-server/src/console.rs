@@ -842,6 +842,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                         ("cran", _) => "R packages for install.packages",
                         ("pub", _) => "Dart and Flutter packages for dart pub",
                         ("ipk", _) => "opkg feeds for OpenWrt and Yocto, signed",
+                        ("terraform", _) => "providers and modules for Terraform and OpenTofu",
                         _ => "",
                     }
                     .to_string(),
@@ -1481,6 +1482,50 @@ fn usage(
         out.push(UseLine {
             label: "Note".into(),
             text: "pkgpod is no proxy: packages from npmjs need their own registry (a scope here, the rest from registry.npmjs.org). npm login is not offered; set the token in .npmrc. unpublish and deprecate are operations here.".into(),
+        });
+        return out;
+    }
+    if r.format == "terraform" {
+        // The registry's host, as sources name it (no scheme, no path).
+        let host = base
+            .split_once("://")
+            .map_or(base.as_str(), |x| x.1)
+            .split('/')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        out.push(UseLine {
+            label: "~/.terraformrc (or TF_CLI_CONFIG_FILE)".into(),
+            text: format!("credentials \"{host}\" {{\n  token = \"<token>\"\n}}"),
+        });
+        out.push(UseLine {
+            label: "A provider".into(),
+            text: format!(
+                "terraform {{\n  required_providers {{\n    <type> = {{ source = \"{host}/<namespace>/<type>\", version = \"~> 1.0\" }}\n  }}\n}}"
+            ),
+        });
+        out.push(UseLine {
+            label: "A module".into(),
+            text: format!(
+                "module \"<name>\" {{\n  source  = \"{host}/<namespace>/<name>/<system>\"\n  version = \"~> 1.0\"\n}}"
+            ),
+        });
+        out.push(UseLine {
+            label: "Upload".into(),
+            text: format!(
+                "curl -u token:<token> -T terraform-provider-<type>_1.0.0_linux_amd64.zip '{base}upload/terraform-provider-<type>_1.0.0_linux_amd64.zip?namespace=<namespace>'\n\
+                 curl -u token:<token> -T module.tar.gz '{base}upload?namespace=<namespace>&name=<name>&system=<system>&version=1.0.0'"
+            ),
+        });
+        out.push(UseLine {
+            label: "A labelled version (in the CLI configuration)".into(),
+            text: format!(
+                "host \"{host}\" {{\n  services = {{\n    \"providers.v1\" = \"{base}@<label>/v1/providers/\",\n    \"modules.v1\"   = \"{base}@<label>/v1/modules/\"\n  }}\n}}"
+            ),
+        });
+        out.push(UseLine {
+            label: "Note".into(),
+            text: "The clients want https and a host name with a dot; they find the registry at /.well-known/terraform.json on the host, so one Terraform repository serves a host. Providers are signed with the repository's key.".into(),
         });
         return out;
     }
@@ -3057,6 +3102,7 @@ fn catalog_words(format: &str) -> (&'static str, [&'static str; 3], bool) {
         "gems" => ("Gems", ["Gem", "Version", "Note"], true),
         "nuget" => ("Packages", ["Package", "Version", "Note"], true),
         "pub" | "composer" | "cran" => ("Packages", ["Package", "Version", "Note"], true),
+        "terraform" => ("Providers and modules", ["Name", "Version", "Kind"], true),
         "deb" => ("Packages", ["Package", "Version", "Where"], true),
         _ => ("Packages", ["Package", "Version", "Where"], true),
     }
