@@ -585,6 +585,14 @@ async fn resigned(
     Some(r)
 }
 
+/// `p` if, with its links followed, it is inside `tree` (a received
+/// tree may hold links; none may lead out of it).
+pub(crate) fn inside(tree: &std::path::Path, p: &std::path::Path) -> Option<PathBuf> {
+    let root = std::fs::canonicalize(tree).ok()?;
+    let real = std::fs::canonicalize(p).ok()?;
+    real.starts_with(&root).then_some(real)
+}
+
 /// A mirror's received tree. `files`: a file tree, whose dot-files are
 /// served (`.treeinfo`), but not what the engines keep for themselves;
 /// in other trees no dot-file is.
@@ -609,11 +617,19 @@ async fn serve_mirror(
     if rel.iter().any(|s| hidden(s)) {
         return status(StatusCode::NOT_FOUND);
     }
+    let (tree2, full2) = (tree.clone(), full.clone());
+    let ok = tokio::task::spawn_blocking(move || inside(&tree2, &full2).is_some())
+        .await
+        .unwrap_or(false);
+    if !ok {
+        return status(StatusCode::NOT_FOUND);
+    }
     if full.is_dir() {
         if !raw_path.ends_with('/') {
             return Redirect::permanent(&format!("{raw_path}/")).into_response();
         }
-        let entries = tokio::task::spawn_blocking(move || fs_entries(&full, hidden))
+        let tree2 = tree.clone();
+        let entries = tokio::task::spawn_blocking(move || fs_entries(&tree2, &full, hidden))
             .await
             .unwrap_or_default();
         return listing(raw_path, entries, &query, head);
@@ -652,7 +668,11 @@ async fn serve_mirror(
     r
 }
 
-fn fs_entries(dir: &std::path::Path, hidden: impl Fn(&str) -> bool) -> Vec<ListEntry> {
+fn fs_entries(
+    tree: &std::path::Path,
+    dir: &std::path::Path,
+    hidden: impl Fn(&str) -> bool,
+) -> Vec<ListEntry> {
     let mut v = Vec::new();
     let Ok(rd) = std::fs::read_dir(dir) else {
         return v;
@@ -662,6 +682,9 @@ fn fs_entries(dir: &std::path::Path, hidden: impl Fn(&str) -> bool) -> Vec<ListE
             continue;
         };
         if hidden(&name) {
+            continue;
+        }
+        if d.file_type().is_ok_and(|t| t.is_symlink()) && inside(tree, &d.path()).is_none() {
             continue;
         }
         let Ok(md) = std::fs::metadata(d.path()) else {

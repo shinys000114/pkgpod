@@ -2103,7 +2103,8 @@ async fn member(
 pub struct ListenerRow {
     pub name: String,
     pub addr: String,
-    pub tls: bool,
+    /// http, https or ftp (with its passive ports).
+    pub serves: String,
     pub state: String,
     pub ok: bool,
 }
@@ -2150,7 +2151,12 @@ async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
                 "stopped".into()
             };
             ListenerRow {
-                tls: !l.cert.is_empty(),
+                serves: match (l.proto.as_str(), l.cert.is_empty()) {
+                    ("ftp", _) if l.passive.is_empty() => "ftp".into(),
+                    ("ftp", _) => format!("ftp (passive {})", l.passive),
+                    (_, true) => "http".into(),
+                    (_, false) => "https".into(),
+                },
                 name: l.name,
                 addr: l.addr,
                 state,
@@ -2207,6 +2213,10 @@ async fn listener_set(
         cert: form_get(&form, "cert").trim().to_string(),
         key: form_get(&form, "key").trim().to_string(),
         enabled: form_get(&form, "disabled") != "on",
+        proto: Some(form_get(&form, "proto").trim().to_string())
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| "http".into()),
+        passive: form_get(&form, "passive").trim().to_string(),
     };
     match api::listener_set(
         State(app),

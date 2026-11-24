@@ -247,6 +247,9 @@ fn run_pass(
         "--recursive",
         "--times",
         "--links",
+        // Links that point out of the tree (absolute, or up through ..)
+        // are not made: the tree is served.
+        "--safe-links",
         "--no-perms",
         "--no-owner",
         "--no-group",

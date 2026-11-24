@@ -487,13 +487,24 @@ fn schemas() -> Value {
                     ),
                     ("key", text("PEM key file.")),
                     ("enabled", boolean()),
+                    (
+                        "proto",
+                        json!({"type": "string", "enum": ["http", "ftp"], "description": "http (TLS with cert and key) or ftp (read-only, anonymous, public files repositories)."}),
+                    ),
+                    (
+                        "passive",
+                        text("FTP: passive data ports, low-high; empty: any."),
+                    ),
                     ("running", boolean()),
                     (
                         "error",
                         nullable("string", "Why it is not running, if it failed."),
                     ),
                 ],
-                &["name", "addr", "cert", "key", "enabled", "running", "error"],
+                &[
+                    "name", "addr", "cert", "key", "enabled", "proto", "passive", "running",
+                    "error",
+                ],
             ),
         ),
         (
@@ -786,6 +797,14 @@ fn schemas() -> Value {
                     ),
                     ("key", text("PEM key file.")),
                     ("enabled", json!({"type": "boolean", "default": true})),
+                    (
+                        "proto",
+                        json!({"type": "string", "enum": ["http", "ftp"], "default": "http"}),
+                    ),
+                    (
+                        "passive",
+                        text("FTP: passive data ports, low-high; empty: any."),
+                    ),
                 ],
                 &["addr"],
             ),
@@ -1098,7 +1117,7 @@ fn ops() -> Vec<Op> {
             .empty(204, "Deleted."),
         op("get", "/api/v1/listeners", "listeners", "Serving listeners (server admin).")
             .reply(200, "The listeners.", array(sref("Listener"))),
-        op("put", "/api/v1/listeners/{name}", "listener_set", "Add or change {addr, cert?, key?, enabled?} (server admin).")
+        op("put", "/api/v1/listeners/{name}", "listener_set", "Add or change {addr, cert?, key?, enabled?, proto?, passive?} (server admin).")
             .body("ListenerSet")
             .empty(204, "Set; the listeners are restarted as needed."),
         op("delete", "/api/v1/listeners/{name}", "listener_delete", "Remove a listener (server admin).")

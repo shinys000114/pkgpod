@@ -93,6 +93,10 @@ CREATE TABLE jobs (
 );
 CREATE INDEX jobs_repo ON jobs(repo, id);
 ",
+    "
+ALTER TABLE listeners ADD COLUMN proto TEXT NOT NULL DEFAULT 'http';
+ALTER TABLE listeners ADD COLUMN passive TEXT NOT NULL DEFAULT '';
+",
 ];
 
 pub fn migrate(db: &Db) -> pkgpod_base::Result<()> {

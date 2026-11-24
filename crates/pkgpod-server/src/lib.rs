@@ -7,6 +7,7 @@
 pub mod api;
 pub mod auth;
 pub mod config;
+pub mod ftp;
 pub mod import;
 pub mod jobs;
 pub mod keys;
