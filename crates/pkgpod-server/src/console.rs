@@ -675,6 +675,35 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String]) -> Vec<UseLine
         format!("http://{addr}/{}/", r.name)
     });
     let mut out = Vec::new();
+    if r.format == "npm" {
+        let nerf = base.split_once("://").map_or(base.as_str(), |x| x.1);
+        out.push(UseLine {
+            label: ".npmrc".into(),
+            text: if r.setting_bool("public") {
+                format!("registry={base}\n//{nerf}:_authToken=<token>   # to publish")
+            } else {
+                format!("registry={base}\n//{nerf}:_authToken=<token>")
+            },
+        });
+        out.push(UseLine {
+            label: "Or for one scope".into(),
+            text: format!("@team:registry={base}"),
+        });
+        out.push(UseLine {
+            label: "Publish and install".into(),
+            text: "npm publish\nnpm install <package>\nnpm dist-tag add <package>@<version> <tag>"
+                .into(),
+        });
+        out.push(UseLine {
+            label: "A labelled version".into(),
+            text: format!("npm install --registry {base}-/label/<label>/ <package>"),
+        });
+        out.push(UseLine {
+            label: "Note".into(),
+            text: "pkgpod is no proxy: packages from npmjs need their own registry (a scope here, the rest from registry.npmjs.org). npm login is not offered; set the token in .npmrc. unpublish and deprecate are operations here.".into(),
+        });
+        return out;
+    }
     if r.format == "pypi" {
         let public = r.setting_bool("public");
         let index = if public {
@@ -1337,10 +1366,13 @@ async fn packages_part(
     match json_of(res) {
         Ok(list) => {
             let rows = pkg_rows(&list);
+            // npm versions go by the unpublish operation (a dist-tag may
+            // name one), not by path.
             let can_write = app
                 .engine
                 .repo(&repo)
                 .ok()
+                .filter(|r| r.format != "npm")
                 .and_then(|r| app.auth.role(&v.caller, &repo, r.setting_bool("public")))
                 >= Some(Role::Write);
             render(&PackagesPart {

@@ -1,0 +1,364 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+//! The npm registry endpoints of an npm repository: packuments made per
+//! request (tarball URLs absolute, from the address asked), tarballs,
+//! `npm publish`, the dist-tag API, ping and whoami.
+//!
+//! Every request of an npm repository comes here; a leading `@` is
+//! always a scope, so labelled versions are at `<repo>/-/label/<label>/`.
+
+use std::sync::Arc;
+
+use axum::body::Body;
+use axum::extract::Request;
+use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use pkgpod_engine::tree::Entry;
+use pkgpod_engine::{RepoInfo, Version};
+use pkgpod_npm::{Packages, VersionMeta, tag_path, tarball_name, version_path};
+use serde_json::{Value, json};
+
+use crate::App;
+use crate::auth::{Caller, Role};
+
+fn reply(st: StatusCode, v: Value) -> Response {
+    let mut r = (st, axum::Json(v)).into_response();
+    r.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    r
+}
+
+fn not_found() -> Response {
+    reply(StatusCode::NOT_FOUND, json!({"error": "Not found"}))
+}
+
+fn err(st: StatusCode, msg: impl Into<String>) -> Response {
+    reply(st, json!({"error": msg.into()}))
+}
+
+fn unauthorized() -> Response {
+    let mut r = err(StatusCode::UNAUTHORIZED, "authentication required");
+    r.headers_mut().insert(
+        header::WWW_AUTHENTICATE,
+        HeaderValue::from_static("Bearer realm=\"pkgpod\""),
+    );
+    r
+}
+
+/// The package name at the start of `rel` and what follows it.
+fn split_name(rel: &[String]) -> Option<(String, &[String])> {
+    let first = rel.first()?;
+    if first.starts_with('@') {
+        let second = rel.get(1)?;
+        Some((format!("{first}/{second}"), &rel[2..]))
+    } else {
+        Some((first.clone(), &rel[1..]))
+    }
+}
+
+pub struct Ask {
+    pub repo: RepoInfo,
+    pub current: Option<Version>,
+    pub rel: Vec<String>,
+    /// The repository's URL as the request reached it, ending in `/`.
+    pub base: String,
+    pub caller: Caller,
+    pub role: Option<Role>,
+}
+
+pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
+    let method = req.method().clone();
+    let reading = method == Method::GET || method == Method::HEAD;
+    // Reading first; what changes the repository asks for write itself.
+    if a.role.is_none() {
+        return if a.caller.user.is_none() {
+            unauthorized()
+        } else {
+            not_found()
+        };
+    }
+    let rel = a.rel.as_slice();
+    // The registry's own endpoints.
+    if rel.first().map(String::as_str) == Some("-") {
+        return match (&rel[1..], &method) {
+            ([p], _) if p == "ping" => reply(StatusCode::OK, json!({})),
+            ([w], _) if w == "whoami" => match &a.caller.user {
+                Some(u) => reply(StatusCode::OK, json!({"username": u.name})),
+                None => unauthorized(),
+            },
+            ([l, label, rest @ ..], m)
+                if l == "label" && (*m == Method::GET || *m == Method::HEAD) =>
+            {
+                let Ok(v) = app.labelled(&a.repo.name, label) else {
+                    return not_found();
+                };
+                let base = format!("{}-/label/{label}/", a.base);
+                read(&app, &a.repo, Some(v), rest, &base, req).await
+            }
+            ([p, rest @ ..], _) if p == "package" => dist_tags(&app, &a, rest, req).await,
+            _ => not_found(),
+        };
+    }
+    if reading {
+        return read(&app, &a.repo, a.current.clone(), rel, &a.base, req).await;
+    }
+    if method == Method::PUT
+        && let Some((name, [])) = split_name(rel)
+    {
+        if let Some(r) = no_write(&a) {
+            return r;
+        }
+        return publish(&app, &a, &name, req).await;
+    }
+    // Endpoints not offered (audit, search, login): npm goes on without.
+    not_found()
+}
+
+/// The answer to a change by a caller who may not write, if so.
+fn no_write(a: &Ask) -> Option<Response> {
+    if a.role >= Some(Role::Write) {
+        return None;
+    }
+    Some(if a.caller.user.is_none() {
+        unauthorized()
+    } else {
+        err(
+            StatusCode::FORBIDDEN,
+            format!("no write access to {}", a.repo.name),
+        )
+    })
+}
+
+/// The packages of the version (one package's subtree only).
+fn packages(app: &App, v: &Version, pkg: &str) -> Packages {
+    let leaves = app.engine.objects().walk(&v.root, pkg).unwrap_or_default();
+    Packages::of(&leaves)
+}
+
+async fn read(
+    app: &Arc<App>,
+    r: &RepoInfo,
+    v: Option<Version>,
+    rel: &[String],
+    base: &str,
+    req: Request,
+) -> Response {
+    let Some(v) = v else {
+        return not_found();
+    };
+    let Some((name, rest)) = split_name(rel) else {
+        return not_found();
+    };
+    if pkgpod_npm::check_name(&name).is_err() {
+        return not_found();
+    }
+    match rest {
+        [] => {
+            let (app2, name2, base2) = (app.clone(), name.clone(), base.to_string());
+            let doc = tokio::task::spawn_blocking(move || {
+                pkgpod_npm::packument(&name2, &packages(&app2, &v, &name2), &base2)
+            })
+            .await
+            .ok()
+            .flatten();
+            let Some(doc) = doc else {
+                return not_found();
+            };
+            let body = serde_json::to_vec(&doc).expect("json");
+            let etag = format!("\"{}\"", pkgpod_base::Digest::of(&body).hex());
+            if req
+                .headers()
+                .get(header::IF_NONE_MATCH)
+                .and_then(|x| x.to_str().ok())
+                .is_some_and(|x| x.split(',').any(|t| t.trim() == etag))
+            {
+                return StatusCode::NOT_MODIFIED.into_response();
+            }
+            let len = body.len();
+            let mut resp = Response::new(if req.method() == Method::HEAD {
+                Body::empty()
+            } else {
+                Body::from(body)
+            });
+            let h = resp.headers_mut();
+            h.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            h.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+            h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+            if let Ok(e) = HeaderValue::from_str(&etag) {
+                h.insert(header::ETAG, e);
+            }
+            resp
+        }
+        [dash, file] if dash == "-" => {
+            let short = name.rsplit('/').next().unwrap_or(&name);
+            let Some(ver) = file
+                .strip_prefix(&format!("{short}-"))
+                .and_then(|x| x.strip_suffix(".tgz"))
+            else {
+                return not_found();
+            };
+            if tarball_name(&name, ver) != *file {
+                return not_found();
+            }
+            let entry = app
+                .engine
+                .objects()
+                .resolve(&v.root, &version_path(&name, ver));
+            let Ok(Some(Entry::Blob { sha256, .. })) = entry else {
+                return not_found();
+            };
+            crate::serve::serve_blob(&r.store().path(&sha256), &sha256, file, None, false, req)
+                .await
+        }
+        _ => not_found(),
+    }
+}
+
+async fn publish(app: &Arc<App>, a: &Ask, name: &str, req: Request) -> Response {
+    let body = match axum::body::to_bytes(req.into_body(), pkgpod_npm::MAX_PUBLISH).await {
+        Ok(b) => b,
+        Err(_) => {
+            return err(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("a publish is at most {} MiB", pkgpod_npm::MAX_PUBLISH >> 20),
+            );
+        }
+    };
+    let (app2, r, actor, name2) = (
+        app.clone(),
+        a.repo.clone(),
+        a.caller.name().to_string(),
+        name.to_string(),
+    );
+    let res = tokio::task::spawn_blocking(move || -> Result<String, (StatusCode, String)> {
+        let p = pkgpod_npm::parse_publish(&name2, &body)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        drop(body);
+        let (sha, size) = r
+            .store()
+            .put_bytes(&p.tarball)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let meta = VersionMeta {
+            manifest: p.manifest.clone(),
+            shasum: p.shasum.clone(),
+            integrity: p.integrity.clone(),
+            time: pkgpod_base::now(),
+        };
+        let out = app2.engine.change(&r.name, &actor, |_, e| {
+            let at = version_path(&p.name, &p.version);
+            if e.get(&at)?.is_some() {
+                return Err(pkgpod_engine::Error::Conflict(format!(
+                    "cannot publish over the previously published version {}@{}",
+                    p.name, p.version
+                )));
+            }
+            e.put(&at, Entry::blob(sha, size, meta.to_json()))?;
+            let mut tags = p.tags.clone();
+            // The first version is latest whatever it was tagged.
+            if !tags.iter().any(|t| t == "latest") && e.get(&tag_path(&p.name, "latest"))?.is_none()
+            {
+                tags.push("latest".into());
+            }
+            for t in &tags {
+                e.put(&tag_path(&p.name, t), Entry::Ref { target: at.clone() })?;
+            }
+            Ok(format!(
+                "publish {}@{} ({})",
+                p.name,
+                p.version,
+                tags.join(", ")
+            ))
+        });
+        match out {
+            Ok(o) => {
+                app2.auth.audit(&actor, "publish", &r.name, &o.summary);
+                Ok(o.summary)
+            }
+            Err(pkgpod_engine::Error::Conflict(m)) => Err((StatusCode::FORBIDDEN, m)),
+            Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+        }
+    })
+    .await;
+    match res {
+        Ok(Ok(s)) => reply(
+            StatusCode::CREATED,
+            json!({"ok": true, "id": name, "summary": s}),
+        ),
+        Ok(Err((st, m))) => err(st, m),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// `/-/package/<name>/dist-tags[/<tag>]`: list, set (the body is the
+/// version as a JSON string), remove.
+async fn dist_tags(app: &Arc<App>, a: &Ask, rest: &[String], req: Request) -> Response {
+    let Some((name, tail)) = split_name(rest) else {
+        return not_found();
+    };
+    let method = req.method().clone();
+    match (tail, &method) {
+        ([d], m) if d == "dist-tags" && (*m == Method::GET || *m == Method::HEAD) => {
+            let Some(v) = a.current.clone() else {
+                return not_found();
+            };
+            let (app2, n2) = (app.clone(), name.clone());
+            let p = tokio::task::spawn_blocking(move || packages(&app2, &v, &n2))
+                .await
+                .unwrap_or_default();
+            match p.tags.get(&name) {
+                Some(t) => reply(StatusCode::OK, json!(t)),
+                None => not_found(),
+            }
+        }
+        ([d, tag], m) if d == "dist-tags" && (*m == Method::PUT || *m == Method::DELETE) => {
+            if let Some(r) = no_write(a) {
+                return r;
+            }
+            let version = if *m == Method::PUT {
+                let Ok(b) = axum::body::to_bytes(req.into_body(), 4096).await else {
+                    return err(StatusCode::BAD_REQUEST, "the body is the version, as JSON");
+                };
+                match serde_json::from_slice::<Value>(&b)
+                    .ok()
+                    .and_then(|v| v.as_str().map(String::from))
+                {
+                    Some(v) => Some(v),
+                    None => {
+                        return err(StatusCode::BAD_REQUEST, "the body is the version, as JSON");
+                    }
+                }
+            } else {
+                None
+            };
+            let (op, params) = match &version {
+                Some(v) => (
+                    "dist-tag",
+                    json!({"package": name, "tag": tag, "version": v}),
+                ),
+                None => ("dist-tag-rm", json!({"package": name, "tag": tag})),
+            };
+            let (app2, repo, actor) = (
+                app.clone(),
+                a.repo.name.clone(),
+                a.caller.name().to_string(),
+            );
+            let res = tokio::task::spawn_blocking(move || {
+                let r = app2.engine.repo(&repo)?;
+                let f = app2.engine.format(&r.format)?.clone();
+                app2.engine
+                    .change(&repo, &actor, |cx, e| f.op(cx, op, &params, e))
+            })
+            .await;
+            match res {
+                Ok(Ok(_)) => reply(StatusCode::OK, json!({"ok": true})),
+                Ok(Err(pkgpod_engine::Error::NotFound(m))) => err(StatusCode::NOT_FOUND, m),
+                Ok(Err(e)) => err(StatusCode::BAD_REQUEST, e.to_string()),
+                Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            }
+        }
+        _ => not_found(),
+    }
+}

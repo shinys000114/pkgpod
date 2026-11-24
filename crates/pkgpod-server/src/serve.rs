@@ -67,6 +67,8 @@ pub fn basic_caller(app: &App, h: &HeaderMap) -> Result<Caller, Error> {
 /// Request path segments, percent-decoded; `None` for unsafe ones.
 pub fn segments(path: &str) -> Option<Vec<String>> {
     let mut out = Vec::new();
+    // An encoded slash separates too (npm asks for @scope%2fname).
+    let path = path.replace("%2f", "/").replace("%2F", "/");
     for raw in path.split('/').filter(|s| !s.is_empty()) {
         let s = String::from_utf8(percent_decode(raw)).ok()?;
         if s == "." || s == ".." || s.contains(['\0', '\\', '/']) {
@@ -143,6 +145,7 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
         && method != Method::HEAD
         && method != Method::PUT
         && method != Method::POST
+        && method != Method::DELETE
         && !registry
     {
         return status(StatusCode::METHOD_NOT_ALLOWED);
@@ -213,7 +216,12 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
                 method == Method::HEAD,
             )
         }
-        Hit::Repo { repo, rel, .. } => {
+        Hit::Repo {
+            repo,
+            rel,
+            base,
+            route,
+        } => {
             let served = match app.served(&repo) {
                 Ok(s) => s,
                 Err(_) => return status(StatusCode::NOT_FOUND),
@@ -221,6 +229,52 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
             let role = app
                 .auth
                 .role(&caller, &repo, served.repo.setting_bool("public"));
+            if served.repo.format == "npm" {
+                // Tarball URLs are absolute: the address the request
+                // came in on (behind a proxy, its scheme).
+                let base_url = match &route {
+                    // The address's scheme and path; its host with the
+                    // port the request came to when it names none.
+                    Some(r) => {
+                        let mut u = r.url();
+                        if !r.host.contains(':')
+                            && host
+                                .to_ascii_lowercase()
+                                .starts_with(&format!("{}:", r.host))
+                        {
+                            u = u.replacen(&format!("://{}/", r.host), &format!("://{host}/"), 1);
+                        }
+                        u
+                    }
+                    None => {
+                        let scheme = req
+                            .headers()
+                            .get("x-forwarded-proto")
+                            .and_then(|v| v.to_str().ok())
+                            .filter(|s| *s == "https" || *s == "http")
+                            .unwrap_or("http")
+                            .to_string();
+                        let mut u = format!("{scheme}://{host}/");
+                        for b in &base {
+                            u.push_str(&percent_encode(b));
+                            u.push('/');
+                        }
+                        u
+                    }
+                };
+                let ask = crate::npm::Ask {
+                    repo: served.repo,
+                    current: served.current,
+                    rel,
+                    base: base_url,
+                    caller,
+                    role,
+                };
+                return crate::npm::handle(app, ask, req).await;
+            }
+            if method == Method::DELETE {
+                return status(StatusCode::METHOD_NOT_ALLOWED);
+            }
             if method == Method::POST {
                 // twine's upload: the repository's address, or legacy/.
                 if served.repo.format != "pypi" || !(rel.is_empty() || rel == ["legacy"]) {
@@ -1053,9 +1107,19 @@ mod tests {
     #[test]
     fn paths_and_listing() {
         assert_eq!(segments("/a%20b/c/").unwrap(), ["a b", "c"]);
-        for bad in ["/../etc", "/a/%2e%2e/b", "/a%2fb", "/a%00", "/a\\b"] {
+        for bad in [
+            "/../etc",
+            "/a/%2e%2e/b",
+            "/a%2f..%2fb",
+            "/a%2F%2e%2E",
+            "/a%00",
+            "/a\\b",
+        ] {
             assert!(segments(bad).is_none(), "{bad}");
         }
+        // An encoded slash separates (npm's @scope%2fname).
+        assert_eq!(segments("/@team%2flib").unwrap(), ["@team", "lib"]);
+        assert_eq!(segments("/a%2Fb").unwrap(), ["a", "b"]);
         let entries = vec![
             ListEntry {
                 name: "b.deb".into(),
