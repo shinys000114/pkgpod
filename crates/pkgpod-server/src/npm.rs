@@ -102,13 +102,65 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
     if reading {
         return read(&app, &a.repo, a.current.clone(), rel, &a.base, req).await;
     }
-    if method == Method::PUT
-        && let Some((name, [])) = split_name(rel)
-    {
-        if let Some(r) = no_write(&a) {
-            return r;
+    // npm publish (a version attached), npm deprecate (the packument
+    // put back changed), npm unpublish (the packument put back without
+    // the version at /-rev/<rev>, then its tarball or the whole package
+    // deleted).
+    if let Some((name, rest)) = split_name(rel) {
+        let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+        let change = match (&method, rest.as_slice()) {
+            (&Method::PUT, []) => Some(Change::Put { unpublish: false }),
+            (&Method::PUT, ["-rev", _]) => Some(Change::Put { unpublish: true }),
+            (&Method::DELETE, ["-rev", _]) => Some(Change::DeleteAll),
+            (&Method::DELETE, ["-", file, "-rev", _]) => {
+                Some(Change::DeleteTarball(file.to_string()))
+            }
+            _ => None,
+        };
+        if let Some(change) = change {
+            if let Some(r) = no_write(&a) {
+                return r;
+            }
+            return match change {
+                Change::Put { unpublish } => {
+                    let body = match axum::body::to_bytes(req.into_body(), pkgpod_npm::MAX_PUBLISH)
+                        .await
+                    {
+                        Ok(b) => b,
+                        Err(_) => {
+                            return err(
+                                StatusCode::PAYLOAD_TOO_LARGE,
+                                format!(
+                                    "a publish is at most {} MiB",
+                                    pkgpod_npm::MAX_PUBLISH >> 20
+                                ),
+                            );
+                        }
+                    };
+                    let doc: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                    if !unpublish
+                        && doc
+                            .get("_attachments")
+                            .is_some_and(|x| x.as_object().is_some_and(|o| !o.is_empty()))
+                    {
+                        publish(&app, &a, &name, body).await
+                    } else {
+                        update(&app, &a, &name, doc, unpublish).await
+                    }
+                }
+                Change::DeleteAll => remove(&app, &a, &name, None).await,
+                Change::DeleteTarball(file) => {
+                    let short = name.rsplit('/').next().unwrap_or(&name).to_string();
+                    match file
+                        .strip_prefix(&format!("{short}-"))
+                        .and_then(|x| x.strip_suffix(".tgz"))
+                    {
+                        Some(v) => remove(&app, &a, &name, Some(v.to_string())).await,
+                        None => not_found(),
+                    }
+                }
+            };
         }
-        return publish(&app, &a, &name, req).await;
     }
     // Endpoints not offered (audit, search, login): npm goes on without.
     not_found()
@@ -217,16 +269,113 @@ async fn read(
     }
 }
 
-async fn publish(app: &Arc<App>, a: &Ask, name: &str, req: Request) -> Response {
-    let body = match axum::body::to_bytes(req.into_body(), pkgpod_npm::MAX_PUBLISH).await {
-        Ok(b) => b,
-        Err(_) => {
-            return err(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                format!("a publish is at most {} MiB", pkgpod_npm::MAX_PUBLISH >> 20),
-            );
-        }
+enum Change {
+    Put { unpublish: bool },
+    DeleteAll,
+    DeleteTarball(String),
+}
+
+/// A packument put back: each version's deprecation as it says; with
+/// `unpublish`, the versions it no longer has are removed.
+async fn update(app: &Arc<App>, a: &Ask, name: &str, doc: Value, unpublish: bool) -> Response {
+    let Some(sent) = doc.get("versions").and_then(Value::as_object).cloned() else {
+        return err(StatusCode::BAD_REQUEST, "no versions in the document");
     };
+    let Some(cur) = a.current.clone() else {
+        return not_found();
+    };
+    let (app2, r, actor, name2) = (
+        app.clone(),
+        a.repo.name.clone(),
+        a.caller.name().to_string(),
+        name.to_string(),
+    );
+    let res = tokio::task::spawn_blocking(move || {
+        let have = packages(&app2, &cur, &name2);
+        let Some(versions) = have.versions.get(&name2) else {
+            return Err(pkgpod_engine::Error::NotFound(format!("no {name2}")));
+        };
+        let mut ops: Vec<(&str, Value)> = Vec::new();
+        for (v, (m, _, _)) in versions {
+            match sent.get(v) {
+                Some(s) => {
+                    let want = s.get("deprecated").and_then(Value::as_str).unwrap_or("");
+                    let now = m
+                        .manifest
+                        .get("deprecated")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    if want != now {
+                        ops.push((
+                            "deprecate",
+                            json!({"package": name2, "version": v, "message": want}),
+                        ));
+                    }
+                }
+                None if unpublish => {
+                    ops.push(("unpublish", json!({"package": name2, "version": v})))
+                }
+                None => {}
+            }
+        }
+        if ops.is_empty() {
+            return Ok(None);
+        }
+        let f = app2.engine.format("npm")?.clone();
+        let out = app2.engine.change(&r, &actor, |cx, e| {
+            let mut said = Vec::new();
+            for (op, p) in &ops {
+                said.push(f.op(cx, op, p, e)?);
+            }
+            Ok(said.join("; "))
+        })?;
+        app2.auth.audit(&actor, "npm", &r, &out.summary);
+        Ok(Some(out.summary))
+    })
+    .await;
+    match res {
+        Ok(Ok(s)) => reply(StatusCode::OK, json!({"ok": true, "summary": s})),
+        Ok(Err(pkgpod_engine::Error::NotFound(m))) => err(StatusCode::NOT_FOUND, m),
+        Ok(Err(e)) => err(StatusCode::BAD_REQUEST, e.to_string()),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// Unpublishes a version (`Some`) or the whole package; a version
+/// already gone is fine (npm deletes its tarball after putting the
+/// packument back without it).
+async fn remove(app: &Arc<App>, a: &Ask, name: &str, version: Option<String>) -> Response {
+    let (app2, r, actor, name2) = (
+        app.clone(),
+        a.repo.name.clone(),
+        a.caller.name().to_string(),
+        name.to_string(),
+    );
+    let res = tokio::task::spawn_blocking(move || {
+        let f = app2.engine.format("npm")?.clone();
+        let p = json!({"package": name2, "version": version.clone().unwrap_or_default()});
+        match app2
+            .engine
+            .change(&r, &actor, |cx, e| f.op(cx, "unpublish", &p, e))
+        {
+            Ok(out) => {
+                app2.auth.audit(&actor, "unpublish", &r, &out.summary);
+                Ok(())
+            }
+            Err(pkgpod_engine::Error::NotFound(_)) if version.is_some() => Ok(()),
+            Err(e) => Err(e),
+        }
+    })
+    .await;
+    match res {
+        Ok(Ok(())) => reply(StatusCode::OK, json!({"ok": true})),
+        Ok(Err(pkgpod_engine::Error::NotFound(m))) => err(StatusCode::NOT_FOUND, m),
+        Ok(Err(e)) => err(StatusCode::BAD_REQUEST, e.to_string()),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+async fn publish(app: &Arc<App>, a: &Ask, name: &str, body: axum::body::Bytes) -> Response {
     let (app2, r, actor, name2) = (
         app.clone(),
         a.repo.clone(),

@@ -6169,3 +6169,63 @@ fn a_key_from_gpg_is_imported_and_signs() {
         .unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
 }
+
+#[test]
+fn npm_deprecate_and_unpublish_with_npm() {
+    if !have("npm") {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&["repo", "create", "js", "-f", "npm"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "js", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let port = s.serve_port;
+    let reg = format!("http://127.0.0.1:{port}/js/");
+    let home = s.dir.path().join("npmhome");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("npmrc"),
+        format!("registry={reg}\n//127.0.0.1:{port}/js/:_authToken={tok}\n"),
+    )
+    .unwrap();
+    let src = s.dir.path().join("npmsrc");
+    for v in ["1.0.0", "1.1.0", "1.2.0"] {
+        let d = npm_package(&src, "hello-pkg", v);
+        let (ok, out) = npm(&home, &d, &["publish"]);
+        assert!(ok, "{out}");
+    }
+    let doc = || -> Value {
+        reqwest::blocking::Client::new()
+            .get(format!("{reg}hello-pkg"))
+            .bearer_auth(&tok)
+            .send()
+            .unwrap()
+            .json()
+            .unwrap()
+    };
+    let (ok, out) = npm(&home, &src, &["deprecate", "hello-pkg@1.0.0", "use 1.2"]);
+    assert!(ok, "{out}");
+    assert_eq!(doc()["versions"]["1.0.0"]["deprecated"], "use 1.2");
+    let (ok, out) = npm(&home, &src, &["deprecate", "hello-pkg@1.0.0", ""]);
+    assert!(ok, "{out}");
+    assert!(doc()["versions"]["1.0.0"].get("deprecated").is_none());
+    // One version, then the whole package.
+    let (ok, out) = npm(&home, &src, &["unpublish", "hello-pkg@1.1.0"]);
+    assert!(ok, "{out}");
+    let d = doc();
+    assert!(
+        d["versions"].get("1.1.0").is_none() && d["versions"].get("1.2.0").is_some(),
+        "{d}"
+    );
+    let (ok, out) = npm(&home, &src, &["unpublish", "hello-pkg", "--force"]);
+    assert!(ok, "{out}");
+    let r = reqwest::blocking::Client::new()
+        .get(format!("{reg}hello-pkg"))
+        .bearer_auth(&tok)
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 404);
+}
