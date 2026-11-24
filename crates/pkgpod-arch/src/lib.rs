@@ -399,6 +399,7 @@ impl Format for Arch {
 
     fn settings(&self, _kind: Kind) -> Vec<Field> {
         vec![
+            pkgpod_engine::settings::key_field(),
             Field::bool(
                 "sign",
                 true,
