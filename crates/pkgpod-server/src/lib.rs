@@ -148,6 +148,7 @@ pub fn formats() -> Vec<Arc<dyn pkgpod_engine::Format>> {
         Arc::new(pkgpod_cargo::Cargo),
         Arc::new(pkgpod_go::Go),
         Arc::new(pkgpod_apk::Apk),
+        Arc::new(pkgpod_rpm::Rpm),
     ]
 }
 

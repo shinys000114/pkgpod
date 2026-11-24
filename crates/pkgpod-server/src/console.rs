@@ -670,6 +670,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                         ("cargo", _) => "Rust crates for cargo (sparse index)",
                         ("go", _) => "Go modules for go (GOPROXY)",
                         ("apk", _) => "Alpine packages for apk, signed per version",
+                        ("rpm", _) => "RPM packages for dnf and yum, signed repodata",
                         _ => "",
                     }
                     .to_string(),
@@ -886,6 +887,45 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String], host: &str) ->
         out.push(UseLine {
             label: "Note".into(),
             text: "pkgpod is no proxy: packages from npmjs need their own registry (a scope here, the rest from registry.npmjs.org). npm login is not offered; set the token in .npmrc. unpublish and deprecate are operations here.".into(),
+        });
+        return out;
+    }
+    if r.format == "rpm" {
+        let id = r.name.replace('.', "-");
+        let public = r.setting_bool("public");
+        // dnf fetches gpgkey without username and password: a private
+        // repository's goes with them in its URL.
+        let key_url = if public {
+            format!("{base}key.asc")
+        } else {
+            let (scheme, rest) = base.split_once("://").unwrap_or(("https", &base));
+            format!("{scheme}://token:<token>@{rest}key.asc")
+        };
+        let mut repo = format!(
+            "[pkgpod-{id}]\nname={}\nbaseurl={base}<group>/\nenabled=1\ngpgcheck=0\nrepo_gpgcheck=1\ngpgkey={key_url}",
+            r.name
+        );
+        if !public {
+            repo.push_str("\nusername=token\npassword=<token>");
+        }
+        out.push(UseLine {
+            label: format!("/etc/yum.repos.d/{id}.repo"),
+            text: repo,
+        });
+        out.push(UseLine {
+            label: "Install".into(),
+            text: "dnf install <package>   # the group: e.g. el9, fc43 or main".into(),
+        });
+        out.push(UseLine {
+            label: "Upload".into(),
+            text: format!(
+                "curl -u token:<token> -T hello-1.0-1.x86_64.rpm '{base}upload?group=el9'\npkgpod upload {} hello-1.0-1.x86_64.rpm -s group=el9",
+                r.name
+            ),
+        });
+        out.push(UseLine {
+            label: "A labelled version".into(),
+            text: format!("baseurl={base}@<label>/<group>/"),
         });
         return out;
     }

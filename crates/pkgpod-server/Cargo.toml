@@ -19,6 +19,7 @@ pkgpod-npm.workspace = true
 pkgpod-cargo.workspace = true
 pkgpod-go.workspace = true
 pkgpod-apk.workspace = true
+pkgpod-rpm.workspace = true
 pkgpod-mirror.workspace = true
 axum.workspace = true
 tokio.workspace = true

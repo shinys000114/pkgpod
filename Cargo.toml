@@ -22,6 +22,7 @@ pkgpod-npm = { path = "crates/pkgpod-npm" }
 pkgpod-cargo = { path = "crates/pkgpod-cargo" }
 pkgpod-go = { path = "crates/pkgpod-go" }
 pkgpod-apk = { path = "crates/pkgpod-apk" }
+pkgpod-rpm = { path = "crates/pkgpod-rpm" }
 pkgpod-mirror = { path = "crates/pkgpod-mirror" }
 pkgpod-server = { path = "crates/pkgpod-server" }
 clap = { version = "4.6", features = ["derive", "env"] }
