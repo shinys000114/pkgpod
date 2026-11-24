@@ -73,7 +73,9 @@ pub(crate) enum Cmd {
         repo: String,
         #[arg(required = true)]
         files: Vec<PathBuf>,
-        /// Upload parameters (deb: dists=a,b component=main replace=true).
+        /// Upload parameters (deb: dists=a,b component=main replace=true;
+        /// path=README.md puts a file beside dists/ instead; files:
+        /// path=dir/name).
         #[arg(long = "set", short = 's', value_name = "KEY=VALUE")]
         params: Vec<String>,
     },
