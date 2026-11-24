@@ -162,9 +162,12 @@ pub fn read_package(data: &[u8]) -> Result<Package> {
     Ok(p)
 }
 
-/// repodata.json of a subdir's packages: (file name, index.json, size,
-/// md5, sha256).
-pub fn repodata(subdir: &str, pkgs: &[(String, Value, u64, String, String)]) -> Value {
+/// A package as repodata.json lists it: file name, index.json, size,
+/// md5, sha256.
+pub type Listed = (String, Value, u64, String, String);
+
+/// repodata.json of a subdir's packages.
+pub fn repodata(subdir: &str, pkgs: &[Listed]) -> Value {
     let (mut tarbz, mut conda) = (Map::new(), Map::new());
     for (file, index, size, md5, sha256) in pkgs {
         let mut e = index.as_object().cloned().unwrap_or_default();
@@ -254,7 +257,7 @@ impl Format for Conda {
 
     fn publish(&self, cx: &PublishCx) -> Result<Option<Digest>> {
         let mut view = Edit::new(cx.objects, pkgpod_engine::tree::empty());
-        let mut subdirs: BTreeMap<String, Vec<(String, Value, u64, String, String)>> = SUBDIRS
+        let mut subdirs: BTreeMap<String, Vec<Listed>> = SUBDIRS
             .iter()
             .map(|s| (s.to_string(), Vec::new()))
             .collect();
