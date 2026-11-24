@@ -142,7 +142,7 @@ main { padding: 1.6rem 2rem 3rem; max-width: 1280px; width: 100%; min-width: 0; 
     flex-wrap: wrap; padding: .55rem .75rem; gap: .4rem;
   }
   .brand { padding: 0 .5rem 0 .25rem; }
-  .nav { flex-direction: row; overflow-x: auto; order: 3; flex: 1 1 100%; }
+  .nav { flex-direction: row; flex-wrap: wrap; order: 3; flex: 1 1 100%; gap: .15rem; }
   .nav a { padding: .4rem .55rem; white-space: nowrap; }
   .nav svg { display: none; }
   .side .who { margin: 0 0 0 auto; border: 0; padding: 0; display: flex; align-items: center; gap: .5rem; }
@@ -367,6 +367,24 @@ button.htmx-request::after { content: "…"; }
 .card-body.results:not(:has(.plan)) { display: none; }
 details.card > summary { font-size: 1rem; }
 details.card > .panel-body { border-top: 1px solid var(--line); padding-top: 1rem; }
+@media (max-width: 640px) {
+  /* Tables become a card a row: each cell under its column's name (the
+     names are copied from the head by app.js), actions on their own
+     line, nothing scrolled sideways. */
+  .table-wrap { overflow-x: visible; }
+  .table-wrap table, .table-wrap tbody, .table-wrap tr, .table-wrap td { display: block; width: 100%; }
+  .table-wrap thead { display: none; }
+  .table-wrap tr { padding: .55rem .8rem; border-bottom: 1px solid var(--line); }
+  .table-wrap tr:last-child { border-bottom: 0; }
+  .table-wrap td { border: 0; padding: .12rem 0; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+  .table-wrap td[data-label]:not([data-label=""]) { position: relative; padding-left: 7.7rem; min-height: 1.5rem; }
+  .table-wrap td[data-label]:not([data-label=""])::before { content: attr(data-label); position: absolute; left: 0; top: .2rem; width: 7.2rem; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+  .table-wrap td.acts, .table-wrap td:last-child:empty { padding-top: .35rem; }
+  .table-wrap td.acts form, .table-wrap td form.inline { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; }
+  .table-wrap td input:not([type="checkbox"]):not([type="radio"]) { min-width: 0; width: 100%; }
+  .table-wrap td.pick { padding-bottom: .2rem; }
+  .side .ver { display: none; }
+}
 @media (max-width: 600px) {
   th, td { padding: .5rem .7rem; }
   .card-head, .card-body, .toolbar, details.panel > summary, details.panel > .panel-body, .empty { padding-left: .8rem; padding-right: .8rem; }
@@ -503,8 +521,10 @@ details.more[open] > summary { margin-bottom: .5rem; }
 @media (max-width: 600px) {
   .stats { gap: .4rem; }
   .stat { min-width: calc(50% - .2rem); flex: 1 1 calc(50% - .2rem); }
-  .tabs { flex-wrap: nowrap; overflow-x: auto; }
-  .tabs .tab { white-space: nowrap; }
+  /* Every tab in sight: they wrap rather than scroll away. */
+  .tabs { flex-wrap: wrap; row-gap: .15rem; }
+  .tabs .tab { white-space: nowrap; padding: .45rem .7rem; border-radius: 8px; }
+  .tabs .tab[aria-selected="true"] { margin-bottom: 0; border-bottom-color: var(--line); }
   table.repos th:nth-child(4), table.repos td:nth-child(4), table.repos th:nth-child(5), table.repos td:nth-child(5) { display: none; }
 }
 
