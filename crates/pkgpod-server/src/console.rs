@@ -2076,12 +2076,12 @@ async fn packages_part(
             let rows = pkg_rows(&list);
             // npm versions go by the unpublish operation (a dist-tag may
             // name one), Go's by remove (a version is a .zip and a .mod),
-            // not by path.
+            // not by path; a Maven row is a version's .pom, not its files.
             let can_write = app
                 .engine
                 .repo(&repo)
                 .ok()
-                .filter(|r| r.format != "npm" && r.format != "go")
+                .filter(|r| !matches!(r.format.as_str(), "npm" | "go" | "maven"))
                 .and_then(|r| app.auth.role(&v.caller, &repo, r.setting_bool("public")))
                 >= Some(Role::Write);
             let format = app.engine.repo(&repo).map(|r| r.format).unwrap_or_default();

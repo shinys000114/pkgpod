@@ -41,9 +41,9 @@
     <form class="choice-form" hx-post="/c/repos" hx-target="next .result">
       <input type="hidden" name="format" value="{{ f.id }}">
       <input type="hidden" name="kind" value="{{ f.kind }}">
-      {% if f.id == "deb" && f.kind == "hosted" && !has_key %}
+      {% if (f.id == "deb" || f.id == "rpm" || f.id == "arch") && f.kind == "hosted" && !has_key %}
       <div class="notice">
-        <p><b>No signing key yet.</b> apt checks the signature of a Debian repository's indexes; pkgpod signs them with the server's key.</p>
+        <p><b>No signing key yet.</b> {% if f.id == "deb" %}apt checks the signature of a Debian repository's indexes{% else if f.id == "rpm" %}dnf checks the signature of an RPM repository's repodata{% else %}pacman checks the signatures of an Arch repository's packages and databases{% endif %}; pkgpod signs them with the server's key.</p>
         <button type="button" class="primary" hx-post="/c/keys/generate" hx-vals='{"name": "main", "uid": "{{ key_uid }}"}' hx-target="next .result">Make a signing key</button>
         <span class="muted small">or add an existing one in <a href="/admin/server">Server</a></span>
       </div>

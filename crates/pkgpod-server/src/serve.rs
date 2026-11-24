@@ -670,7 +670,7 @@ pub fn content_type(name: &str) -> &'static str {
 /// Built-in Cache-Control rules: apt indexes are revalidated (they change
 /// in place), by-hash and pool files kept (their names change with their
 /// content), checksum files revalidated, the rest kept for an hour.
-const DEFAULT_CACHE: [(&str, &str); 8] = [
+const DEFAULT_CACHE: [(&str, &str); 22] = [
     ("**/by-hash/**", "public, max-age=31536000, immutable"),
     ("dists/**", "no-cache"),
     ("pool/**", "public, max-age=31536000"),
@@ -678,6 +678,22 @@ const DEFAULT_CACHE: [(&str, &str); 8] = [
     ("**/*SUMS*", "no-cache"),
     ("**/*.sha256", "no-cache"),
     ("**/*.sha512", "no-cache"),
+    // Indexes made per version: always revalidated (by ETag), so a
+    // cache in between never serves one an upload replaced.
+    ("**/APKINDEX.tar.gz", "no-cache"),
+    ("**/repodata/repomd.xml*", "no-cache"),
+    ("**/*.db", "no-cache"),
+    ("**/*.db.*", "no-cache"),
+    ("**/*.files", "no-cache"),
+    ("**/*.files.*", "no-cache"),
+    ("index.yaml", "no-cache"),
+    ("versions", "no-cache"),
+    ("names", "no-cache"),
+    ("info/*", "no-cache"),
+    ("**/maven-metadata.xml*", "no-cache"),
+    ("**/*.md5", "no-cache"),
+    ("**/*.sha1", "no-cache"),
+    ("key.asc", "no-cache"),
     ("**", "public, max-age=3600"),
 ];
 
@@ -1301,6 +1317,22 @@ mod tests {
         assert!(cache_control("pool/main/h/hello/hello_1_all.deb").contains("31536000"));
         assert_eq!(cache_control("releases/noble/SHA256SUMS"), "no-cache");
         assert_eq!(cache_control("SHA256SUMS"), "no-cache");
+        for index in [
+            "v3.22/main/x86_64/APKINDEX.tar.gz",
+            "el9/repodata/repomd.xml",
+            "el9/repodata/repomd.xml.asc",
+            "pk/x86_64/pk.db",
+            "pk/x86_64/pk.db.sig",
+            "pk/x86_64/pk.files.tar.gz",
+            "index.yaml",
+            "versions",
+            "info/hello",
+            "org/x/a/maven-metadata.xml",
+            "org/x/a/maven-metadata.xml.sha1",
+        ] {
+            assert_eq!(cache_control(index), "no-cache", "{index}");
+        }
+        assert!(cache_control("pk/x86_64/hello-1.0-1-x86_64.pkg.tar.zst").contains("3600"));
         assert_eq!(cache_control("images/disk.img"), "public, max-age=3600");
     }
 
