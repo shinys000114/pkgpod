@@ -5159,7 +5159,8 @@ fn go(home: &Path, cwd: &Path, proxy: &str, args: &[&str]) -> (bool, String) {
         .env("GOCACHE", home.join("gocache"))
         .env("GOPROXY", proxy)
         .env("GOSUMDB", "off")
-        .env("GOFLAGS", "-mod=mod")
+        // A writable module cache: the test's directory goes with it.
+        .env("GOFLAGS", "-mod=mod -modcacherw")
         .env("GOTOOLCHAIN", "local")
         .env("NETRC", home.join("netrc"))
         .env("SSL_CERT_FILE", home.join("ca.pem"))
