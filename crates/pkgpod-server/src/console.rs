@@ -866,7 +866,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
         .iter()
         .map(|r: &RepoRow| (r.format.clone(), r.format_title.clone()))
         .collect();
-    present.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+    present.sort_by_key(|a| a.1.to_lowercase());
     present.dedup();
     Ok(render(&IndexPage {
         s: v.shell("repos"),
