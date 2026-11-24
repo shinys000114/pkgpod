@@ -636,6 +636,28 @@ fn console_login_pages_and_csrf() {
     }
     let (_, usage) = page("/r/c-deb/use");
     assert!(usage.contains(" noble main"), "{usage}");
+    // Without a signing key, signed formats say so when made, as their
+    // first upload would fail.
+    let (_, home) = page("/");
+    for says in ["apt checks", "dnf checks", "pacman checks"] {
+        assert!(home.contains(says), "{says}");
+    }
+    let rpm = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../pkgpod-rpm/tests/fixtures/hello-rpm-1.0-1.noarch.rpm"),
+    )
+    .unwrap();
+    // (sign is on unless said otherwise; the form above sent no box.)
+    s.cli(&["repo", "create", "k-rpm", "-f", "rpm"]).unwrap();
+    let r = c
+        .put(s.url("/k-rpm/upload"))
+        .basic_auth("ann", Some("ann-password"))
+        .body(rpm)
+        .send()
+        .unwrap();
+    let st = r.status().as_u16();
+    let body = r.text().unwrap();
+    assert!(st >= 400 && body.contains("signing key"), "{st} {body}");
     // Tokens are not for the console.
     let tok = s.cli(&["token", "create", "x", "--write"]).unwrap();
     let r = c
@@ -5138,12 +5160,7 @@ fn images_here(wanted: &[&'static str]) -> Vec<&'static str> {
 
 /// Alpine images: apk 2 (3.22) and apk 3 (3.23).
 fn alpine_images() -> Vec<&'static str> {
-    images_here(&[
-        "alpine:3.22",
-        "caddy:2.10-alpine",
-        "alpine:3.23",
-        "nginx:1.29-alpine",
-    ])
+    images_here(&["alpine:3.22", "alpine:3.23"])
 }
 
 /// Runs `script` with sh in `image` on the host's network.
@@ -5177,6 +5194,52 @@ fn docker_sh_in(image: &str, work: Option<&Path>, script: &str) -> (bool, String
             String::from_utf8_lossy(&o.stderr)
         ),
     )
+}
+
+/// A container that stays up while a test runs, so that a client's
+/// caches carry over from one command to the next; removed when dropped.
+struct Ctr(String);
+
+impl Ctr {
+    fn start(image: &str, args: &[&str]) -> Ctr {
+        let o = Command::new("docker")
+            .args([
+                "run",
+                "-d",
+                "--rm",
+                "--network",
+                "host",
+                "--entrypoint",
+                "sleep",
+            ])
+            .args(args)
+            .args([image, "900"])
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        Ctr(String::from_utf8_lossy(&o.stdout).trim().to_string())
+    }
+
+    fn sh(&self, script: &str) -> (bool, String) {
+        let o = Command::new("docker")
+            .args(["exec", &self.0, "sh", "-c", script])
+            .output()
+            .unwrap();
+        (
+            o.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            ),
+        )
+    }
+}
+
+impl Drop for Ctr {
+    fn drop(&mut self) {
+        let _ = Command::new("docker").args(["rm", "-f", &self.0]).output();
+    }
 }
 
 /// Runs `script` in `image` on the host's network, with `key` (when
@@ -5279,7 +5342,7 @@ fn alpine_packages_with_apk() {
     let base = s
         .url("/alp/")
         .replacen("http://", &format!("http://token:{tok}@"), 1);
-    for image in images {
+    for &image in &images {
         let script = |at: &str| {
             format!(
                 "echo {base}{at}v3.22/main > /etc/apk/repositories && apk update && \
@@ -5297,6 +5360,26 @@ fn alpine_packages_with_apk() {
         // Without the key the index is not trusted.
         let (ok, out) = in_alpine(image, None, &script(""));
         assert!(!ok && out.contains("UNTRUSTED"), "{image}: {out}");
+    }
+    // A client that has the index sees the next upload.
+    for (n, &image) in images.iter().enumerate() {
+        let mount = format!("{}:/etc/apk/keys/{name}:ro", key.display());
+        let ctr = Ctr::start(image, &["-v", &mount]);
+        let (ok, out) = ctr.sh(&format!(
+            "echo {base}v3.22/main > /etc/apk/repositories && apk update -q && apk add -q hello-apk && hello-apk"
+        ));
+        assert!(ok, "{image}: {out}");
+        let next = format!("1.{}-r0", 2 + n);
+        let (st, out) = upload(hello(&next), place);
+        assert_eq!(st, 201, "{out}");
+        // apk updates an index younger than a minute only when told to:
+        // as a while later.
+        let (ok, out) =
+            ctr.sh("apk --cache-max-age 0 update -q && apk upgrade -q hello-apk && hello-apk");
+        assert!(
+            ok && out.contains(&format!("hello {next}")),
+            "{image}: {out}"
+        );
     }
 }
 
@@ -5510,7 +5593,13 @@ fn maven_deploy_and_depend() {
         .trim()
         .to_string();
     let base = s.url("/mvn/");
-    let group = format!("org.example.t{}", std::process::id());
+    let group = format!(
+        "org.example.t{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
     let work = s.dir.path().join("mvnwork");
     let project = |dir: &str, version: &str, body: &str, extra: &str| {
         let d = work.join(dir);
@@ -5649,6 +5738,7 @@ fn gems_with_gem_and_bundler() {
     for (name, version, dep) in [
         ("hello-pk", "1.0.0", ""),
         ("hello-pk", "1.1.0", ""),
+        ("hello-pk", "1.2.0", ""),
         (
             "tool-pk",
             "0.1.0",
@@ -5746,6 +5836,19 @@ fn gems_with_gem_and_bundler() {
     assert!(ok && out.contains("Successfully yanked"), "{out}");
     let (ok, out) = bundle("", "hello-pk");
     assert!(ok && out.contains("hello-pk 1.0.0"), "{out}");
+    // A bundler that has the compact index sees the next push.
+    let ctr = Ctr::start(RUBY_IMAGE, &[]);
+    let (ok, out) = ctr.sh(&format!(
+        "set -e; mkdir /a; cd /a; printf 'source \"{source}\"\\ngem \"hello-pk\"\\n' > Gemfile; \
+         bundle install --quiet; bundle exec ruby -e 'require \"hello-pk\"; puts Pk.hello_pk'"
+    ));
+    assert!(ok && out.contains("hello-pk 1.0.0"), "{out}");
+    let (ok, out) = push("hello-pk-1.2.0.gem");
+    assert!(ok, "{out}");
+    let (ok, out) = ctr.sh(
+        "set -e; cd /a; bundle update --quiet hello-pk; bundle exec ruby -e 'require \"hello-pk\"; puts Pk.hello_pk'",
+    );
+    assert!(ok && out.contains("hello-pk 1.2.0"), "{out}");
 }
 
 const ARCH_IMAGE: &str = "archlinux:latest";
@@ -5777,6 +5880,7 @@ fn arch_packages_with_pacman() {
     for (name, ver, arch, dep) in [
         ("hello-pk", "1.0-1", "x86_64", ""),
         ("hello-pk", "1.1-1", "x86_64", ""),
+        ("hello-pk", "1.2-1", "x86_64", ""),
         ("tool-pk", "0.1-1", "any", "depend = hello-pk>=1.0\n"),
     ] {
         let d = work.join(format!("{name}-{ver}"));
@@ -5863,6 +5967,18 @@ fn arch_packages_with_pacman() {
     // Without the key, nothing is trusted.
     let (ok, out) = docker_sh(ARCH_IMAGE, &format!("{}$P -Sy hello-pk", setup("", false)));
     assert!(!ok && out.to_lowercase().contains("signature"), "{out}");
+    // A client that has the databases sees the next upload.
+    let ctr = Ctr::start(ARCH_IMAGE, &[]);
+    let (ok, out) = ctr.sh(&format!(
+        "{}$P -Sy hello-pk >/dev/null\nhello-pk",
+        setup("", true)
+    ));
+    assert!(ok && out.contains("hello-pk 1.1-1"), "{out}");
+    let (st, out) = upload("hello-pk-1.2-1-x86_64.pkg.tar.zst");
+    assert_eq!(st, 201, "{out}");
+    let (ok, out) =
+        ctr.sh("P='pacman --config /tmp/pacman.conf --noconfirm'; $P -Syu >/dev/null && hello-pk");
+    assert!(ok && out.contains("hello-pk 1.2-1"), "{out}");
 }
 
 const DOTNET_IMAGE: &str = "mcr.microsoft.com/dotnet/sdk:10.0";
