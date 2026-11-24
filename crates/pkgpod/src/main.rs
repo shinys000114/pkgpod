@@ -78,7 +78,8 @@ pub(crate) enum Cmd {
         params: Vec<String>,
     },
     /// Run an operation of the repository's format (deb: dist-set,
-    /// dist-remove, remove, copy, move); shows the plan first.
+    /// dist-remove, remove, copy, move, file-remove; `pkgpod repo
+    /// formats` lists them all); shows the plan first.
     Op {
         repo: String,
         op: String,
@@ -213,7 +214,8 @@ pub(crate) enum Cmd {
         /// deb: the dists to import.
         #[arg(long, value_delimiter = ',')]
         dists: Vec<String>,
-        /// files: where the tree goes; default: the top.
+        /// files: where the tree goes; oci: put before the image names;
+        /// default: the top.
         #[arg(long)]
         path: Option<String>,
         /// files: paths left out (rsync-like patterns).

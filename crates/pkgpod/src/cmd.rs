@@ -30,7 +30,7 @@ pub enum RepoCmd {
         name: String,
         #[arg(long, short, default_value = "deb")]
         format: String,
-        /// hosted, import, mirror or group (-s members=a,b).
+        /// hosted, mirror, proxy (-s upstream=...) or group (-s members=a,b).
         #[arg(long, short, default_value = "hosted")]
         kind: String,
         #[arg(long)]
@@ -1401,14 +1401,17 @@ fn repo(x: &Ctx, cmd: RepoCmd) -> Result<(), CliError> {
                     let kinds: Vec<String> =
                         f["kinds"].as_array().into_iter().flatten().map(s).collect();
                     println!("{} ({}): {}", s(&f["id"]), s(&f["title"]), kinds.join(", "));
-                    println!("  settings:");
-                    for st in f["settings"].as_array().into_iter().flatten() {
-                        println!(
-                            "    {:<16} {:<8} {}",
-                            s(&st["name"]),
-                            s(&st["type"]),
-                            s(&st["help"])
-                        );
+                    // Settings by kind: a mirror's are not a hosted one's.
+                    for (kind, list) in f["settings"].as_object().into_iter().flatten() {
+                        println!("  settings ({kind}):");
+                        for st in list.as_array().into_iter().flatten() {
+                            println!(
+                                "    {:<16} {:<8} {}",
+                                s(&st["name"]),
+                                s(&st["type"]),
+                                s(&st["help"])
+                            );
+                        }
                     }
                     println!("  operations:");
                     for o in f["ops"].as_array().into_iter().flatten() {
