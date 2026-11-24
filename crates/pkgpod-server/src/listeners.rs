@@ -186,7 +186,15 @@ pub fn reconcile(app: &Arc<App>) {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&name);
-            if let Err(e) = serve_router(&l.addr, tls, router, rx).await {
+            if let Err(e) = serve_router(
+                &format!("listener {}: serving", l.name),
+                &l.addr,
+                tls,
+                router,
+                rx,
+            )
+            .await
+            {
                 fail(&app2, &name, generation, e);
             }
         });
@@ -261,6 +269,11 @@ pub async fn bind(
                 tries += 1;
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                return Err(format!(
+                    "listening on {addr}: {e}; another program has that address (choose another with pkgpod listener set)"
+                ));
+            }
             Err(e) => return Err(format!("listening on {addr}: {e}")),
         }
     }
@@ -270,6 +283,7 @@ pub async fn bind(
 /// more connections, closes idle ones and returns once the requests in
 /// flight are answered.
 pub async fn serve_router(
+    what: &str,
     addr: &str,
     tls: Option<tokio_rustls::TlsAcceptor>,
     router: Router,
@@ -277,7 +291,7 @@ pub async fn serve_router(
 ) -> Result<(), String> {
     let listener = bind(addr, &stop).await?;
     tracing::info!(
-        "serving on {}{}",
+        "{what} on {}{}",
         listener
             .local_addr()
             .map_or(addr.to_string(), |a| a.to_string()),

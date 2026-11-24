@@ -1794,8 +1794,21 @@ pub(crate) async fn storage_set(
     Json(req): Json<StorageReq>,
 ) -> Result<StatusCode> {
     app.require_admin(&c)?;
-    app.engine
-        .set_storage(&name, std::path::Path::new(&req.path))?;
+    let path = std::path::PathBuf::from(&req.path);
+    if path.is_absolute() {
+        // The server (its user) must be able to keep files there.
+        let probe = path.join(format!(".pkgpod-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&path)
+            .and_then(|_| std::fs::write(&probe, b""))
+            .and_then(|_| std::fs::remove_file(&probe))
+            .map_err(|e| {
+                Error::Invalid(format!(
+                    "{}: the server cannot write there: {e}",
+                    path.display()
+                ))
+            })?;
+    }
+    app.engine.set_storage(&name, &path)?;
     app.auth.audit(c.name(), "storage", &name, &req.path);
     Ok(StatusCode::NO_CONTENT)
 }

@@ -696,6 +696,21 @@ fn cleanup_rules_with_apt() {
 #[test]
 fn rights_and_errors() {
     let s = Server::start();
+    // A storage the server cannot write to is refused when it is set.
+    let ro = s.dir.path().join("ro");
+    std::fs::create_dir_all(&ro).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+    }
+    let e = s
+        .cli(&["storage", "set", "ro", ro.to_str().unwrap()])
+        .unwrap_err();
+    assert!(e.contains("the server cannot write there"), "{e}");
+    let shared = s.dir.path().join("shared");
+    s.cli(&["storage", "set", "shared", shared.to_str().unwrap()])
+        .unwrap();
+    assert!(shared.is_dir());
     s.cli(&["repo", "create", "a", "-s", "sign=false"]).unwrap();
     s.cli(&["repo", "create", "b", "-s", "sign=false"]).unwrap();
     s.cli_in(&["user", "add", "dev", "--password-stdin"], "dev-password")
