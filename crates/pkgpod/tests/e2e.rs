@@ -6695,3 +6695,67 @@ fn oci_at_a_host_root() {
         .unwrap();
     assert_eq!(r.text().unwrap(), "hi");
 }
+
+#[test]
+fn oci_with_docker_on_its_own_host() {
+    let probe = Command::new("docker").arg("info").output();
+    if !probe.is_ok_and(|o| o.status.success()) {
+        return;
+    }
+    // A registry at a host's root, as docker.example.org would be; docker
+    // talks plain HTTP to localhost only, so the host is localhost:<port>.
+    let s = Server::start();
+    let host = format!("localhost:{}", s.serve_port);
+    s.cli(&[
+        "repo",
+        "create",
+        "images",
+        "-f",
+        "oci",
+        "-s",
+        &format!("urls=http://{host}/"),
+    ])
+    .unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "images", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let cfg = s.dir.path().join("docker");
+    std::fs::create_dir_all(&cfg).unwrap();
+    let ctx = s.dir.path().join("ctx");
+    std::fs::create_dir_all(&ctx).unwrap();
+    std::fs::write(ctx.join("hello.txt"), "own host").unwrap();
+    std::fs::write(
+        ctx.join("Dockerfile"),
+        "FROM scratch\nCOPY hello.txt /hello.txt\n",
+    )
+    .unwrap();
+    let image = format!("{host}/app:1");
+    let (ok, out) = docker(
+        &cfg,
+        &["build", "-q", "-t", &image, ctx.to_str().unwrap()],
+        None,
+    );
+    assert!(ok, "{out}");
+    let (ok, out) = docker(
+        &cfg,
+        &["login", &host, "-u", "token", "--password-stdin"],
+        Some(&tok),
+    );
+    assert!(ok, "{out}");
+    let (ok, out) = docker(&cfg, &["push", &image], None);
+    assert!(ok, "{out}");
+    let (ok, out) = docker(&cfg, &["rmi", &image], None);
+    assert!(ok, "{out}");
+    let (ok, out) = docker(&cfg, &["pull", &image], None);
+    assert!(ok, "{out}");
+    let _ = docker(&cfg, &["rmi", &image], None);
+    // Its address is that host's: by another, the image is not there.
+    let r = reqwest::blocking::Client::new()
+        .get(s.url("/v2/images/app/tags/list"))
+        .basic_auth("token", Some(&tok))
+        .send()
+        .unwrap();
+    assert_ne!(r.status().as_u16(), 200);
+}
