@@ -170,27 +170,33 @@ Operations:
   a public group only its public members); only who may read a
   repository makes it a member; a deleted member leaves its groups.
   Publishing goes to a member.
-- Proxy repositories (`-k proxy -s upstream=<registry>`) for Go, Maven
-  (a release's files checked against the upstream's `.sha1`, a
-  SNAPSHOT's files and metadata fetched again after their time) and npm
-  (tarballs fetched from where the package document says, checked
-  against its integrity, and served through the proxy's address) and
-  PyPI (the upstream index's PEP 691 JSON kept, served as JSON or HTML
-  with its files through the proxy, each checked against its sha256)
-  and Cargo (the upstream sparse index's files kept, .crate files
-  fetched from where its config.json says and checked against the
-  index's cksum) and OCI images (`upstream=docker.io`, a registry URL,
-  or one with a name prefix; manifests by tag fetched again after their
-  time, by digest and blobs once, each checked against its digest; an
-  OCI group pulls an image from the first member that has it):
-  a registry's files fetched when asked for and kept (garbage
-  collection keeps them), its metadata asked for again after
-  `metadata_minutes` and served as it was while the upstream is not
-  there; names in `exclude` are never asked upstream. The cache is
-  managed by hand (`pkgpod cache <repo> list|pin|unpin|evict|prefetch`,
-  the console's Cache tab), with a size limit (`max_mib`) that evicts
-  the least recently used unpinned files. In a group after hosted
-  repositories, a proxy answers for what they do not have.
+- Proxy repositories (`-k proxy -s upstream=<registry>`): a registry's
+  files fetched when asked for and kept (garbage collection keeps them),
+  its metadata asked for again after `metadata_minutes` and served as it
+  was while the upstream is not there; names in `exclude` are never
+  asked upstream; only the upstream and URLs its own metadata named are
+  fetched, and a file whose digest is not the one its metadata gives is
+  refused and not kept. The cache is managed by hand (`pkgpod cache
+  <repo> list|pin|unpin|evict|prefetch`, the console's Cache tab), with
+  a size limit (`max_mib`) that evicts the least recently used unpinned
+  files. In a group after hosted repositories, a proxy answers for what
+  they do not have. Upstreams without credentials for now. Per format:
+  - Go: a module's list and @latest are metadata; .info, .mod, .zip files.
+  - Maven: maven-metadata.xml and a SNAPSHOT's files are metadata; a
+    release's files are checked against the upstream's `.sha1`.
+  - npm: the package document is kept as sent and served with its
+    tarball URLs made the proxy's; tarballs come from where it says
+    and are checked against its integrity.
+  - PyPI: the upstream index's PEP 691 JSON is kept and served as JSON
+    or HTML, its files through the proxy, each checked against its
+    sha256.
+  - Cargo: the sparse index's files are kept; .crate files come from
+    where its config.json says and are checked against the index's
+    cksum.
+  - OCI: `upstream=docker.io`, a registry URL, or one with a name
+    prefix; manifests by tag are metadata, by digest and blobs are
+    files, each checked against its digest; pinning a tag pins what it
+    names.
 - `/metrics` on the management listener for Prometheus: repositories
   (those the caller may read), versions, packages, mirrors' syncs,
   files served and downloads since start.
