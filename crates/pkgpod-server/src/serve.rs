@@ -557,11 +557,14 @@ pub(crate) async fn serve_blob(
         }
         return r;
     }
-    if modified.is_some() {
-        // ServeFile would compare against the store file's time.
-        req.headers_mut().remove(header::IF_MODIFIED_SINCE);
-        req.headers_mut().remove(header::IF_UNMODIFIED_SINCE);
-    }
+    // ServeFile would compare against the store file's time, which is
+    // not the entry's: with an entry time we answered above; without one
+    // (generated indexes, content-addressed files) a time to the second
+    // cannot tell two contents of one second apart (an index regenerated
+    // just after a client's fetch would be "not modified" to it), so
+    // revalidation goes by the ETag alone.
+    req.headers_mut().remove(header::IF_MODIFIED_SINCE);
+    req.headers_mut().remove(header::IF_UNMODIFIED_SINCE);
     // If-Range against our validators (ServeFile knows neither our ETag
     // nor the entry's time): a range only of the same content, else the
     // whole file, so a resumed download never splices two versions.
@@ -592,10 +595,16 @@ pub(crate) async fn serve_blob(
         HeaderValue::from_static(cache_control(rel)),
     );
     h.insert(header::ETAG, HeaderValue::from_str(&etag).expect("hex"));
-    if let Some(m) = modified
-        && let Ok(v) = HeaderValue::from_str(&httpdate::fmt_http_date(m))
-    {
-        h.insert(header::LAST_MODIFIED, v);
+    match modified {
+        Some(m) => {
+            if let Ok(v) = HeaderValue::from_str(&httpdate::fmt_http_date(m)) {
+                h.insert(header::LAST_MODIFIED, v);
+            }
+        }
+        // The store file's time is not the content's.
+        None => {
+            h.remove(header::LAST_MODIFIED);
+        }
     }
     if files {
         sandbox(h);
