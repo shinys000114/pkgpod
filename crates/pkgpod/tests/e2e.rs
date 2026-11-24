@@ -6329,15 +6329,19 @@ fn a_key_from_gpg_is_imported_and_signs() {
         ])
         .is_err()
     );
+    // From standard input, as gpg pipes it.
     let out = s
-        .cli(&[
-            "key",
-            "import",
-            "gpgkey",
-            secret.to_str().unwrap(),
-            "--passphrase-file",
-            pass.to_str().unwrap(),
-        ])
+        .cli_in(
+            &[
+                "key",
+                "import",
+                "gpgkey",
+                "-",
+                "--passphrase-file",
+                pass.to_str().unwrap(),
+            ],
+            &std::fs::read_to_string(&secret).unwrap(),
+        )
         .unwrap();
     assert!(out.contains("gpg made"), "{out}");
     let _ = Command::new("gpgconf")
