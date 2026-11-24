@@ -123,14 +123,33 @@ pub(crate) enum Cmd {
         #[command(flatten)]
         yes: cmd::Yes,
     },
-    /// Copy paths of one repository into another of the same format.
+    /// Copy paths of one repository into another of the same format; from
+    /// a deb mirror, packages (name or name=version) of one of its dists.
     Promote {
         from: String,
         to: String,
+        /// Paths; with --dist (from a mirror), packages.
         #[arg(required = true)]
         paths: Vec<String>,
         #[arg(long, short)]
         version: Option<String>,
+        /// From a mirror: its dist.
+        #[arg(long)]
+        dist: Option<String>,
+        /// From a mirror: only these components / architectures.
+        #[arg(long, value_delimiter = ',')]
+        components: Vec<String>,
+        #[arg(long, value_delimiter = ',')]
+        architectures: Vec<String>,
+        /// The target's dist (default: the mirror's) and component
+        /// (default: the package's).
+        #[arg(long)]
+        into: Option<String>,
+        #[arg(long)]
+        component: Option<String>,
+        /// Replace package files of the same name with other content.
+        #[arg(long)]
+        replace: bool,
         #[command(flatten)]
         yes: cmd::Yes,
     },

@@ -11,6 +11,7 @@ pub mod import;
 pub mod jobs;
 pub mod keys;
 pub mod listeners;
+pub mod promote;
 pub mod resign;
 pub mod routes;
 pub mod schema;
