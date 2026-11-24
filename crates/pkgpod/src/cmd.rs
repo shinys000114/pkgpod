@@ -897,6 +897,8 @@ pub fn run(
             repo,
             source,
             dists,
+            path,
+            excludes,
             components,
             architectures,
             keyring,
@@ -913,7 +915,8 @@ pub fn run(
                 &format!("/api/v1/repos/{}/import", enc(&repo)),
                 &json!({"source": source, "dists": dists, "components": components,
                         "architectures": architectures, "keyring": keyring, "replace": replace,
-                        "sources": !no_sources}),
+                        "sources": !no_sources, "path": path.unwrap_or_default(),
+                        "excludes": excludes}),
             )?;
             follow(&x, &v, wait)?;
         }

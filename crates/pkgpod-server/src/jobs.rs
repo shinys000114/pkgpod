@@ -228,6 +228,88 @@ fn int_of(r: &RepoInfo, k: &str, d: i64) -> i64 {
 }
 
 /// Runs a mirror's engine into its tree: (all fine, summary, report).
+/// How a plain tree is fetched.
+pub(crate) struct TreeOpts {
+    pub excludes: Vec<String>,
+    pub delete: bool,
+    pub max_delete: usize,
+    pub bwlimit: Option<u32>,
+    pub parallel: usize,
+}
+
+/// Brings `dest` to the tree at `source` (rsync, http(s) listings or
+/// ftp); `state` keeps what the engine needs between runs. Returns
+/// (ok, summary, report).
+pub(crate) fn fetch_tree(
+    source: &str,
+    o: &TreeOpts,
+    dest: &std::path::Path,
+    state: &std::path::Path,
+    cancel: &AtomicBool,
+    log: &(dyn Fn(&str) + Sync),
+) -> Result<(bool, String, Value), String> {
+    let interrupted = |e: pkgpod_mirror::Error| match e {
+        pkgpod_mirror::Error::Interrupted => "interrupted".to_string(),
+        e => e.to_string(),
+    };
+    std::fs::create_dir_all(dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+    std::fs::create_dir_all(state).map_err(|e| format!("{}: {e}", state.display()))?;
+    if source.starts_with("rsync://") || source.contains("::") {
+        let mut m =
+            pkgpod_mirror::rsync::RsyncMirror::new(source, pkgpod_mirror::rsync::Mode::Tree);
+        m.delete = o.delete;
+        m.max_delete = o.max_delete;
+        m.bwlimit = o.bwlimit;
+        m.excludes = o.excludes.clone();
+        let ctx = pkgpod_mirror::rsync::Ctx { dest, cancel, log };
+        let rep = pkgpod_mirror::rsync::sync(&m, &ctx).map_err(interrupted)?;
+        let summary = format!(
+            "{} file(s) transferred ({}), {} deleted{}",
+            rep.passes.iter().map(|p| p.files_transferred).sum::<u64>(),
+            crate::serve::human(rep.passes.iter().map(|p| p.bytes_transferred).sum()),
+            rep.passes.iter().map(|p| p.files_deleted).sum::<u64>(),
+            rep.error
+                .as_deref()
+                .map(|e| format!("; {e}"))
+                .unwrap_or_default()
+        );
+        return Ok((rep.ok, summary, json!(rep)));
+    }
+    let mut m = pkgpod_mirror::files::FilesMirror::new(source);
+    m.delete = o.delete;
+    m.max_delete = o.max_delete;
+    m.excludes = o.excludes.clone();
+    m.parallel = o.parallel;
+    let http = pkgpod_mirror::fetch::Http::new(Duration::from_secs(60))
+        .map_err(|e| e.to_string())?
+        .with_limit(o.bwlimit);
+    let ctx = pkgpod_mirror::files::FilesCtx {
+        http: &http,
+        dest,
+        state: Some(state),
+        cancel,
+        log,
+    };
+    let rep = pkgpod_mirror::files::sync(&m, &ctx).map_err(interrupted)?;
+    let mut summary = format!(
+        "{} file(s) transferred ({}), {} unchanged, {} deleted",
+        rep.transferred,
+        crate::serve::human(rep.bytes),
+        rep.unchanged,
+        rep.deleted
+    );
+    if rep.failed > 0 {
+        summary.push_str(&format!(", {} failed", rep.failed));
+    }
+    if rep.brake {
+        summary.push_str("; nothing deleted: more than max_delete would have gone");
+    }
+    if let Some(e) = &rep.error {
+        summary.push_str(&format!("; {e}"));
+    }
+    Ok((rep.ok, summary, json!(rep)))
+}
+
 fn sync(
     app: &App,
     r: &RepoInfo,
@@ -250,6 +332,23 @@ fn sync(
         e => e.to_string(),
     };
     let _ = app;
+    if r.format == "files" {
+        let rep = fetch_tree(
+            &source,
+            &TreeOpts {
+                excludes: list_of(r, "excludes"),
+                delete: r.setting_bool("prune"),
+                max_delete: int_of(r, "max_delete", 10_000).max(0) as usize,
+                bwlimit,
+                parallel: int_of(r, "parallel", 4).clamp(1, 64) as usize,
+            },
+            &dest,
+            &state,
+            cancel,
+            log,
+        )?;
+        return Ok(rep);
+    }
     if source.starts_with("rsync://") || source.contains("::") {
         let mut m =
             pkgpod_mirror::rsync::RsyncMirror::new(&source, pkgpod_mirror::rsync::Mode::Apt);

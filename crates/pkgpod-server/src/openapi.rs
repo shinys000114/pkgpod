@@ -815,8 +815,21 @@ fn schemas() -> Value {
             object(
                 "",
                 vec![
-                    ("source", text("The archive root, http(s)://host/debian/.")),
-                    ("dists", strings()),
+                    (
+                        "source",
+                        text(
+                            "deb: the archive root, http(s)://host/debian/; files: the directory (rsync://, host::module, http(s):// listings, ftp://).",
+                        ),
+                    ),
+                    (
+                        "dists",
+                        json!({"type": "array", "items": {"type": "string"}, "description": "deb (required there): the dists to import."}),
+                    ),
+                    ("path", text("files: where the tree goes; empty: the top.")),
+                    (
+                        "excludes",
+                        json!({"type": "array", "items": {"type": "string"}, "description": "files: paths left out, rsync-like."}),
+                    ),
                     (
                         "components",
                         json!({"type": "array", "items": {"type": "string"}, "description": "Empty: all the Release lists."}),
@@ -837,7 +850,7 @@ fn schemas() -> Value {
                         json!({"type": "boolean", "default": true, "description": "Source packages too."}),
                     ),
                 ],
-                &["source", "dists"],
+                &["source"],
             ),
         ),
         (

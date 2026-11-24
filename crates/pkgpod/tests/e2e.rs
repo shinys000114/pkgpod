@@ -2381,3 +2381,114 @@ fn files_hosted() {
         "{found}"
     );
 }
+
+#[test]
+fn files_mirror_and_import_over_http_listings() {
+    let s = Server::start();
+    s.cli(&[
+        "repo",
+        "create",
+        "src",
+        "-f",
+        "files",
+        "-s",
+        "public=true",
+        "-s",
+        "overwrite=true",
+    ])
+    .unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "src", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let c = reqwest::blocking::Client::new();
+    let put = |path: &str, body: &[u8]| {
+        let r = c
+            .put(s.url(&format!("/src/{path}")))
+            .basic_auth("token", Some(&tok))
+            .body(body.to_vec())
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 201, "{path}: {}", r.text().unwrap());
+    };
+    put("iso/a.iso", &vec![1u8; 300_000]);
+    put("iso/b.iso", b"bbb");
+    put("docs/read me.txt", b"spaces in names");
+    put(".treeinfo", b"[general]\n");
+
+    let source = format!("source={}", s.url("/src/"));
+    s.cli(&[
+        "repo",
+        "create",
+        "m",
+        "-f",
+        "files",
+        "-k",
+        "mirror",
+        "-s",
+        &source,
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let out = s.cli(&["sync", "m", "--wait"]).unwrap();
+    assert!(out.contains("4 file(s) transferred"), "{out}");
+    assert_eq!(
+        get(&s.url("/m/docs/read%20me.txt"), None).1,
+        "spaces in names"
+    );
+    assert_eq!(get(&s.url("/m/.treeinfo"), None).1, "[general]\n");
+    let (_, listing) = get(&s.url("/m/"), None);
+    assert!(listing.contains(".treeinfo"), "{listing}");
+    // Nothing changed upstream: nothing is fetched.
+    let out = s.cli(&["sync", "m", "--wait"]).unwrap();
+    assert!(out.contains("0 file(s) transferred"), "{out}");
+    assert!(out.contains("4 unchanged"), "{out}");
+    // Changes upstream are followed, deletions too.
+    put("iso/b.iso", b"bbb, newer");
+    s.cli(&["rm", "src", "docs", "-y"]).unwrap();
+    let out = s.cli(&["sync", "m", "--wait"]).unwrap();
+    assert!(out.contains("1 file(s) transferred"), "{out}");
+    assert_eq!(get(&s.url("/m/iso/b.iso"), None).1, "bbb, newer");
+    assert_eq!(get(&s.url("/m/docs/read%20me.txt"), None).0, 404);
+    // What the engine keeps for itself is not served.
+    let tree = s.dir.path().join("data/storages/main/trees/m");
+    std::fs::write(tree.join("x.iso.pkgpod-part"), "partial").unwrap();
+    assert_eq!(get(&s.url("/m/x.iso.pkgpod-part"), None).0, 404);
+    assert!(!get(&s.url("/m/"), None).1.contains("pkgpod-part"));
+
+    // Import into a hosted repository: one version, under a path.
+    s.cli(&["repo", "create", "copy", "-f", "files"]).unwrap();
+    let out = s
+        .cli(&[
+            "import",
+            "copy",
+            &s.url("/src/"),
+            "--path",
+            "upstream",
+            "--wait",
+        ])
+        .unwrap();
+    assert!(out.contains("imported 3 file(s)"), "{out}");
+    let v = s.json(&["versions", "copy"]);
+    assert_eq!(v.as_array().unwrap().len(), 2, "made, then imported: {v}");
+    let ls = s.cli(&["ls", "copy", "upstream/iso"]).unwrap();
+    assert!(ls.contains("a.iso") && ls.contains("b.iso"), "{ls}");
+    // The upstream's times come along.
+    let up_lm = c.get(s.url("/src/iso/a.iso")).send().unwrap().headers()["last-modified"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    let pw = std::fs::read_to_string(s.dir.path().join("data/admin-password")).unwrap();
+    let copy_lm = c
+        .get(s.url("/copy/upstream/iso/a.iso"))
+        .basic_auth("admin", Some(pw.trim()))
+        .send()
+        .unwrap()
+        .headers()["last-modified"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(up_lm, copy_lm);
+}
