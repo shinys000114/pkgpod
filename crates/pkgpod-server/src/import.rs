@@ -19,9 +19,18 @@ use crate::{App, Error, Result};
 /// What to import.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ImportReq {
-    /// The archive root (`http(s)://host/debian/`).
+    /// deb: the archive root (`http(s)://host/debian/`); files: the
+    /// directory (rsync, http(s) listings or ftp).
     pub source: String,
+    /// deb: the dists to import.
+    #[serde(default)]
     pub dists: Vec<String>,
+    /// files: where the tree goes in the repository; empty: the top.
+    #[serde(default)]
+    pub path: String,
+    /// files: paths left out (as a files mirror's excludes).
+    #[serde(default)]
+    pub excludes: Vec<String>,
     /// Empty: all the Release lists.
     #[serde(default)]
     pub components: Vec<String>,
@@ -46,6 +55,32 @@ fn yes() -> bool {
 /// Starts an import job into a hosted deb repository.
 pub fn start(app: &Arc<App>, repo: &str, req: ImportReq, actor: &str) -> Result<i64> {
     let r = app.engine.repo(repo)?;
+    if r.format == "files" && r.kind != Kind::Mirror {
+        let prefix = req.path.trim_matches('/').to_string();
+        if !prefix.is_empty() {
+            pkgpod_files::check_path(&prefix)?;
+        }
+        let s = req.source.trim();
+        if !(["rsync://", "http://", "https://", "ftp://"]
+            .iter()
+            .any(|p| s.starts_with(p))
+            || s.contains("::"))
+        {
+            return Err(Error::Invalid(format!(
+                "{s:?}: a source is rsync://, host::module, http(s):// or ftp://"
+            )));
+        }
+        let actor2 = actor.to_string();
+        return crate::jobs::start(
+            app,
+            r,
+            "import",
+            actor,
+            Box::new(move |app, r, cancel, log| {
+                run_files(app, r, &req, &prefix, &actor2, cancel, log)
+            }),
+        );
+    }
     if r.format != "deb" || r.kind == Kind::Mirror {
         return Err(Error::Invalid(format!(
             "{repo} is not a hosted deb repository: imports go into one"
@@ -340,4 +375,142 @@ fn fetch_and_take_in(
         summary,
         json!({"files": n, "sources": n_src, "changes": out.changes.len()}),
     ))
+}
+
+/// Imports a plain tree into a hosted files repository: fetched into a
+/// staging directory, then every file taken in under `prefix` with its
+/// time, as one version.
+fn run_files(
+    app: &App,
+    r: &RepoInfo,
+    req: &ImportReq,
+    prefix: &str,
+    actor: &str,
+    cancel: &AtomicBool,
+    log: &(dyn Fn(&str) + Sync),
+) -> Result<(bool, String, Value), String> {
+    let staging = r
+        .storage_path
+        .join("state")
+        .join(format!("{}.import", r.name));
+    let state = r
+        .storage_path
+        .join("state")
+        .join(format!("{}.import-cache", r.name));
+    let _ = std::fs::remove_dir_all(&staging);
+    let res = (|| {
+        let (ok, summary, _) = crate::jobs::fetch_tree(
+            req.source.trim(),
+            &crate::jobs::TreeOpts {
+                excludes: req.excludes.clone(),
+                delete: true,
+                max_delete: usize::MAX,
+                bwlimit: None,
+                parallel: 4,
+            },
+            &staging,
+            &state,
+            cancel,
+            log,
+        )?;
+        if !ok {
+            return Err(format!("fetching failed: {summary}"));
+        }
+        log(&format!("fetched: {summary}; taking the files in"));
+        // Every regular file, by its path under the staging directory.
+        let mut files = Vec::new();
+        let mut todo = vec![staging.clone()];
+        while let Some(dir) = todo.pop() {
+            let rd = std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            for d in rd.flatten() {
+                let name = d.file_name().to_string_lossy().into_owned();
+                if pkgpod_files::engine_name(&name) {
+                    continue;
+                }
+                let ft = d.file_type().map_err(|e| e.to_string())?;
+                if ft.is_dir() {
+                    todo.push(d.path());
+                } else if ft.is_file() {
+                    files.push(d.path());
+                }
+            }
+        }
+        files.sort();
+        let store = r.store();
+        let mut ups = Vec::new();
+        for p in &files {
+            if cancel.load(Ordering::Relaxed) {
+                return Err("interrupted".to_string());
+            }
+            let rel = p
+                .strip_prefix(&staging)
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .into_owned();
+            let path = if prefix.is_empty() {
+                rel
+            } else {
+                format!("{prefix}/{rel}")
+            };
+            if let Err(e) = pkgpod_files::check_path(&path) {
+                log(&format!("left out: {e}"));
+                continue;
+            }
+            let mtime = std::fs::metadata(p)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs() as i64);
+            let (sha256, size) = store.put_file(p).map_err(|e| e.to_string())?;
+            ups.push((
+                path,
+                mtime,
+                Upload {
+                    sha256,
+                    size,
+                    filename: None,
+                },
+            ));
+        }
+        let f = app
+            .engine
+            .format(&r.format)
+            .map_err(|e| e.to_string())?
+            .clone();
+        let n = ups.len();
+        let source = req.source.trim().to_string();
+        let out = app
+            .engine
+            .change(&r.name, actor, |cx, e| {
+                for (path, mtime, up) in &ups {
+                    f.ingest(
+                        cx,
+                        up,
+                        &json!({"path": path, "mtime": mtime, "replace": req.replace}),
+                        e,
+                    )?;
+                }
+                Ok(format!(
+                    "imported {n} file(s) from {source}{}",
+                    if prefix.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" into {prefix}/")
+                    }
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        let summary = match &out.version {
+            Some(v) => format!("{}: version {}", out.summary, v.seq),
+            None => format!("{}: nothing changed", out.summary),
+        };
+        Ok((
+            true,
+            summary,
+            json!({"files": n, "changes": out.changes.len()}),
+        ))
+    })();
+    let _ = std::fs::remove_dir_all(&staging);
+    let _ = std::fs::remove_dir_all(&state);
+    res
 }

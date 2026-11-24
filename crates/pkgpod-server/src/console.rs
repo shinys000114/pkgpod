@@ -2462,6 +2462,8 @@ async fn import(
         keyring: form_get(&form, "keyring").to_string(),
         replace: form_get(&form, "replace") == "on",
         sources: form_get(&form, "no_sources") != "on",
+        path: form_get(&form, "path").trim().to_string(),
+        excludes: list("excludes"),
     };
     match api::import(State(app), v.who(), Path(repo), Json(req)).await {
         Ok((_, Json(j))) => msg(

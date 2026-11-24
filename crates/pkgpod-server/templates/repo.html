@@ -87,6 +87,24 @@
   </div>
 </details>
 {% endif %}
+{% if format == "files" %}
+<details class="card panel">
+  <summary>Import <span class="hint">take in a tree from a file server (rsync, HTTP listings, FTP) as one version</span></summary>
+  <div class="panel-body">
+  <form hx-post="/c/r/{{ name }}/import" hx-target="next .result">
+    <div class="fields">
+      <label class="field wide"><span>source</span><input name="source" required placeholder="rsync://host/module/dir/ · https://host/dir/ · ftp://host/dir/"></label>
+      <label class="field"><span>path</span><input name="path" placeholder="the top"><small>Where the tree goes here.</small></label>
+      <label class="field"><span>excludes</span><input name="excludes" placeholder="*.tmp, /old/"></label>
+      <label class="check field"><input type="checkbox" name="replace"> <span>replace</span><small>Replace files at the same path with other content.</small></label>
+    </div>
+    <div class="form-foot"><button type="submit">Import</button></div>
+  </form>
+  <div class="result"></div>
+  <div hx-get="/r/{{ name }}/jobs" hx-trigger="load, every 5s"></div>
+  </div>
+</details>
+{% endif %}
 {% if !other_repos.is_empty() %}
 <details class="card panel">
   <summary>Promote <span class="hint">copy paths of this repository into another of the same format</span></summary>

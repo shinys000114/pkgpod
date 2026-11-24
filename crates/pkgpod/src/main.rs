@@ -200,10 +200,18 @@ pub(crate) enum Cmd {
     /// Import an apt repository into a hosted one, as one version.
     Import {
         repo: String,
-        /// The archive root: http(s)://host/debian/.
+        /// deb: the archive root (http(s)://host/debian/); files: the
+        /// directory (rsync://, http(s):// listings, ftp://).
         source: String,
-        #[arg(long, value_delimiter = ',', required = true)]
+        /// deb: the dists to import.
+        #[arg(long, value_delimiter = ',')]
         dists: Vec<String>,
+        /// files: where the tree goes; default: the top.
+        #[arg(long)]
+        path: Option<String>,
+        /// files: paths left out (rsync-like patterns).
+        #[arg(long = "exclude", value_delimiter = ',')]
+        excludes: Vec<String>,
         #[arg(long, value_delimiter = ',')]
         components: Vec<String>,
         #[arg(long, value_delimiter = ',')]
