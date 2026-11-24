@@ -373,6 +373,16 @@ async fn prepare(app: &Arc<App>, r: &RepoInfo, up: &Upstream, a: &mut Asked) -> 
     if a.kind != CacheKind::File {
         return Ok(true);
     }
+    // A file there already needs nothing from the upstream.
+    let have = {
+        let (app2, name, path) = (app.clone(), r.name.clone(), a.path.clone());
+        tokio::task::spawn_blocking(move || app2.engine.cache_get(&name, &path))
+            .await
+            .map_err(|e| Error::Invalid(e.to_string()))??
+    };
+    if have.is_some_and(|h| h.kind == CacheKind::File) {
+        return Ok(true);
+    }
     match r.format.as_str() {
         "maven" if !CHECKSUMS.iter().any(|c| a.path.ends_with(c)) => {
             let resp = client()

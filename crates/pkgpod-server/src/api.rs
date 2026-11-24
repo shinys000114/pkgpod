@@ -344,11 +344,18 @@ pub(crate) async fn formats(State(app): St) -> Json<Value> {
         .engine
         .formats()
         .map(|f| {
+            let mut kinds = f.kinds().to_vec();
+            if f.groups() {
+                kinds.push(Kind::Group);
+            }
+            if f.proxy() {
+                kinds.push(Kind::Proxy);
+            }
             json!({
                 "id": f.id(),
                 "title": f.title(),
-                "kinds": f.kinds(),
-                "settings": f.kinds().iter().map(|k| (k.as_str(), app.engine.fields(f.id(), *k).unwrap_or_default())).collect::<std::collections::BTreeMap<_, _>>(),
+                "kinds": kinds,
+                "settings": kinds.iter().map(|k| (k.as_str(), app.engine.fields(f.id(), *k).unwrap_or_default())).collect::<std::collections::BTreeMap<_, _>>(),
                 "ops": f.ops(),
             })
         })

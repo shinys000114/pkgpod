@@ -3458,6 +3458,44 @@ fn group_of_files_repositories() {
         .unwrap();
     assert_eq!(r.status().as_u16(), 403);
     assert!(r.text().unwrap().contains("may not read a"));
+    // The console's pages of a group.
+    let (cc, sid, _) = console_session(&s, "gc", "gc-password");
+    let page = |p: &str| {
+        let r = cc
+            .get(format!("{}{p}", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .send()
+            .unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    let (st, body) = page("/r/g");
+    assert!(
+        st == 200 && body.contains("Members") && body.contains("a, b"),
+        "{body}"
+    );
+    let (st, body) = page("/r/g/members");
+    assert!(st == 200 && body.contains("href=\"/r/a\""), "{body}");
+    for p in ["/r/g/use", "/r/g/settings"] {
+        assert_eq!(page(p).0, 200, "{p}");
+    }
+    let f = s.json(&["repo", "formats"]);
+    let files = f
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == "files")
+        .unwrap();
+    assert!(
+        files["kinds"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("group")),
+        "{files}"
+    );
+    assert!(
+        files["settings"]["group"].to_string().contains("members"),
+        "{files}"
+    );
     // A deleted member leaves its groups.
     s.cli(&["repo", "delete", "a", "-y"]).unwrap();
     let g = s.json(&["repo", "show", "g"]);
@@ -4309,18 +4347,57 @@ fn go_proxy_cache() {
     // Writes are refused.
     let r = c.put(s.url("/gp/upload")).body("x").send().unwrap();
     assert_eq!(r.status().as_u16(), 405);
+    // The console's pages of a proxy.
+    let (cc, sid, csrf) = console_session(&s, "pc", "pc-password");
+    let page = |p: &str| {
+        let r = cc
+            .get(format!("{}{p}", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .send()
+            .unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    let (st, body) = page("/r/gp");
+    assert!(
+        st == 200 && body.contains("Cached") && body.contains(&upstream),
+        "{body}"
+    );
+    let (st, body) = page("/r/gp/cache");
+    assert!(
+        st == 200 && body.contains("example.com/big/@v/v1.0.0.zip") && body.contains("pinned"),
+        "{body}"
+    );
+    for p in ["/r/gp/use", "/r/gp/settings"] {
+        assert_eq!(page(p).0, 200, "{p}");
+    }
+    let r = cc
+        .post(format!("{}/c/r/gp/cache/unpin", s.api))
+        .header("cookie", format!("pkgpod_session={sid}"))
+        .header("x-csrf-token", &csrf)
+        .form(&[("path", "example.com/big/@v/v1.0.0.zip")])
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(r.contains("unpin: 3 changed"), "{r}");
 }
 
-/// A stand-in upstream: answers each path with its body, and 404.
-fn stub_upstream(files: Vec<(String, Vec<u8>)>) -> u16 {
-    stub_upstream_on(0, files)
-}
-
-/// [`stub_upstream`] on a port (0: any).
+/// A stand-in upstream on a port (0: any): answers each path with its
+/// body, and 404.
 fn stub_upstream_on(port: u16, files: Vec<(String, Vec<u8>)>) -> u16 {
+    stub_upstream_log(port, files).0
+}
+
+/// [`stub_upstream_on`], with the paths it was asked for.
+fn stub_upstream_log(
+    port: u16,
+    files: Vec<(String, Vec<u8>)>,
+) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
     use std::io::{BufRead, Write};
     let l = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
     let port = l.local_addr().unwrap().port();
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log2 = log.clone();
     std::thread::spawn(move || {
         for mut c in l.incoming().flatten() {
             let mut r = std::io::BufReader::new(c.try_clone().unwrap());
@@ -4335,6 +4412,7 @@ fn stub_upstream_on(port: u16, files: Vec<(String, Vec<u8>)>) -> u16 {
                 }
             }
             let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
+            log2.lock().unwrap().push(path.clone());
             let (st, body) = match files.iter().find(|(p, _)| *p == path) {
                 Some((_, b)) => ("200 OK", b.clone()),
                 None => ("404 Not Found", Vec::new()),
@@ -4349,7 +4427,7 @@ fn stub_upstream_on(port: u16, files: Vec<(String, Vec<u8>)>) -> u16 {
             let _ = c.write_all(&body);
         }
     });
-    port
+    (port, log)
 }
 
 /// A Maven proxy of another pkgpod's repository, with mvn; a file whose
@@ -4394,10 +4472,13 @@ fn maven_proxy_cache() {
         format!("<settings><servers><server><id>up</id><username>token</username><password>{ut}</password></server></servers></settings>\n"),
     )
     .unwrap();
-    let mvn = |local: &str| {
-        format!(
-            "mvn -B -q -s /work/settings.xml -Dmaven.repo.local=/m2/{local} -Dmaven.test.skip=true"
-        )
+    // The shared local repository, kept apart by the repository an
+    // artifact came from: another id fetches again.
+    let mvn = |_: &str| {
+        "mvn -B -q -s /work/settings.xml -Dmaven.repo.local=/m2/cached -Dmaven.test.skip=true \
+         -Daether.enhancedLocalRepository.split=true \
+         -Daether.enhancedLocalRepository.splitRemoteRepository=true"
+            .to_string()
     };
     let project = |dir: &str, artifact: &str, body: &str, extra: &str| {
         let d = work.join(dir);
@@ -4430,49 +4511,49 @@ fn maven_proxy_cache() {
     );
     let (ok, out) = mvn_sh(
         &work,
-        &format!(
-            "cd greet && {} -Dmaven.install.skip=true deploy",
-            mvn(&format!("d{nanos}"))
-        ),
+        &format!("cd greet && {} -Dmaven.install.skip=true deploy", mvn("")),
     );
     assert!(ok, "{out}");
-    project(
-        "app",
-        "app",
-        "package demo; public class App { String s = Greet.hello(); }\n",
-        &format!(
-            "<repositories><repository><id>mp</id><url>{}</url></repository></repositories>\
-             <dependencies><dependency><groupId>{group}</groupId><artifactId>greet</artifactId><version>1.0.0</version></dependency></dependencies>",
-            s.url("/mp/")
-        ),
-    );
+    let app = |id: &str| {
+        project(
+            "app",
+            "app",
+            "package demo; public class App { String s = Greet.hello(); }\n",
+            &format!(
+                "<repositories><repository><id>{id}</id><url>{}</url></repository></repositories>\
+                 <dependencies><dependency><groupId>{group}</groupId><artifactId>greet</artifactId><version>1.0.0</version></dependency></dependencies>",
+                s.url("/mp/")
+            ),
+        )
+    };
+    app("mp");
     // Cold, then warm with the upstream gone (a local repository of its
     // own each time).
-    let (ok, out) = mvn_sh(
-        &work,
-        &format!("cd app && {} compile", mvn(&format!("a{nanos}"))),
-    );
+    let (ok, out) = mvn_sh(&work, &format!("cd app && {} compile", mvn("")));
     assert!(ok, "{out}");
     let d = s.json(&["downloads", "mp"]);
     assert_eq!(d["packages"][0]["name"], format!("{group}:greet"), "{d}");
+    // Its metadata old: as it was while the upstream is gone.
+    s.cli(&["repo", "set", "mp", "metadata_minutes=0"]).unwrap();
     drop(up);
-    let (ok, out) = mvn_sh(
-        &work,
-        &format!("cd app && {} compile", mvn(&format!("b{nanos}"))),
-    );
+    app("mp2");
+    let (ok, out) = mvn_sh(&work, &format!("cd app && {} compile", mvn("")));
     assert!(ok, "{out}");
     // A SHA-1 that is not the upstream's.
-    let port = stub_upstream(vec![
-        (
-            "/m/org/x/bad/1.0/bad-1.0.jar".into(),
-            b"not what it says".to_vec(),
-        ),
-        (
-            "/m/org/x/bad/1.0/bad-1.0.jar.sha1".into(),
-            b"0123456789012345678901234567890123456789".to_vec(),
-        ),
-        ("/m/org/x/good/1.0/good-1.0.jar".into(), b"good".to_vec()),
-    ]);
+    let (port, log) = stub_upstream_log(
+        0,
+        vec![
+            (
+                "/m/org/x/bad/1.0/bad-1.0.jar".into(),
+                b"not what it says".to_vec(),
+            ),
+            (
+                "/m/org/x/bad/1.0/bad-1.0.jar.sha1".into(),
+                b"0123456789012345678901234567890123456789".to_vec(),
+            ),
+            ("/m/org/x/good/1.0/good-1.0.jar".into(), b"good".to_vec()),
+        ],
+    );
     s.cli(&[
         "repo",
         "create",
@@ -4502,6 +4583,15 @@ fn maven_proxy_cache() {
         .unwrap();
     assert_eq!(r.status().as_u16(), 200);
     assert_eq!(r.text().unwrap(), "good");
+    // Cached: the upstream is not asked again (not even for its .sha1).
+    let asked = log.lock().unwrap().len();
+    let r = c
+        .get(s.url("/bad/org/x/good/1.0/good-1.0.jar"))
+        .send()
+        .unwrap();
+    assert_eq!(r.text().unwrap(), "good");
+    let after = log.lock().unwrap().clone();
+    assert_eq!(after.len(), asked, "{after:?}");
 }
 
 /// An npm proxy of another pkgpod's registry, with npm: tarballs from
@@ -4580,7 +4670,8 @@ fn npm_proxy_cache() {
     assert!(h.join("app/node_modules/@team/lib/index.js").is_file());
     let d = s.json(&["downloads", "np"]);
     assert_eq!(d["total"], 2, "{d}");
-    // With the upstream gone, from the cache.
+    // With the upstream gone, from the cache (documents as they were).
+    s.cli(&["repo", "set", "np", "metadata_minutes=0"]).unwrap();
     drop(up);
     let h = client("c2");
     let (ok, out) = npm(&h, &h.join("app"), &["install", "hello-pkg", "@team/lib"]);
@@ -4690,7 +4781,8 @@ fn pypi_proxy_cache() {
     );
     assert!(page.contains("#sha256="), "{page}");
     assert_eq!(s.json(&["downloads", "pp"])["total"], 1);
-    // With the upstream gone, from the cache.
+    // With the upstream gone, from the cache (pages as they were).
+    s.cli(&["repo", "set", "pp", "metadata_minutes=0"]).unwrap();
     drop(up);
     let (ok, out) = pip(
         &["--index-url", &index, "foo-bar-baz==1.0"],
@@ -4827,7 +4919,8 @@ fn cargo_proxy_cache() {
         s.json(&["downloads", "cp"])["packages"][0]["name"],
         "hello_pod"
     );
-    // With the upstream gone, from the cache.
+    // With the upstream gone, from the cache (index files as they were).
+    s.cli(&["repo", "set", "cp", "metadata_minutes=0"]).unwrap();
     drop(up);
     let (ok, out) = cargo(&home_for_in(&s, "c2", &pindex), &app, &["run", "-q"], "");
     assert!(ok && out.contains("hello 0.1.0"), "{out}");
@@ -5015,7 +5108,8 @@ fn oci_proxy_and_group_with_docker() {
     assert!(content(&tags[4]).contains(&format!("{unique} ours")));
     let (ok, out) = docker(&cfg, &["pull", &tags[3]], None);
     assert!(ok, "{out}");
-    // With the upstream gone, from the cache.
+    // With the upstream gone, from the cache (tags as they were).
+    s.cli(&["repo", "set", "op", "metadata_minutes=0"]).unwrap();
     drop(up);
     for t in &tags[2..4] {
         docker(&cfg, &["rmi", "-f", t], None);
