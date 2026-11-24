@@ -136,6 +136,37 @@ pub struct DistDef {
 
 /// Names of dists, components and architectures: what apt and the pool
 /// layout accept.
+/// Dists as people write them, a group a line: `focal jammy: rockchip
+/// amlogic` (names, then after a colon their components; none: main).
+pub fn parse_dist_groups(text: &str) -> Result<Vec<(String, Vec<String>)>> {
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let (names, comps) = line.split_once(':').unwrap_or((line, ""));
+        let words = |s: &str| -> Vec<String> {
+            s.split([',', ' ', '\t'])
+                .filter(|w| !w.is_empty())
+                .map(String::from)
+                .collect()
+        };
+        let comps = words(comps);
+        for c in &comps {
+            check_name("component", c)?;
+        }
+        let names = words(names);
+        if names.is_empty() {
+            return Err(Error::Invalid(format!("{line:?} names no dist")));
+        }
+        for n in names {
+            check_name("dist", &n)?;
+            if out.iter().any(|(d, _)| *d == n) {
+                return Err(Error::Invalid(format!("dist {n} is named twice")));
+            }
+            out.push((n, comps.clone()));
+        }
+    }
+    Ok(out)
+}
+
 pub fn check_name(what: &str, s: &str) -> Result<()> {
     let ok = !s.is_empty()
         && s.len() <= 100
@@ -870,7 +901,11 @@ impl Format for Deb {
                 name: "dist-set",
                 help: "Add a dist or change one; what is left out keeps its value, and components no longer listed are removed with their packages.",
                 params: vec![
-                    Field::text("name", "", "The dist (dists/<name>)."),
+                    Field::text(
+                        "name",
+                        "",
+                        "The dist (dists/<name>); several, separated by spaces, get the same settings.",
+                    ),
                     Field::list("components", "Components; empty: main."),
                     Field::list(
                         "architectures",
@@ -936,7 +971,20 @@ impl Format for Deb {
 
     fn op(&self, _cx: &Cx, op: &str, p: &Value, e: &mut Edit) -> Result<String> {
         match op {
-            "dist-set" => self.dist_set(p, e),
+            "dist-set" => {
+                // Several names: each gets the same settings.
+                let names = str_list(p, "name");
+                if names.len() <= 1 {
+                    return self.dist_set(p, e);
+                }
+                let mut done = Vec::new();
+                for n in names {
+                    let mut q = p.clone();
+                    q["name"] = json!(n);
+                    done.push(self.dist_set(&q, e)?);
+                }
+                Ok(done.join("; "))
+            }
             "dist-remove" => {
                 let name = str_of(p, "name");
                 check_name("dist", name)?;
