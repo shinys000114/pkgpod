@@ -899,6 +899,11 @@ pub fn part_path(dest: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// Waits before retry `attempt` (doubling from `first`, up to 32x).
+pub(crate) fn pause(first: Duration, attempt: u32, cancel: &AtomicBool) -> Result<(), FetchError> {
+    backoff(first, attempt, cancel)
+}
+
 fn backoff(first: Duration, attempt: u32, cancel: &AtomicBool) -> Result<(), FetchError> {
     let wait = first * (1 << (attempt - 1).min(5));
     let step = Duration::from_millis(50).min(wait);

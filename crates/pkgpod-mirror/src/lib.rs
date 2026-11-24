@@ -7,6 +7,8 @@
 
 pub mod cache;
 pub mod fetch;
+pub mod files;
+pub mod ftp;
 pub mod http;
 pub mod release;
 pub mod rsync;
