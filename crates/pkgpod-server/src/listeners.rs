@@ -271,7 +271,7 @@ pub async fn bind(
             }
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
                 return Err(format!(
-                    "listening on {addr}: {e}; another program has that address (choose another with pkgpod listener set)"
+                    "listening on {addr}: {e}; another program has that address"
                 ));
             }
             Err(e) => return Err(format!("listening on {addr}: {e}")),
@@ -289,7 +289,15 @@ pub async fn serve_router(
     router: Router,
     mut stop: watch::Receiver<bool>,
 ) -> Result<(), String> {
-    let listener = bind(addr, &stop).await?;
+    let listener = bind(addr, &stop).await.map_err(|e| {
+        if !e.ends_with("another program has that address") {
+            e
+        } else if what.starts_with("management") {
+            format!("{e} (choose another with listen in the configuration file)")
+        } else {
+            format!("{e} (choose another with pkgpod listener set)")
+        }
+    })?;
     tracing::info!(
         "{what} on {}{}",
         listener

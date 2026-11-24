@@ -11412,3 +11412,42 @@ fn swift_registry_with_swiftpm() {
     let (ok, out) = app(&url, &tok, resolve);
     assert!(ok && out.contains("\"version\" : \"1.0.0\""), "{out}");
 }
+
+#[test]
+fn a_management_listener_that_cannot_start_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let serve = |extra: &str, listen: &str| {
+        let cfg = dir.path().join("pkgpod.toml");
+        std::fs::write(
+            &cfg,
+            format!(
+                "data_dir = \"{}\"\nlisten = \"{listen}\"\nlog = \"warn\"\n{extra}",
+                dir.path().join("data").display()
+            ),
+        )
+        .unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_pkgpod"))
+            .args(["serve", "-c"])
+            .arg(&cfg)
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    // Half a TLS setup is refused rather than served as plain HTTP.
+    let cert = dir.path().join("cert.pem");
+    std::fs::write(&cert, "").unwrap();
+    let err = serve(
+        &format!("tls_cert = \"{}\"\n", cert.display()),
+        &format!("127.0.0.1:{}", free_port()),
+    );
+    assert!(err.contains("tls_cert and tls_key go together"), "{err}");
+    // An address in use: where to change it, for this listener.
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let err = serve("", &taken.local_addr().unwrap().to_string());
+    assert!(
+        err.contains("another program has that address")
+            && err.contains("listen in the configuration file"),
+        "{err}"
+    );
+}
