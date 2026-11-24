@@ -1,0 +1,10 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+<div class="card">
+  <div class="card-head"><h2>Members</h2><span class="hint">read in this order: for each package, the first member that has it answers alone; publishing goes to a member</span></div>
+  {% if rows.is_empty() %}<p class="empty">No members yet{% if can_admin %}: add them in <a href="/r/{{ repo }}?tab=settings">Settings</a> (members){% endif %}.</p>{% else %}
+  <div class="table-wrap"><table>
+    <thead><tr><th>#</th><th>Repository</th><th>Kind</th><th>Read by</th></tr></thead>
+    <tbody>{% for m in rows %}<tr><td class="num">{{ loop.index }}</td><td>{% if m.readable %}<a href="/r/{{ m.name }}">{{ m.name }}</a>{% else %}{{ m.name }}{% endif %}</td><td>{{ m.kind }}</td><td class="muted">{% if m.public %}anyone{% else %}the group's readers; anonymous readers of a public group do not see it{% endif %}</td></tr>{% endfor %}</tbody>
+  </table></div>
+  {% endif %}
+</div>

@@ -71,10 +71,7 @@ pub fn text(app: &App, caller: &crate::auth::Caller) -> Result<String> {
         "A repository: its format, kind and whether it is public.",
     );
     for r in &repos {
-        let kind = match r.kind {
-            Kind::Mirror => "mirror",
-            _ => "hosted",
-        };
+        let kind = r.kind.as_str();
         let public = if r.setting_bool("public") {
             "true"
         } else {
@@ -109,7 +106,7 @@ pub fn text(app: &App, caller: &crate::auth::Caller) -> Result<String> {
         "The current version's number.",
     );
     let mut updated = Vec::new();
-    for r in repos.iter().filter(|r| r.kind != Kind::Mirror) {
+    for r in repos.iter().filter(|r| r.kind.versioned()) {
         if let Some(v) = app.engine.current(r)? {
             o.line("pkgpod_repository_version", &[("repo", &r.name)], v.seq);
             updated.push((r.name.clone(), v.created));

@@ -30,7 +30,7 @@ pub enum RepoCmd {
         name: String,
         #[arg(long, short, default_value = "deb")]
         format: String,
-        /// hosted, import or mirror.
+        /// hosted, import, mirror or group (-s members=a,b).
         #[arg(long, short, default_value = "hosted")]
         kind: String,
         #[arg(long)]

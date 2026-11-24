@@ -72,6 +72,9 @@ Status: in development, nothing released.
   <repo>`), kept a year unless set otherwise; a status API, SVG badges
   for READMEs (`/.well-known/pkgpod/badges/<repo>/status.svg`; private
   repositories with a badge-only token) and `/metrics` for Prometheus.
+- Group repositories (files, npm, PyPI, Maven, Go, Cargo): one address
+  reading other repositories in order, the first that has a package
+  answering for it.
 - Cleanup rules (keep the newest N, pre-releases after N days, not
   downloaded for N days) for Debian, npm, Cargo, Helm and Go
   repositories, previewed as a plan and run daily.

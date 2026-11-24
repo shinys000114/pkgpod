@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use pkgpod_engine::{Kind, Plan, RepoInfo, Upload};
+use pkgpod_engine::{Plan, RepoInfo, Upload};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -47,7 +47,7 @@ struct Selector {
 /// The plan that takes `pick` from the mirror `from` into `to`.
 pub fn plan(app: &App, from: &RepoInfo, to: &str, pick: &MirrorPick, actor: &str) -> Result<Plan> {
     let dst = app.engine.repo(to)?;
-    if from.format != "deb" || dst.format != "deb" || dst.kind == Kind::Mirror {
+    if from.format != "deb" || dst.format != "deb" || !dst.kind.versioned() {
         return Err(Error::Invalid(format!(
             "promotion from a mirror goes from a deb mirror into a hosted deb repository ({} is {} {})",
             dst.name,

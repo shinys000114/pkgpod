@@ -3297,6 +3297,668 @@ fn status_badges_and_metrics() {
     }
 }
 
+/// A group of files repositories: the first member with a path answers;
+/// listings show all; who may set members and read through it.
+#[test]
+fn group_of_files_repositories() {
+    let s = Server::start();
+    for r in ["a", "b"] {
+        s.cli(&["repo", "create", r, "-f", "files"]).unwrap();
+    }
+    s.cli(&["repo", "set", "b", "public=true"]).unwrap();
+    let w = s
+        .cli(&["token", "create", "w", "--repos", "a,b", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let c = reqwest::blocking::Client::new();
+    for (r, p, body) in [
+        ("a", "shared.txt", "from a"),
+        ("a", "only-a/x.txt", "x"),
+        ("b", "shared.txt", "from b"),
+        ("b", "only-b/y.txt", "y"),
+    ] {
+        let st = c
+            .put(s.url(&format!("/{r}/{p}")))
+            .basic_auth("token", Some(&w))
+            .body(body)
+            .send()
+            .unwrap()
+            .status();
+        assert_eq!(st, 201);
+    }
+    s.cli(&[
+        "repo",
+        "create",
+        "g",
+        "-f",
+        "files",
+        "-k",
+        "group",
+        "-s",
+        "members=a,b",
+    ])
+    .unwrap();
+    // A token for the group alone reads through it, not the members.
+    let gt = s
+        .cli(&["token", "create", "r", "--repos", "g"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let get = |p: &str, t: Option<&str>| {
+        let mut b = c.get(s.url(p));
+        if let Some(t) = t {
+            b = b.basic_auth("token", Some(t));
+        }
+        let r = b.send().unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    assert_eq!(get("/g/shared.txt", Some(&gt)), (200, "from a".into()));
+    assert_eq!(get("/g/only-b/y.txt", Some(&gt)), (200, "y".into()));
+    let (st, list) = get("/g/", Some(&gt));
+    assert_eq!(st, 200);
+    for n in ["shared.txt", "only-a/", "only-b/"] {
+        assert!(list.contains(&format!("href=\"{n}\"")), "{n}: {list}");
+    }
+    assert_ne!(get("/a/shared.txt", Some(&gt)).0, 200);
+    assert_eq!(get("/g/nothing.txt", Some(&gt)).0, 404);
+    assert_eq!(get("/g/@first/shared.txt", Some(&gt)).0, 404);
+    assert_eq!(get("/g/shared.txt", None).0, 401);
+    // Read through, downloads count on the member.
+    assert_eq!(s.json(&["downloads", "a"])["total"], 1);
+    assert_eq!(s.json(&["downloads", "g"])["total"], 0);
+    // Publishing goes to a member.
+    let r = c
+        .put(s.url("/g/new.txt"))
+        .basic_auth("token", Some(&gt))
+        .body("x")
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 405);
+    assert!(r.text().unwrap().contains("publish to its member a"));
+    // A public group: anonymous readers see its public members only.
+    s.cli(&["repo", "set", "g", "public=true"]).unwrap();
+    assert_eq!(get("/g/shared.txt", None), (200, "from b".into()));
+    assert_eq!(get("/g/only-a/x.txt", None).0, 404);
+    assert_eq!(get("/g/shared.txt", Some(&gt)), (200, "from a".into()));
+    // Members: existing, of the format, not groups, readable by who sets
+    // them.
+    let e = s
+        .cli(&[
+            "repo",
+            "create",
+            "g2",
+            "-f",
+            "files",
+            "-k",
+            "group",
+            "-s",
+            "members=nosuch",
+        ])
+        .unwrap_err();
+    assert!(e.contains("no repository nosuch"), "{e}");
+    s.cli(&["repo", "create", "n", "-f", "npm"]).unwrap();
+    let e = s.cli(&["repo", "set", "g", "members=a,n"]).unwrap_err();
+    assert!(e.contains("n is a npm repository"), "{e}");
+    let e = s.cli(&["repo", "set", "g", "members=g"]).unwrap_err();
+    assert!(e.contains("own member"), "{e}");
+    let e = s
+        .cli(&["repo", "create", "dg", "-f", "deb", "-k", "group"])
+        .unwrap_err();
+    assert!(e.contains("cannot be of kind group"), "{e}");
+    s.cli_in(&["user", "add", "u", "--password-stdin"], "u-password")
+        .unwrap();
+    s.cli(&["grant", "set", "g", "user:u", "admin"]).unwrap();
+    let r = c
+        .patch(format!("{}/api/v1/repos/g", s.api))
+        .basic_auth("u", Some("u-password"))
+        .json(&serde_json::json!({"settings": {"members": ["b", "a"]}}))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 403);
+    assert!(r.text().unwrap().contains("may not read a"));
+    // A deleted member leaves its groups.
+    s.cli(&["repo", "delete", "a", "-y"]).unwrap();
+    let g = s.json(&["repo", "show", "g"]);
+    assert_eq!(g["settings"]["members"], serde_json::json!(["b"]), "{g}");
+    assert_eq!(get("/g/shared.txt", Some(&gt)), (200, "from b".into()));
+}
+
+/// A group of npm registries with npm: a package from the first member
+/// that has it, alone.
+#[test]
+fn group_of_npm_registries() {
+    if !have("npm") {
+        return;
+    }
+    let s = Server::start();
+    for r in ["js1", "js2"] {
+        s.cli(&["repo", "create", r, "-f", "npm"]).unwrap();
+    }
+    s.cli(&[
+        "repo",
+        "create",
+        "jsg",
+        "-f",
+        "npm",
+        "-k",
+        "group",
+        "-s",
+        "members=js1,js2",
+    ])
+    .unwrap();
+    let w = s
+        .cli(&["token", "create", "w", "--repos", "js1,js2", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let port = s.serve_port;
+    let src = s.dir.path().join("src");
+    for (r, n, v) in [
+        ("js1", "hello-pkg", "1.0.0"),
+        ("js2", "hello-pkg", "2.0.0"),
+        ("js2", "other-pkg", "1.0.0"),
+    ] {
+        let home = s.dir.path().join(format!("pub-{r}"));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("npmrc"),
+            format!(
+                "registry=http://127.0.0.1:{port}/{r}/\n//127.0.0.1:{port}/{r}/:_authToken={w}\n"
+            ),
+        )
+        .unwrap();
+        let d = npm_package(&src.join(r), n, v);
+        let (ok, out) = npm(&home, &d, &["publish"]);
+        assert!(ok, "{out}");
+    }
+    let gt = s
+        .cli(&["token", "create", "r", "--repos", "jsg"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let home = s.dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("npmrc"),
+        format!("registry=http://127.0.0.1:{port}/jsg/\n//127.0.0.1:{port}/jsg/:_authToken={gt}\n"),
+    )
+    .unwrap();
+    let app = s.dir.path().join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    let (ok, out) = npm(&home, &app, &["install", "hello-pkg", "other-pkg"]);
+    assert!(ok, "{out}");
+    let v = std::fs::read_to_string(app.join("node_modules/hello-pkg/index.js")).unwrap();
+    assert!(v.contains("1.0.0"), "the first member's: {v}");
+    assert!(app.join("node_modules/other-pkg/index.js").is_file());
+    let (ok, out) = npm(&home, &app, &["install", "hello-pkg@2.0.0"]);
+    assert!(!ok, "a later member's version: {out}");
+    // Search shows both members' packages.
+    let r: Value = reqwest::blocking::Client::new()
+        .get(s.url("/jsg/-/v1/search?text=pkg"))
+        .bearer_auth(&gt)
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    let names: Vec<&str> = r["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["package"]["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        names.contains(&"hello-pkg") && names.contains(&"other-pkg"),
+        "{r}"
+    );
+    // Publishing goes to a member; downloads count there.
+    let d = npm_package(&src.join("g"), "new-pkg", "1.0.0");
+    let (ok, out) = npm(&home, &d, &["publish"]);
+    assert!(!ok, "{out}");
+    assert_eq!(
+        s.json(&["downloads", "js2"])["packages"][0]["name"],
+        "other-pkg"
+    );
+    assert_eq!(s.json(&["downloads", "js1"])["total"], 1);
+}
+
+/// A group of PyPI repositories with pip.
+#[test]
+fn group_of_pypi_repositories() {
+    if !have("python3")
+        || !Command::new("python3")
+            .args(["-m", "pip", "--version"])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    {
+        return;
+    }
+    let s = Server::start();
+    for r in ["py1", "py2"] {
+        s.cli(&["repo", "create", r, "-f", "pypi"]).unwrap();
+    }
+    s.cli(&[
+        "repo",
+        "create",
+        "pyg",
+        "-f",
+        "pypi",
+        "-k",
+        "group",
+        "-s",
+        "members=py1,py2",
+    ])
+    .unwrap();
+    let w = s
+        .cli(&["token", "create", "w", "--repos", "py1,py2", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let d = s.dir.path().join("dists");
+    std::fs::create_dir_all(&d).unwrap();
+    for (r, n, v) in [
+        ("py1", "Shared_Pkg", "1.0"),
+        ("py2", "Shared_Pkg", "2.0"),
+        ("py2", "only-two", "1.0"),
+    ] {
+        std::fs::create_dir_all(d.join(r)).unwrap();
+        let f = make_dist(&d.join(r), n, v, "wheel", "", 0);
+        let (st, body) = twine_upload(&s.url(&format!("/{r}/")), Some(("__token__", &w)), &f);
+        assert_eq!(st, 200, "{body}");
+    }
+    let gt = s
+        .cli(&["token", "create", "r", "--repos", "pyg"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let port = s.serve_port;
+    let index = format!("http://__token__:{gt}@127.0.0.1:{port}/pyg/simple/");
+    let t = s.dir.path().join("t1");
+    let (ok, out) = pip(&["--index-url", &index, "shared-pkg", "only-two"], &t);
+    assert!(ok, "{out}");
+    let v = std::fs::read_to_string(t.join("shared_pkg/__init__.py")).unwrap();
+    assert!(v.contains("'1.0'"), "the first member's: {v}");
+    assert!(t.join("only_two/__init__.py").is_file());
+    let (ok, out) = pip(
+        &["--index-url", &index, "shared-pkg==2.0"],
+        &s.dir.path().join("t2"),
+    );
+    assert!(!ok, "a later member's version: {out}");
+    // The project list has both members'.
+    let r = reqwest::blocking::Client::new()
+        .get(s.url("/pyg/simple/"))
+        .basic_auth("__token__", Some(&gt))
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(r.contains("shared-pkg") && r.contains("only-two"), "{r}");
+    // Uploads go to a member.
+    std::fs::create_dir_all(d.join("g")).unwrap();
+    let f = make_dist(&d.join("g"), "new-pkg", "1.0", "wheel", "", 0);
+    let (st, _) = twine_upload(&s.url("/pyg/"), Some(("__token__", &w)), &f);
+    assert_ne!(st, 200);
+}
+
+/// A group of cargo registries with cargo.
+#[test]
+fn group_of_cargo_registries() {
+    if !have("cargo") {
+        return;
+    }
+    let s = Server::start();
+    for r in ["c1", "c2"] {
+        s.cli(&["repo", "create", r, "-f", "cargo"]).unwrap();
+    }
+    s.cli(&[
+        "repo",
+        "create",
+        "cg",
+        "-f",
+        "cargo",
+        "-k",
+        "group",
+        "-s",
+        "members=c1,c2",
+    ])
+    .unwrap();
+    let w = s
+        .cli(&["token", "create", "w", "--repos", "c1,c2", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let home_for = |r: &str| {
+        let home = s.dir.path().join(format!("home-{r}"));
+        std::fs::create_dir_all(home.join("cargo")).unwrap();
+        std::fs::write(
+            home.join("cargo").join("config.toml"),
+            format!(
+                "[registries.crates]\nindex = \"sparse+{}index/\"\n\n\
+                 [registry]\nglobal-credential-providers = [\"cargo:token\"]\n",
+                s.url(&format!("/{r}/"))
+            ),
+        )
+        .unwrap();
+        home
+    };
+    for (r, n, v) in [
+        ("c1", "hello_pod", "0.1.0"),
+        ("c2", "hello_pod", "0.2.0"),
+        ("c2", "only_two", "1.0.0"),
+    ] {
+        let d = cargo_crate(
+            &s.dir.path().join(format!("src-{r}")),
+            n,
+            v,
+            "",
+            (
+                "lib.rs",
+                &format!("pub fn hello() -> &'static str {{ \"{n} {v}\" }}\n"),
+            ),
+        );
+        let (ok, out) = cargo(
+            &home_for(r),
+            &d,
+            &["publish", "--registry", "crates", "--no-verify"],
+            &w,
+        );
+        assert!(ok, "{out}");
+    }
+    let gt = s
+        .cli(&["token", "create", "r", "--repos", "cg"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let home = home_for("cg");
+    let app = |name: &str, deps: &str| {
+        cargo_crate(
+            &s.dir.path().join("apps"),
+            name,
+            "0.1.0",
+            deps,
+            (
+                "main.rs",
+                "fn main() { println!(\"{} {}\", hello_pod::hello(), only_two::hello()); }\n",
+            ),
+        )
+    };
+    let a = app(
+        "app",
+        "hello_pod = { version = \"0.1\", registry = \"crates\" }\nonly_two = { version = \"1\", registry = \"crates\" }\n",
+    );
+    let (ok, out) = cargo(&home, &a, &["run", "-q"], &gt);
+    assert!(
+        ok && out.contains("hello_pod 0.1.0 only_two 1.0.0"),
+        "{out}"
+    );
+    let b = app(
+        "app2",
+        "hello_pod = { version = \"0.2\", registry = \"crates\" }\nonly_two = { version = \"1\", registry = \"crates\" }\n",
+    );
+    let (ok, out) = cargo(&home, &b, &["run", "-q"], &gt);
+    assert!(!ok, "a later member's version: {out}");
+    // The group's config: its own rights and download address.
+    let cfg: Value = reqwest::blocking::Client::new()
+        .get(s.url("/cg/index/config.json"))
+        .header("authorization", &gt)
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(cfg["auth-required"], true, "{cfg}");
+    assert!(cfg["dl"].as_str().unwrap().contains("/cg/"), "{cfg}");
+    // Publishing goes to a member.
+    let d = cargo_crate(
+        &s.dir.path().join("src-g"),
+        "new_one",
+        "1.0.0",
+        "",
+        ("lib.rs", ""),
+    );
+    let (ok, out) = cargo(
+        &home,
+        &d,
+        &["publish", "--registry", "crates", "--no-verify"],
+        &gt,
+    );
+    assert!(!ok, "{out}");
+}
+
+/// A group of Go module proxies with go.
+#[test]
+fn group_of_go_proxies() {
+    if !have("go") {
+        return;
+    }
+    let s = Server::start();
+    for r in ["g1", "g2"] {
+        s.cli(&["repo", "create", r, "-f", "go"]).unwrap();
+    }
+    s.cli(&[
+        "repo",
+        "create",
+        "gg",
+        "-f",
+        "go",
+        "-k",
+        "group",
+        "-s",
+        "members=g1,g2",
+    ])
+    .unwrap();
+    let w = s
+        .cli(&["token", "create", "w", "--repos", "g1,g2", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let src = s.dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let c = reqwest::blocking::Client::new();
+    for (r, m, v) in [
+        ("g1", "example.com/greet", "v1.0.0"),
+        ("g2", "example.com/greet", "v1.1.0"),
+        ("g2", "example.com/other", "v0.3.0"),
+    ] {
+        let zip = go_module_zip(&src.join(r), m, v, &format!("{m} {v}"));
+        let r = c
+            .put(s.url(&format!("/{r}/upload")))
+            .basic_auth("token", Some(&w))
+            .body(zip)
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 201, "{}", r.text().unwrap());
+    }
+    let gt = s
+        .cli(&["token", "create", "r", "--repos", "gg"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let get = |p: &str| {
+        let r = c
+            .get(s.url(&format!("/gg/{p}")))
+            .basic_auth("token", Some(&gt))
+            .send()
+            .unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    // A module from the first member that has it, alone: its list, and
+    // not a later member's version even when asked for by name.
+    assert_eq!(get("example.com/greet/@v/list"), (200, "v1.0.0\n".into()));
+    assert_eq!(get("example.com/greet/@v/v1.1.0.info").0, 404);
+    assert_eq!(get("example.com/other/@v/list"), (200, "v0.3.0\n".into()));
+    assert_eq!(
+        c.get(s.url("/g1/example.com/greet/@v/list"))
+            .basic_auth("token", Some(&gt))
+            .send()
+            .unwrap()
+            .status(),
+        404
+    );
+    // go itself, through the group (public: go sends credentials only
+    // over https).
+    for r in ["g1", "g2", "gg"] {
+        s.cli(&["repo", "set", r, "public=true"]).unwrap();
+    }
+    let home = s.dir.path().join("gohome");
+    std::fs::create_dir_all(&home).unwrap();
+    let app = s.dir.path().join("goapp");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(app.join("go.mod"), "module app\n\ngo 1.21\n").unwrap();
+    let reg = s.url("/gg/");
+    let (ok, out) = go(
+        &home,
+        &app,
+        &reg,
+        &["list", "-m", "-versions", "example.com/greet"],
+    );
+    assert!(ok && out.trim() == "example.com/greet v1.0.0", "{out}");
+    let (ok, out) = go(
+        &home,
+        &app,
+        &reg,
+        &["mod", "download", "-json", "example.com/other@v0.3.0"],
+    );
+    assert!(ok, "{out}");
+}
+
+/// A group of Maven repositories with mvn.
+#[test]
+fn group_of_maven_repositories() {
+    if images_here(&[MAVEN_IMAGE]).is_empty() {
+        return;
+    }
+    let s = Server::start();
+    for r in ["m1", "m2"] {
+        s.cli(&["repo", "create", r, "-f", "maven"]).unwrap();
+    }
+    s.cli(&[
+        "repo",
+        "create",
+        "mg",
+        "-f",
+        "maven",
+        "-k",
+        "group",
+        "-s",
+        "members=m1,m2",
+    ])
+    .unwrap();
+    let w = s
+        .cli(&["token", "create", "w", "--repos", "m1,m2", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let gt = s
+        .cli(&["token", "create", "r", "--repos", "mg"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let group = format!(
+        "org.example.g{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let work = s.dir.path().join("mvnwork");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(
+        work.join("settings.xml"),
+        format!(
+            "<settings><servers><server><id>m1</id><username>token</username><password>{w}</password></server>\
+             <server><id>m2</id><username>token</username><password>{w}</password></server>\
+             <server><id>mg</id><username>token</username><password>{gt}</password></server></servers></settings>\n"
+        ),
+    )
+    .unwrap();
+    let mvn = "mvn -B -q -s /work/settings.xml -Dmaven.repo.local=/m2 -Dmaven.test.skip=true \
+               -Daether.enhancedLocalRepository.split=true \
+               -Daether.enhancedLocalRepository.splitRemoteRepository=true";
+    let project = |dir: &str, artifact: &str, version: &str, body: &str, extra: &str| {
+        let d = work.join(dir);
+        std::fs::create_dir_all(d.join("src/main/java/demo")).unwrap();
+        std::fs::write(
+            d.join("pom.xml"),
+            format!(
+                "<project xmlns=\"http://maven.apache.org/POM/4.0.0\">\n<modelVersion>4.0.0</modelVersion>\n\
+                 <groupId>{group}</groupId><artifactId>{artifact}</artifactId><version>{version}</version>\n\
+                 <properties><maven.compiler.release>17</maven.compiler.release>\
+                 <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding></properties>\n{extra}\n</project>\n"
+            ),
+        )
+        .unwrap();
+        let class = body
+            .split_whitespace()
+            .skip_while(|w| *w != "class")
+            .nth(1)
+            .unwrap();
+        std::fs::write(d.join(format!("src/main/java/demo/{class}.java")), body).unwrap();
+    };
+    for (r, artifact, class, version) in [
+        ("m1", "greet", "Greet", "1.0.0"),
+        ("m2", "greet", "Greet", "2.0.0"),
+        ("m2", "other", "Other", "1.0.0"),
+    ] {
+        let url = s.url(&format!("/{r}/"));
+        let dir = format!("{r}-{artifact}");
+        project(
+            &dir,
+            artifact,
+            version,
+            &format!(
+                "package demo; public class {class} {{ public static String v{}() {{ return \"{version}\"; }} }}\n",
+                version.replace('.', "_")
+            ),
+            &format!(
+                "<distributionManagement><repository><id>{r}</id><url>{url}</url></repository></distributionManagement>"
+            ),
+        );
+        let (ok, out) = mvn_sh(
+            &work,
+            &format!("cd {dir} && {mvn} -Dmaven.install.skip=true deploy"),
+        );
+        assert!(ok, "{out}");
+    }
+    let base = s.url("/mg/");
+    let depend = |dir: &str, deps: &[(&str, &str)], uses: &str| {
+        let deps: String = deps
+            .iter()
+            .map(|(a, v)| format!("<dependency><groupId>{group}</groupId><artifactId>{a}</artifactId><version>{v}</version></dependency>"))
+            .collect();
+        project(
+            dir,
+            dir,
+            "1.0.0",
+            &format!("package demo; public class App {{ String s = {uses}; }}\n"),
+            &format!(
+                "<repositories><repository><id>mg</id><url>{base}</url></repository></repositories><dependencies>{deps}</dependencies>"
+            ),
+        );
+        mvn_sh(&work, &format!("cd {dir} && {mvn} compile"))
+    };
+    let (ok, out) = depend(
+        "app1",
+        &[("greet", "1.0.0"), ("other", "1.0.0")],
+        "Greet.v1_0_0() + Other.v1_0_0()",
+    );
+    assert!(ok, "{out}");
+    let (ok, _) = depend("app2", &[("greet", "2.0.0")], "Greet.v2_0_0()");
+    assert!(!ok, "a later member's version");
+    // The metadata is the first member's.
+    let gpath = group.replace('.', "/");
+    let meta = reqwest::blocking::Client::new()
+        .get(format!("{base}{gpath}/greet/maven-metadata.xml"))
+        .basic_auth("token", Some(&gt))
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(
+        meta.contains("<release>1.0.0</release>") && !meta.contains("2.0.0"),
+        "{meta}"
+    );
+}
+
 #[test]
 fn files_hosted() {
     let s = Server::start();

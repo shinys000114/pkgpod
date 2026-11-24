@@ -396,6 +396,9 @@ pub(crate) async fn repo_create(
     app.require_admin(&c)?;
     blocking(&app, move |app| {
         app.check_urls(&req.name, &req.settings)?;
+        if req.kind == "group" {
+            crate::group::check_members(app, &c, &req.name, &req.format, &req.settings)?;
+        }
         let r = app.engine.create_repo(
             NewRepo {
                 name: req.name,
@@ -572,6 +575,9 @@ pub(crate) async fn repo_patch(
     blocking(&app, move |app| {
         let r0 = app.repo_for(&c, &repo, Role::Admin)?;
         app.check_urls(&repo, &req.settings)?;
+        if r0.kind == Kind::Group {
+            crate::group::check_members(app, &c, &repo, &r0.format, &req.settings)?;
+        }
         let r = app.engine.update_settings(&repo, &req.settings)?;
         app.auth
             .audit(c.name(), "repo settings", &repo, &req.settings.to_string());
@@ -616,6 +622,21 @@ pub(crate) async fn repo_delete(
         app.auth.forget_repo(&repo)?;
         app.stats.forget(app, &repo)?;
         crate::badge::drop_token(app, &repo)?;
+        // Groups read it no more.
+        for g in app.engine.repos()? {
+            let ms = g.setting_list("members");
+            if g.kind == Kind::Group && ms.contains(&repo) {
+                let left: Vec<String> = ms.into_iter().filter(|m| *m != repo).collect();
+                app.engine
+                    .update_settings(&g.name, &json!({"members": left}))?;
+                app.auth.audit(
+                    c.name(),
+                    "repo settings",
+                    &g.name,
+                    &format!("member {repo} deleted"),
+                );
+            }
+        }
         // A mirror's received tree (perhaps an adopted multi-TB one) stays
         // unless asked for.
         let mut detail = String::new();

@@ -16,6 +16,7 @@ pub mod config;
 pub mod galaxy;
 pub mod gems;
 pub mod go;
+pub mod group;
 pub mod helm;
 pub mod import;
 pub mod jobs;

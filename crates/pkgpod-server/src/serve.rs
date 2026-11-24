@@ -233,7 +233,7 @@ fn browsable(format: &str) -> bool {
 }
 
 /// A registry's address seen from a browser: how its clients use it.
-fn client_note(st: StatusCode, text: String) -> Response {
+pub(crate) fn client_note(st: StatusCode, text: String) -> Response {
     (
         st,
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -242,11 +242,11 @@ fn client_note(st: StatusCode, text: String) -> Response {
         .into_response()
 }
 
-fn status(s: StatusCode) -> Response {
+pub(crate) fn status(s: StatusCode) -> Response {
     (s, s.canonical_reason().unwrap_or("")).into_response()
 }
 
-fn deny(c: &Caller) -> Response {
+pub(crate) fn deny(c: &Caller) -> Response {
     if c.user.is_none() {
         let mut r = status(StatusCode::UNAUTHORIZED);
         r.headers_mut().insert(
@@ -403,6 +403,7 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
 }
 
 /// A repository's request, once its route is found.
+#[derive(Clone)]
 pub(crate) struct At {
     pub served: crate::Served,
     /// The caller's role on the repository (a group's readers read its
@@ -429,7 +430,19 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
         raw_path,
     } = at;
     let method = req.method().clone();
-
+    if served.repo.kind == Kind::Group {
+        let at = At {
+            served,
+            role,
+            caller,
+            rel,
+            base,
+            route,
+            host,
+            raw_path,
+        };
+        return Box::pin(crate::group::serve(app, at, req)).await;
+    }
     if served.repo.format == "npm" {
         // Tarball URLs are absolute: the address the request
         // came in on (behind a proxy, its scheme).
@@ -1417,6 +1430,56 @@ async fn serve_mirror(
     r
 }
 
+/// The entries of directory `rel` of what a repository serves (its
+/// current version, or a mirror's received tree); `None` if it is not a
+/// directory there.
+pub(crate) fn dir_entries(app: &App, s: &crate::Served, rel: &[String]) -> Option<Vec<ListEntry>> {
+    let rel_s = rel.join("/");
+    if s.repo.kind == Kind::Mirror {
+        let files = s.repo.format == "files";
+        let hidden = move |name: &str| {
+            if files {
+                pkgpod_files::engine_name(name)
+            } else {
+                name.starts_with('.')
+            }
+        };
+        if rel.iter().any(|x| hidden(x)) {
+            return None;
+        }
+        let tree = s.repo.tree_dir();
+        let full = tree.join(&rel_s);
+        inside(&tree, &full)?;
+        return full.is_dir().then(|| fs_entries(&tree, &full, hidden));
+    }
+    let v = s.current.as_ref()?;
+    let Entry::Dir { id } = app.engine.objects().resolve(&v.served(), &rel_s).ok()?? else {
+        return None;
+    };
+    let t = app.engine.objects().get(&id).ok()?;
+    Some(
+        t.iter()
+            .filter_map(|(name, e)| match e {
+                Entry::Dir { .. } => Some(ListEntry {
+                    name: name.clone(),
+                    dir: true,
+                    size: 0,
+                    modified: None,
+                }),
+                Entry::Blob { size, meta, .. } => Some(ListEntry {
+                    name: name.clone(),
+                    dir: false,
+                    size: *size,
+                    modified: meta.get("mtime").and_then(Value::as_i64).map(|t| {
+                        std::time::UNIX_EPOCH + std::time::Duration::from_secs(t.max(0) as u64)
+                    }),
+                }),
+                _ => None,
+            })
+            .collect(),
+    )
+}
+
 fn fs_entries(
     tree: &std::path::Path,
     dir: &std::path::Path,
@@ -1581,7 +1644,7 @@ pub struct ListEntry {
     pub modified: Option<std::time::SystemTime>,
 }
 
-fn listing(path: &str, entries: Vec<ListEntry>, query: &str, head: bool) -> Response {
+pub(crate) fn listing(path: &str, entries: Vec<ListEntry>, query: &str, head: bool) -> Response {
     let q = |k: &str| {
         query
             .split('&')
