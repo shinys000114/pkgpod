@@ -4881,6 +4881,32 @@ fn cargo_publish_build_yank() {
     let cfg: Value = serde_json::from_str(&cfg).unwrap();
     assert_eq!(cfg["dl"], format!("{reg}@first/api/v1/crates"));
     assert_eq!(cfg["auth-required"], true);
+    // Owners are who may write: listed, not changed through cargo.
+    s.cli_in(&["user", "add", "dev", "--password-stdin"], "dev-password")
+        .unwrap();
+    s.cli(&["grant", "set", "crates", "user:dev", "write"])
+        .unwrap();
+    let (ok, out) = cargo(
+        &home,
+        &app,
+        &["owner", "--list", "hello_pod", "--registry", "crates"],
+        &tok,
+    );
+    assert!(ok && out.contains("user:dev"), "{out}");
+    let (ok, out) = cargo(
+        &home,
+        &app,
+        &[
+            "owner",
+            "--add",
+            "someone",
+            "hello_pod",
+            "--registry",
+            "crates",
+        ],
+        &tok,
+    );
+    assert!(!ok && out.contains("pkgpod's rights"), "{out}");
     let (ok, out) = cargo(
         &home,
         &app,
@@ -6292,6 +6318,13 @@ fn npm_deprecate_and_unpublish_with_npm() {
             .json()
             .unwrap()
     };
+    let (ok, out) = npm(&home, &src, &["search", "hello", "--json"]);
+    assert!(
+        ok && out.contains("hello-pkg") && out.contains("1.2.0"),
+        "{out}"
+    );
+    let (ok, out) = npm(&home, &src, &["search", "nothing-like-it", "--json"]);
+    assert!(ok && !out.contains("hello-pkg"), "{out}");
     let (ok, out) = npm(&home, &src, &["deprecate", "hello-pkg@1.0.0", "use 1.2"]);
     assert!(ok, "{out}");
     assert_eq!(doc()["versions"]["1.0.0"]["deprecated"], "use 1.2");

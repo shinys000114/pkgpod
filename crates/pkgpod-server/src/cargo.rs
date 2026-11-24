@@ -131,6 +131,31 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
             )
             .await
         }
+        (["api", "v1", "crates", name, "owners"], true) => {
+            // Owners are pkgpod's rights: who may write to the registry.
+            let Some(v) = &a.version else {
+                return not_found();
+            };
+            let lower = name.to_ascii_lowercase();
+            if !matches!(
+                app.engine.objects().resolve(&v.root, &lower),
+                Ok(Some(Entry::Dir { .. }))
+            ) {
+                return not_found();
+            }
+            let grants = app.auth.grants(Some(&a.repo.name)).unwrap_or_default();
+            let users: Vec<Value> = grants
+                .iter()
+                .filter(|g| g.role >= Role::Write)
+                .enumerate()
+                .map(|(i, g)| json!({"id": i + 1, "login": g.subject, "name": null}))
+                .collect();
+            reply(StatusCode::OK, json!({"users": users}))
+        }
+        (["api", "v1", "crates", _, "owners"], false) => err(
+            StatusCode::FORBIDDEN,
+            "owners are pkgpod's rights: grant write on the repository instead (pkgpod grant)",
+        ),
         (["api", "v1", "crates"], true) => {
             search(&app, &a, req.uri().query().unwrap_or("").to_string()).await
         }
