@@ -32,7 +32,6 @@
   {% endif %}
 </div>
 {% if s.admin %}
-<datalist id="dl-dists">{% for d in ["trixie", "bookworm", "bullseye", "noble", "jammy", "focal", "stable", "testing", "unstable"] %}<option value="{{ d }}">{% endfor %}</datalist>
 <div class="card" id="new">
   <div class="card-head"><h2>New repository</h2><span class="hint">choose what it holds</span></div>
   <div class="card-body chooser">
@@ -52,8 +51,7 @@
       <div class="fields">
         <label class="field"><span>Name</span><input name="name" placeholder="{% if f.kind == "mirror" %}e.g. debian{% else %}e.g. team{% endif %}" required pattern="[a-z0-9][a-z0-9._-]*" autocomplete="off" autocapitalize="off" spellcheck="false"><small>Lowercase letters, digits, '.', '_', '-'.</small></label>
         {% if f.id == "deb" && f.kind == "hosted" %}
-        <label class="field"><span>First dist</span><input name="first_dist" placeholder="noble" list="dl-dists" autocomplete="off" autocapitalize="off" spellcheck="false"><small>The codename clients put in sources.list; more can be added later.</small></label>
-        <label class="field"><span>Components</span><input name="first_components" placeholder="main" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+        <label class="field wide"><span>Dists</span><textarea name="dists" rows="3" spellcheck="false" autocapitalize="off" placeholder="focal jammy noble: rockchip amlogic&#10;resolute: internal-realtek"></textarea><small>A line per group: the dists clients put in sources.list, then after a colon their components (none: main). More can be added or changed later.</small></label>
         {% endif %}
         {% if storages.len() > 1 %}<label class="field"><span>Storage</span><select name="storage">{% for st in storages %}<option>{{ st }}</option>{% endfor %}</select></label>{% endif %}
       </div>

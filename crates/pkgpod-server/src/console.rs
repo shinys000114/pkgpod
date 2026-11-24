@@ -328,8 +328,6 @@ fn label_of(name: &str) -> String {
         "bwlimit" => "Bandwidth limit",
         "max_delete" => "Most deletions",
         "udebs" => "Installer packages (udebs)",
-        "first_dist" => "First dist",
-        "first_components" => "Its components",
         "ignore_missing" => "Missing files allowed",
         "key" => "Signing key",
         _ => "",
@@ -433,10 +431,48 @@ fn form_fields(
                     .get(&key)
                     .map(|m| serde_json::to_string(m).expect("json"))
                     .unwrap_or_default(),
-                natural: matches!(f.name, "description" | "note" | "uid"),
+                natural: matches!(
+                    f.name,
+                    "description" | "note" | "uid" | "message" | "reason"
+                ),
             }
         })
         .collect()
+}
+
+/// Names and versions from a repository's catalog for its operations'
+/// fields that name a package (`package`, `crate`, `gem`, `module`,
+/// `project`, `image`) or a version (`version`, `tag`), where the format
+/// gave none.
+fn catalog_hints(
+    app: &App,
+    repo: &str,
+    ops: &[pkgpod_engine::format::OpSpec],
+    h: &mut pkgpod_engine::FormHints,
+) {
+    let found = app.engine.search("", Some(repo), 5000).unwrap_or_default();
+    if found.is_empty() {
+        return;
+    }
+    let mut names: Vec<String> = found.iter().map(|x| x.name.clone()).collect();
+    names.sort();
+    names.dedup();
+    let mut versions: Vec<String> = found.iter().map(|x| x.version.clone()).collect();
+    versions.sort();
+    versions.dedup();
+    versions.retain(|v| !v.is_empty());
+    for o in ops {
+        for p in &o.params {
+            let list = match p.name {
+                "package" | "crate" | "gem" | "module" | "project" | "image" => &names,
+                "version" | "tag" => &versions,
+                _ => continue,
+            };
+            h.suggest
+                .entry(format!("{}.{}", o.name, p.name))
+                .or_insert_with(|| list.clone());
+        }
+    }
 }
 
 /// Hints for settings forms: the signing keys there are.
@@ -845,34 +881,40 @@ async fn repo_create(
         storage,
         settings,
     };
-    let first_dist = form_get(&form, "first_dist").trim().to_string();
-    let components: Vec<String> = form_get(&form, "first_components")
-        .split([',', ' '])
-        .filter(|c| !c.is_empty())
-        .map(String::from)
-        .collect();
+    // A hosted Debian repository's dists, made with it (a group a line).
+    let dists = if req.format == "deb" && req.kind == "hosted" {
+        match pkgpod_deb::format::parse_dist_groups(form_get(&form, "dists")) {
+            Ok(d) => d,
+            Err(e) => return err_part(e.into()),
+        }
+    } else {
+        Vec::new()
+    };
     let actor = v.caller.name().to_string();
     match api::repo_create(State(app.clone()), v.who(), Json(req)).await {
         Ok((_, Json(r))) => {
             let name = s(&r["name"]);
-            // A Debian repository takes uploads once it has a dist.
-            if !first_dist.is_empty() {
+            // A Debian repository takes uploads once it has a dist; all of
+            // them in one version.
+            if !dists.is_empty() {
                 let (app2, name2) = (app.clone(), name.clone());
                 let made = tokio::task::spawn_blocking(move || {
                     let r = app2.engine.repo(&name2)?;
                     let f = app2.engine.format(&r.format)?.clone();
-                    let p = json!({"name": first_dist, "components": components});
-                    app2.engine
-                        .change(&name2, &actor, |cx, e| f.op(cx, "dist-set", &p, e))
+                    app2.engine.change(&name2, &actor, |cx, e| {
+                        let mut done = Vec::new();
+                        for (d, comps) in &dists {
+                            let p = json!({"name": d, "components": comps});
+                            done.push(f.op(cx, "dist-set", &p, e)?);
+                        }
+                        Ok(done.join("; "))
+                    })
                 })
                 .await;
                 match made {
                     Ok(Ok(_)) => {}
                     Ok(Err(e)) => {
-                        return msg(
-                            false,
-                            format!("created {name}, but its first dist was not: {e}"),
-                        );
+                        return msg(false, format!("created {name}, but not its dists: {e}"));
                     }
                     Err(e) => return msg(false, e.to_string()),
                 }
@@ -955,10 +997,14 @@ pub struct OpForm {
     pub fields: Vec<FormField>,
 }
 
-/// An operation's title, from its help: the first sentence (to a `.`,
-/// `:`, `;` or `(`), and the rest.
+/// An operation's title, from its help: its first clause (to a `.`, `:`
+/// or `;`), without a long remark in parentheses; and the rest.
 fn op_title(help: &str) -> (String, String) {
-    let cut = help.find(['.', ':', ';', '(']).unwrap_or(help.len());
+    let end = help.find(['.', ':', ';']).unwrap_or(help.len());
+    let cut = match help[..end].find('(') {
+        Some(p) if end > 48 => p,
+        _ => end,
+    };
     let rest = help[cut..]
         .trim_start_matches(['.', ':', ';'])
         .trim()
@@ -1214,15 +1260,25 @@ fn usage(
             format!("{scheme}://token:<token>@{rest}")
         };
         let section = r.name.to_ascii_lowercase();
-        out.push(UseLine {
-            label: "Trust the key".into(),
-            text: format!(
-                "curl -fsSL {server}key.asc -o /tmp/pkgpod.asc\nsudo pacman-key --add /tmp/pkgpod.asc\nsudo pacman-key --lsign-key \"$(gpg --show-keys --with-colons /tmp/pkgpod.asc | awk -F: '/^fpr/{{print $10; exit}}')\""
-            ),
-        });
+        let signed = r.setting_bool("sign");
+        if signed {
+            out.push(UseLine {
+                label: "Trust the key".into(),
+                text: format!(
+                    "curl -fsSL {server}key.asc -o /tmp/pkgpod.asc\nsudo pacman-key --add /tmp/pkgpod.asc\nsudo pacman-key --lsign-key \"$(gpg --show-keys --with-colons /tmp/pkgpod.asc | awk -F: '/^fpr/{{print $10; exit}}')\""
+                ),
+            });
+        }
         out.push(UseLine {
             label: "/etc/pacman.conf".into(),
-            text: format!("[{section}]\nServer = {server}$repo/$arch"),
+            text: format!(
+                "[{section}]\n{}Server = {server}$repo/$arch",
+                if signed {
+                    ""
+                } else {
+                    "SigLevel = Optional TrustAll   # not signed\n"
+                }
+            ),
         });
         out.push(UseLine {
             label: "Upload".into(),
@@ -1341,8 +1397,14 @@ fn usage(
             let (scheme, rest) = base.split_once("://").unwrap_or(("https", &base));
             format!("{scheme}://token:<token>@{rest}key.asc")
         };
+        // Unsigned: dnf is told not to look for a signature.
+        let check = if r.setting_bool("sign") {
+            format!("repo_gpgcheck=1\ngpgkey={key_url}")
+        } else {
+            "repo_gpgcheck=0".to_string()
+        };
         let mut repo = format!(
-            "[pkgpod-{id}]\nname={}\nbaseurl={base}<group>/\nenabled=1\ngpgcheck=0\nrepo_gpgcheck=1\ngpgkey={key_url}",
+            "[pkgpod-{id}]\nname={}\nbaseurl={base}<group>/\nenabled=1\ngpgcheck=0\n{check}",
             r.name
         );
         if !public {
@@ -1996,7 +2058,9 @@ async fn actions_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> Re
         .map(|v| v.root)
         .unwrap_or_else(pkgpod_engine::tree::empty);
     let hints = if can_write {
-        f.form_hints(app.engine.objects(), &root)
+        let mut h = f.form_hints(app.engine.objects(), &root);
+        catalog_hints(&app, &r.name, &f.ops(), &mut h);
+        h
     } else {
         pkgpod_engine::FormHints::default()
     };

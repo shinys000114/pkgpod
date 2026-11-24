@@ -265,7 +265,7 @@ label.check.field .check-line { display: inline-flex; gap: .45rem; align-items: 
 .dist-pick { border: 0; padding: 0; margin: 0; min-width: 0; display: flex; flex-direction: column; align-items: stretch; gap: .3rem; }
 .dist-pick legend { padding: 0; margin-bottom: .3rem; color: var(--muted); font-size: 13px; font-weight: 500; }
 .dist-pick .check-row { display: flex; flex-wrap: wrap; gap: .35rem 1.1rem; }
-code.op-id { font: 11.5px var(--mono); color: var(--muted); background: var(--surface-2); padding: .05rem .35rem; border-radius: 4px; font-weight: 400; }
+code.op-id { white-space: nowrap; font: 11.5px var(--mono); color: var(--muted); background: var(--surface-2); padding: .05rem .35rem; border-radius: 4px; font-weight: 400; }
 .toolbar { display: flex; gap: .6rem; flex-wrap: wrap; padding: .8rem 1.1rem; border-bottom: 1px solid var(--line); }
 .toolbar input { flex: 1 1 220px; width: auto; }
 .toolbar select { flex: 0 1 180px; width: auto; }
