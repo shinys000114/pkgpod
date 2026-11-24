@@ -170,7 +170,9 @@ Operations:
   a public group only its public members); only who may read a
   repository makes it a member; a deleted member leaves its groups.
   Publishing goes to a member.
-- Proxy repositories (`-k proxy -s upstream=<registry>`), Go's first:
+- Proxy repositories (`-k proxy -s upstream=<registry>`) for Go and
+  Maven (a release's files checked against the upstream's `.sha1`, a
+  SNAPSHOT's files and metadata fetched again after their time):
   a registry's files fetched when asked for and kept (garbage
   collection keeps them), its metadata asked for again after
   `metadata_minutes` and served as it was while the upstream is not
