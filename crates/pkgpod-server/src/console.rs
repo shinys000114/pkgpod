@@ -4237,6 +4237,8 @@ struct BadgesPart {
     /// The addresses can be shown (public, or with the token).
     shown: bool,
     badges: Vec<BadgeRow>,
+    /// The scheme and host the badges are served at.
+    root: String,
 }
 
 struct BadgeRow {
@@ -4307,6 +4309,7 @@ async fn badges_part(
         public,
         can_admin,
         badges,
+        root,
     })
 }
 

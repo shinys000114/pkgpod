@@ -10186,6 +10186,12 @@ fn console_packages_filter_download_details_bulk() {
             && b.contains("New token"),
         "{b}"
     );
+    // A note, shown by the page when the images do not load, names the
+    // address they come from.
+    assert!(
+        b.contains("badge-broken\" hidden") && b.contains("did not load from <code>http://"),
+        "{b}"
+    );
     // Details: when it came, its digest.
     let d = text("/r/r/pkg?path=el9%2Fhello-rpm-1.0-1.noarch.rpm");
     assert!(
