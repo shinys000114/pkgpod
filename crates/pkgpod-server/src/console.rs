@@ -697,6 +697,8 @@ pub struct FormatChoice {
 #[template(path = "index.html")]
 struct IndexPage {
     s: Shell,
+    /// Formats in the list (id, title), for its filter.
+    present: Vec<(String, String)>,
     repos: Vec<RepoRow>,
     formats: Vec<FormatChoice>,
     storages: Vec<String>,
@@ -749,7 +751,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
         .formats()
         .map(|f| (f.id().to_string(), f.title().to_string()))
         .collect();
-    let repos = list
+    let repos: Vec<RepoRow> = list
         .as_array()
         .into_iter()
         .flatten()
@@ -859,8 +861,16 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
         vec![]
     };
     let host = crate::routes::host_name(&host);
+    // The formats in the list, for its filter.
+    let mut present: Vec<(String, String)> = repos
+        .iter()
+        .map(|r: &RepoRow| (r.format.clone(), r.format_title.clone()))
+        .collect();
+    present.sort_by_key(|a| a.1.to_lowercase());
+    present.dedup();
     Ok(render(&IndexPage {
         s: v.shell("repos"),
+        present,
         repos,
         formats,
         storages,

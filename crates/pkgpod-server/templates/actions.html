@@ -14,10 +14,10 @@
 <details class="card panel">
   <summary>Upload <span class="hint">files into the repository; each upload is a version</span></summary>
   <div class="panel-body">
-  <form hx-post="/c/r/{{ name }}/upload" hx-encoding="multipart/form-data" hx-target="next .result">
-    <div class="fields"><label class="field wide"><span>Files</span><input type="file" name="file" multiple required></label></div>
+  <form class="upload-form" hx-post="/c/r/{{ name }}/upload" hx-encoding="multipart/form-data" hx-target="next .result">
+    <div class="fields"><label class="field wide dropzone"><span>Files</span><input type="file" name="file" multiple required><small class="drop-hint">Drop files here, or choose them; all of them go in one version.</small><ul class="drop-list"></ul></label></div>
     {% call m::fields(upload) %}{% endcall %}
-    <div class="form-foot"><button type="submit">Upload</button></div>
+    <div class="form-foot"><button type="submit">Upload</button><progress class="upload-progress" max="100" value="0" hidden></progress><span class="muted small upload-pct"></span></div>
   </form>
   <div class="result"></div>
   </div>
