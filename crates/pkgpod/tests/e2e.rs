@@ -5823,6 +5823,62 @@ fn maven_deploy_and_depend() {
     assert!(ok, "{out}");
     let (ok, _) = depend("app4", "1.1.0-SNAPSHOT", "hello2", "@first/");
     assert!(!ok, "the label has no SNAPSHOT");
+    // A Maven plugin: deployed, then run by its prefix (mvn pkhello:hello),
+    // which mvn finds in the group's metadata.
+    let plugin = work.join("hello-maven-plugin");
+    std::fs::create_dir_all(plugin.join("src/main/java/demo")).unwrap();
+    std::fs::write(
+        plugin.join("pom.xml"),
+        format!(
+            "<project xmlns=\"http://maven.apache.org/POM/4.0.0\">\n<modelVersion>4.0.0</modelVersion>\n\
+             <groupId>{group}</groupId><artifactId>hello-maven-plugin</artifactId><version>1.0.0</version>\n\
+             <packaging>maven-plugin</packaging>\n\
+             <properties><maven.compiler.release>17</maven.compiler.release>\
+             <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding></properties>\n\
+             <dependencies>\
+             <dependency><groupId>org.apache.maven</groupId><artifactId>maven-plugin-api</artifactId>\
+             <version>3.9.9</version><scope>provided</scope></dependency>\
+             <dependency><groupId>org.apache.maven.plugin-tools</groupId><artifactId>maven-plugin-annotations</artifactId>\
+             <version>3.15.1</version><scope>provided</scope></dependency>\
+             </dependencies>\n\
+             <build><plugins><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-plugin-plugin</artifactId>\
+             <version>3.15.1</version><configuration><goalPrefix>pkhello</goalPrefix></configuration></plugin></plugins></build>\n\
+             {deploy_to}\n</project>\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        plugin.join("src/main/java/demo/HelloMojo.java"),
+        "package demo;\nimport org.apache.maven.plugin.AbstractMojo;\nimport org.apache.maven.plugins.annotations.Mojo;\n\
+         @Mojo(name = \"hello\", requiresProject = false)\n\
+         public class HelloMojo extends AbstractMojo { public void execute() { getLog().info(\"pkgpod plugin says hello\"); } }\n",
+    )
+    .unwrap();
+    let (ok, out) = mvn_sh(
+        &work,
+        &format!("cd hello-maven-plugin && {mvn} -Dmaven.install.skip=true deploy"),
+    );
+    assert!(ok, "{out}");
+    let meta = get(&format!("{gpath}/maven-metadata.xml"));
+    assert!(meta.contains("<prefix>pkhello</prefix>"), "{meta}");
+    std::fs::write(
+        work.join("plugins.xml"),
+        format!(
+            "<settings><servers><server><id>pk</id><username>token</username><password>{tok}</password></server></servers>\
+             <pluginGroups><pluginGroup>{group}</pluginGroup></pluginGroups>\
+             <profiles><profile><id>pk</id><activation><activeByDefault>true</activeByDefault></activation>\
+             <pluginRepositories><pluginRepository><id>pk</id><url>{base}</url></pluginRepository></pluginRepositories>\
+             </profile></profiles></settings>\n"
+        ),
+    )
+    .unwrap();
+    let (ok, out) = mvn_sh(
+        &work,
+        "mkdir -p empty && cd empty && mvn -B -s /work/plugins.xml -Dmaven.repo.local=/m2 \
+         -Daether.enhancedLocalRepository.split=true \
+         -Daether.enhancedLocalRepository.splitRemoteRepository=true pkhello:hello",
+    );
+    assert!(ok && out.contains("pkgpod plugin says hello"), "{out}");
 }
 
 const RUBY_IMAGE: &str = "ruby:3.4-slim";
