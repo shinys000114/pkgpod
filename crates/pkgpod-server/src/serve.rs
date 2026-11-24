@@ -159,6 +159,55 @@ fn client_base(route: Option<&Route>, host: &str, base: &[String], req: &Request
     }
 }
 
+/// The dnf repository file of an RPM repository's group.
+fn rpm_repo_file(repo: &pkgpod_engine::RepoInfo, base: &str, group: &str) -> String {
+    let public = repo.setting_bool("public");
+    let sign = repo
+        .settings
+        .get("sign")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let id = format!("{}-{group}", repo.name).replace('.', "-");
+    let key_url = if public {
+        format!("{base}key.asc")
+    } else {
+        // dnf fetches gpgkey without username and password.
+        let (scheme, rest) = base.split_once("://").unwrap_or(("https", base));
+        format!("{scheme}://token:<token>@{rest}key.asc")
+    };
+    let mut s = String::new();
+    if !public {
+        s.push_str(
+            "# Replace <token> with a pkgpod token that may read this repository.
+",
+        );
+    }
+    s.push_str(&format!(
+        "[{id}]
+name={} {group}
+baseurl={base}{group}/
+enabled=1
+gpgcheck=0
+",
+        repo.name
+    ));
+    if sign {
+        s.push_str(&format!(
+            "repo_gpgcheck=1
+gpgkey={key_url}
+"
+        ));
+    }
+    if !public {
+        s.push_str(
+            "username=token
+password=<token>
+",
+        );
+    }
+    s
+}
+
 /// Formats whose repositories are trees to browse. npm, OCI, cargo, Go
 /// and NuGet repositories answer their clients' API only, as public registries do:
 /// they are left out of listings, and their address says how to use them.
@@ -353,6 +402,44 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
                     );
                 }
                 return crate::go::read(&app, &served.repo, version, &rel, req).await;
+            }
+            // A dnf repository file per RPM group: <address><group>.repo.
+            if served.repo.format == "rpm"
+                && matches!(method, Method::GET | Method::HEAD)
+                && let Some(last) = rel.last()
+                && let Some(group) = last.strip_suffix(".repo")
+                && (rel.len() == 1 || (rel.len() == 2 && rel[0].starts_with('@')))
+            {
+                if role.is_none() {
+                    return deny(&caller);
+                }
+                let mut base_url = client_base(route.as_ref(), &host, &base, &req);
+                let version = match rel
+                    .first()
+                    .and_then(|f| f.strip_prefix('@'))
+                    .filter(|_| rel.len() == 2)
+                {
+                    Some(label) => {
+                        base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
+                        app.labelled(&served.repo.name, label).ok()
+                    }
+                    None => served.current.clone(),
+                };
+                let there = version.is_some_and(|v| {
+                    matches!(
+                        app.engine
+                            .objects()
+                            .resolve(&v.served(), &format!("{group}/repodata/repomd.xml")),
+                        Ok(Some(Entry::Blob { .. }))
+                    )
+                });
+                if !there {
+                    return status(StatusCode::NOT_FOUND);
+                }
+                return client_note(
+                    StatusCode::OK,
+                    rpm_repo_file(&served.repo, &base_url, group),
+                );
             }
             if served.repo.format == "helm" && crate::helm::is_api(&rel) {
                 let current = served.current.clone();

@@ -5445,7 +5445,7 @@ fn rpm_packages_with_dnf() {
              username=token\npassword={tok}\nEOF\n"
         )
     };
-    for image in images {
+    for &image in &images {
         let dnf = "dnf -y --disablerepo='*' --enablerepo=pk";
         let (ok, out) = docker_sh(
             image,
@@ -5482,6 +5482,29 @@ fn rpm_packages_with_dnf() {
     let (ok, out) = s.admin(&["check", "--deep"]);
     assert!(ok, "{out}");
     s.cli(&["repo", "set", "rpms", "sign=true"]).unwrap();
+    // The repository file the server gives for a group, as dnf takes it.
+    let r = c
+        .get(s.url("/rpms/el.repo"))
+        .basic_auth("token", Some(&tok))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    let file = r.text().unwrap().replace("<token>", &tok);
+    assert!(file.contains(&format!("baseurl={base}el/")), "{file}");
+    let (ok, out) = docker_sh(
+        images[0],
+        &format!(
+            "set -e\ncat > /etc/yum.repos.d/pk.repo <<'EOF'\n{file}EOF\n\
+             dnf -y -q --disablerepo='*' --enablerepo='rpms-el' install hello-rpm\nhello-rpm"
+        ),
+    );
+    assert!(ok && out.contains("hello-rpm 1.1"), "{out}");
+    let r = c
+        .get(s.url("/rpms/nothing.repo"))
+        .basic_auth("token", Some(&tok))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 404);
     // What dnf checked with repo_gpgcheck.
     let r = c
         .get(s.url("/rpms/el/repodata/repomd.xml.asc"))
