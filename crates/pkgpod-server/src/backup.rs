@@ -36,7 +36,19 @@ fn io(p: &Path, e: std::io::Error) -> Error {
 
 /// Copies the regular files of `from` into `to` (made), hard-linking when
 /// it can; sockets, links and `skip` names are left out.
+/// Copies `from` into `to`. Files under a `store` or `trees` directory
+/// are hard-linked when they can be: blobs are never written in place and
+/// a mirror replaces a file by renaming a new one over it. Everything else
+/// (the database, keys) is copied, so the two sides never share a file
+/// that is written to.
 fn copy_tree(from: &Path, to: &Path, skip: &[&str], rep: &mut Report) -> Result<()> {
+    let link = ["store", "trees"]
+        .iter()
+        .any(|d| from.file_name().is_some_and(|n| n == *d));
+    copy_dir(from, to, skip, link, rep)
+}
+
+fn copy_dir(from: &Path, to: &Path, skip: &[&str], link: bool, rep: &mut Report) -> Result<()> {
     std::fs::create_dir_all(to).map_err(|e| io(to, e))?;
     let rd = match std::fs::read_dir(from) {
         Ok(r) => r,
@@ -52,13 +64,14 @@ fn copy_tree(from: &Path, to: &Path, skip: &[&str], rep: &mut Report) -> Result<
         let (src, dst) = (d.path(), to.join(&name));
         let ft = d.file_type().map_err(|e| io(&src, e))?;
         if ft.is_dir() {
-            copy_tree(&src, &dst, &[], rep)?;
+            let link = link || name == "store" || name == "trees";
+            copy_dir(&src, &dst, &[], link, rep)?;
         } else if ft.is_file() {
             if dst.exists() {
                 continue;
             }
             rep.files += 1;
-            if std::fs::hard_link(&src, &dst).is_ok() {
+            if link && std::fs::hard_link(&src, &dst).is_ok() {
                 rep.linked += 1;
             } else {
                 rep.bytes += std::fs::copy(&src, &dst).map_err(|e| io(&src, e))?;

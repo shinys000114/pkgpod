@@ -7527,6 +7527,16 @@ fn backup_while_working_then_restore() {
     };
     let (ok, out) = admin2(&["restore", backup.to_str().unwrap()]);
     assert!(ok, "{out}");
+    // The restored database and keys are copies: what the server writes
+    // never reaches the backup (blobs may be shared, being immutable).
+    {
+        use std::os::unix::fs::MetadataExt;
+        let ino = |p: &Path| std::fs::metadata(p).unwrap().ino();
+        assert_ne!(ino(&backup.join("pkgpod.db")), ino(&d2.join("pkgpod.db")));
+        for k in std::fs::read_dir(backup.join("keys")).unwrap().flatten() {
+            assert_ne!(ino(&k.path()), ino(&d2.join("keys").join(k.file_name())));
+        }
+    }
     let (ok, out) = admin2(&["check", "--deep"]);
     assert!(ok, "{out}");
     s.child = Command::new(env!("CARGO_BIN_EXE_pkgpod"))
