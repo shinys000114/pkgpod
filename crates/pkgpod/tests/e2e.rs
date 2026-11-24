@@ -4198,6 +4198,9 @@ fn go_proxy_cache() {
         out.contains("6 changed"),
         "the zips with their .info and .mod: {out}"
     );
+    // go reads the latest version's go.mod for retractions: kept too.
+    s.cli(&["cache", "gp", "pin", "example.com/greet/@v/v1.1.0.info"])
+        .unwrap();
     s.cli(&["repo", "set", "gp", "max_mib=1"]).unwrap();
     let (ok, out) = go(
         &home,
@@ -5023,6 +5026,36 @@ fn oci_proxy_and_group_with_docker() {
     // Pushing to the proxy or the group is refused.
     let (ok, _) = docker(&cfg, &["push", &tags[3]], None);
     assert!(!ok);
+    // A pinned tag keeps its manifests and layers over the size limit;
+    // what the cache names passes the deep check.
+    let out = s.cli(&["cache", "op", "pin", "up/manifests/1"]).unwrap();
+    let n: usize = out.split_whitespace().next().unwrap().parse().unwrap();
+    assert!(n >= 1, "the tag's manifest and what it names: {out}");
+    // (docker fetched only what its own store lacked: what the cached
+    // manifests name and the cache has is pinned.)
+    let cache = s.json(&["cache", "op"]);
+    let pinned = cache["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["pinned"] == true)
+        .count();
+    assert!(pinned >= 1 && n >= pinned, "{cache}");
+    let (ok, out) = s.admin(&["check", "--deep"]);
+    assert!(ok && !out.contains("missing"), "{out}");
+    // A registry named by its host, as docker names it.
+    s.cli(&[
+        "repo",
+        "create",
+        "hub",
+        "-f",
+        "oci",
+        "-k",
+        "proxy",
+        "-s",
+        "upstream=docker.io",
+    ])
+    .unwrap();
 }
 
 #[test]

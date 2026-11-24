@@ -420,6 +420,78 @@ async fn group(
     )
 }
 
+/// The proxy's size limit, after a new file.
+async fn shrink(app: &Arc<App>, r: &RepoInfo) {
+    let max = (r
+        .settings
+        .get("max_mib")
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        .max(0) as u64)
+        << 20;
+    if max > 0 {
+        let (app2, name) = (app.clone(), r.name.clone());
+        let _ = blocking(move || app2.engine.cache_shrink(&name, max)).await;
+    }
+}
+
+fn used(app: &Arc<App>, r: &RepoInfo, path: &str) {
+    let (app2, name, path) = (app.clone(), r.name.clone(), path.to_string());
+    tokio::spawn(async move {
+        let _ = blocking(move || app2.engine.cache_used(&name, &path)).await;
+    });
+}
+
+/// A cached manifest's pins go to what it names: an index's platform
+/// manifests, a manifest's config and layers (these are shared, so
+/// they carry no tag of their own).
+pub fn pin_closure(app: &App, repo: &str, paths: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = paths.to_vec();
+    let mut todo: Vec<String> = paths.to_vec();
+    let Ok(r) = app.engine.repo(repo) else {
+        return out;
+    };
+    while let Some(p) = todo.pop() {
+        let Some((image, _)) = p.split_once("/manifests/") else {
+            continue;
+        };
+        let image = image.to_string();
+        let Ok(Some(row)) = app.engine.cache_get(repo, &p) else {
+            continue;
+        };
+        let Some(sha) = row.sha256 else { continue };
+        let Ok(body) = std::fs::read(r.store().path(&sha)) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_slice::<Value>(&body) else {
+            continue;
+        };
+        let mut found: Vec<(String, bool)> = Vec::new();
+        if let Some(d) = v["config"]["digest"].as_str() {
+            found.push((format!("{image}/blobs/{d}"), false));
+        }
+        for l in v["layers"].as_array().into_iter().flatten() {
+            if let Some(d) = l["digest"].as_str() {
+                found.push((format!("{image}/blobs/{d}"), false));
+            }
+        }
+        for m in v["manifests"].as_array().into_iter().flatten() {
+            if let Some(d) = m["digest"].as_str() {
+                found.push((format!("{image}/manifests/{d}"), true));
+            }
+        }
+        for (q, again) in found {
+            if !out.contains(&q) {
+                out.push(q.clone());
+                if again {
+                    todo.push(q);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Upstream registry clients, by proxy (their Bearer tokens kept).
 fn registries() -> &'static Mutex<HashMap<String, Arc<pkgpod_mirror::oci::Registry>>> {
     static R: OnceLock<Mutex<HashMap<String, Arc<pkgpod_mirror::oci::Registry>>>> = OnceLock::new();
@@ -597,6 +669,7 @@ async fn proxy(
                             ))
                             .await;
                         }
+                        shrink(app, r).await;
                         Some(tagged)
                     }
                     // The upstream not there: as it was.
@@ -628,6 +701,8 @@ async fn proxy(
                 app.stats
                     .named(crate::stats::Counts::Whole, &resp, &r.name, image, re);
             }
+            used(app, r, &path);
+            used(app, r, &format!("{image}/manifests/{digest}"));
             resp
         }
         Target::Blob(d) => {
@@ -654,6 +729,7 @@ async fn proxy(
                             String::new(),
                         ))
                         .await;
+                        shrink(app, r).await;
                     }
                     Some(Err(e)) => return oci_err(StatusCode::BAD_GATEWAY, "BLOB_UNKNOWN", e),
                     None => {
@@ -669,6 +745,7 @@ async fn proxy(
             *again.method_mut() = method.clone();
             *again.uri_mut() = uri;
             *again.headers_mut() = headers;
+            used(app, r, &path);
             crate::serve::serve_blob(&r.store().path(&want), &want, "blob", None, false, again)
                 .await
         }
