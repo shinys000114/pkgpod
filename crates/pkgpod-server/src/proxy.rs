@@ -30,7 +30,7 @@ use crate::serve::{At, percent_encode, status};
 use crate::{App, Error, Result, Served};
 
 /// Formats whose proxies are served.
-pub const FORMATS: &[&str] = &["go", "maven"];
+pub const FORMATS: &[&str] = &["go", "maven", "npm"];
 
 /// Largest file fetched.
 pub const MAX_FILE: u64 = 4 << 30;
@@ -47,6 +47,18 @@ pub struct Asked {
     pub version: String,
     /// Served whole, it is a download.
     pub count: bool,
+    /// Where upstream it is, when not at the path under the base (a URL
+    /// the cached metadata named).
+    pub url: Option<String>,
+    /// What it must hash to, as the upstream's metadata says.
+    pub expect: Option<Expect>,
+}
+
+/// A digest a file must have.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expect {
+    Sha1(String),
+    Sha512(Vec<u8>),
 }
 
 fn joined(rel: &[String]) -> String {
@@ -72,6 +84,8 @@ fn go(rel: &[String]) -> Option<Asked> {
             name,
             version: String::new(),
             count: false,
+            url: None,
+            expect: None,
         }),
         [v, l] if v == "@v" && l == "list" => Some(Asked {
             path,
@@ -79,6 +93,8 @@ fn go(rel: &[String]) -> Option<Asked> {
             name,
             version: String::new(),
             count: false,
+            url: None,
+            expect: None,
         }),
         [v, f] if v == "@v" => {
             let (ver, ext) = f.rsplit_once('.')?;
@@ -91,6 +107,8 @@ fn go(rel: &[String]) -> Option<Asked> {
                 name,
                 version: ver.to_string(),
                 count: ext == "zip",
+                url: None,
+                expect: None,
             })
         }
         _ => None,
@@ -124,6 +142,8 @@ fn maven(rel: &[String]) -> Option<Asked> {
             name: format!("{}:{artifact}", group.join(".")),
             version: String::new(),
             count: false,
+            url: None,
+            expect: None,
         });
     }
     let [group @ .., artifact, version] = dirs else {
@@ -147,7 +167,54 @@ fn maven(rel: &[String]) -> Option<Asked> {
         name: format!("{}:{artifact}", group.join(".")),
         version: version.clone(),
         count: main && bare == file.as_str(),
+        url: None,
+        expect: None,
     })
+}
+
+/// An npm package name as a path segment (`@scope%2fname`).
+fn npm_path(pkg: &str) -> String {
+    percent_encode(pkg)
+}
+
+/// npm's registry: a package's document (metadata, its tarball URLs
+/// made ours when served) and its tarballs (files, fetched from where
+/// the document says).
+fn npm(rel: &[String]) -> Option<Asked> {
+    let (pkg, rest) = match rel {
+        [s, n, rest @ ..] if s.starts_with('@') => (format!("{s}/{n}"), rest),
+        [n, rest @ ..] if !n.starts_with('-') => (n.clone(), rest),
+        _ => return None,
+    };
+    match rest {
+        [] => Some(Asked {
+            path: npm_path(&pkg),
+            kind: CacheKind::Meta,
+            name: pkg,
+            version: String::new(),
+            count: false,
+            url: None,
+            expect: None,
+        }),
+        [d, file] if d == "-" && file.ends_with(".tgz") => {
+            let short = pkg.rsplit('/').next().unwrap_or(&pkg).to_string();
+            let version = file
+                .strip_prefix(&format!("{short}-"))
+                .and_then(|v| v.strip_suffix(".tgz"))
+                .unwrap_or("")
+                .to_string();
+            Some(Asked {
+                path: format!("{}/-/{}", npm_path(&pkg), percent_encode(file)),
+                kind: CacheKind::File,
+                name: pkg,
+                version,
+                count: true,
+                url: None,
+                expect: None,
+            })
+        }
+        _ => None,
+    }
 }
 
 /// What a request is, for a format.
@@ -155,43 +222,133 @@ pub fn classify(format: &str, rel: &[String]) -> Option<Asked> {
     match format {
         "go" => go(rel),
         "maven" => maven(rel),
+        "npm" => npm(rel),
         _ => None,
     }
 }
 
-/// The digest the upstream gives for a file, to check it against: the
-/// upstream's own `<file>.sha1` for Maven (not for checksum files).
-async fn expected(up: &Upstream, format: &str, a: &Asked) -> Option<String> {
-    if format != "maven" || CHECKSUMS.iter().any(|c| a.path.ends_with(c)) {
-        return None;
+/// Before a file is fetched: where it is and what it must hash to, as
+/// the upstream says (Maven: the `.sha1` beside it; npm: its package
+/// document's tarball URL and integrity). False if the upstream has no
+/// such file.
+async fn prepare(app: &Arc<App>, r: &RepoInfo, up: &Upstream, a: &mut Asked) -> Result<bool> {
+    if a.kind != CacheKind::File {
+        return Ok(true);
     }
-    let r = client()
-        .get(format!("{}{}.sha1", up.base, a.path))
-        .send()
-        .await
-        .ok()?;
-    if !r.status().is_success() {
-        return None;
+    match r.format.as_str() {
+        "maven" if !CHECKSUMS.iter().any(|c| a.path.ends_with(c)) => {
+            let resp = client()
+                .get(format!("{}{}.sha1", up.base, a.path))
+                .send()
+                .await;
+            if let Ok(resp) = resp
+                && resp.status().is_success()
+                && let Ok(t) = resp.text().await
+                && let Some(hex) = t.split_whitespace().next()
+                && hex.len() == 40
+                && hex.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                a.expect = Some(Expect::Sha1(hex.to_ascii_lowercase()));
+            }
+            Ok(true)
+        }
+        "npm" => {
+            // The cache key, not yet cached: what the document says.
+            let have = {
+                let (app2, name, path) = (app.clone(), r.name.clone(), a.path.clone());
+                tokio::task::spawn_blocking(move || app2.engine.cache_get(&name, &path))
+                    .await
+                    .map_err(|e| Error::Invalid(e.to_string()))??
+            };
+            if have.is_some_and(|h| h.kind == CacheKind::File) {
+                return Ok(true);
+            }
+            let doc = Asked {
+                path: npm_path(&a.name),
+                kind: CacheKind::Meta,
+                name: a.name.clone(),
+                version: String::new(),
+                count: false,
+                url: None,
+                expect: None,
+            };
+            let Got::Row(row) = get(app, r, up, &doc).await? else {
+                return Ok(false);
+            };
+            let Some(v) = read_json(r, &row).await else {
+                return Ok(false);
+            };
+            let file = a.path.rsplit('/').next().unwrap_or("").to_string();
+            let file = String::from_utf8_lossy(&crate::serve::percent_decode(&file)).into_owned();
+            for (ver, m) in v["versions"].as_object().into_iter().flatten() {
+                let Some(t) = m["dist"]["tarball"].as_str() else {
+                    continue;
+                };
+                if t.rsplit('/').next() != Some(file.as_str())
+                    || !(t.starts_with("https://") || t.starts_with("http://"))
+                {
+                    continue;
+                }
+                a.url = Some(t.to_string());
+                a.version = ver.clone();
+                a.expect = m["dist"]["integrity"]
+                    .as_str()
+                    .and_then(|i| i.strip_prefix("sha512-"))
+                    .and_then(|b| {
+                        use base64::Engine;
+                        base64::engine::general_purpose::STANDARD.decode(b).ok()
+                    })
+                    .map(Expect::Sha512)
+                    .or_else(|| {
+                        m["dist"]["shasum"]
+                            .as_str()
+                            .map(|h| Expect::Sha1(h.to_ascii_lowercase()))
+                    });
+                return Ok(true);
+            }
+            Ok(false)
+        }
+        _ => Ok(true),
     }
-    let t = r.text().await.ok()?;
-    let hex = t.split_whitespace().next()?.to_ascii_lowercase();
-    (hex.len() == 40 && hex.bytes().all(|b| b.is_ascii_hexdigit())).then_some(hex)
 }
 
-fn sha1_file(p: &std::path::Path) -> std::io::Result<String> {
-    use sha1::Digest as _;
+/// A cached document, read as JSON.
+async fn read_json(r: &RepoInfo, row: &CacheRow) -> Option<Value> {
+    let p = r.store().path(row.sha256.as_ref()?);
+    let b = tokio::fs::read(p).await.ok()?;
+    serde_json::from_slice(&b).ok()
+}
+
+fn hash_file(p: &std::path::Path, e: &Expect) -> std::io::Result<bool> {
+    use sha2::Digest as _;
     use std::io::Read;
     let mut f = std::fs::File::open(p)?;
-    let mut h = sha1::Sha1::new();
     let mut buf = vec![0u8; 1 << 16];
-    loop {
-        let n = f.read(&mut buf)?;
-        if n == 0 {
-            break;
+    match e {
+        Expect::Sha1(want) => {
+            let mut h = sha1::Sha1::new();
+            loop {
+                let n = f.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                h.update(&buf[..n]);
+            }
+            let got: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+            Ok(&got == want)
         }
-        h.update(&buf[..n]);
+        Expect::Sha512(want) => {
+            let mut h = sha2::Sha512::new();
+            loop {
+                let n = f.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                h.update(&buf[..n]);
+            }
+            Ok(h.finalize().as_slice() == want.as_slice())
+        }
     }
-    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// The metadata that says whether the upstream has package `name`.
@@ -206,6 +363,7 @@ fn name_doc(format: &str, name: &str) -> Option<String> {
         )),
         // Groups name a Maven artifact by its directory.
         "maven" => Some(format!("{name}/maven-metadata.xml")),
+        "npm" => Some(npm_path(name)),
         _ => None,
     }
 }
@@ -307,7 +465,10 @@ async fn get(app: &Arc<App>, r: &RepoInfo, up: &Upstream, a: &Asked) -> Result<G
             _ => {}
         }
     }
-    let url = format!("{}{}", up.base, a.path);
+    let url = a
+        .url
+        .clone()
+        .unwrap_or_else(|| format!("{}{}", up.base, a.path));
     let mut req = client().get(&url);
     if let Some(row) = have.as_ref().filter(|r| r.kind == CacheKind::Meta) {
         if !row.etag.is_empty() {
@@ -382,23 +543,18 @@ async fn get(app: &Arc<App>, r: &RepoInfo, up: &Upstream, a: &Asked) -> Result<G
             "{url} is larger than {MAX_FILE} bytes"
         )));
     }
-    let want = if a.kind == CacheKind::File {
-        expected(up, &r.format, a).await
-    } else {
-        None
-    };
     let (sha, size) =
         crate::serve::stream_to_store(r.store(), resp.bytes_stream(), MAX_FILE).await?;
-    if let Some(want) = want {
+    if let Some(want) = a.expect.clone() {
         let p = r.store().path(&sha);
-        let got = tokio::task::spawn_blocking(move || sha1_file(&p))
+        let ok = tokio::task::spawn_blocking(move || hash_file(&p, &want))
             .await
             .map_err(|e| Error::Invalid(e.to_string()))?
             .map_err(|e| Error::Invalid(e.to_string()))?;
-        if got != want {
+        if !ok {
             // Not kept: the stored blob goes at the next collection.
             return Err(Error::Invalid(format!(
-                "{url}: its SHA-1 is {got}, the upstream says {want}"
+                "{url}: its digest is not the one the upstream's metadata gives (SHA-1 or integrity)"
             )));
         }
     }
@@ -444,6 +600,8 @@ pub async fn has_name(app: &Arc<App>, m: &Served, name: &str) -> bool {
         name: name.to_string(),
         version: String::new(),
         count: false,
+        url: None,
+        expect: None,
     };
     matches!(get(app, &m.repo, &up, &a).await, Ok(Got::Row(_)))
 }
@@ -455,6 +613,10 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
     }
     let method = req.method().clone();
     if method != Method::GET && method != Method::HEAD {
+        // npm's own endpoints (audit) answer as a hosted registry does.
+        if r.format == "npm" && at.rel.first().map(String::as_str) == Some("-") {
+            return status(StatusCode::NOT_FOUND);
+        }
         return text(
             StatusCode::METHOD_NOT_ALLOWED,
             format!(
@@ -474,7 +636,7 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
             ),
         );
     }
-    let Some(a) = classify(&r.format, &at.rel) else {
+    let Some(mut a) = classify(&r.format, &at.rel) else {
         return status(StatusCode::NOT_FOUND);
     };
     let up = match Upstream::of(&r) {
@@ -484,6 +646,11 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
     if up.excluded(&a.name) {
         return status(StatusCode::NOT_FOUND);
     }
+    match prepare(&app, &r, &up, &mut a).await {
+        Ok(true) => {}
+        Ok(false) => return status(StatusCode::NOT_FOUND),
+        Err(e) => return text(StatusCode::BAD_GATEWAY, e.to_string()),
+    }
     let row = match get(&app, &r, &up, &a).await {
         Ok(Got::Row(row)) => row,
         Ok(Got::Missing) => return status(StatusCode::NOT_FOUND),
@@ -492,6 +659,40 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
     let Some(sha) = row.sha256 else {
         return status(StatusCode::NOT_FOUND);
     };
+    if r.format == "npm" && a.kind == CacheKind::Meta {
+        // Its tarballs through here.
+        let base = crate::serve::client_base(at.route.as_ref(), &at.host, &at.base, &req);
+        let Some(mut v) = read_json(&r, &row).await else {
+            return text(
+                StatusCode::BAD_GATEWAY,
+                "the upstream's document is not JSON".into(),
+            );
+        };
+        if let Some(vs) = v["versions"].as_object_mut() {
+            for m in vs.values_mut() {
+                let file = m["dist"]["tarball"]
+                    .as_str()
+                    .and_then(|t| t.rsplit('/').next())
+                    .map(String::from);
+                if let Some(f) = file {
+                    m["dist"]["tarball"] = json!(format!("{base}{}/-/{f}", npm_path(&a.name)));
+                }
+            }
+        }
+        let body = if method == Method::HEAD {
+            String::new()
+        } else {
+            v.to_string()
+        };
+        let mut resp = Response::new(Body::from(body));
+        resp.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        resp.headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+        return resp;
+    }
     let counts = crate::stats::counts(req.method(), req.headers());
     let file = r.store().path(&sha);
     let name = at.rel.last().cloned().unwrap_or_default();
@@ -526,13 +727,24 @@ pub async fn prefetch(app: &Arc<App>, r: &RepoInfo, paths: &[String]) -> Result<
             .split('/')
             .map(|s| String::from_utf8_lossy(&crate::serve::percent_decode(s)).into_owned())
             .collect();
-        let Some(a) = classify(&r.format, &rel) else {
+        let Some(mut a) = classify(&r.format, &rel) else {
             out.push(json!({"path": p, "state": "not a file or document of this format"}));
             continue;
         };
         if up.excluded(&a.name) {
             out.push(json!({"path": p, "state": "excluded"}));
             continue;
+        }
+        match prepare(app, r, &up, &mut a).await {
+            Ok(true) => {}
+            Ok(false) => {
+                out.push(json!({"path": p, "state": "not upstream"}));
+                continue;
+            }
+            Err(e) => {
+                out.push(json!({"path": p, "state": format!("failed: {e}")}));
+                continue;
+            }
         }
         let state = match get(app, r, &up, &a).await {
             Ok(Got::Row(row)) => format!("cached ({} bytes)", row.size),
