@@ -1745,6 +1745,71 @@ fn import_an_apt_repository_as_one_version() {
         .send()
         .unwrap();
     assert_eq!(r.status().as_u16(), 403);
+
+    // Other files beside the archive: a README, a keyring.
+    let readme = s.dir.path().join("README.md");
+    std::fs::write(&readme, "# packages\n").unwrap();
+    let out = s
+        .cli(&[
+            "upload",
+            "new",
+            readme.to_str().unwrap(),
+            "-s",
+            "path=README.md",
+        ])
+        .unwrap();
+    assert!(out.contains("README.md put beside the archive"), "{out}");
+    s.cli(&[
+        "upload",
+        "new",
+        kf.to_str().unwrap(),
+        "-s",
+        "path=keys/old.asc",
+    ])
+    .unwrap();
+    let auth = Some(("admin", pw.trim()));
+    assert_eq!(
+        get(&s.url("/new/README.md"), auth),
+        (200, "# packages\n".into())
+    );
+    assert_eq!(get(&s.url("/new/keys/old.asc"), auth).1, key);
+    assert_eq!(get(&s.url("/new/dists/focal/InRelease"), auth).0, 200);
+    let out = s
+        .cli(&[
+            "upload",
+            "new",
+            readme.to_str().unwrap(),
+            "-s",
+            "path=README.md",
+        ])
+        .unwrap();
+    assert!(out.contains("unchanged"), "{out}");
+    for bad in ["dists/focal/Release", "pool/x", "key.asc", "../x", "a//b"] {
+        let e = s
+            .cli(&[
+                "upload",
+                "new",
+                readme.to_str().unwrap(),
+                "-s",
+                &format!("path={bad}"),
+            ])
+            .unwrap_err();
+        assert!(
+            e.contains(bad.trim_matches('/')) || e.contains("path"),
+            "{bad}: {e}"
+        );
+    }
+    assert_eq!(
+        s.json(&["repo", "packages", "new"])
+            .as_array()
+            .unwrap()
+            .len(),
+        4
+    );
+    s.cli(&["op", "new", "file-remove", "path=keys/old.asc", "-y"])
+        .unwrap();
+    assert_eq!(get(&s.url("/new/keys/old.asc"), auth).0, 404);
+    assert_eq!(get(&s.url("/new/README.md"), auth).0, 200);
 }
 
 /// Every file under `root` with its size and time.
