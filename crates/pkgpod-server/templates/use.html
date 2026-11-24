@@ -1,7 +1,16 @@
 {# SPDX-License-Identifier: AGPL-3.0-only #}
 <div class="card">
   <div class="card-head"><h2>How to use</h2><span class="hint">commands for this repository's clients, with its address</span></div>
-  {% if dists.len() > 1 %}<div class="card-body dist-switch"><span class="muted small">For the dist</span>{% for (d, on) in dists %} <button type="button" class="link{% if on %} on{% endif %}" hx-get="/r/{{ repo }}/use?dist={{ d|urlencode }}" hx-target="#tab"{% if on %} aria-pressed="true"{% endif %}>{{ d }}</button>{% endfor %}</div>{% endif %}
+  {% if token_note.is_empty() %}
+  <form class="card-body token-fill" hx-post="/c/r/{{ repo }}/use-token" hx-target="#tab">
+    <input type="hidden" name="place" value="{{ place }}">
+    <span class="muted small">Put a token in these commands:</span>
+    {% if can_write %}<label class="check"><input type="checkbox" name="write"> may upload</label>{% endif %}
+    <select name="days" aria-label="Expires"><option value="30">30 days</option><option value="90" selected>90 days</option><option value="365">a year</option><option value="0">never expires</option></select>
+    <button type="submit">Make a token for {{ repo }}</button>
+  </form>
+  {% else %}<div class="card-body"><p class="notice">{{ token_note }}</p></div>{% endif %}
+  {% if dists.len() > 1 %}<div class="card-body dist-switch"><span class="muted small">For the {{ noun }}</span>{% for (d, on) in dists %} <button type="button" class="link{% if on %} on{% endif %}" hx-get="/r/{{ repo }}/use?dist={{ d|urlencode }}" hx-target="#tab"{% if on %} aria-pressed="true"{% endif %}>{{ d }}</button>{% endfor %}</div>{% endif %}
   <div class="card-body use">
   {% for u in usage %}<div class="use-step">
     <p class="use-label">{{ u.label }}</p>
