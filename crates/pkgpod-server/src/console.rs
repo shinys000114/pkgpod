@@ -673,6 +673,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                         ("rpm", _) => "RPM packages for dnf and yum, signed repodata",
                         ("helm", _) => "Helm charts for helm (index.yaml)",
                         ("maven", _) => "Java artifacts for Maven and Gradle",
+                        ("gems", _) => "Ruby gems for gem and bundler",
                         _ => "",
                     }
                     .to_string(),
@@ -889,6 +890,33 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String], host: &str) ->
         out.push(UseLine {
             label: "Note".into(),
             text: "pkgpod is no proxy: packages from npmjs need their own registry (a scope here, the rest from registry.npmjs.org). npm login is not offered; set the token in .npmrc. unpublish and deprecate are operations here.".into(),
+        });
+        return out;
+    }
+    if r.format == "gems" {
+        let source = if r.setting_bool("public") {
+            base.clone()
+        } else {
+            let (scheme, rest) = base.split_once("://").unwrap_or(("https", &base));
+            format!("{scheme}://token:<token>@{rest}")
+        };
+        out.push(UseLine {
+            label: "Gemfile".into(),
+            text: format!("source \"{source}\"\ngem \"<gem>\""),
+        });
+        out.push(UseLine {
+            label: "Install".into(),
+            text: format!("gem install <gem> --source {source}"),
+        });
+        out.push(UseLine {
+            label: "Push and yank".into(),
+            text: format!(
+                "GEM_HOST_API_KEY=<token> gem push --host {base} <gem>-<version>.gem\nGEM_HOST_API_KEY=<token> gem yank --host {base} <gem> -v <version>"
+            ),
+        });
+        out.push(UseLine {
+            label: "A labelled version".into(),
+            text: format!("source \"{source}@<label>/\""),
         });
         return out;
     }
@@ -1794,6 +1822,7 @@ fn catalog_words(format: &str) -> (&'static str, [&'static str; 3], bool) {
         "go" => ("Modules", ["Module", "Version", "Note"], true),
         "helm" => ("Charts", ["Chart", "Version", "Note"], true),
         "maven" => ("Artifacts", ["Group:artifact", "Version", "Note"], true),
+        "gems" => ("Gems", ["Gem", "Version", "Note"], true),
         "deb" => ("Packages", ["Package", "Version", "Where"], true),
         _ => ("Packages", ["Package", "Version", "Where"], true),
     }

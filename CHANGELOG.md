@@ -37,6 +37,9 @@ Formats:
 - **Maven**: files deployed at their Maven paths; maven-metadata.xml
   (artifact and SNAPSHOT version) and md5/sha1/sha256/sha512 made here,
   uploaded checksums checked; releases deployed once unless `redeploy`.
+- **RubyGems**: `gem push` and `gem yank`; the compact index (versions,
+  names, info) and marshalled gemspecs (quick/Marshal.4.8) made from
+  each gem's metadata.
 
 Everywhere: versions of every hosted repository with labels
 (`@label` addresses; `-/label/<label>/` for npm), diffs, rollback and

@@ -586,7 +586,7 @@ fn console_login_pages_and_csrf() {
     // page, usage and actions open.
     let src = s.url("/web/");
     type Fields<'a> = &'a [(&'a str, &'a str)];
-    let choices: [(&str, &str, &str, Fields); 13] = [
+    let choices: [(&str, &str, &str, Fields); 14] = [
         ("deb", "hosted", "c-deb", &[("first_dist", "noble")]),
         (
             "deb",
@@ -605,6 +605,7 @@ fn console_login_pages_and_csrf() {
         ("rpm", "hosted", "c-rpm", &[]),
         ("helm", "hosted", "c-helm", &[]),
         ("maven", "hosted", "c-maven", &[]),
+        ("gems", "hosted", "c-gems", &[]),
     ];
     for (format, kind, name, extra) in choices {
         let mut form = vec![("format", format), ("kind", kind), ("name", name)];
@@ -4631,6 +4632,7 @@ fn serving_root_lists_trees_not_registries() {
         ("tree-rpm", "rpm"),
         ("tree-helm", "helm"),
         ("tree-maven", "maven"),
+        ("tree-gems", "gems"),
         ("reg-npm", "npm"),
         ("reg-oci", "oci"),
         ("reg-cargo", "cargo"),
@@ -4655,6 +4657,7 @@ fn serving_root_lists_trees_not_registries() {
         "tree-rpm",
         "tree-helm",
         "tree-maven",
+        "tree-gems",
     ] {
         assert!(root.contains(name), "{name}: {root}");
     }
@@ -5610,4 +5613,125 @@ fn maven_deploy_and_depend() {
     assert!(ok, "{out}");
     let (ok, _) = depend("app4", "1.1.0-SNAPSHOT", "hello2", "@first/");
     assert!(!ok, "the label has no SNAPSHOT");
+}
+
+const RUBY_IMAGE: &str = "ruby:3.4-slim";
+
+#[test]
+fn gems_with_gem_and_bundler() {
+    if images_here(&[RUBY_IMAGE]).is_empty() {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&["repo", "create", "rubygems", "-f", "gems"])
+        .unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "rubygems", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let base = s.url("/rubygems/");
+    let source = base.replacen("http://", &format!("http://token:{tok}@"), 1);
+    // Gems made by gem build: hello-pk 1.0.0 and 1.1.0, tool-pk needing it.
+    let work = s.dir.path().join("gemwork");
+    for (name, version, dep) in [
+        ("hello-pk", "1.0.0", ""),
+        ("hello-pk", "1.1.0", ""),
+        (
+            "tool-pk",
+            "0.1.0",
+            "s.add_dependency \"hello-pk\", \">= 1.0\"",
+        ),
+    ] {
+        let d = work.join(format!("{name}-{version}"));
+        std::fs::create_dir_all(d.join("lib")).unwrap();
+        std::fs::write(
+            d.join(format!("{name}.gemspec")),
+            format!(
+                "Gem::Specification.new do |s|\n  s.name = \"{name}\"; s.version = \"{version}\"\n  \
+                 s.summary = \"test\"; s.authors = [\"t\"]; s.license = \"MIT\"\n  \
+                 s.homepage = \"https://example.org\"; s.files = [\"lib/{name}.rb\"]\n  {dep}\nend\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            d.join(format!("lib/{name}.rb")),
+            format!(
+                "module Pk; def self.{}; \"{name} {version}\"; end; end\n",
+                name.replace('-', "_")
+            ),
+        )
+        .unwrap();
+    }
+    let (ok, out) = docker_sh_in(
+        RUBY_IMAGE,
+        Some(&work),
+        "set -e; for d in */; do (cd $d && gem build -q *.gemspec >/dev/null 2>&1 && mv *.gem ..); done; ls *.gem",
+    );
+    assert!(ok && out.contains("tool-pk-0.1.0.gem"), "{out}");
+    let push = |gem: &str| {
+        docker_sh_in(
+            RUBY_IMAGE,
+            Some(&work),
+            &format!("GEM_HOST_API_KEY={tok} gem push --host {base} {gem}"),
+        )
+    };
+    let (ok, out) = push("hello-pk-1.0.0.gem");
+    assert!(
+        ok && out.contains("Successfully registered gem: hello-pk (1.0.0)"),
+        "{out}"
+    );
+    s.cli(&["label", "rubygems", "first"]).unwrap();
+    for g in ["hello-pk-1.1.0.gem", "tool-pk-0.1.0.gem"] {
+        let (ok, out) = push(g);
+        assert!(ok, "{out}");
+    }
+    // A version is pushed once.
+    let (ok, out) = push("hello-pk-1.0.0.gem");
+    assert!(
+        ok && out.contains("already there"),
+        "the same gem again: {out}"
+    );
+    let mut other = std::fs::read(work.join("hello-pk-1.0.0.gem")).unwrap();
+    other.extend_from_slice(&[0; 512]);
+    std::fs::write(work.join("other.gem"), other).unwrap();
+    let (ok, out) = push("other.gem");
+    assert!(!ok && out.contains("Repushing"), "{out}");
+    // gem install with its dependency, from the marshalled gemspecs.
+    let (ok, out) = docker_sh(
+        RUBY_IMAGE,
+        &format!(
+            "set -e; gem install -q tool-pk --clear-sources --source {source}; \
+             ruby -e 'require \"tool-pk\"; require \"hello-pk\"; puts Pk.tool_pk, Pk.hello_pk'"
+        ),
+    );
+    assert!(
+        ok && out.contains("tool-pk 0.1.0") && out.contains("hello-pk 1.1.0"),
+        "{out}"
+    );
+    // bundler, through the compact index; and a label's source.
+    let bundle = |at: &str, gem: &str| {
+        docker_sh(
+            RUBY_IMAGE,
+            &format!(
+                "set -e; mkdir /a; cd /a; printf 'source \"{source}{at}\"\\ngem \"{gem}\"\\n' > Gemfile; \
+                 bundle install --quiet; bundle exec ruby -e 'require \"hello-pk\"; puts Pk.hello_pk'"
+            ),
+        )
+    };
+    let (ok, out) = bundle("", "tool-pk");
+    assert!(ok && out.contains("hello-pk 1.1.0"), "{out}");
+    let (ok, out) = bundle("@first/", "hello-pk");
+    assert!(ok && out.contains("hello-pk 1.0.0"), "{out}");
+    let (ok, _) = bundle("@first/", "tool-pk");
+    assert!(!ok, "the label has no tool-pk");
+    // Yanked: gone from the index.
+    let (ok, out) = docker_sh_in(
+        RUBY_IMAGE,
+        Some(&work),
+        &format!("GEM_HOST_API_KEY={tok} gem yank --host {base} hello-pk -v 1.1.0"),
+    );
+    assert!(ok && out.contains("Successfully yanked"), "{out}");
+    let (ok, out) = bundle("", "hello-pk");
+    assert!(ok && out.contains("hello-pk 1.0.0"), "{out}");
 }

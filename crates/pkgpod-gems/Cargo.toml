@@ -1,0 +1,19 @@
+[package]
+name = "pkgpod-gems"
+description = "pkgpod RubyGems format: gems for gem and bundler (compact index, gem push)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+pkgpod-base.workspace = true
+pkgpod-engine.workspace = true
+serde_json.workspace = true
+flate2.workspace = true
+tar.workspace = true
+md-5.workspace = true
+yaml-rust2.workspace = true
+jiff.workspace = true

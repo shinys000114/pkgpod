@@ -386,6 +386,7 @@ form.inline + form.inline { margin-top: .5rem; }
 .fmt-rpm { background: color-mix(in srgb, #ee0000 12%, var(--surface)); color: color-mix(in srgb, #b30000 85%, var(--fg)); }
 .fmt-helm { background: color-mix(in srgb, #0f1689 14%, var(--surface)); color: color-mix(in srgb, #277a9f 85%, var(--fg)); }
 .fmt-maven { background: color-mix(in srgb, #c71a36 12%, var(--surface)); color: color-mix(in srgb, #a3162d 85%, var(--fg)); }
+.fmt-gems { background: color-mix(in srgb, #cc342d 12%, var(--surface)); color: color-mix(in srgb, #b02a24 85%, var(--fg)); }
 .fmt-npm { background: color-mix(in srgb, #c92a2a 14%, var(--surface)); color: color-mix(in srgb, #c92a2a 80%, var(--fg)); }
 .page-head h1 .fmt, .page-head h1 .tag { font-size: 12px; }
 
