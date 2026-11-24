@@ -362,6 +362,19 @@ fn fetch_and_take_in(
     let store = r.store();
     let mut taken: std::collections::HashMap<String, (pkgpod_base::Digest, u64)> =
         Default::default();
+    let mut progress = Progress::new(
+        log,
+        plan.iter()
+            .flat_map(|d| {
+                d.files.iter().map(|(_, p)| p.as_str()).chain(
+                    d.sources
+                        .iter()
+                        .flat_map(|(_, ps)| ps.iter().map(String::as_str)),
+                )
+            })
+            .collect::<BTreeSet<_>>()
+            .len(),
+    );
     let mut take = |path: &str| -> Result<(pkgpod_base::Digest, u64), String> {
         if let Some(t) = taken.get(path) {
             return Ok(*t);
@@ -370,6 +383,7 @@ fn fetch_and_take_in(
             .put_owned(&staging.join(path))
             .map_err(|e| e.to_string())?;
         taken.insert(path.to_string(), t);
+        progress.add(t.1);
         Ok(t)
     };
     let mut uploads: Vec<(String, String, Upload)> = Vec::new();
@@ -597,6 +611,7 @@ fn take_in_tree(
     files.sort();
     log(&format!("{} file(s) to take in", files.len()));
     let store = r.store();
+    let mut progress = Progress::new(log, files.len());
     let mut ups = Vec::new();
     for p in &files {
         if cancel.load(Ordering::Relaxed) {
@@ -623,6 +638,7 @@ fn take_in_tree(
             store.put_file(p)
         }
         .map_err(|e| e.to_string())?;
+        progress.add(size);
         ups.push((
             path,
             mtime,
@@ -670,6 +686,47 @@ fn take_in_tree(
         summary,
         json!({"files": n, "changes": out.changes.len()}),
     ))
+}
+
+/// Says every half minute how far a take-in has come, so moving a large
+/// tree into the store is not a long silence in the job's log.
+struct Progress<'a> {
+    log: &'a (dyn Fn(&str) + Sync),
+    total: usize,
+    done: usize,
+    bytes: u64,
+    since: std::time::Instant,
+    last: std::time::Instant,
+}
+
+impl<'a> Progress<'a> {
+    fn new(log: &'a (dyn Fn(&str) + Sync), total: usize) -> Self {
+        let now = std::time::Instant::now();
+        Progress {
+            log,
+            total,
+            done: 0,
+            bytes: 0,
+            since: now,
+            last: now,
+        }
+    }
+
+    fn add(&mut self, size: u64) {
+        self.done += 1;
+        self.bytes += size;
+        if self.done < self.total && self.last.elapsed() >= Duration::from_secs(30) {
+            self.last = std::time::Instant::now();
+            let secs = self.since.elapsed().as_secs().max(1);
+            (self.log)(&format!(
+                "taken in {} of {} file(s), {} ({}/s)",
+                self.done,
+                self.total,
+                crate::serve::human(self.bytes),
+                crate::serve::human(self.bytes / secs),
+            ));
+        }
+    }
 }
 
 /// Does a descriptor's platform match `os/arch[/variant]`?
