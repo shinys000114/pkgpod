@@ -134,7 +134,8 @@ fn deny(c: &Caller) -> Response {
 
 async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
     let method = req.method().clone();
-    if method != Method::GET && method != Method::HEAD && method != Method::PUT {
+    let registry = req.uri().path() == "/v2" || req.uri().path().starts_with("/v2/");
+    if method != Method::GET && method != Method::HEAD && method != Method::PUT && !registry {
         return status(StatusCode::METHOD_NOT_ALLOWED);
     }
     let host = req
@@ -162,6 +163,16 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
         Ok(t) => t,
         Err(e) => return e.into_response(),
     };
+    if registry && crate::oci::claims(&table, &host, &path[1..]) {
+        let rest = path[1..].to_vec();
+        return match crate::oci::handle(app.clone(), caller.clone(), &host, &rest, req).await {
+            Some(r) => r,
+            None => status(StatusCode::NOT_FOUND),
+        };
+    }
+    if registry && method != Method::GET && method != Method::HEAD && method != Method::PUT {
+        return status(StatusCode::METHOD_NOT_ALLOWED);
+    }
     match table.route(&host, &path) {
         Hit::None => status(StatusCode::NOT_FOUND),
         Hit::Index(list) => {
@@ -203,7 +214,8 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
                 .role(&caller, &repo, served.repo.setting_bool("public"));
             if method == Method::PUT {
                 if role < Some(Role::Write) {
-                    return if role.is_some() {
+                    // Clients send credentials only after a 401.
+                    return if role.is_some() && caller.user.is_some() {
                         status(StatusCode::FORBIDDEN)
                     } else {
                         deny(&caller)
@@ -416,7 +428,7 @@ pub fn cache_control(rel: &str) -> &'static str {
 /// its Last-Modified, not the store file's, which a re-upload touches;
 /// `files`: a files repository's, served sandboxed (anyone may have
 /// uploaded the HTML).
-async fn serve_blob(
+pub(crate) async fn serve_blob(
     file: &std::path::Path,
     sha: &Digest,
     rel: &str,

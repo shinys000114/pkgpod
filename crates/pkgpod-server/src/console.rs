@@ -675,6 +675,42 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String]) -> Vec<UseLine
         format!("http://{addr}/{}/", r.name)
     });
     let mut out = Vec::new();
+    if r.format == "oci" {
+        // host[:port] and the path that starts image names.
+        let rest = base.split_once("://").map_or(base.as_str(), |x| x.1);
+        let reg = rest.trim_end_matches('/');
+        let image = format!("{reg}/app:1.0");
+        if !r.setting_bool("public") {
+            out.push(UseLine {
+                label: "Log in (pull and push)".into(),
+                text: format!(
+                    "echo <token> | docker login {} -u token --password-stdin",
+                    reg.split('/').next().unwrap_or(reg)
+                ),
+            });
+        } else {
+            out.push(UseLine {
+                label: "Log in (to push; pulling needs none)".into(),
+                text: format!(
+                    "echo <token> | docker login {} -u token --password-stdin",
+                    reg.split('/').next().unwrap_or(reg)
+                ),
+            });
+        }
+        out.push(UseLine {
+            label: "Push".into(),
+            text: format!("docker tag app:1.0 {image}\ndocker push {image}"),
+        });
+        out.push(UseLine {
+            label: "Pull".into(),
+            text: format!("docker pull {image}"),
+        });
+        out.push(UseLine {
+            label: "Note".into(),
+            text: "Registries are reached at /v2/ of a host: give this repository a host of its own (https://registry.example.org/), or a host and a path that starts the image names (https://registry.example.org/team/). Over plain http, docker needs the host in insecure-registries.".into(),
+        });
+        return out;
+    }
     if r.format == "files" {
         let auth = if r.setting_bool("public") {
             ""

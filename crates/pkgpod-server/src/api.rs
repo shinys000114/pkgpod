@@ -472,6 +472,7 @@ pub(crate) async fn repo_delete(
     blocking(&app, move |app| {
         let r = app.engine.repo(&repo)?;
         app.engine.delete_repo(&repo)?;
+        crate::oci::forget(app, &repo);
         app.auth.forget_repo(&repo)?;
         // A mirror's received tree (perhaps an adopted multi-TB one) stays
         // unless asked for.

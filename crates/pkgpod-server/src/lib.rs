@@ -12,6 +12,7 @@ pub mod import;
 pub mod jobs;
 pub mod keys;
 pub mod listeners;
+pub mod oci;
 pub mod openapi;
 pub mod promote;
 pub mod resign;
@@ -132,7 +133,11 @@ struct Cache {
 
 /// Formats compiled into this server.
 pub fn formats() -> Vec<Arc<dyn pkgpod_engine::Format>> {
-    vec![Arc::new(pkgpod_deb::Deb), Arc::new(pkgpod_files::Files)]
+    vec![
+        Arc::new(pkgpod_deb::Deb),
+        Arc::new(pkgpod_files::Files),
+        Arc::new(pkgpod_oci::Oci),
+    ]
 }
 
 impl App {
