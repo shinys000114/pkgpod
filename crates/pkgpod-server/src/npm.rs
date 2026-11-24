@@ -115,8 +115,25 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
         let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
         let change = match (&method, rest.as_slice()) {
             (&Method::PUT, []) => Some(Change::Put { unpublish: false }),
-            (&Method::PUT, ["-rev", _]) => Some(Change::Put { unpublish: true }),
-            (&Method::DELETE, ["-rev", _]) => Some(Change::DeleteAll),
+            (&Method::PUT, ["-rev", r]) | (&Method::DELETE, ["-rev", r]) => {
+                // What the client read must still be what is here: else it
+                // would undo another's publish.
+                let here = a
+                    .current
+                    .as_ref()
+                    .map(|v| pkgpod_npm::rev(&name, &packages(&app, v, &name)));
+                if here.as_deref() != Some(*r) {
+                    return err(
+                        StatusCode::CONFLICT,
+                        format!("{name} changed since it was read (revision {r}): read it again"),
+                    );
+                }
+                Some(if method == Method::PUT {
+                    Change::Put { unpublish: true }
+                } else {
+                    Change::DeleteAll
+                })
+            }
             (&Method::DELETE, ["-", file, "-rev", _]) => {
                 Some(Change::DeleteTarball(file.to_string()))
             }

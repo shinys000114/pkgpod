@@ -6415,6 +6415,29 @@ fn npm_deprecate_and_unpublish_with_npm() {
     let (ok, out) = npm(&home, &src, &["deprecate", "hello-pkg@1.0.0", ""]);
     assert!(ok, "{out}");
     assert!(doc()["versions"]["1.0.0"].get("deprecated").is_none());
+    // A packument read before another's publish cannot unpublish: the
+    // revision has changed.
+    let stale = doc();
+    let d = npm_package(&src, "hello-pkg", "1.3.0");
+    let (ok, out) = npm(&home, &d, &["publish"]);
+    assert!(ok, "{out}");
+    let mut body = stale.clone();
+    body["versions"].as_object_mut().unwrap().remove("1.1.0");
+    let r = reqwest::blocking::Client::new()
+        .put(format!(
+            "{reg}hello-pkg/-rev/{}",
+            stale["_rev"].as_str().unwrap()
+        ))
+        .bearer_auth(&tok)
+        .json(&body)
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 409, "{}", r.text().unwrap());
+    let d = doc();
+    assert!(
+        d["versions"].get("1.3.0").is_some() && d["versions"].get("1.1.0").is_some(),
+        "{d}"
+    );
     // One version, then the whole package.
     let (ok, out) = npm(&home, &src, &["unpublish", "hello-pkg@1.1.0"]);
     assert!(ok, "{out}");
