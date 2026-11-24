@@ -19,6 +19,8 @@
 //! quick/Marshal.4.8/<file>.gemspec.rz
 //! versions, names, info/<name>       the compact index (yanked
 //!                                    versions left out)
+//! specs.4.8.gz, latest_specs.4.8.gz, prerelease_specs.4.8.gz
+//!                                    the full index (gem search -r)
 //! ```
 
 pub mod marshal;
@@ -314,6 +316,109 @@ pub fn read_gem(data: &[u8]) -> Result<Spec> {
     })
 }
 
+/// Whether a gem version is a prerelease (as Gem::Version says: it has
+/// a letter).
+pub fn prerelease(v: &str) -> bool {
+    v.bytes().any(|b| b.is_ascii_alphabetic())
+}
+
+/// Gem::Version's order: segments split at dots and where digits meet
+/// letters; numbers compare as numbers, a letter segment is older.
+pub fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    fn segs(v: &str) -> Vec<Result<u64, String>> {
+        let mut out = Vec::new();
+        for part in v.split(['.', '-']) {
+            let mut cur = String::new();
+            let mut digits = None;
+            for c in part.chars() {
+                let d = c.is_ascii_digit();
+                if digits.is_some_and(|x| x != d) {
+                    out.push(cur.parse::<u64>().map_err(|_| cur.clone()));
+                    cur.clear();
+                }
+                digits = Some(d);
+                cur.push(c);
+            }
+            if !cur.is_empty() {
+                out.push(cur.parse::<u64>().map_err(|_| cur.clone()));
+            }
+        }
+        out
+    }
+    let (x, y) = (segs(a), segs(b));
+    for i in 0..x.len().max(y.len()) {
+        let o = match (x.get(i), y.get(i)) {
+            (Some(Ok(p)), Some(Ok(q))) => p.cmp(q),
+            (Some(Err(p)), Some(Err(q))) => p.cmp(q),
+            (Some(Ok(_)), Some(Err(_))) => std::cmp::Ordering::Greater,
+            (Some(Err(_)), Some(Ok(_))) => std::cmp::Ordering::Less,
+            (Some(Ok(0)), None) | (None, Some(Ok(0))) => std::cmp::Ordering::Equal,
+            (Some(Ok(_)), None) => std::cmp::Ordering::Greater,
+            (None, Some(Ok(_))) => std::cmp::Ordering::Less,
+            (Some(Err(_)), None) => std::cmp::Ordering::Less,
+            (None, Some(Err(_))) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        };
+        if o.is_ne() {
+            return o;
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+/// The full index, as RubyGems' SpecFetcher reads it (gem search -r,
+/// gem list -r, older gem install): specs.4.8.gz (released versions),
+/// latest_specs.4.8.gz (the newest per name and platform) and
+/// prerelease_specs.4.8.gz, each a gzipped Marshal array of [name,
+/// Gem::Version, platform]; `gems` as (name, version, platform), yanked
+/// ones left out.
+pub fn full_index(gems: &[(String, String, String)]) -> Vec<(&'static str, Vec<u8>)> {
+    let tuple = |(n, v, p): &(String, String, String)| {
+        Rb::Array(vec![
+            Rb::Str(n.clone()),
+            Rb::UserMarshal(
+                "Gem::Version".into(),
+                Box::new(Rb::Array(vec![Rb::Str(v.clone())])),
+            ),
+            Rb::Str(p.clone()),
+        ])
+    };
+    let mut released: Vec<&(String, String, String)> =
+        gems.iter().filter(|g| !prerelease(&g.1)).collect();
+    released.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(version_cmp(&a.1, &b.1))
+            .then(a.2.cmp(&b.2))
+    });
+    let mut latest: BTreeMap<(&str, &str), &(String, String, String)> = BTreeMap::new();
+    for g in &released {
+        let e = latest.entry((g.0.as_str(), g.2.as_str())).or_insert(g);
+        if version_cmp(&g.1, &e.1).is_gt() {
+            *e = g;
+        }
+    }
+    let pre: Vec<&(String, String, String)> = gems.iter().filter(|g| prerelease(&g.1)).collect();
+    let gz = |items: Vec<Rb>| {
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut e, &Writer::dump(&Rb::Array(items))).expect("in memory");
+        e.finish().expect("in memory")
+    };
+    vec![
+        (
+            "specs.4.8.gz",
+            gz(released.iter().map(|g| tuple(g)).collect()),
+        ),
+        (
+            "latest_specs.4.8.gz",
+            gz(latest.values().map(|g| tuple(g)).collect()),
+        ),
+        (
+            "prerelease_specs.4.8.gz",
+            gz(pre.iter().map(|g| tuple(g)).collect()),
+        ),
+    ]
+}
+
 /// The compact index of gems given as (name, compact line, yanked): the
 /// `versions` file, `names` and each `info/<name>`.
 pub fn compact_index(
@@ -516,6 +621,7 @@ impl Format for Gems {
     fn publish(&self, cx: &PublishCx) -> Result<Option<Digest>> {
         let mut view = Edit::new(cx.objects, pkgpod_engine::tree::empty());
         let mut gems = Vec::new();
+        let mut tuples = Vec::new();
         for (path, entry) in cx.objects.walk(&cx.root, "")? {
             let Entry::Blob { sha256, size, meta } = &entry else {
                 return Err(invalid(format!("{path} is not a gem")));
@@ -541,9 +647,16 @@ impl Format for Gems {
                 Entry::blob(quick, n, Value::Null),
             )?;
             let yanked = meta.get("yanked").and_then(Value::as_bool) == Some(true);
+            if !yanked {
+                tuples.push((s("name"), s("version"), s("platform")));
+            }
             gems.push((s("name"), s("info"), yanked));
         }
         let (versions, names, infos) = compact_index(&gems, cx.created);
+        for (name, data) in full_index(&tuples) {
+            let (d, n) = cx.store.put_bytes(&data)?;
+            view.put(name, Entry::blob(d, n, Value::Null))?;
+        }
         let mut text = |path: &str, t: &str| -> Result<()> {
             let (d, n) = cx.store.put_bytes(t.as_bytes())?;
             view.put(path, Entry::blob(d, n, Value::Null))?;
@@ -609,5 +722,30 @@ mod tests {
         assert_eq!(names, "---\na\nb\n");
         assert_eq!(infos[0], ("a".into(), "---\n1.0 |checksum:y\n".into()));
         assert!(read_gem(&gem(&META.replace("name: hello-pk", "name: ../x"))).is_err());
+        use std::cmp::Ordering::*;
+        for (a, b, o) in [
+            ("1.10.0", "1.9.0", Greater),
+            ("1.0.0.pre", "1.0.0", Less),
+            ("1.0", "1.0.0", Equal),
+            ("2.0.0.rc1", "2.0.0.beta2", Greater),
+        ] {
+            assert_eq!(version_cmp(a, b), o, "{a} {b}");
+        }
+        assert!(prerelease("1.0.0.pre") && !prerelease("1.0.0"));
+        let idx = full_index(&[
+            ("a".into(), "1.0.0".into(), "ruby".into()),
+            ("a".into(), "1.10.0".into(), "ruby".into()),
+            ("a".into(), "2.0.0.pre".into(), "ruby".into()),
+        ]);
+        let unz = |d: &[u8]| {
+            let mut v = Vec::new();
+            flate2::read::GzDecoder::new(d).read_to_end(&mut v).unwrap();
+            v
+        };
+        // [["a", Gem::Version "1.10.0", "ruby"]]: one entry, the newest.
+        let latest = unz(&idx[1].1);
+        assert!(latest.starts_with(b"\x04\x08[\x06[\x08"), "{latest:?}");
+        assert!(latest.windows(6).any(|w| w == b"1.10.0"));
+        assert!(unz(&idx[2].1).windows(9).any(|w| w == b"2.0.0.pre"));
     }
 }

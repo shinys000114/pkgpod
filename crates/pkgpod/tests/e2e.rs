@@ -5909,6 +5909,17 @@ fn gems_with_gem_and_bundler() {
         "set -e; cd /a; bundle update --quiet hello-pk; bundle exec ruby -e 'require \"hello-pk\"; puts Pk.hello_pk'",
     );
     assert!(ok && out.contains("hello-pk 1.2.0"), "{out}");
+    // The full index: gem search and gem list on the server, without
+    // the yanked version.
+    let (ok, out) = docker_sh(
+        RUBY_IMAGE,
+        &format!(
+            "gem search -r hello --clear-sources --source {source}; \
+             gem list -r -a hello-pk --clear-sources --source {source}"
+        ),
+    );
+    assert!(ok && out.contains("hello-pk (1.2.0)"), "{out}");
+    assert!(out.contains("hello-pk (1.2.0, 1.0.0)"), "{out}");
 }
 
 const ARCH_IMAGE: &str = "archlinux:latest";
