@@ -153,6 +153,10 @@ impl Engine {
     pub fn fields(&self, format: &str, kind: Kind) -> Result<Vec<Field>> {
         let mut f = settings::common(kind);
         let fmt = self.format(format)?;
+        if kind == Kind::Group {
+            // A group holds nothing: only which repositories it reads.
+            return Ok(f);
+        }
         if kind.versioned() && fmt.cleanup() {
             f.extend(settings::cleanup_fields());
         }
@@ -300,7 +304,8 @@ impl Engine {
             return Err(Error::Invalid("v2 is kept for the OCI registry API".into()));
         }
         let f = self.format(&n.format)?.clone();
-        if !f.kinds().contains(&n.kind) {
+        let group = n.kind == Kind::Group && f.groups();
+        if !f.kinds().contains(&n.kind) && !group {
             return Err(Error::Invalid(format!(
                 "{} repositories cannot be of kind {}",
                 f.id(),
@@ -308,7 +313,9 @@ impl Engine {
             )));
         }
         let settings = settings::check(&self.fields(&n.format, n.kind)?, &n.settings)?;
-        f.check_settings(n.kind, &settings)?;
+        if n.kind != Kind::Group {
+            f.check_settings(n.kind, &settings)?;
+        }
         let storage = n.storage.unwrap_or_else(|| "main".into());
         let exists = self.db.read(|c| {
             c.query_row("SELECT 1 FROM storages WHERE name = ?1", [&storage], |_| {
@@ -344,17 +351,19 @@ impl Engine {
             })?;
         self.bump();
         let repo = self.repo(&n.name)?;
-        if repo.kind.versioned() {
-            self.commit(
-                &repo,
-                None,
-                tree::empty(),
-                "repository created",
-                actor,
-                true,
-            )?;
-        } else {
-            std::fs::create_dir_all(repo.tree_dir())?;
+        match repo.kind {
+            Kind::Mirror => std::fs::create_dir_all(repo.tree_dir())?,
+            Kind::Group => {}
+            _ => {
+                self.commit(
+                    &repo,
+                    None,
+                    tree::empty(),
+                    "repository created",
+                    actor,
+                    true,
+                )?;
+            }
         }
         self.repo(&n.name)
     }
@@ -364,7 +373,9 @@ impl Engine {
         let r = self.repo(name)?;
         let merged = settings::merge(&r.settings, patch);
         let s = settings::check(&self.fields(&r.format, r.kind)?, &merged)?;
-        self.format(&r.format)?.check_settings(r.kind, &s)?;
+        if r.kind != Kind::Group {
+            self.format(&r.format)?.check_settings(r.kind, &s)?;
+        }
         self.db.write(|tx| {
             tx.execute(
                 "UPDATE repos SET settings = ?1 WHERE id = ?2",
@@ -498,8 +509,9 @@ impl Engine {
     ) -> Result<Option<Version>> {
         if !r.kind.versioned() {
             return Err(Error::Invalid(format!(
-                "{} is a mirror: it has no versions",
-                r.name
+                "{} is a {}: it has no versions",
+                r.name,
+                r.kind.as_str()
             )));
         }
         let _gc = self.gc_lock.read().unwrap_or_else(|e| e.into_inner());
@@ -620,7 +632,8 @@ impl Engine {
         let r = self.repo(name)?;
         if !r.kind.versioned() {
             return Err(Error::Invalid(format!(
-                "{name} is a mirror: it cannot be changed"
+                "{name} is a {}: it cannot be changed",
+                r.kind.as_str()
             )));
         }
         let (base, root) = self.current_root(&r)?;
@@ -667,7 +680,8 @@ impl Engine {
         let r = self.repo(name)?;
         if !r.kind.versioned() {
             return Err(Error::Invalid(format!(
-                "{name} is a mirror: it cannot be changed"
+                "{name} is a {}: it cannot be changed",
+                r.kind.as_str()
             )));
         }
         let _gc = self.gc_lock.read().unwrap_or_else(|e| e.into_inner());

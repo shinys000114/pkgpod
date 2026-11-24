@@ -504,6 +504,10 @@ impl Npm {
 }
 
 impl Format for Npm {
+    fn groups(&self) -> bool {
+        true
+    }
+
     fn id(&self) -> &'static str {
         "npm"
     }

@@ -171,6 +171,10 @@ pub fn name_version(path: &str) -> (String, String) {
 }
 
 impl Format for Files {
+    fn groups(&self) -> bool {
+        true
+    }
+
     fn id(&self) -> &'static str {
         "files"
     }

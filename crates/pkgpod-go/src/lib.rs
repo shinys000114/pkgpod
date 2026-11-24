@@ -315,6 +315,10 @@ pub fn pseudo(v: &str) -> bool {
 }
 
 impl Format for Go {
+    fn groups(&self) -> bool {
+        true
+    }
+
     fn id(&self) -> &'static str {
         "go"
     }

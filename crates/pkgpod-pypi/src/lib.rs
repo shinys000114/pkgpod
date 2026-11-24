@@ -225,6 +225,10 @@ impl Pypi {
 }
 
 impl Format for Pypi {
+    fn groups(&self) -> bool {
+        true
+    }
+
     fn id(&self) -> &'static str {
         "pypi"
     }

@@ -272,6 +272,10 @@ pub trait Format: Send + Sync {
     fn version_cmp(&self, a: &str, b: &str) -> std::cmp::Ordering {
         crate::version::cmp(a, b)
     }
+    /// Whether group repositories of this format are served.
+    fn groups(&self) -> bool {
+        false
+    }
     /// Whether cleanup rules may remove this format's package versions:
     /// only where the version order is the clients' and removing one
     /// leaves nothing of it behind.

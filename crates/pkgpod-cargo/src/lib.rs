@@ -435,6 +435,10 @@ impl Cargo {
 }
 
 impl Format for Cargo {
+    fn groups(&self) -> bool {
+        true
+    }
+
     fn id(&self) -> &'static str {
         "cargo"
     }

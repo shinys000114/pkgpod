@@ -302,6 +302,10 @@ fn sum_text(data: &[u8]) -> String {
 }
 
 impl Format for Maven {
+    fn groups(&self) -> bool {
+        true
+    }
+
     fn id(&self) -> &'static str {
         "maven"
     }
