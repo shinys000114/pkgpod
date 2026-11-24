@@ -30,6 +30,9 @@ pub struct Key {
 pub struct Keys {
     db: Arc<Db>,
     home: PathBuf,
+    /// Where the server's RSA key is (made on first use).
+    rsa_dir: PathBuf,
+    rsa: std::sync::Mutex<Option<Arc<crate::rsa_key::RsaKey>>>,
 }
 
 pub fn get_setting(db: &Db, name: &str) -> Result<Option<String>> {
@@ -63,12 +66,25 @@ fn check_fpr(f: &str) -> Result<()> {
 }
 
 impl Keys {
-    /// `home`: the server's gpg home.
-    pub fn new(db: Arc<Db>, home: &Path) -> Keys {
+    /// `home`: the server's gpg home; `rsa_dir`: where its RSA key is.
+    pub fn new(db: Arc<Db>, home: &Path, rsa_dir: &Path) -> Keys {
         Keys {
             db,
             home: home.to_path_buf(),
+            rsa_dir: rsa_dir.to_path_buf(),
+            rsa: std::sync::Mutex::new(None),
         }
+    }
+
+    /// The server's RSA key, made on first use.
+    pub fn rsa_key(&self) -> Result<Arc<crate::rsa_key::RsaKey>> {
+        let mut k = self.rsa.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(k) = &*k {
+            return Ok(k.clone());
+        }
+        let made = Arc::new(crate::rsa_key::RsaKey::load_or_make(&self.rsa_dir)?);
+        *k = Some(made.clone());
+        Ok(made)
     }
 
     pub fn home(&self) -> &Path {
@@ -248,5 +264,20 @@ impl pkgpod_engine::Signer for Keys {
     }
     fn public_key(&self, key: Option<&str>) -> pkgpod_engine::Result<Vec<u8>> {
         Keys::public_key(self, key).map_err(|e| pkgpod_engine::Error::Invalid(e.to_string()))
+    }
+    fn rsa_sign(&self, data: &[u8]) -> pkgpod_engine::Result<(String, Vec<u8>)> {
+        let k = self
+            .rsa_key()
+            .map_err(|e| pkgpod_engine::Error::Invalid(e.to_string()))?;
+        let sig = k
+            .sign(data)
+            .map_err(|e| pkgpod_engine::Error::Invalid(e.to_string()))?;
+        Ok((k.name.clone(), sig))
+    }
+    fn rsa_public_key(&self) -> pkgpod_engine::Result<(String, Vec<u8>)> {
+        let k = self
+            .rsa_key()
+            .map_err(|e| pkgpod_engine::Error::Invalid(e.to_string()))?;
+        Ok((k.name.clone(), k.public_pem.clone().into_bytes()))
     }
 }

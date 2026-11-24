@@ -382,6 +382,7 @@ form.inline + form.inline { margin-top: .5rem; }
 .fmt-pypi { background: color-mix(in srgb, #f59f00 18%, var(--surface)); color: color-mix(in srgb, #b46900 85%, var(--fg)); }
 .fmt-cargo { background: color-mix(in srgb, #b7410e 18%, var(--surface)); color: color-mix(in srgb, #a33a0c 85%, var(--fg)); }
 .fmt-go { background: color-mix(in srgb, #00add8 16%, var(--surface)); color: color-mix(in srgb, #007d9c 85%, var(--fg)); }
+.fmt-apk { background: color-mix(in srgb, #0d597f 16%, var(--surface)); color: color-mix(in srgb, #0d597f 85%, var(--fg)); }
 .fmt-npm { background: color-mix(in srgb, #c92a2a 14%, var(--surface)); color: color-mix(in srgb, #c92a2a 80%, var(--fg)); }
 .page-head h1 .fmt, .page-head h1 .tag { font-size: 12px; }
 

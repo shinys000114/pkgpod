@@ -586,7 +586,7 @@ fn console_login_pages_and_csrf() {
     // page, usage and actions open.
     let src = s.url("/web/");
     type Fields<'a> = &'a [(&'a str, &'a str)];
-    let choices: [(&str, &str, &str, Fields); 9] = [
+    let choices: [(&str, &str, &str, Fields); 10] = [
         ("deb", "hosted", "c-deb", &[("first_dist", "noble")]),
         (
             "deb",
@@ -601,6 +601,7 @@ fn console_login_pages_and_csrf() {
         ("npm", "hosted", "c-npm", &[]),
         ("cargo", "hosted", "c-cargo", &[]),
         ("go", "hosted", "c-go", &[]),
+        ("apk", "hosted", "c-apk", &[]),
     ];
     for (format, kind, name, extra) in choices {
         let mut form = vec![("format", format), ("kind", kind), ("name", name)];
@@ -4587,6 +4588,7 @@ fn serving_root_lists_trees_not_registries() {
         ("tree-deb", "deb"),
         ("tree-files", "files"),
         ("tree-pypi", "pypi"),
+        ("tree-apk", "apk"),
         ("reg-npm", "npm"),
         ("reg-oci", "oci"),
         ("reg-cargo", "cargo"),
@@ -4603,7 +4605,7 @@ fn serving_root_lists_trees_not_registries() {
     // The listing names what is browsed; registries answer their clients.
     let (st, root) = get(&s.url("/"), None);
     assert_eq!(st, 200);
-    for name in ["tree-deb", "tree-files", "tree-pypi"] {
+    for name in ["tree-deb", "tree-files", "tree-pypi", "tree-apk"] {
         assert!(root.contains(name), "{name}: {root}");
     }
     for name in ["reg-npm", "reg-oci", "reg-cargo", "reg-go", "hidden-oci"] {
@@ -5025,5 +5027,154 @@ fn go_modules_through_the_proxy() {
             .send()
             .unwrap();
         assert_eq!(r.status().as_u16(), 401, "{f}");
+    }
+}
+
+/// Alpine images here (none is pulled): apk 2 and apk 3 where they are.
+/// With PKGPOD_REQUIRE_TOOLS (CI), having none fails instead of skipping.
+fn alpine_images() -> Vec<&'static str> {
+    if !have("docker") {
+        return Vec::new();
+    }
+    let here: Vec<&'static str> = [
+        "alpine:3.22",
+        "caddy:2.10-alpine",
+        "alpine:3.23",
+        "nginx:1.29-alpine",
+    ]
+    .into_iter()
+    .filter(|i| {
+        Command::new("docker")
+            .args(["image", "inspect", i])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    })
+    .collect();
+    if here.is_empty() && std::env::var_os("PKGPOD_REQUIRE_TOOLS").is_some() {
+        panic!("no Alpine image (docker pull alpine:3.22 alpine:3.23)");
+    }
+    here
+}
+
+/// Runs `script` in `image` on the host's network, with `key` (when
+/// given) among apk's trusted keys.
+fn in_alpine(image: &str, key: Option<(&Path, &str)>, script: &str) -> (bool, String) {
+    let mut c = Command::new("docker");
+    c.args(["run", "--rm", "--network", "host", "--entrypoint", "sh"]);
+    if let Some((path, name)) = key {
+        c.arg("-v")
+            .arg(format!("{}:/etc/apk/keys/{name}:ro", path.display()));
+    }
+    let o = c.arg(image).arg("-c").arg(script).output().unwrap();
+    (
+        o.status.success(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        ),
+    )
+}
+
+#[test]
+fn alpine_packages_with_apk() {
+    use pkgpod_apk::testutil::make_apk;
+    let images = alpine_images();
+    if images.is_empty() {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&["repo", "create", "alp", "-f", "apk"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "alp", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let c = reqwest::blocking::Client::new();
+    let upload = |apk: Vec<u8>, q: &str| {
+        let r = c
+            .put(s.url(&format!("/alp/upload?{q}")))
+            .basic_auth("token", Some(&tok))
+            .body(apk)
+            .send()
+            .unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    let hello = |v: &str| {
+        make_apk(
+            "hello-apk",
+            v,
+            "x86_64",
+            (
+                "usr/bin/hello-apk",
+                format!("#!/bin/sh\necho hello {v}\n").as_bytes(),
+            ),
+        )
+    };
+    let place = "branch=v3.22&repository=main";
+    for apk in [
+        hello("1.0-r0"),
+        make_apk(
+            "motd-apk",
+            "2-r0",
+            "noarch",
+            ("usr/share/motd-apk", b"a message\n"),
+        ),
+    ] {
+        let (st, out) = upload(apk, place);
+        assert_eq!(st, 201, "{out}");
+    }
+    s.cli(&["label", "alp", "first"]).unwrap();
+    let (st, out) = upload(hello("1.1-r0"), place);
+    assert_eq!(st, 201, "{out}");
+    // Other content under the same name and version needs replace.
+    let other = make_apk("hello-apk", "1.1-r0", "x86_64", ("usr/bin/hello-apk", b"x"));
+    let (st, out) = upload(other, place);
+    assert_eq!(st, 409, "{out}");
+    // The key, by the name the listing gives it.
+    let r = c
+        .get(s.url("/alp/"))
+        .basic_auth("token", Some(&tok))
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    let name = r
+        .split(['"', '>', '<', '/'])
+        .find(|w| w.starts_with("pkgpod-") && w.ends_with(".rsa.pub"))
+        .unwrap_or_else(|| panic!("no key in {r}"))
+        .to_string();
+    let key = s.dir.path().join(&name);
+    let pem = c
+        .get(s.url(&format!("/alp/{name}")))
+        .basic_auth("token", Some(&tok))
+        .send()
+        .unwrap()
+        .bytes()
+        .unwrap();
+    std::fs::write(&key, &pem).unwrap();
+    let base = s
+        .url("/alp/")
+        .replacen("http://", &format!("http://token:{tok}@"), 1);
+    for image in images {
+        let script = |at: &str| {
+            format!(
+                "echo {base}{at}v3.22/main > /etc/apk/repositories && apk update && \
+                 apk add hello-apk motd-apk && hello-apk && cat /usr/share/motd-apk"
+            )
+        };
+        let (ok, out) = in_alpine(image, Some((&key, &name)), &script(""));
+        assert!(
+            ok && out.contains("hello 1.1-r0") && out.contains("a message"),
+            "{image}: {out}"
+        );
+        // A labelled version, as it was.
+        let (ok, out) = in_alpine(image, Some((&key, &name)), &script("@first/"));
+        assert!(ok && out.contains("hello 1.0-r0"), "{image}: {out}");
+        // Without the key the index is not trusted.
+        let (ok, out) = in_alpine(image, None, &script(""));
+        assert!(!ok && out.contains("UNTRUSTED"), "{image}: {out}");
     }
 }
