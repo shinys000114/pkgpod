@@ -24,6 +24,7 @@ md-5.workspace = true
 time.workspace = true
 thiserror.workspace = true
 pgp.workspace = true
+rand.workspace = true
 
 tempfile = { workspace = true, optional = true }
 

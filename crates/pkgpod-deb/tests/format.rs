@@ -7,14 +7,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use pkgpod_base::db::Db;
-use pkgpod_deb::sign::{GpgSigner, Signer as _};
+use pkgpod_deb::sign::{PgpKey, Signer as _};
 use pkgpod_deb::testutil::{TestKey, build_deb, have};
 use pkgpod_deb::verify::{Keyring, verify_inrelease};
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{Engine, Error, Kind, NewRepo, Upload};
 use serde_json::{Value, json};
 
-struct Gpg(GpgSigner);
+struct Gpg(PgpKey);
 
 impl pkgpod_engine::Signer for Gpg {
     fn clearsign(&self, _: Option<&str>, d: &[u8]) -> pkgpod_engine::Result<Vec<u8>> {
@@ -221,7 +221,9 @@ fn conflicts_operations_and_rollback() {
     let hits = f.e.search("too", Some("ppa"), 10).unwrap();
     assert_eq!(hits.len(), 2);
 
-    // Rollback to before the removal: a new version, freshly signed.
+    // Rollback to before the removal: a new version, freshly signed (a
+    // second later: Release dates are to the second).
+    std::thread::sleep(std::time::Duration::from_millis(1100));
     let plan = f.e.plan_rollback("ppa", before - 1, "t").unwrap();
     let v = f.e.apply(&plan, "t").unwrap().version.unwrap();
     assert_eq!(v.root, f.e.version("ppa", before - 1).unwrap().root);

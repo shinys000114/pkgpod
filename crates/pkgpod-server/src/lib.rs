@@ -175,7 +175,7 @@ impl App {
         schema::migrate(&db)?;
         let keys = Arc::new(Keys::new(
             db.clone(),
-            &cfg.gnupg(),
+            &cfg.data_dir.join("keys"),
             &cfg.data_dir.join("rsa"),
         ));
         let engine = Arc::new(Engine::open(

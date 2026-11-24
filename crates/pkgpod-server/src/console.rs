@@ -2946,7 +2946,9 @@ pub struct ListenerRow {
 pub struct KeyRow {
     pub name: String,
     pub fingerprint: String,
+    pub uid: String,
     pub default: bool,
+    pub missing: bool,
 }
 
 pub struct AuditRow {
@@ -3005,7 +3007,9 @@ async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
         .map(|k| KeyRow {
             name: k.name,
             fingerprint: k.fingerprint,
+            uid: k.uid,
             default: k.default,
+            missing: k.missing,
         })
         .collect();
     let storages = app
@@ -3095,9 +3099,8 @@ async fn key_generate(
 
 async fn key_add(State(app): St, v: Viewer, Form(form): Form<Vec<(String, String)>>) -> Response {
     let req = api::KeyReq {
-        fingerprint: form_get(&form, "fingerprint").to_string(),
-        homedir: form_get(&form, "homedir").to_string(),
-        passphrase_file: form_get(&form, "passphrase_file").to_string(),
+        secret_key: form_get(&form, "secret_key").to_string(),
+        passphrase: form_get(&form, "passphrase").to_string(),
     };
     match api::key_set(
         State(app),

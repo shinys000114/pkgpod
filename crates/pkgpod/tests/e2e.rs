@@ -158,11 +158,6 @@ impl Drop for Server {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = Command::new("gpgconf")
-            .arg("--homedir")
-            .arg(self.dir.path().join("data/gnupg"))
-            .args(["--kill", "all"])
-            .status();
     }
 }
 
@@ -1248,35 +1243,22 @@ fn source_packages_with_apt() {
         ],
     );
     // Signed, as debsign leaves it: kept byte for byte.
-    let signed = Command::new("gpg")
-        .arg("--homedir")
-        .arg(s.dir.path().join("data/gnupg"))
-        .args(["--batch", "--yes", "--clearsign", "--output", "-"])
-        .arg(&one)
-        .output()
-        .unwrap();
-    assert!(
-        signed.status.success(),
-        "{}",
-        String::from_utf8_lossy(&signed.stderr)
-    );
-    std::fs::write(&one, &signed.stdout).unwrap();
+    let signer = pkgpod_deb::testutil::TestKey::new().unwrap().signer();
+    let signed =
+        pkgpod_deb::sign::Signer::clearsign(&signer, &std::fs::read(&one).unwrap()).unwrap();
+    std::fs::write(&one, &signed).unwrap();
     let out = s.cli(&["upload", "src", one.to_str().unwrap()]).unwrap();
     assert!(out.contains("added source hello 1.0-1"), "{out}");
     let pooled = reqwest::blocking::get(s.url("/src/pool/main/h/hello/hello_1.0-1.dsc"))
         .unwrap()
         .bytes()
         .unwrap();
-    assert_eq!(pooled.as_ref(), signed.stdout.as_slice());
+    assert_eq!(pooled.as_ref(), signed.as_slice());
     let (_, sources) = get(&s.url("/src/dists/noble/main/source/Sources"), None);
-    let h = pkgpod_deb::hash::hash_bytes(&signed.stdout);
+    let h = pkgpod_deb::hash::hash_bytes(&signed);
     assert!(sources.starts_with("Package: hello\n"), "{sources}");
     assert!(
-        sources.contains(&format!(
-            " {} {} hello_1.0-1.dsc",
-            h.sha256,
-            signed.stdout.len()
-        )),
+        sources.contains(&format!(" {} {} hello_1.0-1.dsc", h.sha256, signed.len())),
         "{sources}"
     );
 
@@ -2189,7 +2171,7 @@ fn openapi_describes_what_the_api_sends() {
         204,
     );
     a.ok("delete", listener, "/api/v1/listeners/extra", None, 204);
-    if have("gpg") {
+    {
         let v = a.ok(
             "post",
             "/api/v1/keys/{name}/generate",
@@ -2197,16 +2179,19 @@ fn openapi_describes_what_the_api_sends() {
             Some(json!({"uid": "pkgpod api <api@example.invalid>"})),
             200,
         );
-        let fpr = v["fingerprint"].as_str().unwrap().to_string();
+        assert_eq!(v["uid"], "pkgpod api <api@example.invalid>");
+        // A key made elsewhere, imported armored.
+        let other = pkgpod_deb::testutil::TestKey::new().unwrap();
         let key = "/api/v1/keys/{name}";
         let v = a.ok(
             "put",
             key,
             "/api/v1/keys/again",
-            Some(json!({"fingerprint": fpr})),
+            Some(json!({"secret_key": other.key.armored_secret().unwrap()})),
             200,
         );
         assert_eq!(v["name"], "again");
+        assert_eq!(v["fingerprint"], other.fpr);
         a.ok(
             "post",
             "/api/v1/keys/{name}/default",
@@ -6087,4 +6072,100 @@ fn nuget_with_dotnet() {
     assert_eq!(found["data"][0]["version"], "1.0.0", "{found}");
     let (ok, out) = run("1.1.0", "");
     assert!(ok && out.contains("hello-pk 1.1.0"), "{out}");
+}
+
+#[test]
+fn a_key_from_gpg_is_imported_and_signs() {
+    if !have("gpg") || !have("gpgv") || !have("dpkg-deb") {
+        return;
+    }
+    // A key as gpg makes it (an encryption subkey too), with a passphrase.
+    let s = Server::start();
+    let home = tempfile::Builder::new()
+        .prefix("gpgh")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::set_permissions(
+        home.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    let gpg = |args: &[&str]| {
+        let o = Command::new("gpg")
+            .arg("--homedir")
+            .arg(home.path())
+            .args([
+                "--batch",
+                "--pinentry-mode",
+                "loopback",
+                "--passphrase",
+                "pw-1",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        o.stdout
+    };
+    gpg(&[
+        "--quick-gen-key",
+        "gpg made <gpg@example.invalid>",
+        "default",
+        "default",
+        "never",
+    ]);
+    let secret = s.dir.path().join("secret.asc");
+    std::fs::write(&secret, gpg(&["--armor", "--export-secret-keys"])).unwrap();
+    let public = gpg(&["--export"]);
+    let pass = s.dir.path().join("pass");
+    std::fs::write(&pass, "pw-1\n").unwrap();
+    // A wrong passphrase is refused; the right one imports.
+    std::fs::write(s.dir.path().join("wrong"), "nope\n").unwrap();
+    let wrong = s.dir.path().join("wrong");
+    assert!(
+        s.cli(&[
+            "key",
+            "import",
+            "gpgkey",
+            secret.to_str().unwrap(),
+            "--passphrase-file",
+            wrong.to_str().unwrap()
+        ])
+        .is_err()
+    );
+    let out = s
+        .cli(&[
+            "key",
+            "import",
+            "gpgkey",
+            secret.to_str().unwrap(),
+            "--passphrase-file",
+            pass.to_str().unwrap(),
+        ])
+        .unwrap();
+    assert!(out.contains("gpg made"), "{out}");
+    let _ = Command::new("gpgconf")
+        .arg("--homedir")
+        .arg(home.path())
+        .args(["--kill", "all"])
+        .status();
+    s.cli(&["repo", "create", "ppa", "-s", "public=true"])
+        .unwrap();
+    s.cli(&["op", "ppa", "dist-set", "name=stable", "-y"])
+        .unwrap();
+    let deb = build_deb(s.dir.path(), "hello", "1.0", "amd64", "xz", "");
+    s.cli(&["upload", "ppa", deb.to_str().unwrap()]).unwrap();
+    // gpgv, with only the key gpg exported, checks what pkgpod signed.
+    let ring = s.dir.path().join("ring.gpg");
+    std::fs::write(&ring, &public).unwrap();
+    let inrelease = s.dir.path().join("InRelease");
+    let (_, text) = get(&s.url("/ppa/dists/stable/InRelease"), None);
+    std::fs::write(&inrelease, text).unwrap();
+    let o = Command::new("gpgv")
+        .arg("--keyring")
+        .arg(&ring)
+        .arg(&inrelease)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
 }

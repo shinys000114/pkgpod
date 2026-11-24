@@ -2380,6 +2380,7 @@ dependencies = [
  "pkgpod-base",
  "pkgpod-deb",
  "pkgpod-engine",
+ "rand 0.8.8",
  "serde",
  "serde_json",
  "sha1 0.11.0",

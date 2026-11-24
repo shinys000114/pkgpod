@@ -1,17 +1,23 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Signing keys (gpg) and server-wide settings.
+//! Signing keys and server-wide settings.
 //!
-//! A key is a gpg key in a gpg home: the server's own (`<data_dir>/gnupg`)
-//! or one given with its home and passphrase file. One key is the
-//! default; a repository may name another in its `key` setting.
+//! An OpenPGP key is kept by pkgpod itself (rpgp, no gpg): its secret
+//! key, armored, in `<data_dir>/keys/<name>.asc` (mode 0600), and the
+//! passphrase it was imported with, if any, in `<name>.pass`. Keys are
+//! generated (Ed25519) or imported (as `gpg --export-secret-keys
+//! --armor` writes them). One key is the default; a repository may name
+//! another in its `key` setting. The server's RSA key (apk) is
+//! [`crate::rsa_key`].
 
+use std::collections::HashMap;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use pkgpod_base::db::Db;
-use pkgpod_deb::sign::{GpgSigner, Signer as _};
+use pkgpod_deb::sign::{PgpKey, Signer as _};
 use rusqlite::{OptionalExtension, params};
 use serde::Serialize;
 
@@ -21,18 +27,21 @@ use crate::{Error, Result};
 pub struct Key {
     pub name: String,
     pub fingerprint: String,
-    /// gpg home; empty: the server's.
-    pub homedir: String,
-    pub passphrase_file: String,
+    pub uid: String,
     pub default: bool,
+    /// Its secret key file is not there (to be imported again).
+    pub missing: bool,
 }
 
 pub struct Keys {
     db: Arc<Db>,
-    home: PathBuf,
+    /// Where the secret keys are.
+    dir: PathBuf,
     /// Where the server's RSA key is (made on first use).
     rsa_dir: PathBuf,
-    rsa: std::sync::Mutex<Option<Arc<crate::rsa_key::RsaKey>>>,
+    rsa: Mutex<Option<Arc<crate::rsa_key::RsaKey>>>,
+    /// Keys read, by name, with the fingerprint they were read for.
+    loaded: Mutex<HashMap<String, Arc<PgpKey>>>,
 }
 
 pub fn get_setting(db: &Db, name: &str) -> Result<Option<String>> {
@@ -55,24 +64,35 @@ pub fn set_setting(db: &Db, name: &str, value: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn check_fpr(f: &str) -> Result<()> {
-    let f = f.trim();
-    if f.len() < 16 || !f.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(Error::Invalid(format!(
-            "{f:?} is not a key fingerprint (hex digits)"
-        )));
-    }
-    Ok(())
+fn io(p: &Path, e: std::io::Error) -> Error {
+    Error::Invalid(format!("{}: {e}", p.display()))
+}
+
+/// Writes `data` to `path` with mode 0600, whole or not at all.
+fn write_private(path: &Path, data: &[u8]) -> Result<()> {
+    let tmp = path.with_extension("tmp");
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)
+        .map_err(|e| io(&tmp, e))?;
+    f.write_all(data)
+        .and_then(|_| f.sync_all())
+        .map_err(|e| io(&tmp, e))?;
+    std::fs::rename(&tmp, path).map_err(|e| io(path, e))
 }
 
 impl Keys {
-    /// `home`: the server's gpg home; `rsa_dir`: where its RSA key is.
-    pub fn new(db: Arc<Db>, home: &Path, rsa_dir: &Path) -> Keys {
+    /// `dir`: where the OpenPGP keys are; `rsa_dir`: where the RSA key is.
+    pub fn new(db: Arc<Db>, dir: &Path, rsa_dir: &Path) -> Keys {
         Keys {
             db,
-            home: home.to_path_buf(),
+            dir: dir.to_path_buf(),
             rsa_dir: rsa_dir.to_path_buf(),
-            rsa: std::sync::Mutex::new(None),
+            rsa: Mutex::new(None),
+            loaded: Mutex::new(HashMap::new()),
         }
     }
 
@@ -87,30 +107,37 @@ impl Keys {
         Ok(made)
     }
 
-    pub fn home(&self) -> &Path {
-        &self.home
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    fn file(&self, name: &str) -> PathBuf {
+        self.dir.join(format!("{name}.asc"))
+    }
+
+    fn pass_file(&self, name: &str) -> PathBuf {
+        self.dir.join(format!("{name}.pass"))
     }
 
     pub fn list(&self) -> Result<Vec<Key>> {
         let def = get_setting(&self.db, "default_key")?;
-        Ok(self.db.read(|c| {
-            let mut st = c.prepare(
-                "SELECT name, fingerprint, homedir, passphrase_file FROM keys ORDER BY name",
-            )?;
+        let rows: Vec<(String, String, String)> = self.db.read(|c| {
+            let mut st = c.prepare("SELECT name, fingerprint, uid FROM keys ORDER BY name")?;
             let v = st
-                .query_map([], |r| {
-                    let name: String = r.get(0)?;
-                    Ok(Key {
-                        default: def.as_deref() == Some(name.as_str()),
-                        name,
-                        fingerprint: r.get(1)?,
-                        homedir: r.get(2)?,
-                        passphrase_file: r.get(3)?,
-                    })
-                })?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok::<_, rusqlite::Error>(v)
-        })?)
+        })?;
+        Ok(rows
+            .into_iter()
+            .map(|(name, fingerprint, uid)| Key {
+                default: def.as_deref() == Some(name.as_str()),
+                missing: !self.file(&name).is_file(),
+                name,
+                fingerprint,
+                uid,
+            })
+            .collect())
     }
 
     pub fn get(&self, name: &str) -> Result<Key> {
@@ -120,22 +147,55 @@ impl Keys {
             .ok_or_else(|| Error::NotFound(format!("no key {name}")))
     }
 
-    /// Adds or changes a key. The first key becomes the default.
-    pub fn set(&self, name: &str, fpr: &str, homedir: &str, passphrase_file: &str) -> Result<Key> {
+    /// Keeps `key` as `name` (replacing one of that name). The first key
+    /// becomes the default.
+    fn keep(&self, name: &str, key: &PgpKey, passphrase: Option<&str>) -> Result<Key> {
         pkgpod_engine::check_name("key", name).map_err(|e| Error::Invalid(e.to_string()))?;
-        check_fpr(fpr)?;
+        std::fs::create_dir_all(&self.dir).map_err(|e| io(&self.dir, e))?;
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700));
+        }
+        let armored = key
+            .armored_secret()
+            .map_err(|e| Error::Invalid(e.to_string()))?;
+        write_private(&self.file(name), armored.as_bytes())?;
+        match passphrase {
+            Some(p) => write_private(&self.pass_file(name), p.as_bytes())?,
+            None => {
+                let _ = std::fs::remove_file(self.pass_file(name));
+            }
+        }
         self.db.write(|tx| {
             tx.execute(
-                "INSERT INTO keys (name, fingerprint, homedir, passphrase_file) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(name) DO UPDATE SET fingerprint = excluded.fingerprint,
-                   homedir = excluded.homedir, passphrase_file = excluded.passphrase_file",
-                params![name, fpr.trim().to_uppercase(), homedir, passphrase_file],
+                "INSERT INTO keys (name, fingerprint, uid) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(name) DO UPDATE SET fingerprint = excluded.fingerprint, uid = excluded.uid",
+                params![name, key.fingerprint(), key.uid()],
             )
         })?;
+        self.loaded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name);
         if get_setting(&self.db, "default_key")?.is_none() {
             set_setting(&self.db, "default_key", Some(name))?;
         }
         self.get(name)
+    }
+
+    /// Imports a secret key (armored or binary), unlocked by
+    /// `passphrase` when it has one.
+    pub fn import(&self, name: &str, data: &[u8], passphrase: Option<&str>) -> Result<Key> {
+        let passphrase = passphrase.filter(|p| !p.is_empty());
+        let key =
+            PgpKey::from_bytes(data, passphrase).map_err(|e| Error::Invalid(e.to_string()))?;
+        self.keep(name, &key, passphrase)
+    }
+
+    /// Makes a new Ed25519 signing key without a passphrase as `name`.
+    pub fn generate(&self, name: &str, uid: &str) -> Result<Key> {
+        let key = PgpKey::generate(uid).map_err(|e| Error::Invalid(e.to_string()))?;
+        self.keep(name, &key, None)
     }
 
     pub fn remove(&self, name: &str) -> Result<()> {
@@ -145,6 +205,12 @@ impl Keys {
         if n == 0 {
             return Err(Error::NotFound(format!("no key {name}")));
         }
+        let _ = std::fs::remove_file(self.file(name));
+        let _ = std::fs::remove_file(self.pass_file(name));
+        self.loaded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name);
         if get_setting(&self.db, "default_key")?.as_deref() == Some(name) {
             set_setting(&self.db, "default_key", None)?;
         }
@@ -156,93 +222,48 @@ impl Keys {
         set_setting(&self.db, "default_key", Some(name))
     }
 
-    fn gpg_home(&self, k: &Key) -> PathBuf {
-        if k.homedir.is_empty() {
-            self.home.clone()
-        } else {
-            PathBuf::from(&k.homedir)
-        }
-    }
-
-    fn signer(&self, name: Option<&str>) -> Result<GpgSigner> {
+    /// The key `name` (the default's when `None`), read once.
+    fn signer(&self, name: Option<&str>) -> Result<Arc<PgpKey>> {
         let name = match name {
             Some(n) => n.to_string(),
             None => get_setting(&self.db, "default_key")?.ok_or_else(|| {
-                Error::Invalid("no signing key: add one (pkgpod key add or generate)".into())
+                Error::Invalid(
+                    "no signing key: make one (pkgpod key generate) or import one".into(),
+                )
             })?,
         };
-        let k = self.get(&name)?;
-        let mut s = GpgSigner::new(k.fingerprint.clone());
-        s.homedir = Some(self.gpg_home(&k));
-        if !k.passphrase_file.is_empty() {
-            s.passphrase_file = Some(PathBuf::from(&k.passphrase_file));
+        if let Some(k) = self
+            .loaded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&name)
+        {
+            return Ok(k.clone());
         }
-        Ok(s)
+        let k = self.get(&name)?;
+        let data = std::fs::read(self.file(&name)).map_err(|_| {
+            Error::Invalid(format!(
+                "key {name} ({}) has no secret key file: import it (gpg --export-secret-keys --armor {} | pkgpod key import {name} -)",
+                k.fingerprint, k.fingerprint
+            ))
+        })?;
+        let pass = std::fs::read_to_string(self.pass_file(&name)).ok();
+        let key = Arc::new(
+            PgpKey::from_bytes(&data, pass.as_deref())
+                .map_err(|e| Error::Invalid(e.to_string()))?,
+        );
+        self.loaded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name, key.clone());
+        Ok(key)
     }
 
     /// The public key, armored (what clients put in their keyring).
     pub fn public_key(&self, name: Option<&str>) -> Result<Vec<u8>> {
-        let s = self.signer(name)?;
-        let out = Command::new("gpg")
-            .arg("--homedir")
-            .arg(s.homedir.as_deref().unwrap_or(&self.home))
-            .args(["--batch", "--armor", "--export", &s.key])
-            .output()
-            .map_err(|e| Error::Invalid(format!("running gpg: {e}")))?;
-        if !out.status.success() || out.stdout.is_empty() {
-            return Err(Error::Invalid(format!(
-                "gpg could not export {}: {}",
-                s.key,
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
-        }
-        Ok(out.stdout)
-    }
-
-    /// Makes a new ed25519 signing key without a passphrase in the
-    /// server's gpg home (mode 0700) and adds it as `name`.
-    pub fn generate(&self, name: &str, uid: &str) -> Result<Key> {
-        std::fs::create_dir_all(&self.home)
-            .map_err(|e| Error::Invalid(format!("{}: {e}", self.home.display())))?;
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&self.home, std::fs::Permissions::from_mode(0o700));
-        let gpg = |args: &[&str]| -> Result<Vec<u8>> {
-            let out = Command::new("gpg")
-                .arg("--homedir")
-                .arg(&self.home)
-                .arg("--batch")
-                .args(args)
-                .output()
-                .map_err(|e| Error::Invalid(format!("running gpg: {e}")))?;
-            if !out.status.success() {
-                return Err(Error::Invalid(format!(
-                    "gpg {}: {}",
-                    args.join(" "),
-                    String::from_utf8_lossy(&out.stderr).trim()
-                )));
-            }
-            Ok(out.stdout)
-        };
-        gpg(&[
-            "--passphrase",
-            "",
-            "--pinentry-mode",
-            "loopback",
-            "--quick-gen-key",
-            uid,
-            "ed25519",
-            "sign",
-            "never",
-        ])?;
-        let list = String::from_utf8_lossy(&gpg(&["--with-colons", "--list-secret-keys", uid])?)
-            .to_string();
-        let fpr = list
-            .lines()
-            .rfind(|l| l.starts_with("fpr:"))
-            .and_then(|l| l.split(':').nth(9))
-            .ok_or_else(|| Error::Invalid("gpg made no key".into()))?
-            .to_string();
-        self.set(name, &fpr, "", "")
+        self.signer(name)?
+            .armored_public()
+            .map_err(|e| Error::Invalid(e.to_string()))
     }
 }
 
@@ -260,7 +281,7 @@ impl pkgpod_engine::Signer for Keys {
         Ok(s.detach_sign(data)?)
     }
     fn key_id(&self, key: Option<&str>) -> Option<String> {
-        self.signer(key).ok().map(|s| s.key)
+        self.signer(key).ok().map(|s| s.fingerprint())
     }
     fn public_key(&self, key: Option<&str>) -> pkgpod_engine::Result<Vec<u8>> {
         Keys::public_key(self, key).map_err(|e| pkgpod_engine::Error::Invalid(e.to_string()))

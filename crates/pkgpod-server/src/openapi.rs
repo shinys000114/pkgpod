@@ -510,21 +510,16 @@ fn schemas() -> Value {
         (
             "Key",
             object(
-                "A signing key.",
+                "A signing key (OpenPGP, kept by pkgpod).",
                 vec![
                     ("name", string()),
                     ("fingerprint", string()),
-                    ("homedir", text("gpg home; empty: the server's.")),
-                    ("passphrase_file", string()),
+                    ("uid", text("Its first user id.")),
                     ("default", boolean()),
+                    // Its secret key file is not there: to be imported again.
+                    ("missing", boolean()),
                 ],
-                &[
-                    "name",
-                    "fingerprint",
-                    "homedir",
-                    "passphrase_file",
-                    "default",
-                ],
+                &["name", "fingerprint", "uid", "default", "missing"],
             ),
         ),
         (
@@ -814,11 +809,15 @@ fn schemas() -> Value {
             object(
                 "",
                 vec![
-                    ("fingerprint", string()),
-                    ("homedir", text("gpg home; empty: the server's.")),
-                    ("passphrase_file", string()),
+                    (
+                        "secret_key",
+                        text(
+                            "The secret key, armored (gpg --export-secret-keys --armor) or binary.",
+                        ),
+                    ),
+                    ("passphrase", text("What unlocks it, if anything.")),
                 ],
-                &["fingerprint"],
+                &["secret_key"],
             ),
         ),
         (
@@ -1139,12 +1138,12 @@ fn ops() -> Vec<Op> {
             .empty(204, "Removed."),
         op("get", "/api/v1/keys", "keys", "Signing keys (server admin).")
             .reply(200, "The keys.", array(sref("Key"))),
-        op("put", "/api/v1/keys/{name}", "key_set", "Add or change {fingerprint, homedir?, passphrase_file?} (server admin).")
+        op("put", "/api/v1/keys/{name}", "key_set", "Import a secret key {secret_key, passphrase?} as this name (server admin).")
             .body("KeySet")
             .reply(200, "The key.", sref("Key")),
         op("delete", "/api/v1/keys/{name}", "key_delete", "Remove a key (server admin).")
             .empty(204, "Removed."),
-        op("post", "/api/v1/keys/{name}/generate", "key_generate", "Make a new key {uid} in the server's gpg home (server admin).")
+        op("post", "/api/v1/keys/{name}/generate", "key_generate", "Make a new Ed25519 key {uid} (server admin).")
             .body("KeyGenerate")
             .reply(200, "The new key.", sref("Key")),
         op("post", "/api/v1/keys/{name}/default", "key_default", "Make it the default key (server admin).")

@@ -184,16 +184,16 @@ pub enum ListenerCmd {
 #[derive(Subcommand)]
 pub enum KeyCmd {
     List,
-    /// Add a key that is in a gpg home.
-    Add {
+    /// Import a secret key (as gpg --export-secret-keys --armor writes
+    /// it; `-` for standard input).
+    Import {
         name: String,
-        fingerprint: String,
-        #[arg(long, default_value = "")]
-        homedir: String,
+        file: String,
+        /// A file holding the key's passphrase, if it has one.
         #[arg(long, default_value = "")]
         passphrase_file: String,
     },
-    /// Make a new key in the server's gpg home.
+    /// Make a new Ed25519 key.
     Generate {
         name: String,
         uid: String,
@@ -831,17 +831,42 @@ pub fn run(
                     );
                 });
             }
-            KeyCmd::Add {
+            KeyCmd::Import {
                 name,
-                fingerprint,
-                homedir,
+                file,
                 passphrase_file,
             } => {
-                c.send(
+                let read = |f: &str| -> Result<String, CliError> {
+                    if f == "-" {
+                        let mut s = String::new();
+                        std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)
+                            .map_err(|e| CliError::usage(format!("standard input: {e}")))?;
+                        Ok(s)
+                    } else {
+                        std::fs::read_to_string(f).map_err(|e| CliError::usage(format!("{f}: {e}")))
+                    }
+                };
+                let secret_key = read(&file)?;
+                let passphrase = if passphrase_file.is_empty() {
+                    String::new()
+                } else {
+                    read(&passphrase_file)?
+                        .trim_end_matches(['\n', '\r'])
+                        .to_string()
+                };
+                let v = c.send(
                     Method::PUT,
                     &format!("/api/v1/keys/{}", enc(&name)),
-                    &json!({"fingerprint": fingerprint, "homedir": homedir, "passphrase_file": passphrase_file}),
+                    &json!({"secret_key": secret_key, "passphrase": passphrase}),
                 )?;
+                x.print(&v, |v| {
+                    println!(
+                        "{} {} {}",
+                        s(&v["name"]),
+                        s(&v["fingerprint"]),
+                        s(&v["uid"])
+                    )
+                });
             }
             KeyCmd::Generate { name, uid } => {
                 let v = c.post(
