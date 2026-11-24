@@ -11,6 +11,7 @@ pub mod cargo;
 pub mod composer;
 pub mod config;
 pub mod ftp;
+pub mod galaxy;
 pub mod gems;
 pub mod go;
 pub mod helm;
@@ -167,6 +168,7 @@ pub fn formats() -> Vec<Arc<dyn pkgpod_engine::Format>> {
         Arc::new(pkgpod_pub::Pub),
         Arc::new(pkgpod_ipk::Ipk),
         Arc::new(pkgpod_terraform::Terraform),
+        Arc::new(pkgpod_galaxy::Galaxy),
     ]
 }
 

@@ -843,6 +843,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                         ("pub", _) => "Dart and Flutter packages for dart pub",
                         ("ipk", _) => "opkg feeds for OpenWrt and Yocto, signed",
                         ("terraform", _) => "providers and modules for Terraform and OpenTofu",
+                        ("galaxy", _) => "Ansible collections for ansible-galaxy",
                         _ => "",
                     }
                     .to_string(),
@@ -1482,6 +1483,30 @@ fn usage(
         out.push(UseLine {
             label: "Note".into(),
             text: "pkgpod is no proxy: packages from npmjs need their own registry (a scope here, the rest from registry.npmjs.org). npm login is not offered; set the token in .npmrc. unpublish and deprecate are operations here.".into(),
+        });
+        return out;
+    }
+    if r.format == "galaxy" {
+        out.push(UseLine {
+            label: "ansible.cfg".into(),
+            text: format!(
+                "[galaxy]\nserver_list = {id}, release_galaxy\n\n[galaxy_server.{id}]\nurl = {base}\ntoken = <token>\n\n[galaxy_server.release_galaxy]\nurl = https://galaxy.ansible.com/",
+                id = r.name.replace(['.', '-'], "_")
+            ),
+        });
+        out.push(UseLine {
+            label: "Install".into(),
+            text: "ansible-galaxy collection install <namespace>.<name>".into(),
+        });
+        out.push(UseLine {
+            label: "Publish".into(),
+            text: format!(
+                "ansible-galaxy collection build\nansible-galaxy collection publish <namespace>-<name>-1.0.0.tar.gz -s {base} --token <token>"
+            ),
+        });
+        out.push(UseLine {
+            label: "A labelled version".into(),
+            text: format!("url = {base}@<label>/"),
         });
         return out;
     }
@@ -3103,6 +3128,7 @@ fn catalog_words(format: &str) -> (&'static str, [&'static str; 3], bool) {
         "nuget" => ("Packages", ["Package", "Version", "Note"], true),
         "pub" | "composer" | "cran" => ("Packages", ["Package", "Version", "Note"], true),
         "terraform" => ("Providers and modules", ["Name", "Version", "Kind"], true),
+        "galaxy" => ("Collections", ["Collection", "Version", "Note"], true),
         "deb" => ("Packages", ["Package", "Version", "Where"], true),
         _ => ("Packages", ["Package", "Version", "Where"], true),
     }

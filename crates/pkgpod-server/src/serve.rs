@@ -45,7 +45,11 @@ pub fn basic_caller(app: &App, h: &HeaderMap) -> Result<Caller, Error> {
     let Some(v) = h.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) else {
         return Ok(Caller::anonymous());
     };
-    if let Some(t) = v.strip_prefix("Bearer ") {
+    // Bearer, or Token as ansible-galaxy sends it.
+    if let Some(t) = v
+        .strip_prefix("Bearer ")
+        .or_else(|| v.strip_prefix("Token "))
+    {
         return app.auth.token(t.trim()).ok_or(Error::Unauthorized);
     }
     // A token alone, as cargo sends it.
@@ -214,7 +218,7 @@ password=<token>
 fn browsable(format: &str) -> bool {
     !matches!(
         format,
-        "npm" | "oci" | "cargo" | "go" | "nuget" | "composer" | "pub" | "terraform"
+        "npm" | "oci" | "cargo" | "go" | "nuget" | "composer" | "pub" | "terraform" | "galaxy"
     )
 }
 
@@ -522,6 +526,31 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
             }
             if served.repo.format == "gems" && crate::gems::is_api(&method, &rel) {
                 return crate::gems::handle(app, served.repo, caller, role, req).await;
+            }
+            if served.repo.format == "galaxy" {
+                let mut base_url = client_base(route.as_ref(), &host, &base, &req);
+                let mut rel = rel;
+                let mut version = served.current.clone();
+                let mut labelled = false;
+                if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
+                    let Ok(v) = app.labelled(&served.repo.name, label) else {
+                        return status(StatusCode::NOT_FOUND);
+                    };
+                    base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
+                    version = Some(v);
+                    labelled = true;
+                    rel.remove(0);
+                }
+                let ask = crate::galaxy::Ask {
+                    repo: served.repo,
+                    version,
+                    labelled,
+                    rel,
+                    base: base_url,
+                    caller,
+                    role,
+                };
+                return crate::galaxy::handle(app, ask, req).await;
             }
             if served.repo.format == "pub" {
                 let mut base_url = client_base(route.as_ref(), &host, &base, &req);

@@ -736,7 +736,7 @@ fn console_login_pages_and_csrf() {
     // page, usage and actions open.
     let src = s.url("/web/");
     type Fields<'a> = &'a [(&'a str, &'a str)];
-    let choices: [(&str, &str, &str, Fields); 22] = [
+    let choices: [(&str, &str, &str, Fields); 23] = [
         (
             "deb",
             "hosted",
@@ -772,6 +772,7 @@ fn console_login_pages_and_csrf() {
         ("pub", "hosted", "c-pub", &[]),
         ("ipk", "hosted", "c-ipk", &[]),
         ("terraform", "hosted", "c-terraform", &[]),
+        ("galaxy", "hosted", "c-galaxy", &[]),
     ];
     for (format, kind, name, extra) in choices {
         let mut form = vec![("format", format), ("kind", kind), ("name", name)];
@@ -4874,6 +4875,7 @@ fn serving_root_lists_trees_not_registries() {
         ("reg-nuget", "nuget"),
         ("reg-composer", "composer"),
         ("reg-terraform", "terraform"),
+        ("reg-galaxy", "galaxy"),
         ("reg-pub", "pub"),
         ("reg-go", "go"),
     ] {
@@ -4913,6 +4915,7 @@ fn serving_root_lists_trees_not_registries() {
         "reg-composer",
         "reg-pub",
         "reg-terraform",
+        "reg-galaxy",
         "hidden-oci",
     ] {
         assert!(!root.contains(name), "{name}: {root}");
@@ -8050,4 +8053,81 @@ fn terraform_registry_with_terraform_and_tofu() {
     s.restart();
     let (ok, out) = run(TOFU_IMAGE, "tofu", "run-after", "rc.tfrc");
     assert!(ok && out.contains("MSG=hello pkgpod 1.0.0"), "{out}");
+}
+
+const ANSIBLE_NEW: &str = "alpine/ansible:2.21.0";
+const ANSIBLE_OLD: &str = "alpine/ansible:2.18.6";
+
+#[test]
+fn galaxy_collections_with_ansible_galaxy() {
+    if images_here(&[ANSIBLE_NEW, ANSIBLE_OLD]).len() < 2 {
+        return;
+    }
+    let mut s = Server::start();
+    s.cli(&["repo", "create", "ans", "-f", "galaxy"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "ans", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let work = s.dir.path().join("ans");
+    std::fs::create_dir_all(&work).unwrap();
+    let url = s.url("/ans/");
+    // A collection with a module, built by ansible-galaxy.
+    let build = |ver: &str, extra: &str| {
+        let script = format!(
+            "set -e; rm -rf src-{ver}; mkdir src-{ver}; cd src-{ver}; ansible-galaxy collection init team.hello >/dev/null; cd team/hello; \
+             sed -i 's/^version: .*/version: {ver}/' galaxy.yml; mkdir -p plugins/modules; \
+             printf '#!/usr/bin/python\\nfrom ansible.module_utils.basic import AnsibleModule\\ndef main():\\n    m = AnsibleModule(argument_spec={{}})\\n    m.exit_json(changed=False, msg=\"hello {ver}{extra}\")\\nif __name__ == \"__main__\":\\n    main()\\n' > plugins/modules/greet.py; \
+             ansible-galaxy collection build --force --output-path /work >/dev/null"
+        );
+        let (ok, out) = docker_sh_in(ANSIBLE_NEW, Some(&work), &script);
+        assert!(ok, "{out}");
+    };
+    let publish = |ver: &str| {
+        docker_sh_in(
+            ANSIBLE_NEW,
+            Some(&work),
+            &format!(
+                "ansible-galaxy collection publish team-hello-{ver}.tar.gz -s {url} --token {tok}"
+            ),
+        )
+    };
+    build("1.0.0", "");
+    let (ok, out) = publish("1.0.0");
+    assert!(ok, "{out}");
+    s.cli(&["label", "ans", "first"]).unwrap();
+    build("1.1.0", "");
+    let (ok, out) = publish("1.1.0");
+    assert!(ok, "{out}");
+    // Installed by another ansible, the module run.
+    let install = |server: &str, token: &str| {
+        docker_sh_in(
+            ANSIBLE_OLD,
+            Some(&work),
+            &format!(
+                "set -e; rm -rf /tmp/c; ansible-galaxy collection install team.hello -s {server} {token} -p /tmp/c; \
+                 ANSIBLE_COLLECTIONS_PATH=/tmp/c ansible localhost -m team.hello.greet 2>/dev/null"
+            ),
+        )
+    };
+    let tok_arg = format!("--token {tok}");
+    let (ok, out) = install(&url, &tok_arg);
+    assert!(ok && out.contains("\"msg\": \"hello 1.1.0\""), "{out}");
+    // A label's server: the version it had.
+    let (ok, out) = install(&format!("{url}@first/"), &tok_arg);
+    assert!(ok && out.contains("\"msg\": \"hello 1.0.0\""), "{out}");
+    // Without a token: refused.
+    let (ok, out) = install(&url, "");
+    assert!(!ok, "{out}");
+    // A version is published once.
+    build("1.1.0", " again");
+    let (ok, out) = publish("1.1.0");
+    assert!(!ok && out.contains("already exists"), "{out}");
+    // Removed: the older one; after a restart, the same.
+    s.cli(&["rm", "ans", "team/hello/team-hello-1.1.0.tar.gz", "-y"])
+        .unwrap();
+    s.restart();
+    let (ok, out) = install(&url, &tok_arg);
+    assert!(ok && out.contains("\"msg\": \"hello 1.0.0\""), "{out}");
 }
