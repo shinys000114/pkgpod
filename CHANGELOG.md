@@ -160,7 +160,7 @@ Operations:
   more than `cleanup_max` versions is held for review. Removed versions
   come back by rollback while retention keeps the version before; the
   space is freed when it no longer does.
-- Group repositories for files, npm, PyPI, Maven, Go and Cargo
+- Group repositories for files, npm, PyPI, Maven, Go, Cargo and OCI
   (`pkgpod repo create <name> -f <format> -k group -s members=a,b`): one
   address that reads its members in order. For each package the first
   member that has it answers alone (versions are not merged, so a
@@ -179,7 +179,10 @@ Operations:
   with its files through the proxy, each checked against its sha256)
   and Cargo (the upstream sparse index's files kept, .crate files
   fetched from where its config.json says and checked against the
-  index's cksum):
+  index's cksum) and OCI images (`upstream=docker.io`, a registry URL,
+  or one with a name prefix; manifests by tag fetched again after their
+  time, by digest and blobs once, each checked against its digest; an
+  OCI group pulls an image from the first member that has it):
   a registry's files fetched when asked for and kept (garbage
   collection keeps them), its metadata asked for again after
   `metadata_minutes` and served as it was while the upstream is not

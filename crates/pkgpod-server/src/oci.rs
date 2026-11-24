@@ -30,8 +30,8 @@ use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
 use pkgpod_base::Digest;
 use pkgpod_base::store::Incoming;
-use pkgpod_engine::RepoInfo;
 use pkgpod_engine::tree::Entry;
+use pkgpod_engine::{Kind, RepoInfo};
 use pkgpod_oci::{Images, Parsed, manifest_path, parse_digest, tag_path};
 use rusqlite::params;
 use serde_json::{Value, json};
@@ -90,7 +90,7 @@ fn set(r: &mut Response, k: &'static str, v: &str) {
 }
 
 /// What a request asks of an image.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum Target {
     Manifest(String),
     Blob(String),
@@ -289,6 +289,19 @@ pub async fn handle(
             )
         });
     }
+    if r.kind == Kind::Proxy {
+        if writing {
+            return Some(read_only(&r.name));
+        }
+        let (uri, headers) = (req.uri().clone(), req.headers().clone());
+        return Some(proxy(&app, &r, &image, &target, &method, uri, headers).await);
+    }
+    if r.kind == Kind::Group {
+        if writing {
+            return Some(read_only(&r.name));
+        }
+        return Some(group(app, caller, r, name, image, target, req).await);
+    }
     let cx = Ctx {
         app,
         caller,
@@ -296,7 +309,21 @@ pub async fn handle(
         name,
         image,
     };
-    Some(match (target, method) {
+    Some(answer(cx, target, req).await)
+}
+
+fn read_only(repo: &str) -> Response {
+    oci_err(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "UNSUPPORTED",
+        format!("{repo} is read through: push to a hosted repository"),
+    )
+}
+
+/// A hosted repository's answer.
+async fn answer(cx: Ctx, target: Target, req: Request) -> Response {
+    let method = req.method().clone();
+    match (target, method) {
         (Target::Manifest(re), m) if m == Method::GET || m == Method::HEAD => {
             get_manifest(&cx, &re, m == Method::HEAD).await
         }
@@ -326,7 +353,331 @@ pub async fn handle(
             referrers(&cx, &d, req.uri().query().unwrap_or("")).await
         }
         _ => oci_err(StatusCode::METHOD_NOT_ALLOWED, "UNSUPPORTED", "not here"),
+    }
+}
+
+/// A group of registries: the first member that has the image answers
+/// alone (a proxy has it if its upstream does).
+async fn group(
+    app: Arc<App>,
+    caller: Caller,
+    g: RepoInfo,
+    name: String,
+    image: String,
+    target: Target,
+    req: Request,
+) -> Response {
+    let public_only = app.auth.role(&caller, &g.name, false).is_none();
+    let members: Vec<RepoInfo> = g
+        .setting_list("members")
+        .iter()
+        .filter_map(|m| app.engine.repo(m).ok())
+        .filter(|m| m.format == "oci" && m.kind != Kind::Group)
+        .filter(|m| !public_only || m.setting_bool("public"))
+        .collect();
+    let method = req.method().clone();
+    for m in members {
+        if m.kind == Kind::Proxy {
+            let (uri, headers) = (req.uri().clone(), req.headers().clone());
+            let r = proxy(&app, &m, &image, &target, &method, uri, headers).await;
+            if r.status() != StatusCode::NOT_FOUND {
+                return r;
+            }
+            continue;
+        }
+        let (app2, m2, image2) = (app.clone(), m.clone(), image.clone());
+        let has = blocking(move || {
+            let v = app2.engine.current(&m2).ok()??;
+            app2.engine
+                .objects()
+                .resolve(&v.root, &image2)
+                .ok()
+                .flatten()
+                .map(|_| ())
+        })
+        .await
+        .flatten()
+        .is_some();
+        if has {
+            let mut again = Request::new(Body::empty());
+            *again.method_mut() = method.clone();
+            *again.uri_mut() = req.uri().clone();
+            *again.headers_mut() = req.headers().clone();
+            let cx = Ctx {
+                app: app.clone(),
+                caller: caller.clone(),
+                r: m,
+                name: name.clone(),
+                image: image.clone(),
+            };
+            return answer(cx, target, again).await;
+        }
+    }
+    oci_err(
+        StatusCode::NOT_FOUND,
+        "NAME_UNKNOWN",
+        format!("no member of {} has {image}", g.name),
+    )
+}
+
+/// Upstream registry clients, by proxy (their Bearer tokens kept).
+fn registries() -> &'static Mutex<HashMap<String, Arc<pkgpod_mirror::oci::Registry>>> {
+    static R: OnceLock<Mutex<HashMap<String, Arc<pkgpod_mirror::oci::Registry>>>> = OnceLock::new();
+    R.get_or_init(Default::default)
+}
+
+/// The upstream image a proxy's image is: `upstream` is a registry
+/// (`docker.io`, `https://ghcr.io`), with a name prefix as a path
+/// (`http://host/team`: `team/<image>`).
+fn upstream_ref(r: &RepoInfo, image: &str) -> Option<pkgpod_mirror::oci::ImageRef> {
+    let u = r.setting_str("upstream").trim().trim_end_matches('/');
+    let (source, prefix) = match u.split_once("://") {
+        Some((scheme, rest)) => match rest.split_once('/') {
+            Some((host, p)) => (format!("{scheme}://{host}"), p.to_string()),
+            None => (u.to_string(), String::new()),
+        },
+        None => match u.split_once('/') {
+            Some((host, p)) => (host.to_string(), p.to_string()),
+            None => (u.to_string(), String::new()),
+        },
+    };
+    let name = if prefix.is_empty() {
+        image.to_string()
+    } else {
+        format!("{prefix}/{image}")
+    };
+    pkgpod_mirror::oci::parse_ref(&source, &name).ok()
+}
+
+/// A proxy's answer: manifests by tag (metadata) and by digest, and
+/// blobs (files), each checked against its digest.
+async fn proxy(
+    app: &Arc<App>,
+    r: &RepoInfo,
+    image: &str,
+    target: &Target,
+    method: &Method,
+    uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    use pkgpod_engine::cache::{CacheKind, CacheRow};
+    let head = *method == Method::HEAD;
+    let excluded = r
+        .setting_list("exclude")
+        .iter()
+        .any(|p| match p.strip_suffix('*') {
+            Some(pre) => image.starts_with(pre),
+            None => image == p,
+        });
+    let unknown = |what: &str| {
+        oci_err(
+            StatusCode::NOT_FOUND,
+            "MANIFEST_UNKNOWN",
+            format!("{image}:{what} is not here"),
+        )
+    };
+    if excluded {
+        return unknown("excluded");
+    }
+    let Some(up) = upstream_ref(r, image) else {
+        return oci_err(
+            StatusCode::BAD_GATEWAY,
+            "UNKNOWN",
+            "the proxy's upstream is not a registry",
+        );
+    };
+    // A blocking client: made (and ever dropped) off the async threads.
+    let name = r.name.clone();
+    let reg = blocking(move || {
+        let mut m = registries().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(x) = m.get(&name) {
+            return Ok(x.clone());
+        }
+        let x = Arc::new(pkgpod_mirror::oci::Registry::new(None)?);
+        m.insert(name, x.clone());
+        Ok::<_, pkgpod_mirror::Error>(x)
     })
+    .await;
+    let reg = match reg {
+        Some(Ok(x)) => x,
+        Some(Err(e)) => return oci_err(StatusCode::BAD_GATEWAY, "UNKNOWN", e.to_string()),
+        None => {
+            return oci_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UNKNOWN",
+                "the registry client",
+            );
+        }
+    };
+    let ttl = r
+        .settings
+        .get("metadata_minutes")
+        .and_then(Value::as_i64)
+        .unwrap_or(30)
+        .max(0)
+        * 60;
+    let now = pkgpod_base::now();
+    let (app2, repo2) = (app.clone(), r.name.clone());
+    let cached = move |path: String| {
+        let (app2, repo2) = (app2.clone(), repo2.clone());
+        async move {
+            blocking(move || app2.engine.cache_get(&repo2, &path).ok().flatten())
+                .await
+                .flatten()
+        }
+    };
+    let row = |path: String, kind, sha: Digest, size: u64, ct: String, version: String| CacheRow {
+        path,
+        kind,
+        sha256: Some(sha),
+        size,
+        content_type: ct,
+        etag: String::new(),
+        last_modified: String::new(),
+        fetched: now,
+        used: now,
+        pinned: false,
+        name: image.to_string(),
+        version,
+    };
+    let put = |rw: CacheRow| {
+        let (app2, repo2) = (app.clone(), r.name.clone());
+        blocking(move || app2.engine.cache_put(&repo2, &rw))
+    };
+    match target {
+        Target::Manifest(re) => {
+            let by_tag = !re.starts_with("sha256:");
+            let path = format!("{image}/manifests/{re}");
+            let have = cached(path.clone()).await;
+            let fresh = have
+                .as_ref()
+                .is_some_and(|h| !by_tag || now - h.fetched < ttl);
+            let got = if fresh {
+                have.clone()
+            } else {
+                let (reg2, up2, re2) = (reg.clone(), up.clone(), re.clone());
+                match blocking(move || reg2.manifest(&up2, &re2)).await {
+                    Some(Ok((body, mt, digest))) => {
+                        let store = r.store();
+                        let stored = blocking(move || {
+                            let mut inc = store.incoming()?;
+                            std::io::Write::write_all(&mut inc, &body)?;
+                            store.commit(inc, None)
+                        })
+                        .await;
+                        let Some(Ok((sha, size))) = stored else {
+                            return oci_err(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "UNKNOWN",
+                                "storing the manifest",
+                            );
+                        };
+                        if format!("sha256:{}", sha.hex()) != digest {
+                            return oci_err(
+                                StatusCode::BAD_GATEWAY,
+                                "UNKNOWN",
+                                "the manifest is not its digest",
+                            );
+                        }
+                        let kind = if by_tag {
+                            CacheKind::Meta
+                        } else {
+                            CacheKind::File
+                        };
+                        let tagged = row(path.clone(), kind, sha, size, mt.clone(), re.clone());
+                        let _ = put(tagged.clone()).await;
+                        if by_tag {
+                            let _ = put(row(
+                                format!("{image}/manifests/{digest}"),
+                                CacheKind::File,
+                                sha,
+                                size,
+                                mt,
+                                re.clone(),
+                            ))
+                            .await;
+                        }
+                        Some(tagged)
+                    }
+                    // The upstream not there: as it was.
+                    _ if have.is_some() => have.clone(),
+                    _ => None,
+                }
+            };
+            let Some(got) = got else {
+                return unknown(re);
+            };
+            let Some(sha) = got.sha256 else {
+                return unknown(re);
+            };
+            let body = if head {
+                Vec::new()
+            } else {
+                match tokio::fs::read(r.store().path(&sha)).await {
+                    Ok(b) => b,
+                    Err(_) => return unknown(re),
+                }
+            };
+            let mut resp = Response::new(Body::from(body));
+            let digest = format!("sha256:{}", sha.hex());
+            set(&mut resp, "Content-Type", &got.content_type);
+            set(&mut resp, "Content-Length", &got.size.to_string());
+            set(&mut resp, "Docker-Content-Digest", &digest);
+            set(&mut resp, "Docker-Distribution-API-Version", "registry/2.0");
+            if by_tag && !head {
+                app.stats
+                    .named(crate::stats::Counts::Whole, &resp, &r.name, image, re);
+            }
+            resp
+        }
+        Target::Blob(d) => {
+            let Ok(want) = parse_digest(d) else {
+                return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "not a digest");
+            };
+            let path = format!("{image}/blobs/{d}");
+            if cached(path.clone()).await.is_none() {
+                let (reg2, up2, d2, store) = (reg.clone(), up.clone(), d.clone(), r.store());
+                let stored = blocking(move || -> Result<(Digest, u64), String> {
+                    let mut inc = store.incoming().map_err(|e| e.to_string())?;
+                    reg2.blob(&up2, &d2, &mut inc).map_err(|e| e.to_string())?;
+                    store.commit(inc, Some(&want)).map_err(|e| e.to_string())
+                })
+                .await;
+                match stored {
+                    Some(Ok((sha, size))) => {
+                        let _ = put(row(
+                            path.clone(),
+                            CacheKind::File,
+                            sha,
+                            size,
+                            "application/octet-stream".into(),
+                            String::new(),
+                        ))
+                        .await;
+                    }
+                    Some(Err(e)) => return oci_err(StatusCode::BAD_GATEWAY, "BLOB_UNKNOWN", e),
+                    None => {
+                        return oci_err(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "UNKNOWN",
+                            "fetching the blob",
+                        );
+                    }
+                }
+            }
+            let mut again = Request::new(Body::empty());
+            *again.method_mut() = method.clone();
+            *again.uri_mut() = uri;
+            *again.headers_mut() = headers;
+            crate::serve::serve_blob(&r.store().path(&want), &want, "blob", None, false, again)
+                .await
+        }
+        _ => oci_err(
+            StatusCode::NOT_FOUND,
+            "UNSUPPORTED",
+            "a proxy answers manifests and blobs",
+        ),
+    }
 }
 
 struct Ctx {

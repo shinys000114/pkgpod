@@ -4878,6 +4878,153 @@ fn home_for_in(s: &Server, name: &str, index: &str) -> PathBuf {
     home
 }
 
+/// An OCI proxy of another pkgpod's registry, and a group of a hosted
+/// registry and the proxy, with docker.
+#[test]
+fn oci_proxy_and_group_with_docker() {
+    let probe = Command::new("docker").arg("info").output();
+    if !probe.is_ok_and(|o| o.status.success()) {
+        return;
+    }
+    let up = Server::start();
+    up.cli(&["repo", "create", "img", "-f", "oci", "-s", "public=true"])
+        .unwrap();
+    let ut = up
+        .cli(&["token", "create", "w", "--repos", "img", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let s = Server::start();
+    s.cli(&["repo", "create", "mine", "-f", "oci", "-s", "public=true"])
+        .unwrap();
+    let st = s
+        .cli(&["token", "create", "w", "--repos", "mine", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    s.cli(&[
+        "repo",
+        "create",
+        "op",
+        "-f",
+        "oci",
+        "-k",
+        "proxy",
+        "-s",
+        &format!("upstream=http://127.0.0.1:{}/img", up.serve_port),
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    s.cli(&[
+        "repo",
+        "create",
+        "og",
+        "-f",
+        "oci",
+        "-k",
+        "group",
+        "-s",
+        "members=mine,op",
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let cfg = s.dir.path().join("docker");
+    std::fs::create_dir_all(&cfg).unwrap();
+    let unique = format!("pkgpod {} {}", up.serve_port, s.serve_port);
+    let build = |tag: &str, text: &str| {
+        let d = s
+            .dir
+            .path()
+            .join(format!("ctx-{}", tag.replace(['/', ':'], "_")));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("hello.txt"), text).unwrap();
+        std::fs::write(
+            d.join("Dockerfile"),
+            "FROM scratch\nCOPY hello.txt /hello.txt\n",
+        )
+        .unwrap();
+        let (ok, out) = docker(&cfg, &["build", "-q", "-t", tag, d.to_str().unwrap()], None);
+        assert!(ok, "{out}");
+    };
+    let content = |tag: &str| {
+        let (ok, id) = docker(&cfg, &["create", tag, "/x"], None);
+        assert!(ok, "{id}");
+        let id = id.trim().to_string();
+        let (ok, out) = docker(&cfg, &["cp", &format!("{id}:/hello.txt"), "-"], None);
+        docker(&cfg, &["rm", &id], None);
+        assert!(ok, "{out}");
+        out
+    };
+    let uhost = format!("127.0.0.1:{}", up.serve_port);
+    let host = format!("127.0.0.1:{}", s.serve_port);
+    let tags: Vec<String> = vec![
+        format!("{uhost}/img/up:1"),
+        format!("{host}/mine/own:1"),
+        format!("{host}/op/up:1"),
+        format!("{host}/og/up:1"),
+        format!("{host}/og/own:1"),
+    ];
+    struct Cleanup(PathBuf, Vec<String>);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            for t in &self.1 {
+                docker(&self.0, &["rmi", "-f", t], None);
+            }
+        }
+    }
+    let _cleanup = Cleanup(cfg.clone(), tags.clone());
+    let login = |h: &str, t: &str| {
+        let (ok, out) = docker(
+            &cfg,
+            &["login", h, "-u", "token", "--password-stdin"],
+            Some(t),
+        );
+        assert!(ok, "{out}");
+    };
+    // Upstream: an image pushed there.
+    login(&uhost, &ut);
+    build(&tags[0], &format!("{unique} upstream"));
+    let (ok, out) = docker(&cfg, &["push", &tags[0]], None);
+    assert!(ok, "{out}");
+    docker(&cfg, &["rmi", "-f", &tags[0]], None);
+    // Ours: one pushed to the hosted member.
+    login(&host, &st);
+    build(&tags[1], &format!("{unique} ours"));
+    let (ok, out) = docker(&cfg, &["push", &tags[1]], None);
+    assert!(ok, "{out}");
+    docker(&cfg, &["rmi", "-f", &tags[1]], None);
+    docker(&cfg, &["logout", &host], None);
+    // Through the proxy, anonymous.
+    let (ok, out) = docker(&cfg, &["pull", &tags[2]], None);
+    assert!(ok, "{out}");
+    assert!(content(&tags[2]).contains(&format!("{unique} upstream")));
+    let cache = s.json(&["cache", "op"]).to_string();
+    assert!(
+        cache.contains("up/manifests/1") && cache.contains("up/blobs/sha256:"),
+        "{cache}"
+    );
+    // Through the group: ours from the hosted member, the other through
+    // the proxy.
+    let (ok, out) = docker(&cfg, &["pull", &tags[4]], None);
+    assert!(ok, "{out}");
+    assert!(content(&tags[4]).contains(&format!("{unique} ours")));
+    let (ok, out) = docker(&cfg, &["pull", &tags[3]], None);
+    assert!(ok, "{out}");
+    // With the upstream gone, from the cache.
+    drop(up);
+    for t in &tags[2..4] {
+        docker(&cfg, &["rmi", "-f", t], None);
+    }
+    let (ok, out) = docker(&cfg, &["pull", &tags[2]], None);
+    assert!(ok, "{out}");
+    assert!(content(&tags[2]).contains(&format!("{unique} upstream")));
+    // Pushing to the proxy or the group is refused.
+    let (ok, _) = docker(&cfg, &["push", &tags[3]], None);
+    assert!(!ok);
+}
+
 #[test]
 fn files_hosted() {
     let s = Server::start();

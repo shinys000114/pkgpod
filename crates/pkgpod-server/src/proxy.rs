@@ -30,7 +30,7 @@ use crate::serve::{At, percent_encode, status};
 use crate::{App, Error, Result, Served};
 
 /// Formats whose proxies are served.
-pub const FORMATS: &[&str] = &["go", "maven", "npm", "pypi", "cargo"];
+pub const FORMATS: &[&str] = &["go", "maven", "npm", "pypi", "cargo", "oci"];
 
 /// Largest file fetched.
 pub const MAX_FILE: u64 = 4 << 30;

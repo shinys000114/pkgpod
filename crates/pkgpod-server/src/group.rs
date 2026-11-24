@@ -29,7 +29,7 @@ use crate::serve::{At, ListEntry};
 use crate::{App, Served};
 
 /// Formats whose groups are served.
-pub const FORMATS: &[&str] = &["files", "npm", "pypi", "maven", "go", "cargo"];
+pub const FORMATS: &[&str] = &["files", "npm", "pypi", "maven", "go", "cargo", "oci"];
 
 /// What a request through a group asks for.
 #[derive(Debug, PartialEq)]
