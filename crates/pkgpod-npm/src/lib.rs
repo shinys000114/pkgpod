@@ -38,6 +38,9 @@ pub const TAGS: &str = "_dist-tags";
 /// Largest publish request (JSON with the tarball in base64).
 pub const MAX_PUBLISH: usize = 256 << 20;
 
+/// Largest version manifest kept.
+pub const MAX_MANIFEST: usize = 256 << 10;
+
 fn name_part_ok(s: &str) -> bool {
     !s.is_empty()
         && !s.starts_with(['.', '_'])
@@ -285,6 +288,13 @@ pub fn parse_publish(url_name: &str, body: &[u8]) -> Result<Publish> {
             "dist".into(),
             json!({"shasum": shasum, "integrity": integrity}),
         );
+        // Kept per version in one directory object of the package: no
+        // READMEs (they are in the tarball).
+        m.remove("readme");
+        m.remove("readmeFilename");
+    }
+    if serde_json::to_vec(&manifest).map_or(0, |b| b.len()) > MAX_MANIFEST {
+        return Err(bad("the version's manifest is larger than 256 KiB"));
     }
     let tags: Vec<String> = v["dist-tags"]
         .as_object()
