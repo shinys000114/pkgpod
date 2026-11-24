@@ -2736,6 +2736,31 @@ fn use_render(
         places.first().cloned().unwrap_or_default()
     };
     let mut usage = with_names(app, r, usage(app, r, &urls, host, &place));
+    if matches!(r.kind, Kind::Proxy | Kind::Group) {
+        // Read through: nothing is published here and it has no labels.
+        usage.retain(|l| {
+            let w = l.label.to_lowercase();
+            !(w.starts_with("upload")
+                || w.starts_with("a labelled")
+                || w == "publish"
+                || w.contains("deploy")
+                || w.starts_with("push"))
+        });
+        usage.push(UseLine {
+            label: "Note".into(),
+            text: if r.kind == Kind::Proxy {
+                format!(
+                    "A proxy of {}: what is not here yet is fetched from it when first asked for, then kept.\nPublish to a hosted repository; its Cache tab lists, pins and evicts what is kept.",
+                    r.setting_str("upstream")
+                )
+            } else {
+                format!(
+                    "A group of {}: for each package the first of them that has it answers.\nPublish to one of them.",
+                    r.setting_list("members").join(", ")
+                )
+            },
+        });
+    }
     let mut token_note = String::new();
     if let Some((t, note)) = token {
         for u in &mut usage {
