@@ -379,16 +379,7 @@ fn deb_repository_with_apt() {
 fn rights_and_errors() {
     let s = Server::start();
     s.cli(&["repo", "create", "a", "-s", "sign=false"]).unwrap();
-    s.cli(&[
-        "repo",
-        "create",
-        "b",
-        "-s",
-        "sign=false",
-        "-s",
-        "public=true",
-    ])
-    .unwrap();
+    s.cli(&["repo", "create", "b", "-s", "sign=false"]).unwrap();
     s.cli_in(&["user", "add", "dev", "--password-stdin"], "dev-password")
         .unwrap();
     s.cli(&["grant", "set", "a", "user:dev", "write"]).unwrap();
