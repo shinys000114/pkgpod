@@ -586,7 +586,7 @@ fn console_login_pages_and_csrf() {
     // page, usage and actions open.
     let src = s.url("/web/");
     type Fields<'a> = &'a [(&'a str, &'a str)];
-    let choices: [(&str, &str, &str, Fields); 11] = [
+    let choices: [(&str, &str, &str, Fields); 12] = [
         ("deb", "hosted", "c-deb", &[("first_dist", "noble")]),
         (
             "deb",
@@ -603,6 +603,7 @@ fn console_login_pages_and_csrf() {
         ("go", "hosted", "c-go", &[]),
         ("apk", "hosted", "c-apk", &[]),
         ("rpm", "hosted", "c-rpm", &[]),
+        ("helm", "hosted", "c-helm", &[]),
     ];
     for (format, kind, name, extra) in choices {
         let mut form = vec![("format", format), ("kind", kind), ("name", name)];
@@ -4627,6 +4628,7 @@ fn serving_root_lists_trees_not_registries() {
         ("tree-pypi", "pypi"),
         ("tree-apk", "apk"),
         ("tree-rpm", "rpm"),
+        ("tree-helm", "helm"),
         ("reg-npm", "npm"),
         ("reg-oci", "oci"),
         ("reg-cargo", "cargo"),
@@ -4649,6 +4651,7 @@ fn serving_root_lists_trees_not_registries() {
         "tree-pypi",
         "tree-apk",
         "tree-rpm",
+        "tree-helm",
     ] {
         assert!(root.contains(name), "{name}: {root}");
     }
@@ -5127,20 +5130,27 @@ fn alpine_images() -> Vec<&'static str> {
 
 /// Runs `script` with sh in `image` on the host's network.
 fn docker_sh(image: &str, script: &str) -> (bool, String) {
-    let o = Command::new("docker")
-        .args([
-            "run",
-            "--rm",
-            "--network",
-            "host",
-            "--entrypoint",
-            "sh",
-            image,
-            "-c",
-            script,
-        ])
-        .output()
-        .unwrap();
+    docker_sh_in(image, None, script)
+}
+
+/// [`docker_sh`] with a directory of the host at /work, as the user
+/// running the tests.
+fn docker_sh_in(image: &str, work: Option<&Path>, script: &str) -> (bool, String) {
+    let mut c = Command::new("docker");
+    c.args(["run", "--rm", "--network", "host", "--entrypoint", "sh"]);
+    if let Some(w) = work {
+        let uid = rustix::process::getuid().as_raw();
+        let gid = rustix::process::getgid().as_raw();
+        c.arg("-v").arg(format!("{}:/work", w.display())).args([
+            "-w",
+            "/work",
+            "-u",
+            &format!("{uid}:{gid}"),
+            "-e",
+            "HOME=/tmp",
+        ]);
+    }
+    let o = c.arg(image).arg("-c").arg(script).output().unwrap();
     (
         o.status.success(),
         format!(
@@ -5367,4 +5377,75 @@ fn rpm_packages_with_dnf() {
         .send()
         .unwrap();
     assert!(r.text().unwrap().contains("BEGIN PGP SIGNATURE"));
+}
+
+#[test]
+fn helm_charts_with_helm() {
+    let images = images_here(&["alpine/helm:3.19.0", "alpine/helm:4.3.2"]);
+    if images.is_empty() {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&["repo", "create", "charts", "-f", "helm"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "charts", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    // Charts made and packaged by helm itself.
+    let work = s.dir.path().join("helmwork");
+    std::fs::create_dir_all(&work).unwrap();
+    let (ok, out) = docker_sh_in(
+        images[0],
+        Some(&work),
+        "set -e; helm create web >/dev/null; for v in 0.1.0 0.2.0; do \
+         sed -i \"s/^version: .*/version: $v/\" web/Chart.yaml; helm package web >/dev/null; done; ls",
+    );
+    assert!(ok && out.contains("web-0.2.0.tgz"), "{out}");
+    let c = reqwest::blocking::Client::new();
+    let upload = |data: Vec<u8>| {
+        let r = c
+            .put(s.url("/charts/upload"))
+            .basic_auth("token", Some(&tok))
+            .body(data)
+            .send()
+            .unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    let chart = |f: &str| std::fs::read(work.join(f)).unwrap();
+    let (st, out) = upload(chart("web-0.1.0.tgz"));
+    assert_eq!(st, 201, "{out}");
+    s.cli(&["label", "charts", "first"]).unwrap();
+    let (st, out) = upload(chart("web-0.2.0.tgz"));
+    assert_eq!(st, 201, "{out}");
+    // A version is uploaded once (other content needs replace).
+    let mut other = chart("web-0.1.0.tgz");
+    other.extend_from_slice(&[0; 8]);
+    let (st, out) = upload(other);
+    assert_eq!(st, 409, "{out}");
+    let base = s.url("/charts/");
+    for image in images {
+        let script = format!(
+            "set -e; export HOME=/tmp; \
+             helm repo add pk {base} --username token --password {tok} >/dev/null; \
+             helm repo add first {base}@first/ --username token --password {tok} >/dev/null; \
+             helm search repo pk/web --versions; helm search repo first/web --versions; \
+             helm template demo pk/web --version 0.1.0 | grep -c '^kind: Deployment'"
+        );
+        let (ok, out) = docker_sh(image, &script);
+        assert!(ok, "{image}: {out}");
+        let versions = |repo: &str| -> Vec<String> {
+            out.lines()
+                .filter(|l| l.starts_with(&format!("{repo}/web")))
+                .filter_map(|l| l.split_whitespace().nth(1).map(String::from))
+                .collect()
+        };
+        assert_eq!(versions("pk"), ["0.2.0", "0.1.0"], "{image}: {out}");
+        assert_eq!(versions("first"), ["0.1.0"], "{image}: the label: {out}");
+        assert_eq!(
+            out.lines().last(),
+            Some("1"),
+            "{image}: helm template: {out}"
+        );
+    }
 }

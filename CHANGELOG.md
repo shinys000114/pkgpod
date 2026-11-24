@@ -32,6 +32,8 @@ Formats:
   every architecture.
 - **RPM**: packages by group, repodata (primary, filelists, other) as
   createrepo_c makes it, repomd.xml signed for `repo_gpgcheck`.
+- **Helm**: chart repositories: packaged charts uploaded, `index.yaml`
+  made per version with relative URLs, so a label is a repository too.
 
 Everywhere: versions of every hosted repository with labels
 (`@label` addresses; `-/label/<label>/` for npm), diffs, rollback and
