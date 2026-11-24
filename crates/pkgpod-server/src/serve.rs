@@ -458,6 +458,22 @@ async fn serve_blob(
         req.headers_mut().remove(header::IF_MODIFIED_SINCE);
         req.headers_mut().remove(header::IF_UNMODIFIED_SINCE);
     }
+    // If-Range against our validators (ServeFile knows neither our ETag
+    // nor the entry's time): a range only of the same content, else the
+    // whole file, so a resumed download never splices two versions.
+    if let Some(cond) = req
+        .headers_mut()
+        .remove(header::IF_RANGE)
+        .and_then(|v| v.to_str().ok().map(str::to_string))
+    {
+        let cond = cond.trim();
+        // Only our ETag: a date cannot tell apart two contents put in
+        // the same second, so a date gets the whole file.
+        let same = cond == etag;
+        if !same {
+            req.headers_mut().remove(header::RANGE);
+        }
+    }
     let mut r = match ServeFile::new(file).oneshot(req).await {
         Ok(r) => r.map(Body::new),
         Err(_) => return status(StatusCode::INTERNAL_SERVER_ERROR),

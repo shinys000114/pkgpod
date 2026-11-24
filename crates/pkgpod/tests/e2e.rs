@@ -2337,8 +2337,50 @@ fn files_hosted() {
     assert_eq!(s.json(&["versions", "f"]).as_array().unwrap().len(), n);
     let (st, body) = put("tools/v1/tool.tar.gz", b"tool one, changed");
     assert_eq!(st, 409, "{body}");
+    let old_etag = c
+        .head(s.url("/f/tools/v1/tool.tar.gz"))
+        .send()
+        .unwrap()
+        .headers()["etag"]
+        .to_str()
+        .unwrap()
+        .to_string();
     let (st, _) = put("tools/v1/tool.tar.gz?replace=1", b"tool one, changed");
     assert_eq!(st, 201);
+    // A download resumed across the change gets the new file whole.
+    for cond in [&old_etag, &lm] {
+        let r = c
+            .get(s.url("/f/tools/v1/tool.tar.gz"))
+            .header("range", "bytes=4-")
+            .header("if-range", cond.as_str())
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 200, "If-Range {cond}");
+        assert_eq!(r.bytes().unwrap().as_ref(), b"tool one, changed");
+    }
+    let r = c
+        .get(s.url("/f/tools/v1/tool.tar.gz"))
+        .header("range", "bytes=5-")
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 206);
+    assert_eq!(r.bytes().unwrap().as_ref(), b"one, changed");
+    let etag = c
+        .head(s.url("/f/tools/v1/tool.tar.gz"))
+        .send()
+        .unwrap()
+        .headers()["etag"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    let r = c
+        .get(s.url("/f/tools/v1/tool.tar.gz"))
+        .header("range", "bytes=5-")
+        .header("if-range", etag.as_str())
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 206, "the same content: the range");
+    assert_eq!(r.bytes().unwrap().as_ref(), b"one, changed");
     // Never over a directory, nor at a label's address, nor elsewhere
     // than the URL says.
     assert_eq!(put("tools", b"x").0, 409);
