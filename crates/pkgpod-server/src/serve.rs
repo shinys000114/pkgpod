@@ -120,6 +120,23 @@ pub fn html(s: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+/// Formats whose repositories are trees to browse. npm and OCI
+/// repositories answer their clients' API only, as public registries do:
+/// they are left out of listings, and their address says how to use them.
+fn browsable(format: &str) -> bool {
+    !matches!(format, "npm" | "oci")
+}
+
+/// A registry's address seen from a browser: how its clients use it.
+fn client_note(st: StatusCode, text: String) -> Response {
+    (
+        st,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        text,
+    )
+        .into_response()
+}
+
 fn status(s: StatusCode) -> Response {
     (s, s.canonical_reason().unwrap_or("")).into_response()
 }
@@ -207,6 +224,7 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
             let mut entries = Vec::new();
             for (seg, repo) in list {
                 if let Ok(s) = app.served(&repo)
+                    && browsable(&s.repo.format)
                     && app
                         .auth
                         .role(&caller, &repo, s.repo.setting_bool("public"))
@@ -274,6 +292,18 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
                         u
                     }
                 };
+                if rel.is_empty() && matches!(method, Method::GET | Method::HEAD) {
+                    if role.is_none() {
+                        return deny(&caller);
+                    }
+                    let r = &served.repo.name;
+                    return client_note(
+                        StatusCode::OK,
+                        format!(
+                            "{r}: an npm registry.\n\n  npm install --registry {base_url} <package>\n  npm publish --registry {base_url}\n\nIts packages are listed in pkgpod's console.\n"
+                        ),
+                    );
+                }
                 let ask = crate::npm::Ask {
                     repo: served.repo,
                     current: served.current,
@@ -283,6 +313,29 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
                     role,
                 };
                 return crate::npm::handle(app, ask, req).await;
+            }
+            if served.repo.format == "oci" {
+                // Images go by /v2/; the stored tree is not for browsing.
+                if role.is_none() {
+                    return deny(&caller);
+                }
+                let at = if base.is_empty() {
+                    host.clone()
+                } else {
+                    format!("{host}/{}", base.join("/"))
+                };
+                let st = if rel.is_empty() {
+                    StatusCode::OK
+                } else {
+                    StatusCode::NOT_FOUND
+                };
+                return client_note(
+                    st,
+                    format!(
+                        "{}: a container image registry.\n\n  docker pull {at}/<image>:<tag>\n  docker push {at}/<image>:<tag>\n\nIts images are listed in pkgpod's console.\n",
+                        served.repo.name
+                    ),
+                );
             }
             if method == Method::DELETE {
                 return status(StatusCode::METHOD_NOT_ALLOWED);
