@@ -1072,7 +1072,9 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String], host: &str) ->
         }
         out.push(UseLine {
             label: format!("/etc/yum.repos.d/{id}.repo"),
-            text: repo,
+            text: format!(
+                "{repo}\n# or fetch it: curl -o /etc/yum.repos.d/{id}.repo {base}<group>.repo"
+            ),
         });
         out.push(UseLine {
             label: "Install".into(),
