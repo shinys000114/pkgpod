@@ -8,7 +8,7 @@
 <title>{% block title %}pkgpod{% endblock %}</title>
 <link rel="stylesheet" href="{{ s.css }}">
 <script src="/ui/htmx-2.0.11.min.js"></script>
-<script src="{{ s.js }}" defer></script>
+<script src="{{ s.js }}"></script>
 </head>
 <body hx-headers='{"X-CSRF-Token": "{{ s.csrf }}"}'>
 {% if !s.user.is_empty() %}
@@ -30,6 +30,7 @@
   <div class="who">
     <span><b>{{ s.user }}</b>{% if s.admin %}<span class="role">admin</span>{% endif %}</span>
     <button hx-post="/logout">Log out</button>
+    <button type="button" class="theme-switch" title="Light, dark, or as the system has it">Theme: system</button>
   </div>
   <div class="muted ver">pkgpod {{ s.version }}</div>
 </aside>
