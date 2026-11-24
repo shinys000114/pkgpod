@@ -32,8 +32,10 @@ Formats:
   every architecture.
 - **RPM**: packages by group, repodata (primary, filelists, other) as
   createrepo_c makes it, repomd.xml signed for `repo_gpgcheck`.
-- **Helm**: chart repositories: packaged charts uploaded, `index.yaml`
-  made per version with relative URLs, so a label is a repository too.
+- **Helm**: chart repositories: packaged charts uploaded (also through
+  ChartMuseum's API, `api/charts`, as `helm cm-push` uses it),
+  `index.yaml` made per version with relative URLs, so a label is a
+  repository too.
 - **Maven**: files deployed at their Maven paths; maven-metadata.xml
   (artifact and SNAPSHOT version) and md5/sha1/sha256/sha512 made here,
   uploaded checksums checked; releases deployed once unless `redeploy`.

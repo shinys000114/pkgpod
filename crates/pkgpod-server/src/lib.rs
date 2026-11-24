@@ -12,6 +12,7 @@ pub mod config;
 pub mod ftp;
 pub mod gems;
 pub mod go;
+pub mod helm;
 pub mod import;
 pub mod jobs;
 pub mod keys;

@@ -354,6 +354,11 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
                 }
                 return crate::go::read(&app, &served.repo, version, &rel, req).await;
             }
+            if served.repo.format == "helm" && crate::helm::is_api(&rel) {
+                let current = served.current.clone();
+                return crate::helm::handle(app, served.repo, current, caller, role, rel, req)
+                    .await;
+            }
             if served.repo.format == "gems" && crate::gems::is_api(&method, &rel) {
                 return crate::gems::handle(app, served.repo, caller, role, req).await;
             }
