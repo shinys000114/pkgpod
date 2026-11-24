@@ -215,7 +215,18 @@ async fn upload(app: &Arc<App>, a: &Ask, req: Request) -> Response {
     // Errors too are told at the finalizing URL, where dart pub reads
     // them (as the repository spec has it).
     let (key, text) = match res {
-        Ok(Ok(o)) => ("message", o.summary),
+        // dart pub says what pub.dev says.
+        Ok(Ok(o)) => (
+            "message",
+            match o
+                .summary
+                .strip_prefix("added ")
+                .and_then(|s| s.split_once(' '))
+            {
+                Some((n, v)) => format!("Successfully uploaded {n} version {v}."),
+                None => o.summary,
+            },
+        ),
         Ok(Err(pkgpod_engine::Error::Conflict(m) | pkgpod_engine::Error::Invalid(m))) => {
             ("error", m)
         }

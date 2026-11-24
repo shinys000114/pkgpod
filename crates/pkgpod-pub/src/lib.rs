@@ -246,7 +246,7 @@ impl Format for Pub {
                 json!({"pubspec": spec, "version": version, "time": pkgpod_base::now(), "retracted": false}),
             ),
         )?;
-        Ok(format!("Successfully uploaded {name} version {version}."))
+        Ok(format!("added {name} {version}"))
     }
 
     fn catalog(&self, path: &str, entry: &Entry) -> Option<Item> {
