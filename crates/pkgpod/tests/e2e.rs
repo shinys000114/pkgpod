@@ -2558,9 +2558,10 @@ fn files_hosted() {
     assert_eq!(get(&s.url("/f/manual/b.txt"), None).1, "b");
     assert_eq!(get(&s.url("/f/docs/b.txt"), None).0, 404);
     assert_eq!(get(&s.url("/f/@first/docs/b.txt"), None).1, "b");
-    let found = s.json(&["search", "tools"]);
+    // Found by the file's name, with the version its directory gives.
+    let found = s.json(&["search", "tool.tar"]);
     assert!(
-        found.to_string().contains("tools/v1/tool.tar.gz"),
+        found.to_string().contains("tools/v1/tool.tar.gz") && found.to_string().contains("\"v1\""),
         "{found}"
     );
 }
