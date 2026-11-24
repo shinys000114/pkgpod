@@ -1332,3 +1332,108 @@ fn stopping_answers_the_requests_in_flight() {
     let status = status.expect("the server did not exit");
     assert!(status.success(), "{status}");
 }
+
+/// The sha256 a Release lists for `path`.
+fn release_sha256(release: &str, path: &str) -> String {
+    let mut in_sha = false;
+    for l in release.lines() {
+        if l.starts_with("SHA256:") {
+            in_sha = true;
+            continue;
+        }
+        if in_sha && !l.starts_with(' ') {
+            in_sha = false;
+        }
+        if in_sha {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            if f.len() == 3 && f[2] == path {
+                return f[0].to_string();
+            }
+        }
+    }
+    panic!("{path} not in Release:\n{release}")
+}
+
+#[test]
+fn indexes_by_hash_stay_while_versions_change() {
+    if !have("dpkg-deb") || !have("gpg") {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&[
+        "key",
+        "generate",
+        "main",
+        "pkgpod e2e <e2e@example.invalid>",
+    ])
+    .unwrap();
+    s.cli(&["repo", "create", "busy", "-s", "public=true"])
+        .unwrap();
+    s.cli(&["op", "busy", "dist-set", "name=stable", "-y"])
+        .unwrap();
+    let debs = s.dir.path().join("debs");
+    std::fs::create_dir_all(&debs).unwrap();
+    let first = build_deb(&debs, "first", "1", "amd64", "xz", "");
+    s.cli(&["upload", "busy", first.to_str().unwrap()]).unwrap();
+    let idx = "main/binary-amd64/Packages.xz";
+    let by_hash = |sha: &str| {
+        s.url(&format!(
+            "/busy/dists/stable/main/binary-amd64/by-hash/SHA256/{sha}"
+        ))
+    };
+
+    // A client read the Release of one version; a new version comes;
+    // what it lists is still there by hash.
+    let (_, rel) = get(&s.url("/busy/dists/stable/Release"), None);
+    let old = release_sha256(&rel, idx);
+    let second = build_deb(&debs, "second", "1", "amd64", "xz", "");
+    s.cli(&["upload", "busy", second.to_str().unwrap()])
+        .unwrap();
+    let (_, rel2) = get(&s.url("/busy/dists/stable/Release"), None);
+    assert_ne!(release_sha256(&rel2, idx), old);
+    let r = reqwest::blocking::get(by_hash(&old)).unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    let body = r.bytes().unwrap();
+    assert_eq!(pkgpod_deb::hash::hash_bytes(&body).sha256, old);
+    assert_eq!(
+        get(&by_hash(&"0".repeat(64)), None).0,
+        404,
+        "only what a version listed"
+    );
+
+    // Readers fetching as apt does while uploads make versions: every
+    // index listed is served, with that content.
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|sc| {
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                sc.spawn(|| {
+                    let c = reqwest::blocking::Client::new();
+                    let mut n = 0;
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        let rel = c
+                            .get(s.url("/busy/dists/stable/InRelease"))
+                            .send()
+                            .unwrap()
+                            .text()
+                            .unwrap();
+                        let sha = release_sha256(&rel, idx);
+                        let r = c.get(by_hash(&sha)).send().unwrap();
+                        assert_eq!(r.status().as_u16(), 200, "{sha}");
+                        let b = r.bytes().unwrap();
+                        assert_eq!(pkgpod_deb::hash::hash_bytes(&b).sha256, sha);
+                        n += 1;
+                    }
+                    n
+                })
+            })
+            .collect();
+        for i in 0..8 {
+            let d = build_deb(&debs, &format!("load{i}"), "1", "amd64", "xz", "");
+            s.cli(&["upload", "busy", d.to_str().unwrap()]).unwrap();
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let reads: usize = readers.into_iter().map(|h| h.join().unwrap()).sum();
+        assert!(reads > 8, "{reads} reads");
+    });
+}

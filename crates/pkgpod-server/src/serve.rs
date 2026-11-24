@@ -264,6 +264,36 @@ async fn get(
     let rel_s = rel.join("/");
     let entry = match app.engine.objects().resolve(&version.served(), &rel_s) {
         Ok(Some(e)) => e,
+        Ok(None) if rel.iter().any(|s| s == "by-hash") => {
+            // An index by hash from a version made a moment ago: a client
+            // read the Release of the version before and asks for what
+            // it lists. Served for a day, as archives keep them.
+            let (app2, repo, rel2) = (app.clone(), s.repo.name.clone(), rel_s.clone());
+            let found = tokio::task::spawn_blocking(move || {
+                let since = pkgpod_base::now() - BY_HASH_KEPT;
+                for v in app2
+                    .engine
+                    .versions_since(&repo, since)
+                    .ok()?
+                    .into_iter()
+                    .take(50)
+                {
+                    if let Ok(Some(e @ Entry::Blob { .. })) =
+                        app2.engine.objects().resolve(&v.served(), &rel2)
+                    {
+                        return Some(e);
+                    }
+                }
+                None
+            })
+            .await
+            .ok()
+            .flatten();
+            match found {
+                Some(e) => e,
+                None => return status(StatusCode::NOT_FOUND),
+            }
+        }
         Ok(None) => return status(StatusCode::NOT_FOUND),
         Err(e) => return Error::from(e).into_response(),
     };
@@ -304,6 +334,10 @@ async fn get(
         _ => status(StatusCode::NOT_FOUND),
     }
 }
+
+/// How long the by-hash indexes of earlier versions stay served
+/// (seconds).
+const BY_HASH_KEPT: i64 = 86400;
 
 /// Content types by file name, for the names of the served tree (blob
 /// files in the store have none).
