@@ -260,6 +260,13 @@ pub fn router() -> Router<Arc<App>> {
         .route("/api/v1/repos/{repo}/tree", get(tree))
         .route("/api/v1/repos/{repo}/packages", get(packages))
         .route("/api/v1/repos/{repo}/downloads", get(downloads))
+        .route("/api/v1/repos/{repo}/status", get(repo_status))
+        .route(
+            "/api/v1/repos/{repo}/badge-token",
+            get(badge_token)
+                .post(badge_token_new)
+                .delete(badge_token_drop),
+        )
         .route("/api/v1/settings", get(settings_get).patch(settings_patch))
         .route("/api/v1/repos/{repo}/ops/{op}", post(op))
         .route(
@@ -449,6 +456,68 @@ pub(crate) async fn downloads(
     .await
 }
 
+#[derive(Deserialize)]
+pub(crate) struct StatusQ {
+    #[serde(default)]
+    package: Option<String>,
+}
+
+/// A repository's state: version, packages, downloads, syncs.
+pub(crate) async fn repo_status(
+    State(app): St,
+    Who(c): Who,
+    Path(repo): Path<String>,
+    Query(q): Query<StatusQ>,
+) -> Result<Json<Value>> {
+    blocking(&app, move |app| {
+        let r = app.repo_for(&c, &repo, Role::Read)?;
+        let p = q.package.as_deref().filter(|p| !p.is_empty());
+        Ok(Json(crate::status::status(app, &r, p)?))
+    })
+    .await
+}
+
+/// A private repository's badge token (repository admins).
+pub(crate) async fn badge_token(
+    State(app): St,
+    Who(c): Who,
+    Path(repo): Path<String>,
+) -> Result<Json<Value>> {
+    blocking(&app, move |app| {
+        app.repo_for(&c, &repo, Role::Admin)?;
+        Ok(Json(json!({"token": crate::badge::token(app, &repo)?})))
+    })
+    .await
+}
+
+pub(crate) async fn badge_token_new(
+    State(app): St,
+    Who(c): Who,
+    Path(repo): Path<String>,
+) -> Result<Json<Value>> {
+    blocking(&app, move |app| {
+        app.repo_for(&c, &repo, Role::Admin)?;
+        let t = crate::badge::new_token(app, &repo)?;
+        app.auth.audit(c.name(), "badge token", &repo, "made");
+        Ok(Json(json!({"token": t})))
+    })
+    .await
+}
+
+pub(crate) async fn badge_token_drop(
+    State(app): St,
+    Who(c): Who,
+    Path(repo): Path<String>,
+) -> Result<StatusCode> {
+    blocking(&app, move |app| {
+        app.repo_for(&c, &repo, Role::Admin)?;
+        crate::badge::drop_token(app, &repo)?;
+        app.auth.audit(c.name(), "badge token", &repo, "removed");
+        Ok(StatusCode::NO_CONTENT)
+    })
+    .await
+}
+
 fn settings_json(app: &App) -> Value {
     json!({"downloads_days": crate::stats::days_kept(app)})
 }
@@ -542,6 +611,7 @@ pub(crate) async fn repo_delete(
         crate::oci::forget(app, &repo);
         app.auth.forget_repo(&repo)?;
         app.stats.forget(app, &repo)?;
+        crate::badge::drop_token(app, &repo)?;
         // A mirror's received tree (perhaps an adopted multi-TB one) stays
         // unless asked for.
         let mut detail = String::new();

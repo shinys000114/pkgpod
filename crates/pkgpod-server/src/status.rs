@@ -1,0 +1,71 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+//! A repository's state in one document: its version, packages,
+//! downloads and, for a mirror, its syncs. The status API and the badges
+//! read it.
+
+use pkgpod_engine::{Kind, RepoInfo};
+use serde_json::{Value, json};
+
+use crate::{App, Result};
+
+/// Days the download counts in a status cover.
+pub const DAYS: i64 = 30;
+
+pub fn status(app: &App, r: &RepoInfo, package: Option<&str>) -> Result<Value> {
+    let _ = app.stats.flush(app);
+    let cur = app.engine.current(r)?;
+    let packages = app
+        .engine
+        .catalog_counts()?
+        .get(&r.name)
+        .copied()
+        .unwrap_or(0);
+    let mut v = json!({
+        "repo": r.name,
+        "format": r.format,
+        "kind": r.kind,
+        "public": r.setting_bool("public"),
+        "version": cur.as_ref().map(|v| json!({"seq": v.seq, "created": v.created, "summary": v.summary})),
+        "packages": packages,
+        "downloads": crate::stats::total(app, &r.name, DAYS, None)?,
+        "sync": Value::Null,
+        "ok": true,
+    });
+    if r.kind == Kind::Mirror {
+        let syncs: Vec<_> = crate::jobs::list(&app.db, Some(&r.name), 50)?
+            .into_iter()
+            .filter(|j| j.kind == "sync")
+            .collect();
+        let last_ok = syncs
+            .iter()
+            .find(|j| j.state == "ok")
+            .and_then(|j| j.finished);
+        let last = syncs.first();
+        // Running or queued: as good as the sync before.
+        let ok = match last.map(|j| j.state.as_str()) {
+            Some("ok") => true,
+            Some("running" | "queued") => last_ok.is_some(),
+            _ => false,
+        };
+        v["sync"] = json!({
+            "state": last.map(|j| j.state.clone()),
+            "started": last.and_then(|j| j.started),
+            "finished": last.and_then(|j| j.finished),
+            "summary": last.map(|j| j.summary.clone()),
+            "last_ok": last_ok,
+            "next": crate::jobs::next_run(r),
+        });
+        v["ok"] = json!(ok);
+    }
+    if let Some(name) = package {
+        let versions = app.engine.package_versions(&r.name, name)?;
+        v["package"] = json!({
+            "name": name,
+            "latest": versions.last(),
+            "versions": versions.len(),
+            "downloads": crate::stats::total(app, &r.name, DAYS, Some(name))?,
+        });
+    }
+    Ok(v)
+}

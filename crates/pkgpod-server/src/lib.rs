@@ -7,6 +7,7 @@
 pub mod api;
 pub mod auth;
 pub mod backup;
+pub mod badge;
 pub mod cargo;
 pub mod composer;
 pub mod conan;
@@ -19,6 +20,7 @@ pub mod import;
 pub mod jobs;
 pub mod keys;
 pub mod listeners;
+pub mod metrics;
 pub mod npm;
 pub mod nuget;
 pub mod oci;
@@ -32,6 +34,7 @@ pub mod rsa_key;
 pub mod schema;
 pub mod serve;
 pub mod stats;
+pub mod status;
 pub mod swift;
 pub mod terraform;
 pub mod usign_key;
@@ -139,6 +142,8 @@ pub struct App {
     pub conan_staged: conan::Staged,
     pub resigner: resign::Resigner,
     pub stats: stats::Stats,
+    /// When this process opened the data (seconds).
+    pub started: i64,
     cache: Mutex<Cache>,
 }
 
@@ -225,6 +230,7 @@ impl App {
             conan_staged: conan::Staged::default(),
             resigner: resign::Resigner::default(),
             stats: stats::Stats::default(),
+            started: pkgpod_base::now(),
             cache: Mutex::new(Cache::default()),
         }))
     }

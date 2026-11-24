@@ -129,6 +129,14 @@ CREATE TABLE downloads (
 ) WITHOUT ROWID;
 CREATE INDEX downloads_day ON downloads(day);
 ",
+    // A repository's badge token: lets its badges be shown, nothing else.
+    "
+CREATE TABLE badge_tokens (
+    repo TEXT PRIMARY KEY,
+    token TEXT NOT NULL,
+    created INTEGER NOT NULL
+);
+",
 ];
 
 pub fn migrate(db: &Db) -> pkgpod_base::Result<()> {
@@ -149,6 +157,7 @@ mod tests {
             "ea67331ae65ecf81",
             "af0a60b7120d6678",
             "ecf508f3a5114520",
+            "c4eb88395a908cdd",
         ];
         let got: Vec<String> = super::STEPS
             .iter()

@@ -406,6 +406,53 @@ fn schemas() -> Value {
             ),
         ),
         (
+            "RepoStatus",
+            object(
+                "A repository's state.",
+                vec![
+                    ("repo", string()),
+                    ("format", string()),
+                    ("kind", string()),
+                    ("public", boolean()),
+                    (
+                        "version",
+                        json!({"type": ["object", "null"], "description": "The current version: seq, created, summary; null for none (and mirrors).", "properties": {"seq": integer(), "created": integer(), "summary": string()}}),
+                    ),
+                    (
+                        "packages",
+                        json!({"type": "integer", "description": "Catalog rows of the current version."}),
+                    ),
+                    (
+                        "downloads",
+                        json!({"type": "integer", "description": "Downloads in the last 30 days."}),
+                    ),
+                    (
+                        "sync",
+                        json!({"type": ["object", "null"], "description": "Mirrors: the last sync (state, started, finished, summary), when one last went well (last_ok), the next scheduled (next).", "properties": {"state": {"type": ["string", "null"]}, "started": {"type": ["integer", "null"]}, "finished": {"type": ["integer", "null"]}, "summary": {"type": ["string", "null"]}, "last_ok": {"type": ["integer", "null"]}, "next": {"type": ["string", "null"]}}}),
+                    ),
+                    (
+                        "ok",
+                        json!({"type": "boolean", "description": "A mirror whose last sync failed is not."}),
+                    ),
+                    (
+                        "package",
+                        json!({"type": "object", "description": "With ?package=: its latest version (the format's order), how many, downloads in 30 days.", "properties": {"name": string(), "latest": {"type": ["string", "null"]}, "versions": integer(), "downloads": integer()}}),
+                    ),
+                ],
+                &[
+                    "repo",
+                    "format",
+                    "kind",
+                    "public",
+                    "version",
+                    "packages",
+                    "downloads",
+                    "sync",
+                    "ok",
+                ],
+            ),
+        ),
+        (
             "Settings",
             object(
                 "The server's settings.",
@@ -1057,6 +1104,15 @@ fn ops() -> Vec<Op> {
             .query("days", integer(), "The last this many days, today included (default 30, at most 3650).")
             .query("name", string(), "One package only.")
             .reply(200, "The counts.", sref("Downloads")),
+        op("get", "/api/v1/repos/{repo}/status", "repo_status", "A repository's state: version, packages, downloads, a mirror's syncs.")
+            .query("package", string(), "A package's latest version and downloads too.")
+            .reply(200, "The state.", sref("RepoStatus")),
+        op("get", "/api/v1/repos/{repo}/badge-token", "badge_token", "The repository's badge token (repository admin): shows a private repository's badges at /.well-known/pkgpod/badges/<repo>/<kind>.svg?token=, and nothing else.")
+            .reply(200, "The token; null for none.", json!({"type": "object", "properties": {"token": {"type": ["string", "null"]}}, "required": ["token"]})),
+        op("post", "/api/v1/repos/{repo}/badge-token", "badge_token_new", "Makes the repository a new badge token; the old one stops working.")
+            .reply(200, "The new token.", json!({"type": "object", "properties": {"token": string()}, "required": ["token"]})),
+        op("delete", "/api/v1/repos/{repo}/badge-token", "badge_token_drop", "Removes the badge token: a private repository's badges are not shown.")
+            .empty(204, "Removed."),
         op("get", "/api/v1/settings", "settings_get", "The server's settings (server admin).")
             .reply(200, "The settings.", sref("Settings")),
         op("patch", "/api/v1/settings", "settings_patch", "Changes the server's settings (server admin); fields left out keep their values.")
@@ -1443,6 +1499,7 @@ mod tests {
                                 | "key_default"
                                 | "sync"
                                 | "job_cancel"
+                                | "badge_token_new"
                         )
                     );
                     assert_eq!(o.get("requestBody").is_some(), wants, "{at}: request body");

@@ -65,6 +65,9 @@ pub fn router() -> Router<Arc<App>> {
         .route("/r/{repo}/diff", get(diff_part))
         .route("/r/{repo}/changes", get(changes_part))
         .route("/r/{repo}/settings", get(settings_part))
+        .route("/r/{repo}/badges", get(badges_part))
+        .route("/c/r/{repo}/badge-token", post(badge_token_new))
+        .route("/c/r/{repo}/badge-token/delete", post(badge_token_drop))
         .route("/r/{repo}/use", get(use_part))
         .route("/c/r/{repo}/copy", post(repo_copy))
         .route("/admin/usage", get(usage_part))
@@ -3899,6 +3902,113 @@ async fn unlabel(
 pub struct GrantRow {
     pub subject: String,
     pub role: String,
+}
+
+#[derive(Template)]
+#[template(path = "badges.html")]
+struct BadgesPart {
+    repo: String,
+    public: bool,
+    can_admin: bool,
+    has_token: bool,
+    /// The addresses can be shown (public, or with the token).
+    shown: bool,
+    badges: Vec<BadgeRow>,
+}
+
+struct BadgeRow {
+    kind: String,
+    url: String,
+    markdown: String,
+}
+
+async fn badges_part(
+    State(app): St,
+    v: Viewer,
+    Path(repo): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let r = match app.repo_for(&v.caller, &repo, Role::Read) {
+        Ok(r) => r,
+        Err(e) => return err_part(e),
+    };
+    let public = r.setting_bool("public");
+    let can_admin = app.auth.role(&v.caller, &repo, public) == Some(Role::Admin);
+    let token = if public {
+        None
+    } else {
+        crate::badge::token(&app, &repo).ok().flatten()
+    };
+    // The serving address's scheme and host.
+    let urls = strs(&r.settings["urls"]);
+    let base = base_url(&app, &r, &urls, &host_of(&headers));
+    let root = match base.split_once("://") {
+        Some((s, rest)) => format!("{s}://{}", rest.split('/').next().unwrap_or("")),
+        None => base.clone(),
+    };
+    let package = app
+        .engine
+        .search("", Some(&repo), 1)
+        .ok()
+        .and_then(|f| f.into_iter().next())
+        .map(|f| f.name);
+    let mut badges = Vec::new();
+    for kind in crate::badge::KINDS {
+        let mut q: Vec<String> = Vec::new();
+        if *kind == "version" {
+            match &package {
+                Some(p) => q.push(format!("package={}", crate::serve::percent_encode(p))),
+                None => continue,
+            }
+        }
+        if let Some(t) = &token {
+            q.push(format!("token={t}"));
+        }
+        let url = format!(
+            "{root}/{}/{}/{kind}.svg{}{}",
+            crate::badge::PREFIX.join("/"),
+            crate::serve::percent_encode(&repo),
+            if q.is_empty() { "" } else { "?" },
+            q.join("&")
+        );
+        badges.push(BadgeRow {
+            kind: kind.to_string(),
+            markdown: format!("![{kind}]({url})"),
+            url,
+        });
+    }
+    render(&BadgesPart {
+        shown: public || token.is_some(),
+        has_token: token.is_some(),
+        repo,
+        public,
+        can_admin,
+        badges,
+    })
+}
+
+async fn badge_token_new(
+    State(app): St,
+    v: Viewer,
+    Path(repo): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    match api::badge_token_new(State(app.clone()), v.who(), Path(repo.clone())).await {
+        Ok(_) => badges_part(State(app), v, Path(repo), headers).await,
+        Err(e) => err_part(e),
+    }
+}
+
+async fn badge_token_drop(
+    State(app): St,
+    v: Viewer,
+    Path(repo): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    match api::badge_token_drop(State(app.clone()), v.who(), Path(repo.clone())).await {
+        Ok(_) => badges_part(State(app), v, Path(repo), headers).await,
+        Err(e) => err_part(e),
+    }
 }
 
 #[derive(Template)]

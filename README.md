@@ -69,7 +69,9 @@ Status: in development, nothing released.
   `/api/v1/openapi.json`) and the `pkgpod` command, with one rights
   model (users, teams, roles per repository, scoped tokens).
 - Download statistics by package, version and day (`pkgpod downloads
-  <repo>`), kept a year unless set otherwise.
+  <repo>`), kept a year unless set otherwise; a status API, SVG badges
+  for READMEs (`/.well-known/pkgpod/badges/<repo>/status.svg`; private
+  repositories with a badge-only token) and `/metrics` for Prometheus.
 
 ## Quick start
 

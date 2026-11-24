@@ -318,6 +318,20 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
     {
         return crate::terraform::discovery(&prefix);
     }
+    // Badges, at every host's root.
+    if path.len() > 3
+        && path[..3]
+            .iter()
+            .zip(crate::badge::PREFIX)
+            .all(|(a, b)| a == b)
+        && matches!(method, Method::GET | Method::HEAD)
+    {
+        let (app2, rest) = (app.clone(), path[3..].to_vec());
+        let q = req.uri().query().unwrap_or("").to_string();
+        return tokio::task::spawn_blocking(move || crate::badge::serve(&app2, &caller, &rest, &q))
+            .await
+            .unwrap_or_else(|_| status(StatusCode::INTERNAL_SERVER_ERROR));
+    }
     if registry && crate::oci::claims(&table, &host, &path[1..]) {
         let rest = path[1..].to_vec();
         return match crate::oci::handle(app.clone(), caller.clone(), &host, &rest, req).await {
@@ -1180,7 +1194,7 @@ pub(crate) async fn serve_blob(
 
 /// Content anyone with write access put there (or an upstream did): not
 /// run in the origin of the console or of other repositories.
-fn sandbox(h: &mut HeaderMap) {
+pub(crate) fn sandbox(h: &mut HeaderMap) {
     h.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static("sandbox"),

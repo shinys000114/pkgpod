@@ -10,6 +10,7 @@
   <div class="result"></div>
   </div>
 </div>
+<div hx-get="/r/{{ repo }}/badges" hx-trigger="load" hx-swap="outerHTML"></div>
 {% if can_admin %}
 <div class="card">
   <div class="card-head"><h2>Rights</h2><span class="hint">server admins may do everything; grants on * (Users &amp; teams) cover every repository</span></div>

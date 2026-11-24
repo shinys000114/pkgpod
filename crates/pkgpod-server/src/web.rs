@@ -11,6 +11,7 @@ use crate::App;
 pub fn router(app: Arc<App>) -> Router {
     Router::new()
         .merge(crate::api::router())
+        .route("/metrics", axum::routing::get(crate::metrics::metrics))
         .merge(crate::console::router())
         .fallback(crate::console::not_found)
         .with_state(app)
