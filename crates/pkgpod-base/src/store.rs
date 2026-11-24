@@ -57,6 +57,20 @@ impl Store {
         self.path(d).is_file()
     }
 
+    /// Whether the store has `d`; if so, its time is set to now, so
+    /// garbage collection's grace period covers it until it is named by a
+    /// version (an old blob nothing names any more, found here and about
+    /// to be named, is not collected in between).
+    pub fn keep(&self, d: &Digest) -> bool {
+        let p = self.path(d);
+        if p.is_file() {
+            touch(&p);
+            true
+        } else {
+            false
+        }
+    }
+
     fn tmp_dir(&self) -> Result<PathBuf> {
         let t = self.root.join("tmp");
         fs::create_dir_all(&t).map_err(|e| Error::io(&t, e))?;

@@ -818,7 +818,7 @@ impl Engine {
                     let mut need = vec![*sha256];
                     need.extend(f.references(entry, &src_store));
                     for d in need {
-                        if !dst_store.has(&d) && src_store.has(&d) {
+                        if !dst_store.keep(&d) && src_store.has(&d) {
                             dst_store.put_file(&src_store.path(&d))?;
                         }
                     }

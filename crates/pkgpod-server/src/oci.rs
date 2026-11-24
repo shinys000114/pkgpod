@@ -456,7 +456,8 @@ async fn put_manifest(cx: &Ctx, re: &str, req: Request) -> Response {
         // What it names must be here: blobs uploaded or referenced, an
         // index's children in the image.
         for b in &parsed.blobs {
-            if !has_blob(&app, &r, b) {
+            // keep(): the blob stays young until this manifest names it.
+            if !has_blob(&app, &r, b) || !r.store().keep(b) {
                 return Err(oci_err(
                     StatusCode::BAD_REQUEST,
                     "MANIFEST_BLOB_UNKNOWN",
@@ -727,7 +728,7 @@ async fn mount(cx: &Ctx, d: &Digest, from: &str) -> Option<Response> {
         return None;
     }
     let (dst, srcp) = (cx.r.store(), src_r.store().path(d));
-    if !dst.has(d) {
+    if !dst.keep(d) {
         blocking(move || dst.put_file(&srcp)).await?.ok()?;
     }
     record_upload(&cx.app, &cx.r.name, d);

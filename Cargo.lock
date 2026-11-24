@@ -2295,6 +2295,7 @@ dependencies = [
  "pkgpod-deb",
  "pkgpod-server",
  "reqwest",
+ "rusqlite",
  "rustix",
  "serde",
  "serde_json",

@@ -29,6 +29,7 @@ rustix.workspace = true
 jiff.workspace = true
 
 [dev-dependencies]
+rusqlite.workspace = true
 pkgpod-deb = { workspace = true, features = ["testutil"] }
 tempfile.workspace = true
 reqwest = { workspace = true, features = ["form"] }

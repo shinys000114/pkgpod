@@ -269,6 +269,13 @@ enum AdminCmd {
     },
     /// Write a consistent copy of the database.
     Backup { to: PathBuf },
+    /// Check that every version can be read whole and every blob it
+    /// names is in the store (with --deep, with its sha256); exits 1 on
+    /// problems. Safe while the server runs.
+    Check {
+        #[arg(long)]
+        deep: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -357,6 +364,30 @@ fn admin(a: &ServerArgs, cmd: AdminCmd) -> Result<(), client::CliError> {
                 .backup(&to)
                 .map_err(|e| client::CliError::other(e.to_string()))?;
             println!("database copied to {}", to.display());
+        }
+        AdminCmd::Check { deep } => {
+            let rep = app
+                .engine
+                .check(deep)
+                .map_err(|e| client::CliError::other(e.to_string()))?;
+            println!(
+                "{} repositories, {} versions, {} tree objects, {} blobs{}",
+                rep.repos,
+                rep.versions,
+                rep.objects,
+                rep.blobs,
+                if deep { " (hashed)" } else { "" }
+            );
+            for p in &rep.problems {
+                println!("problem: {p}");
+            }
+            if !rep.ok() {
+                return Err(client::CliError::other(format!(
+                    "{} problem(s) found",
+                    rep.problems.len()
+                )));
+            }
+            println!("ok");
         }
     }
     Ok(())
