@@ -459,8 +459,33 @@ async fn file_op(
         app.conan_staged.put(&a.repo.name, dir, file, sha, size);
         return text(StatusCode::CREATED, "");
     }
-    // The manifest: the revision, in one version.
+    // The manifest: the revision, in one version, with its recipe or
+    // package info (a manifest alone, say after a restart lost the
+    // files before it, is refused).
     let mut staged = app.conan_staged.take(&a.repo.name, dir);
+    let main = if dir.contains("/packages/") {
+        "conaninfo.txt"
+    } else {
+        "conanfile.py"
+    };
+    let (app3, d3, m3) = (app.clone(), dir.to_string(), main.to_string());
+    let have_main = staged.contains_key(main)
+        || tokio::task::spawn_blocking(move || {
+            matches!(
+                app3.engine.objects().resolve(&root, &format!("{d3}/{m3}")),
+                Ok(Some(Entry::Blob { .. }))
+            )
+        })
+        .await
+        .unwrap_or(false);
+    if !have_main {
+        return text(
+            StatusCode::CONFLICT,
+            format!(
+                "{dir}: {main} was not uploaded before its manifest; upload the revision again"
+            ),
+        );
+    }
     staged.insert(file.into(), (sha, size));
     let (app2, repo, actor, dir2) = (
         app.clone(),
