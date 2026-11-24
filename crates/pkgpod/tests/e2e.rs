@@ -585,7 +585,8 @@ fn console_login_pages_and_csrf() {
     // Every choice of the new-repository form makes a repository whose
     // page, usage and actions open.
     let src = s.url("/web/");
-    let choices: [(&str, &str, &str, &[(&str, &str)]); 7] = [
+    type Fields<'a> = &'a [(&'a str, &'a str)];
+    let choices: [(&str, &str, &str, Fields); 7] = [
         ("deb", "hosted", "c-deb", &[("first_dist", "noble")]),
         (
             "deb",
