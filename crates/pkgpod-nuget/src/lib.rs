@@ -15,7 +15,9 @@
 //! The service index, the flat container, registrations and search are
 //! made per request from the version asked (their URLs are absolute).
 //! A version is pushed once; deleting one unlists it (it stays
-//! downloadable for builds that name it), as on nuget.org.
+//! downloadable for builds that name it), as on nuget.org. Symbol
+//! packages (.snupkg) are kept beside their package, as
+//! `<id>/<version>.snupkg`.
 
 use std::cmp::Ordering;
 
@@ -274,6 +276,19 @@ pub fn path(id: &str, version: &str) -> String {
     )
 }
 
+/// Where a version's symbols (.snupkg) are kept.
+pub fn symbols_path(id: &str, version: &str) -> String {
+    format!(
+        "{}/{}.snupkg",
+        id.to_ascii_lowercase(),
+        version.to_ascii_lowercase()
+    )
+}
+
+fn is_symbols(meta: &Value) -> bool {
+    meta.get("symbols").and_then(Value::as_bool) == Some(true)
+}
+
 /// A version as kept, read back.
 #[derive(Debug, Clone)]
 pub struct Kept {
@@ -303,6 +318,9 @@ pub fn versions(leaves: &[(String, Entry)]) -> Vec<Kept> {
             let Entry::Blob { sha256, size, meta } = e else {
                 return None;
             };
+            if is_symbols(meta) {
+                return None;
+            }
             let id = meta.get("id")?.as_str()?.to_string();
             let version = meta.get("version")?.as_str()?.to_string();
             Some((
@@ -399,13 +417,37 @@ impl Format for Nuget {
         Vec::new()
     }
 
-    fn ingest(&self, cx: &Cx, up: &Upload, _p: &Value, e: &mut Edit) -> Result<String> {
+    fn ingest(&self, cx: &Cx, up: &Upload, params: &Value, e: &mut Edit) -> Result<String> {
         if up.size > MAX_NUPKG {
             return Err(invalid("a package is at most 1 GiB"));
         }
         let data = std::fs::read(cx.store.path(&up.sha256))?;
         let (n, xml) = read_nupkg(&data)?;
         drop(data);
+        // A symbol package: beside its package, which must be there.
+        let symbols = params.get("symbols").and_then(Value::as_bool) == Some(true)
+            || String::from_utf8_lossy(&xml).contains("SymbolsPackage");
+        if symbols {
+            match e.get(&path(&n.id, &n.version))? {
+                Some(Entry::Blob { meta, .. })
+                    if meta.get("id").and_then(Value::as_str) == Some(n.id.as_str()) => {}
+                _ => {
+                    return Err(Error::NotFound(format!(
+                        "{} {} is not here: push the package before its symbols",
+                        n.id, n.version
+                    )));
+                }
+            }
+            e.put(
+                &symbols_path(&n.id, &n.version),
+                Entry::blob(
+                    up.sha256,
+                    up.size,
+                    json!({"id": n.id, "version": n.version, "symbols": true, "time": pkgpod_base::now()}),
+                ),
+            )?;
+            return Ok(format!("pushed symbols of {} {}", n.id, n.version));
+        }
         let p = path(&n.id, &n.version);
         if let Some(Entry::Blob { sha256, .. }) = e.get(&p)? {
             if sha256 == up.sha256 {
@@ -469,6 +511,9 @@ impl Format for Nuget {
         let Entry::Blob { meta, .. } = entry else {
             return None;
         };
+        if is_symbols(meta) {
+            return None;
+        }
         let s = |k: &str| {
             meta.get(k)
                 .and_then(Value::as_str)
@@ -488,9 +533,18 @@ impl Format for Nuget {
 
     fn publish(&self, cx: &PublishCx) -> Result<Option<Digest>> {
         for (p, e) in cx.objects.walk(&cx.root, "")? {
-            let ok = matches!(&e, Entry::Blob { meta, .. }
-                if meta.get("id").and_then(Value::as_str).zip(meta.get("version").and_then(Value::as_str))
-                    .is_some_and(|(id, v)| path(id, v) == p));
+            let ok = match &e {
+                Entry::Blob { meta, .. } => {
+                    let s = |k: &str| meta.get(k).and_then(Value::as_str).unwrap_or("");
+                    let want = if is_symbols(meta) {
+                        symbols_path(s("id"), s("version"))
+                    } else {
+                        path(s("id"), s("version"))
+                    };
+                    !s("id").is_empty() && want == p
+                }
+                _ => false,
+            };
             if !ok {
                 return Err(invalid(format!("{p} is not a package version")));
             }

@@ -6124,13 +6124,18 @@ fn nuget_with_dotnet() {
             DOTNET_IMAGE,
             Some(&work),
             &format!(
-                "{dotnet}; set -e; dotnet pack hello -c Release -p:Version={version} -o out >/dev/null; \
+                "{dotnet}; set -e; dotnet pack hello -c Release -p:Version={version} \\
+                 -p:IncludeSymbols=true -p:SymbolPackageFormat=snupkg -o out >/dev/null; \
                  dotnet nuget push out/Hello.Pk.{version}.nupkg -s pk -k {tok}"
             ),
         )
     };
     let (ok, out) = pack_push("1.0.0");
-    assert!(ok, "{out}");
+    // The symbols go along, to SymbolPackagePublish.
+    assert!(
+        ok && out.contains("Hello.Pk.1.0.0.snupkg") && !out.contains("warn"),
+        "{out}"
+    );
     s.cli(&["label", "feed", "first"]).unwrap();
     let (ok, out) = pack_push("1.1.0");
     assert!(ok, "{out}");
