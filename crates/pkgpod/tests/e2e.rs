@@ -4129,3 +4129,182 @@ fn a_large_directory_survives_garbage_collection() {
     let (_, listing) = get(&s.url("/lots/many/"), None);
     assert!(listing.contains("f0699.txt") && listing.contains("extra.txt"));
 }
+
+impl Server {
+    /// `pkgpod admin <args>` on this server's data: (ok, output).
+    fn admin(&self, args: &[&str]) -> (bool, String) {
+        let o = Command::new(env!("CARGO_BIN_EXE_pkgpod"))
+            .arg("admin")
+            .arg("-c")
+            .arg(self.dir.path().join("pkgpod.toml"))
+            .args(args)
+            .output()
+            .unwrap();
+        (
+            o.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            ),
+        )
+    }
+}
+
+#[test]
+fn admin_check_finds_what_is_missing() {
+    let s = Server::start();
+    s.cli(&["repo", "create", "f", "-f", "files"]).unwrap();
+    let d = s.dir.path().join("src");
+    std::fs::create_dir_all(&d).unwrap();
+    for (n, body) in [("a.txt", "alpha"), ("b.txt", "bravo"), ("c.txt", "charlie")] {
+        std::fs::write(d.join(n), body).unwrap();
+        s.cli(&["upload", "f", d.join(n).to_str().unwrap()])
+            .unwrap();
+    }
+    let (ok, out) = s.admin(&["check", "--deep"]);
+    assert!(ok && out.contains("ok"), "{out}");
+    let blob = |body: &str| {
+        let h = pkgpod_deb::hash::hash_bytes(body.as_bytes()).sha256;
+        s.dir
+            .path()
+            .join(format!("data/storages/main/store/{}/{h}", &h[..2]))
+    };
+    // A blob gone.
+    std::fs::remove_file(blob("alpha")).unwrap();
+    let (ok, out) = s.admin(&["check"]);
+    assert!(!ok && out.contains("is missing from the store"), "{out}");
+    std::fs::write(blob("alpha"), "alpha").unwrap();
+    // A blob changed in place, same size: only a deep check sees it.
+    std::fs::write(blob("bravo"), "BRAVO").unwrap();
+    assert!(s.admin(&["check"]).0);
+    let (ok, out) = s.admin(&["check", "--deep"]);
+    assert!(!ok && out.contains("does not have that sha256"), "{out}");
+    std::fs::write(blob("bravo"), "bravo").unwrap();
+    assert!(s.admin(&["check", "--deep"]).0);
+    // A tree object gone.
+    let db = rusqlite_like_delete(&s.dir.path().join("data/pkgpod.db"));
+    let (ok, out) = s.admin(&["check"]);
+    assert!(!ok && out.contains("missing"), "{db} {out}");
+}
+
+/// Deletes one tree object (the oldest non-empty one); its id.
+fn rusqlite_like_delete(db: &Path) -> String {
+    let c = rusqlite::Connection::open(db).unwrap();
+    c.busy_timeout(Duration::from_secs(10)).unwrap();
+    let id: Vec<u8> = c
+        .query_row(
+            "SELECT id FROM objects WHERE length(data) > 2 ORDER BY created LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    c.execute("DELETE FROM objects WHERE id = ?1", [&id])
+        .unwrap();
+    id.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[test]
+fn killed_and_restarted_the_data_holds() {
+    let mut s = Server::start();
+    s.cli(&[
+        "repo",
+        "create",
+        "f",
+        "-f",
+        "files",
+        "-s",
+        "public=true",
+        "-s",
+        "keep_versions=3",
+    ])
+    .unwrap();
+    s.cli(&["repo", "create", "copy", "-f", "files"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "f", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    // Something to import while the uploads go on.
+    let src = s.dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    for i in 0..300 {
+        std::fs::write(src.join(format!("s{i}.bin")), vec![i as u8; 20_000]).unwrap();
+    }
+    s.cli(&["repo", "create", "up", "-f", "files", "-s", "public=true"])
+        .unwrap();
+    let ut = s
+        .cli(&["token", "create", "up", "--repos", "up", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    for i in 0..300 {
+        let r = reqwest::blocking::Client::new()
+            .put(s.url(&format!("/up/s{i}.bin")))
+            .basic_auth("token", Some(&ut))
+            .body(vec![i as u8; 20_000])
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 201);
+    }
+    for round in 0..3 {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writers: Vec<_> = (0..4)
+            .map(|w| {
+                let (stop, url, tok) = (stop.clone(), s.url("/f/"), tok.clone());
+                std::thread::spawn(move || {
+                    let c = reqwest::blocking::Client::new();
+                    let mut n = 0;
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        let _ = c
+                            .put(format!("{url}w{w}/r{round}-{n}.bin"))
+                            .basic_auth("token", Some(&tok))
+                            .body(vec![n as u8; 50_000])
+                            .send();
+                        n += 1;
+                    }
+                })
+            })
+            .collect();
+        if round == 0 {
+            let _ = s.cli(&["import", "copy", &s.url("/up/"), "--path", "imp"]);
+        }
+        if round == 1 {
+            let _ = s.cli(&["gc", "--grace-hours", "0"]);
+        }
+        std::thread::sleep(Duration::from_millis(700));
+        Command::new("kill")
+            .args(["-9", &s.child.id().to_string()])
+            .status()
+            .unwrap();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        for w in writers {
+            w.join().unwrap();
+        }
+        s.restart();
+        let (ok, out) = s.admin(&["check", "--deep"]);
+        assert!(ok, "round {round}: {out}");
+    }
+    // It goes on working: uploads, a collection, reads.
+    let r = reqwest::blocking::Client::new()
+        .put(s.url("/f/after.txt"))
+        .basic_auth("token", Some(&tok))
+        .body("after")
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 201);
+    s.cli(&["gc", "--grace-hours", "0"]).unwrap();
+    s.restart();
+    assert_eq!(get(&s.url("/f/after.txt"), None).1, "after");
+    let (ok, out) = s.admin(&["check", "--deep"]);
+    assert!(ok, "{out}");
+    // The import killed midway is not left running.
+    let jobs = s.json(&["jobs", "copy"]);
+    assert!(
+        jobs.as_array()
+            .unwrap()
+            .iter()
+            .all(|j| j["state"] != "running"),
+        "{jobs}"
+    );
+}

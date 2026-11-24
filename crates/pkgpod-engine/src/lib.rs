@@ -7,6 +7,7 @@
 //! Formats plug in through [`format::Format`]; the engine never looks
 //! inside a blob.
 
+pub mod check;
 pub mod format;
 pub mod schema;
 pub mod settings;

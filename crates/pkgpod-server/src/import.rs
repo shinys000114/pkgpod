@@ -596,7 +596,7 @@ fn run_oci(
             if interrupted() {
                 return Err("interrupted".into());
             }
-            if store.has(b) {
+            if store.keep(b) {
                 continue;
             }
             let d = format!("sha256:{}", b.hex());
