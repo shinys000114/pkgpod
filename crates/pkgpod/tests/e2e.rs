@@ -1660,6 +1660,109 @@ fn import_an_apt_repository_as_one_version() {
         .is_err()
     );
     assert_eq!(s.json(&["versions", "new"]).as_array().unwrap().len(), 2);
+
+    // From a directory on the server, checked the same way: a mirror's
+    // tree is an apt archive.
+    let key = std::fs::read_to_string(&kf).unwrap();
+    s.cli(&[
+        "repo",
+        "create",
+        "oldmir",
+        "-k",
+        "mirror",
+        "-s",
+        &format!("source={}", s.url("/old/")),
+        "-s",
+        "dists=focal",
+        "-s",
+        "sources=true",
+        "-s",
+        &format!("keyring={key}"),
+    ])
+    .unwrap();
+    s.cli(&["sync", "oldmir", "--wait"]).unwrap();
+    let tree = s.dir.path().join("data/storages/main/trees/oldmir");
+    let before = tree_files(&tree);
+    s.cli(&["repo", "create", "new2"]).unwrap();
+    let out = s
+        .cli(&[
+            "import",
+            "new2",
+            tree.to_str().unwrap(),
+            "--dists",
+            "focal",
+            "--keyring",
+            kf.to_str().unwrap(),
+            "--wait",
+        ])
+        .unwrap();
+    assert!(
+        out.contains("imported 3 package file(s) and 1 source package(s)"),
+        "{out}"
+    );
+    let (_, imported) = get(
+        &s.url("/new2/dists/focal/main/source/Sources"),
+        Some(("admin", pw.trim())),
+    );
+    assert_eq!(srcs, imported);
+    assert_eq!(tree_files(&tree), before, "the directory is left as it was");
+    let out = s
+        .cli(&[
+            "import",
+            "new2",
+            &format!("file://{}", tree.display()),
+            "--dists",
+            "focal",
+            "--keyring",
+            kf.to_str().unwrap(),
+            "--wait",
+        ])
+        .unwrap();
+    assert!(out.contains("nothing changed"), "{out}");
+    let e = s
+        .cli(&["import", "new2", "/nowhere/at/all", "--dists", "focal"])
+        .unwrap_err();
+    assert!(e.contains("/nowhere/at/all"), "{e}");
+    // Only for server admins: the server's disk is not a repository's.
+    s.cli_in(&["user", "add", "w", "--password-stdin"], "w-password")
+        .unwrap();
+    s.cli(&["grant", "set", "new2", "user:w", "admin"]).unwrap();
+    s.cli(&["grant", "set", "oldmir", "user:w", "admin"])
+        .unwrap();
+    let c = reqwest::blocking::Client::new();
+    let r = c
+        .post(format!("{}/api/v1/repos/new2/import", s.api))
+        .basic_auth("w", Some("w-password"))
+        .json(&serde_json::json!({"source": tree, "dists": ["focal"]}))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 403);
+    assert!(r.text().unwrap().contains("server admins"));
+    let r = c
+        .patch(format!("{}/api/v1/repos/oldmir", s.api))
+        .basic_auth("w", Some("w-password"))
+        .json(&serde_json::json!({"settings": {"source": "file:///etc/"}}))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 403);
+}
+
+/// Every file under `root` with its size and time.
+fn tree_files(root: &Path) -> Vec<(PathBuf, u64, std::time::SystemTime)> {
+    let mut out = Vec::new();
+    let mut todo = vec![root.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let m = e.metadata().unwrap();
+            if m.is_dir() {
+                todo.push(e.path());
+            } else {
+                out.push((e.path(), m.len(), m.modified().unwrap()));
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// An apt state directory whose sources.list reads `base` (dist `stable`)
@@ -5554,6 +5657,70 @@ fn files_mirror_and_import_over_http_listings() {
         .unwrap()
         .to_string();
     assert_eq!(up_lm, copy_lm);
+
+    // From a directory on the server: read where it is, excludes and
+    // links left out, times kept.
+    let local = s.dir.path().join("local-tree");
+    std::fs::create_dir_all(local.join("docs/old")).unwrap();
+    std::fs::write(local.join("README"), "read me\n").unwrap();
+    std::fs::write(local.join("docs/guide.txt"), "guide\n").unwrap();
+    std::fs::write(local.join("docs/old/gone.txt"), "old\n").unwrap();
+    std::fs::write(local.join("docs/x.tmp"), "tmp\n").unwrap();
+    std::os::unix::fs::symlink(&secret, local.join("docs/leak")).unwrap();
+    let t = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_500_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(local.join("README"))
+        .unwrap()
+        .set_modified(t)
+        .unwrap();
+    let before = tree_files(&local);
+    let out = s
+        .cli(&[
+            "import",
+            "copy",
+            local.to_str().unwrap(),
+            "--path",
+            "local",
+            "--exclude",
+            "*.tmp",
+            "--exclude",
+            "/docs/old/",
+            "--wait",
+        ])
+        .unwrap();
+    assert!(out.contains("imported 2 file(s)"), "{out}");
+    let ls = s.cli(&["ls", "copy", "local/docs"]).unwrap();
+    assert!(
+        ls.contains("guide.txt")
+            && !ls.contains("x.tmp")
+            && !ls.contains("old")
+            && !ls.contains("leak"),
+        "{ls}"
+    );
+    let r = c
+        .head(s.url("/copy/local/README"))
+        .basic_auth("admin", Some(pw.trim()))
+        .send()
+        .unwrap();
+    assert_eq!(
+        r.headers()["last-modified"].to_str().unwrap(),
+        "Fri, 14 Jul 2017 02:40:00 GMT"
+    );
+    assert_eq!(
+        tree_files(&local),
+        before,
+        "the directory is left as it was"
+    );
+    let job = &s.json(&["jobs", "copy"])[0];
+    let log = s.json(&["job", &job["id"].to_string()]);
+    assert!(
+        log["log"]
+            .as_str()
+            .unwrap()
+            .contains("left out 1 symbolic link(s)"),
+        "{log}"
+    );
 }
 
 /// A registry client for the tests: Basic auth with a token.

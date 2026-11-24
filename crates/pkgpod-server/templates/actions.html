@@ -41,7 +41,7 @@
   <div class="panel-body">
   <form hx-post="/c/r/{{ name }}/import" hx-target="next .result">
     <div class="fields">
-      <label class="field wide"><span>Source</span><input name="source" required placeholder="https://apt.example.org/ppa/" autocomplete="off" autocapitalize="off" spellcheck="false"><small>The archive root, where dists/ is.</small></label>
+      <label class="field wide"><span>Source</span><input name="source" required placeholder="https://apt.example.org/ppa/ · /srv/apt/" autocomplete="off" autocapitalize="off" spellcheck="false"><small>The archive root, where dists/ is: an address, or a directory on the server (server admins).</small></label>
       <label class="field"><span>Dists</span><input name="dists" required placeholder="noble, jammy" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
       <label class="field"><span>Components</span><input name="components" placeholder="all" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
       <label class="field"><span>Architectures</span><input name="architectures" placeholder="all" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
@@ -78,11 +78,11 @@
 {% endif %}
 {% if format == "files" %}
 <details class="card panel">
-  <summary>Import <span class="hint">take in a tree from a file server (rsync, HTTP listings) as one version</span></summary>
+  <summary>Import <span class="hint">take in a tree from a file server (rsync, HTTP listings) or the server's disk as one version</span></summary>
   <div class="panel-body">
   <form hx-post="/c/r/{{ name }}/import" hx-target="next .result">
     <div class="fields">
-      <label class="field wide"><span>Source</span><input name="source" required placeholder="rsync://host/module/dir/ · https://host/dir/" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+      <label class="field wide"><span>Source</span><input name="source" required placeholder="rsync://host/module/dir/ · https://host/dir/ · /srv/files/" autocomplete="off" autocapitalize="off" spellcheck="false"><small>A directory on the server is read where it is (server admins).</small></label>
       <label class="field"><span>Path</span><input name="path" placeholder="the top" autocomplete="off" autocapitalize="off" spellcheck="false"><small>Where the tree goes here.</small></label>
       <label class="field"><span>Excludes</span><input name="excludes" placeholder="*.tmp, /old/" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
       <label class="check field"><span class="check-line"><input type="checkbox" name="replace"> <span>Replace</span></span><small>Replace files at the same path with other content.</small></label>

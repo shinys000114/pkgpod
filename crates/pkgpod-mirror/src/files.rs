@@ -88,11 +88,12 @@ impl FilesMirror {
     }
 }
 
-/// Exclude patterns, compiled.
-struct Excludes(Vec<(glob::Pattern, bool, bool)>);
+/// Exclude patterns, compiled: `name` anywhere, `/a/b` from the top,
+/// a final `/` for directories only.
+pub struct Excludes(Vec<(glob::Pattern, bool, bool)>);
 
 impl Excludes {
-    fn new(specs: &[String]) -> Result<Self, Error> {
+    pub fn new(specs: &[String]) -> Result<Self, Error> {
         let mut v = Vec::new();
         for s in specs {
             let dir_only = s.ends_with('/');
@@ -109,7 +110,8 @@ impl Excludes {
         Ok(Self(v))
     }
 
-    fn matches(&self, rel: &str, dir: bool) -> bool {
+    /// Whether `rel` (relative to the top, no leading `/`) is left out.
+    pub fn matches(&self, rel: &str, dir: bool) -> bool {
         let opts = glob::MatchOptions {
             case_sensitive: true,
             require_literal_separator: true,
