@@ -485,6 +485,24 @@ impl Npm {
     }
 }
 
+impl Npm {
+    /// Removes version `v` of `pkg`, the dist-tags naming it, and moves
+    /// latest; false if it is not there.
+    fn unpublish(pkg: &str, v: &str, e: &mut Edit) -> Result<bool> {
+        let path = version_path(pkg, v);
+        if !e.remove(&path)? {
+            return Ok(false);
+        }
+        for (t, entry) in e.list(&format!("{pkg}/{TAGS}"))? {
+            if matches!(entry, Some(Entry::Ref { target }) if target == path) {
+                e.remove(&tag_path(pkg, &t))?;
+            }
+        }
+        Self::fix_latest(pkg, e)?;
+        Ok(true)
+    }
+}
+
 impl Format for Npm {
     fn id(&self) -> &'static str {
         "npm"
@@ -597,16 +615,9 @@ impl Format for Npm {
                     }
                     return Ok(format!("unpublished {pkg}"));
                 }
-                let path = version_path(&pkg, &v);
-                if !e.remove(&path)? {
+                if !Self::unpublish(&pkg, &v, e)? {
                     return Err(Error::NotFound(format!("no {pkg}@{v}")));
                 }
-                for (t, entry) in e.list(&format!("{pkg}/{TAGS}"))? {
-                    if matches!(entry, Some(Entry::Ref { target }) if target == path) {
-                        e.remove(&tag_path(&pkg, &t))?;
-                    }
-                }
-                Self::fix_latest(&pkg, e)?;
                 Ok(format!("unpublished {pkg}@{v}"))
             }
             _ => Err(Error::Invalid(format!(
@@ -619,6 +630,30 @@ impl Format for Npm {
         Err(Error::Invalid(
             "packages are published with npm publish (or yarn, pnpm) to the registry".into(),
         ))
+    }
+
+    fn version_cmp(&self, a: &str, b: &str) -> Ordering {
+        compare(a, b)
+    }
+
+    fn cleanup(&self) -> bool {
+        true
+    }
+
+    fn prerelease(&self, v: &str) -> bool {
+        pkgpod_engine::version::semver_pre(v)
+    }
+
+    /// As npm unpublish: the version, its dist-tags, latest moved.
+    fn remove_version(&self, e: &mut Edit, path: &str) -> Result<()> {
+        let Some((pkg, VERSIONS, v)) = split_path(path) else {
+            return Err(Error::NotFound(format!("no {path}")));
+        };
+        if Self::unpublish(pkg, v, e)? {
+            Ok(())
+        } else {
+            Err(Error::NotFound(format!("no {pkg}@{v}")))
+        }
     }
 
     fn catalog(&self, path: &str, entry: &Entry) -> Option<Item> {

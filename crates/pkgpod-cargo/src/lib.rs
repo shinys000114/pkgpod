@@ -505,6 +505,18 @@ impl Format for Cargo {
         ))
     }
 
+    fn version_cmp(&self, a: &str, b: &str) -> std::cmp::Ordering {
+        pkgpod_engine::version::semver_cmp(a, b)
+    }
+
+    fn cleanup(&self) -> bool {
+        true
+    }
+
+    fn prerelease(&self, v: &str) -> bool {
+        pkgpod_engine::version::semver_pre(v)
+    }
+
     fn catalog(&self, path: &str, entry: &Entry) -> Option<Item> {
         let (_, v) = path.split_once('/')?;
         let Entry::Blob { meta, .. } = entry else {

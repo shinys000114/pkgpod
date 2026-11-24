@@ -91,6 +91,23 @@ pub fn cmp(a: &str, b: &str) -> Ordering {
     a.cmp(b)
 }
 
+fn semver_of(v: &str) -> Option<semver::Version> {
+    semver::Version::parse(bare(v)).ok()
+}
+
+/// Semantic versions' order (a leading `v` allowed); others as [`cmp`].
+pub fn semver_cmp(a: &str, b: &str) -> Ordering {
+    match (semver_of(a), semver_of(b)) {
+        (Some(x), Some(y)) => x.cmp(&y).then_with(|| a.cmp(b)),
+        _ => cmp(a, b),
+    }
+}
+
+/// A semantic version with a pre-release part.
+pub fn semver_pre(v: &str) -> bool {
+    semver_of(v).is_some_and(|x| !x.pre.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,5 +149,24 @@ mod tests {
         assert_eq!(cmp("1.0", "1.0"), Ordering::Equal);
         // Equal as versions: still one order.
         assert_ne!(cmp("1.01", "1.1"), Ordering::Equal);
+        let mut s = vec![
+            "1.0.0",
+            "1.0.0-rc.10",
+            "1.0.0-rc.2",
+            "v0.9.0",
+            "1.0.0-alpha",
+        ];
+        s.sort_by(|a, b| semver_cmp(a, b));
+        assert_eq!(
+            s,
+            [
+                "v0.9.0",
+                "1.0.0-alpha",
+                "1.0.0-rc.2",
+                "1.0.0-rc.10",
+                "1.0.0"
+            ]
+        );
+        assert!(semver_pre("v1.2.3-rc.1") && !semver_pre("1.2.3") && !semver_pre("x"));
     }
 }

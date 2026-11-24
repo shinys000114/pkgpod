@@ -151,6 +151,32 @@ pub fn common(kind: crate::Kind) -> Vec<Field> {
     v
 }
 
+/// Cleanup rules, for formats that have them (hosted repositories).
+pub fn cleanup_fields() -> Vec<Field> {
+    vec![
+        Field::int(
+            "cleanup_keep_last",
+            0,
+            "Cleanup: keep this many newest versions of each package (0: all).",
+        ),
+        Field::int(
+            "cleanup_prerelease_days",
+            0,
+            "Cleanup: remove pre-releases in for longer than this many days (0: never).",
+        ),
+        Field::int(
+            "cleanup_unused_days",
+            0,
+            "Cleanup: remove versions in and not downloaded for this many days (0: never; needs download counts kept at least as long).",
+        ),
+        Field::int(
+            "cleanup_max",
+            50,
+            "Cleanup: the daily run holds a cleanup that would remove more versions than this, for review.",
+        ),
+    ]
+}
+
 /// Checks `v` against `fields`, coercing strings where a CLI gives them
 /// (`"true"`, `"5"`, `"a,b"`), and fills in defaults. Unknown names are
 /// refused.

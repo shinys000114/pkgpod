@@ -152,7 +152,11 @@ impl Engine {
     /// Common settings and the format's, in that order.
     pub fn fields(&self, format: &str, kind: Kind) -> Result<Vec<Field>> {
         let mut f = settings::common(kind);
-        f.extend(self.format(format)?.settings(kind));
+        let fmt = self.format(format)?;
+        if kind.versioned() && fmt.cleanup() {
+            f.extend(settings::cleanup_fields());
+        }
+        f.extend(fmt.settings(kind));
         Ok(f)
     }
 
@@ -583,8 +587,8 @@ impl Engine {
             )?;
             let mut del = tx.prepare_cached("DELETE FROM catalog WHERE repo = ?1 AND path = ?2")?;
             let mut ins = tx.prepare_cached(
-                "INSERT OR REPLACE INTO catalog (repo, path, name, version, extra, sha256, size)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT OR REPLACE INTO catalog (repo, path, name, version, extra, sha256, size, added)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?;
             for c in &changes {
                 del.execute(params![r.id, c.path])?;
@@ -596,7 +600,7 @@ impl Engine {
                         _ => (None, 0),
                     };
                     ins.execute(params![
-                        r.id, c.path, it.name, it.version, it.extra, sha, size
+                        r.id, c.path, it.name, it.version, it.extra, sha, size, created
                     ])?;
                 }
             }
@@ -912,6 +916,26 @@ impl Engine {
 
     /// Catalog rows (packages, images' tags, files) of every repository,
     /// by name.
+    /// The catalog rows of a repository's current version.
+    pub fn catalog_rows(&self, repo: &str) -> Result<Vec<CatalogRow>> {
+        Ok(self.db.read(|c| {
+            let mut st = c.prepare(
+                "SELECT c.path, c.name, c.version, c.extra, c.added FROM catalog c
+                 JOIN repos r ON r.id = c.repo WHERE r.name = ?1 ORDER BY c.path",
+            )?;
+            st.query_map([repo], |r| {
+                Ok(CatalogRow {
+                    path: r.get(0)?,
+                    name: r.get(1)?,
+                    version: r.get(2)?,
+                    extra: r.get(3)?,
+                    added: r.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+        })?)
+    }
+
     /// Catalog rows of one repository's current version.
     pub fn catalog_count(&self, repo: &str) -> Result<i64> {
         Ok(self.db.read(|c| {
@@ -1052,6 +1076,17 @@ impl Engine {
         })?;
         Ok(n)
     }
+}
+
+/// A catalog row of a current version.
+#[derive(Debug, Clone, Serialize)]
+pub struct CatalogRow {
+    pub path: String,
+    pub name: String,
+    pub version: String,
+    pub extra: String,
+    /// When it came in (seconds).
+    pub added: i64,
 }
 
 /// A search hit.

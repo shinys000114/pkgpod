@@ -1211,6 +1211,32 @@ impl Format for Deb {
         crate::version::compare(a, b)
     }
 
+    fn cleanup(&self) -> bool {
+        true
+    }
+
+    fn prerelease(&self, v: &str) -> bool {
+        v.contains('~')
+    }
+
+    /// A dist's component and architecture (or its sources).
+    fn cleanup_place(&self, _path: &str, extra: &str) -> String {
+        extra.to_string()
+    }
+
+    /// A source package is its directory.
+    fn remove_version(&self, e: &mut Edit, path: &str) -> Result<()> {
+        let p = match crate::source::split_path(path) {
+            Some((d, c, dir, _)) => format!("dists/{d}/{c}/{dir}"),
+            None => path.to_string(),
+        };
+        if e.remove(&p)? {
+            Ok(())
+        } else {
+            Err(Error::NotFound(format!("no {p}")))
+        }
+    }
+
     fn catalog(&self, path: &str, entry: &Entry) -> Option<Item> {
         if let Some((d, c, _, f)) = crate::source::split_path(path) {
             let m = crate::source::meta(entry).filter(|_| f.ends_with(".dsc"))?;
