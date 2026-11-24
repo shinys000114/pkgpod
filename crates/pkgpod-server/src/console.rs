@@ -1379,6 +1379,19 @@ fn with_names(app: &App, r: &pkgpod_engine::RepoInfo, mut lines: Vec<UseLine>) -
         {
             continue;
         }
+        // A reference with its version (conan's name/version) fills
+        // <package>/<version> whole.
+        if item.name.contains('/') {
+            l.text = l.text.replace("<package>/<version>", &item.name);
+            continue;
+        }
+        // A dotted id (Galaxy's namespace.name, Swift's scope.name).
+        if item.name.contains('.') {
+            l.text = l
+                .text
+                .replace("<namespace>.<name>", &item.name)
+                .replace("<scope>.<name>", &item.name);
+        }
         for ph in [
             "<package>",
             "<project>",
