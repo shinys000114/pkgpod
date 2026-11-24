@@ -4,7 +4,8 @@
 
 use pkgpod_base::db::Db;
 
-const STEPS: &[&str] = &["
+const STEPS: &[&str] = &[
+    "
 CREATE TABLE storages (
     name TEXT PRIMARY KEY,
     path TEXT NOT NULL
@@ -57,8 +58,30 @@ CREATE TABLE catalog (
     PRIMARY KEY (repo, path)
 ) WITHOUT ROWID;
 CREATE INDEX catalog_name ON catalog(name);
-"];
+",
+    "
+-- Directory objects over 512 entries are stored in parts (shards); a
+-- pkgpod that does not know them must not open this data.
+CREATE TABLE format_notes (note TEXT PRIMARY KEY) WITHOUT ROWID;
+INSERT INTO format_notes VALUES ('directories in parts');
+",
+];
 
 pub fn migrate(db: &Db) -> pkgpod_base::Result<()> {
     db.migrate("engine", STEPS)
+}
+
+#[cfg(test)]
+mod tests {
+    /// Steps are only ever appended: data made by one release is opened
+    /// by the next. Changing a step fails here; a new step adds its hash.
+    #[test]
+    fn steps_are_only_ever_appended() {
+        let want: &[&str] = &["74f2eb1383deb982", "df4988794dabd0b4"];
+        let got: Vec<String> = super::STEPS
+            .iter()
+            .map(|s| pkgpod_base::Digest::of(s.as_bytes()).hex()[..16].to_string())
+            .collect();
+        assert_eq!(got, want, "steps of the engine's schema changed");
+    }
 }
