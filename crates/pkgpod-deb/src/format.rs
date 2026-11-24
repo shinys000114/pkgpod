@@ -811,11 +811,21 @@ impl Format for Deb {
     }
 
     fn check_settings(&self, kind: Kind, settings: &Value) -> Result<()> {
-        if kind != Kind::Mirror || settings["resign"] != Value::Bool(true) {
+        if kind != Kind::Mirror {
             return Ok(());
         }
         let source = settings["source"].as_str().unwrap_or("").trim();
-        if !(source.starts_with("http://") || source.starts_with("https://")) {
+        let http = source.starts_with("http://") || source.starts_with("https://");
+        if http && str_list(settings, "dists").is_empty() {
+            return Err(Error::Invalid(
+                "an http(s) source needs the dists to mirror (an rsync one takes the whole tree)"
+                    .into(),
+            ));
+        }
+        if settings["resign"] != Value::Bool(true) {
+            return Ok(());
+        }
+        if !http {
             return Err(Error::Invalid(
                 "resign needs an http(s) source: an rsync tree is copied as it is, without its signature checked".into(),
             ));
