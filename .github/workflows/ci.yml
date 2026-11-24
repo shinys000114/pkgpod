@@ -38,12 +38,12 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq apt-utils dpkg-dev gpg gpgv zstd rsync
       # Clients in containers: apk 2 (3.22) and apk 3 (3.23), dnf 5
       # (Fedora 43) and dnf 4 (Rocky 9), helm 3 and 4, Maven 3.9, Ruby 3.4,
-      # pacman (Arch).
+      # pacman (Arch), .NET 10.
       - name: Client images
         run: |
           for i in alpine:3.22 alpine:3.23 fedora:43 rockylinux:9 \
                    alpine/helm:3.19.0 alpine/helm:4.3.2 maven:3.9-eclipse-temurin-21 \
-                   ruby:3.4-slim archlinux:latest; do
+                   ruby:3.4-slim archlinux:latest mcr.microsoft.com/dotnet/sdk:10.0; do
             docker pull -q "$i"
           done
       - name: Tests with real apt

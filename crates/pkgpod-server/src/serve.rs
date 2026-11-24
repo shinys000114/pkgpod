@@ -159,11 +159,11 @@ fn client_base(route: Option<&Route>, host: &str, base: &[String], req: &Request
     }
 }
 
-/// Formats whose repositories are trees to browse. npm, OCI, cargo and
-/// Go repositories answer their clients' API only, as public registries do:
+/// Formats whose repositories are trees to browse. npm, OCI, cargo, Go
+/// and NuGet repositories answer their clients' API only, as public registries do:
 /// they are left out of listings, and their address says how to use them.
 fn browsable(format: &str) -> bool {
-    !matches!(format, "npm" | "oci" | "cargo" | "go")
+    !matches!(format, "npm" | "oci" | "cargo" | "go" | "nuget")
 }
 
 /// A registry's address seen from a browser: how its clients use it.
@@ -356,6 +356,43 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
             }
             if served.repo.format == "gems" && crate::gems::is_api(&method, &rel) {
                 return crate::gems::handle(app, served.repo, caller, role, req).await;
+            }
+            if served.repo.format == "nuget" {
+                let mut base_url = client_base(route.as_ref(), &host, &base, &req);
+                let mut rel = rel;
+                let mut version = served.current.clone();
+                let mut labelled = false;
+                if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
+                    let Ok(v) = app.labelled(&served.repo.name, label) else {
+                        return status(StatusCode::NOT_FOUND);
+                    };
+                    base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
+                    version = Some(v);
+                    labelled = true;
+                    rel.remove(0);
+                }
+                if rel.is_empty() && matches!(method, Method::GET | Method::HEAD) {
+                    if role.is_none() {
+                        return deny(&caller);
+                    }
+                    return client_note(
+                        StatusCode::OK,
+                        format!(
+                            "{}: a NuGet feed.\n\n  dotnet nuget add source {base_url}index.json -n {}\n  dotnet nuget push <package>.nupkg -s {base_url}index.json -k <token>\n\nIts packages are listed in pkgpod's console.\n",
+                            served.repo.name, served.repo.name
+                        ),
+                    );
+                }
+                let ask = crate::nuget::Ask {
+                    repo: served.repo,
+                    version,
+                    labelled,
+                    rel,
+                    base: base_url,
+                    caller,
+                    role,
+                };
+                return crate::nuget::handle(app, ask, req).await;
             }
             if served.repo.format == "cargo" {
                 let mut base_url = client_base(route.as_ref(), &host, &base, &req);

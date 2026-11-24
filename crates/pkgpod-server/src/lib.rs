@@ -17,6 +17,7 @@ pub mod jobs;
 pub mod keys;
 pub mod listeners;
 pub mod npm;
+pub mod nuget;
 pub mod oci;
 pub mod openapi;
 pub mod promote;
@@ -154,6 +155,7 @@ pub fn formats() -> Vec<Arc<dyn pkgpod_engine::Format>> {
         Arc::new(pkgpod_maven::Maven),
         Arc::new(pkgpod_gems::Gems),
         Arc::new(pkgpod_arch::Arch),
+        Arc::new(pkgpod_nuget::Nuget),
     ]
 }
 

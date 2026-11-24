@@ -44,6 +44,9 @@ Formats:
   .files databases with the newest version of each package, packages
   and databases signed with the repository's key, `any` packages in
   every architecture.
+- **NuGet**: the V3 API (service index, flat container, registrations,
+  search) made per request; `dotnet nuget push` with the token as API
+  key; delete unlists.
 
 Everywhere: versions of every hosted repository with labels
 (`@label` addresses; `-/label/<label>/` for npm), diffs, rollback and

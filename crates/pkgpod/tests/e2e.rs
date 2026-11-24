@@ -586,7 +586,7 @@ fn console_login_pages_and_csrf() {
     // page, usage and actions open.
     let src = s.url("/web/");
     type Fields<'a> = &'a [(&'a str, &'a str)];
-    let choices: [(&str, &str, &str, Fields); 15] = [
+    let choices: [(&str, &str, &str, Fields); 16] = [
         ("deb", "hosted", "c-deb", &[("first_dist", "noble")]),
         (
             "deb",
@@ -607,6 +607,7 @@ fn console_login_pages_and_csrf() {
         ("maven", "hosted", "c-maven", &[]),
         ("gems", "hosted", "c-gems", &[]),
         ("arch", "hosted", "c-arch", &[]),
+        ("nuget", "hosted", "c-nuget", &[]),
     ];
     for (format, kind, name, extra) in choices {
         let mut form = vec![("format", format), ("kind", kind), ("name", name)];
@@ -4638,6 +4639,7 @@ fn serving_root_lists_trees_not_registries() {
         ("reg-npm", "npm"),
         ("reg-oci", "oci"),
         ("reg-cargo", "cargo"),
+        ("reg-nuget", "nuget"),
         ("reg-go", "go"),
     ] {
         let mut args = vec!["repo", "create", name, "-f", format, "-s", "public=true"];
@@ -4664,7 +4666,14 @@ fn serving_root_lists_trees_not_registries() {
     ] {
         assert!(root.contains(name), "{name}: {root}");
     }
-    for name in ["reg-npm", "reg-oci", "reg-cargo", "reg-go", "hidden-oci"] {
+    for name in [
+        "reg-npm",
+        "reg-oci",
+        "reg-cargo",
+        "reg-go",
+        "reg-nuget",
+        "hidden-oci",
+    ] {
         assert!(!root.contains(name), "{name}: {root}");
     }
     let (st, note) = get(&s.url("/reg-oci/"), None);
@@ -5854,4 +5863,112 @@ fn arch_packages_with_pacman() {
     // Without the key, nothing is trusted.
     let (ok, out) = docker_sh(ARCH_IMAGE, &format!("{}$P -Sy hello-pk", setup("", false)));
     assert!(!ok && out.to_lowercase().contains("signature"), "{out}");
+}
+
+const DOTNET_IMAGE: &str = "mcr.microsoft.com/dotnet/sdk:10.0";
+
+#[test]
+fn nuget_with_dotnet() {
+    if images_here(&[DOTNET_IMAGE]).is_empty() {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&["repo", "create", "feed", "-f", "nuget"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "feed", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let base = s.url("/feed/");
+    let work = s.dir.path().join("nugetwork");
+    std::fs::create_dir_all(work.join("hello")).unwrap();
+    std::fs::create_dir_all(work.join("app")).unwrap();
+    let config = |at: &str| {
+        format!(
+            "<configuration>\n  <packageSources>\n    <clear />\n    \
+             <add key=\"pk\" value=\"{base}{at}index.json\" allowInsecureConnections=\"true\" />\n  \
+             </packageSources>\n  <packageSourceCredentials>\n    <pk>\n      \
+             <add key=\"Username\" value=\"token\" />\n      <add key=\"ClearTextPassword\" value=\"{tok}\" />\n    \
+             </pk>\n  </packageSourceCredentials>\n</configuration>\n"
+        )
+    };
+    std::fs::write(work.join("nuget.config"), config("")).unwrap();
+    std::fs::write(
+        work.join("hello/Hello.Pk.csproj"),
+        "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <TargetFramework>net10.0</TargetFramework>\n    \
+         <PackageId>Hello.Pk</PackageId>\n    <Authors>t</Authors>\n    <Description>test</Description>\n  \
+         </PropertyGroup>\n</Project>\n",
+    )
+    .unwrap();
+    let dotnet = "export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1; cd /work";
+    let pack_push = |version: &str| {
+        std::fs::write(
+            work.join("hello/Greet.cs"),
+            format!("namespace Hello.Pk;\npublic static class Greet {{ public static string Hi() => \"hello-pk {version}\"; }}\n"),
+        )
+        .unwrap();
+        docker_sh_in(
+            DOTNET_IMAGE,
+            Some(&work),
+            &format!(
+                "{dotnet}; set -e; dotnet pack hello -c Release -p:Version={version} -o out >/dev/null; \
+                 dotnet nuget push out/Hello.Pk.{version}.nupkg -s pk -k {tok}"
+            ),
+        )
+    };
+    let (ok, out) = pack_push("1.0.0");
+    assert!(ok, "{out}");
+    s.cli(&["label", "feed", "first"]).unwrap();
+    let (ok, out) = pack_push("1.1.0");
+    assert!(ok, "{out}");
+    // A version is pushed once.
+    let (ok, out) = pack_push("1.0.0");
+    assert!(!ok && out.contains("409"), "{out}");
+    // An app that uses it, restored from the feed (or a label's).
+    let run = |version: &str, at: &str| {
+        std::fs::write(work.join("nuget.config"), config(at)).unwrap();
+        std::fs::write(
+            work.join("app/App.csproj"),
+            format!(
+                "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <OutputType>Exe</OutputType>\n    \
+                 <TargetFramework>net10.0</TargetFramework>\n  </PropertyGroup>\n  <ItemGroup>\n    \
+                 <PackageReference Include=\"Hello.Pk\" Version=\"[{version}]\" />\n  </ItemGroup>\n</Project>\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            work.join("app/Program.cs"),
+            "System.Console.WriteLine(Hello.Pk.Greet.Hi());\n",
+        )
+        .unwrap();
+        docker_sh_in(
+            DOTNET_IMAGE,
+            Some(&work),
+            &format!("{dotnet}; dotnet run --project app"),
+        )
+    };
+    let (ok, out) = run("1.1.0", "");
+    assert!(ok && out.contains("hello-pk 1.1.0"), "{out}");
+    let (ok, out) = run("1.0.0", "@first/");
+    assert!(ok && out.contains("hello-pk 1.0.0"), "{out}");
+    let (ok, _) = run("1.1.0", "@first/");
+    assert!(!ok, "the label has no 1.1.0");
+    // Deleting unlists: out of search, still there for builds naming it.
+    std::fs::write(work.join("nuget.config"), config("")).unwrap();
+    let (ok, out) = docker_sh_in(
+        DOTNET_IMAGE,
+        Some(&work),
+        &format!("{dotnet}; dotnet nuget delete Hello.Pk 1.1.0 -s pk -k {tok} --non-interactive"),
+    );
+    assert!(ok, "{out}");
+    let found: Value = reqwest::blocking::Client::new()
+        .get(format!("{base}query?q=hello"))
+        .basic_auth("token", Some(&tok))
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(found["data"][0]["version"], "1.0.0", "{found}");
+    let (ok, out) = run("1.1.0", "");
+    assert!(ok && out.contains("hello-pk 1.1.0"), "{out}");
 }

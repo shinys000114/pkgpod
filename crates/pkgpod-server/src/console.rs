@@ -675,6 +675,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                         ("maven", _) => "Java artifacts for Maven and Gradle",
                         ("gems", _) => "Ruby gems for gem and bundler",
                         ("arch", _) => "Arch packages for pacman, signed",
+                        ("nuget", _) => ".NET packages for dotnet and NuGet",
                         _ => "",
                     }
                     .to_string(),
@@ -891,6 +892,39 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String], host: &str) ->
         out.push(UseLine {
             label: "Note".into(),
             text: "pkgpod is no proxy: packages from npmjs need their own registry (a scope here, the rest from registry.npmjs.org). npm login is not offered; set the token in .npmrc. unpublish and deprecate are operations here.".into(),
+        });
+        return out;
+    }
+    if r.format == "nuget" {
+        let feed = format!("{base}index.json");
+        let id = r.name.replace('.', "-");
+        let creds = if r.setting_bool("public") {
+            String::new()
+        } else {
+            format!(
+                "\n  <packageSourceCredentials>\n    <{id}>\n      <add key=\"Username\" value=\"token\" />\n      <add key=\"ClearTextPassword\" value=\"&lt;token&gt;\" />\n    </{id}>\n  </packageSourceCredentials>"
+            )
+        };
+        let insecure = if base.starts_with("http://") {
+            " allowInsecureConnections=\"true\""
+        } else {
+            ""
+        };
+        out.push(UseLine {
+            label: "nuget.config".into(),
+            text: format!(
+                "<configuration>\n  <packageSources>\n    <add key=\"{id}\" value=\"{feed}\"{insecure} />\n  </packageSources>{creds}\n</configuration>"
+            ),
+        });
+        out.push(UseLine {
+            label: "Push and unlist".into(),
+            text: format!(
+                "dotnet nuget push <package>.nupkg -s {feed} -k <token>\ndotnet nuget delete <package> <version> -s {feed} -k <token> --non-interactive   # unlists"
+            ),
+        });
+        out.push(UseLine {
+            label: "A labelled version".into(),
+            text: format!("{base}@<label>/index.json   (read-only)"),
         });
         return out;
     }
@@ -1855,6 +1889,7 @@ fn catalog_words(format: &str) -> (&'static str, [&'static str; 3], bool) {
         "helm" => ("Charts", ["Chart", "Version", "Note"], true),
         "maven" => ("Artifacts", ["Group:artifact", "Version", "Note"], true),
         "gems" => ("Gems", ["Gem", "Version", "Note"], true),
+        "nuget" => ("Packages", ["Package", "Version", "Note"], true),
         "deb" => ("Packages", ["Package", "Version", "Where"], true),
         _ => ("Packages", ["Package", "Version", "Where"], true),
     }
