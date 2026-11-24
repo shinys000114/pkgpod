@@ -387,451 +387,489 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
             let role = app
                 .auth
                 .role(&caller, &repo, served.repo.setting_bool("public"));
-            if served.repo.format == "npm" {
-                // Tarball URLs are absolute: the address the request
-                // came in on (behind a proxy, its scheme).
-                let base_url = client_base(route.as_ref(), &host, &base, &req);
-                if rel.is_empty() && matches!(method, Method::GET | Method::HEAD) {
-                    if role.is_none() {
-                        return deny(&caller);
-                    }
-                    let r = &served.repo.name;
-                    return client_note(
-                        StatusCode::OK,
-                        format!(
-                            "{r}: an npm registry.\n\n  npm install --registry {base_url} <package>\n  npm publish --registry {base_url}\n\nIts packages are listed in pkgpod's console.\n"
-                        ),
-                    );
-                }
-                let ask = crate::npm::Ask {
-                    repo: served.repo,
-                    current: served.current,
-                    rel,
-                    base: base_url,
-                    caller,
-                    role,
-                };
-                return crate::npm::handle(app, ask, req).await;
-            }
-            if served.repo.format == "terraform" && matches!(method, Method::GET | Method::HEAD) {
-                // A module archive through a signed URL needs no token.
-                if role.is_none()
-                    && !crate::terraform::signed_ok(
-                        &app,
-                        &served.repo.name,
-                        &rel.join("/"),
-                        req.uri().query().unwrap_or(""),
-                    )
-                {
-                    return deny(&caller);
-                }
-                let mut base_url = client_base(route.as_ref(), &host, &base, &req);
-                let mut rel = rel;
-                let mut version = served.current.clone();
-                if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
-                    let Ok(v) = app.labelled(&served.repo.name, label) else {
-                        return status(StatusCode::NOT_FOUND);
-                    };
-                    base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
-                    version = Some(v);
-                    rel.remove(0);
-                }
-                if rel.is_empty() {
-                    return client_note(
-                        StatusCode::OK,
-                        format!(
-                            "{}: a Terraform/OpenTofu registry.\n\n  source = \"<host>/<namespace>/<type>\"\n\nIts providers and modules are listed in pkgpod's console.\n",
-                            served.repo.name
-                        ),
-                    );
-                }
-                return crate::terraform::read(&app, &served.repo, version, &rel, &base_url, req)
-                    .await;
-            }
-            if served.repo.format == "composer" && matches!(method, Method::GET | Method::HEAD) {
-                if role.is_none() {
-                    return deny(&caller);
-                }
-                let mut base_url = client_base(route.as_ref(), &host, &base, &req);
-                let mut rel = rel;
-                let mut version = served.current.clone();
-                if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
-                    let Ok(v) = app.labelled(&served.repo.name, label) else {
-                        return status(StatusCode::NOT_FOUND);
-                    };
-                    base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
-                    version = Some(v);
-                    rel.remove(0);
-                }
-                if rel.is_empty() {
-                    return client_note(
-                        StatusCode::OK,
-                        format!(
-                            "{}: a Composer repository.\n\n  composer config repositories.{} composer {base_url}\n\nIts packages are listed in pkgpod's console.\n",
-                            served.repo.name, served.repo.name
-                        ),
-                    );
-                }
-                return crate::composer::read(&app, &served.repo, version, &rel, &base_url, req)
-                    .await;
-            }
-            if served.repo.format == "go" && matches!(method, Method::GET | Method::HEAD) {
-                if role.is_none() {
-                    return deny(&caller);
-                }
-                let mut base_url = client_base(route.as_ref(), &host, &base, &req);
-                let mut rel = rel;
-                let mut version = served.current.clone();
-                if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@'))
-                    && rel.len() > 1
-                    && rel[0] != "@v"
-                    && rel[0] != "@latest"
-                {
-                    let Ok(v) = app.labelled(&served.repo.name, label) else {
-                        return status(StatusCode::NOT_FOUND);
-                    };
-                    base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
-                    version = Some(v);
-                    rel.remove(0);
-                }
-                if rel.is_empty() {
-                    return client_note(
-                        StatusCode::OK,
-                        format!(
-                            "{}: a Go module proxy.\n\n  GOPROXY={base_url},https://proxy.golang.org,direct\n  GONOSUMDB=<your module prefix>\n\nIts modules are listed in pkgpod's console.\n",
-                            served.repo.name
-                        ),
-                    );
-                }
-                return crate::go::read(&app, &served.repo, version, &rel, req).await;
-            }
-            // A dnf repository file per RPM group: <address><group>.repo.
-            if served.repo.format == "rpm"
-                && matches!(method, Method::GET | Method::HEAD)
-                && let Some(last) = rel.last()
-                && let Some(group) = last.strip_suffix(".repo")
-                && (rel.len() == 1 || (rel.len() == 2 && rel[0].starts_with('@')))
-            {
-                if role.is_none() {
-                    return deny(&caller);
-                }
-                let mut base_url = client_base(route.as_ref(), &host, &base, &req);
-                let version = match rel
-                    .first()
-                    .and_then(|f| f.strip_prefix('@'))
-                    .filter(|_| rel.len() == 2)
-                {
-                    Some(label) => {
-                        base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
-                        app.labelled(&served.repo.name, label).ok()
-                    }
-                    None => served.current.clone(),
-                };
-                let there = version.is_some_and(|v| {
-                    matches!(
-                        app.engine
-                            .objects()
-                            .resolve(&v.served(), &format!("{group}/repodata/repomd.xml")),
-                        Ok(Some(Entry::Blob { .. }))
-                    )
-                });
-                if !there {
-                    return status(StatusCode::NOT_FOUND);
-                }
-                return client_note(
-                    StatusCode::OK,
-                    rpm_repo_file(&served.repo, &base_url, group),
-                );
-            }
-            if served.repo.format == "helm" && crate::helm::is_api(&rel) {
-                let current = served.current.clone();
-                return crate::helm::handle(app, served.repo, current, caller, role, rel, req)
-                    .await;
-            }
-            if served.repo.format == "gems" && crate::gems::is_api(&method, &rel) {
-                return crate::gems::handle(app, served.repo, caller, role, req).await;
-            }
-            if served.repo.format == "swift" {
-                let mut base_url = client_base(route.as_ref(), &host, &base, &req);
-                let mut rel = rel;
-                let mut version = served.current.clone();
-                let mut labelled = false;
-                if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
-                    let Ok(v) = app.labelled(&served.repo.name, label) else {
-                        return status(StatusCode::NOT_FOUND);
-                    };
-                    base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
-                    version = Some(v);
-                    labelled = true;
-                    rel.remove(0);
-                }
-                if rel.is_empty() && matches!(method, Method::GET | Method::HEAD) {
-                    if role.is_none() {
-                        return deny(&caller);
-                    }
-                    return client_note(
-                        StatusCode::OK,
-                        format!(
-                            "{}: a Swift package registry.\n\n  swift package-registry set {base_url}\n  swift package-registry login {base_url} --token <token>\n\nIts packages are listed in pkgpod's console.\n",
-                            served.repo.name
-                        ),
-                    );
-                }
-                let ask = crate::swift::Ask {
-                    repo: served.repo,
-                    version,
-                    labelled,
-                    rel,
-                    base: base_url,
-                    caller,
-                    role,
-                };
-                return crate::swift::handle(app, ask, req).await;
-            }
-            if served.repo.format == "conan" {
-                let mut rel = rel;
-                let mut version = served.current.clone();
-                let mut labelled = false;
-                if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
-                    let Ok(v) = app.labelled(&served.repo.name, label) else {
-                        return status(StatusCode::NOT_FOUND);
-                    };
-                    version = Some(v);
-                    labelled = true;
-                    rel.remove(0);
-                }
-                if rel.is_empty() && matches!(method, Method::GET | Method::HEAD) {
-                    return client_note(
-                        StatusCode::OK,
-                        format!(
-                            "{}: a Conan remote.\n\n  conan remote add {} {}\n  conan remote login {} <user> -p <token>\n\nIts recipes and packages are listed in pkgpod's console.\n",
-                            served.repo.name,
-                            served.repo.name,
-                            client_base(route.as_ref(), &host, &base, &req),
-                            served.repo.name
-                        ),
-                    );
-                }
-                // A token given as a Basic password: what logging in gives back.
-                let token = req
-                    .headers()
-                    .get(header::AUTHORIZATION)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.strip_prefix("Basic "))
-                    .and_then(|b| {
-                        use base64::Engine;
-                        base64::engine::general_purpose::STANDARD
-                            .decode(b.trim())
-                            .ok()
-                    })
-                    .and_then(|b| String::from_utf8(b).ok())
-                    .and_then(|s| s.split_once(':').map(|(_, p)| p.to_string()))
-                    .filter(|p| p.starts_with(crate::auth::TOKEN_PREFIX));
-                let ask = crate::conan::Ask {
-                    repo: served.repo,
-                    version,
-                    labelled,
-                    rel,
-                    caller,
-                    role,
-                    token,
-                };
-                return crate::conan::handle(app, ask, req).await;
-            }
-            if served.repo.format == "galaxy" {
-                let mut base_url = client_base(route.as_ref(), &host, &base, &req);
-                let mut rel = rel;
-                let mut version = served.current.clone();
-                let mut labelled = false;
-                if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
-                    let Ok(v) = app.labelled(&served.repo.name, label) else {
-                        return status(StatusCode::NOT_FOUND);
-                    };
-                    base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
-                    version = Some(v);
-                    labelled = true;
-                    rel.remove(0);
-                }
-                let ask = crate::galaxy::Ask {
-                    repo: served.repo,
-                    version,
-                    labelled,
-                    rel,
-                    base: base_url,
-                    caller,
-                    role,
-                };
-                return crate::galaxy::handle(app, ask, req).await;
-            }
-            if served.repo.format == "pub" {
-                let mut base_url = client_base(route.as_ref(), &host, &base, &req);
-                let mut rel = rel;
-                let mut version = served.current.clone();
-                let mut labelled = false;
-                if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
-                    let Ok(v) = app.labelled(&served.repo.name, label) else {
-                        return status(StatusCode::NOT_FOUND);
-                    };
-                    base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
-                    version = Some(v);
-                    labelled = true;
-                    rel.remove(0);
-                }
-                if rel.is_empty() && matches!(method, Method::GET | Method::HEAD) {
-                    if role.is_none() {
-                        return deny(&caller);
-                    }
-                    return client_note(
-                        StatusCode::OK,
-                        format!(
-                            "{}: a pub repository.\n\n  dart pub token add {base_url}\n  dependencies:\n    <package>:\n      hosted: {base_url}\n      version: ^1.0.0\n\nIts packages are listed in pkgpod's console.\n",
-                            served.repo.name
-                        ),
-                    );
-                }
-                let ask = crate::pub_api::Ask {
-                    repo: served.repo,
-                    version,
-                    labelled,
-                    rel,
-                    base: base_url,
-                    caller,
-                    role,
-                };
-                return crate::pub_api::handle(app, ask, req).await;
-            }
-            if served.repo.format == "nuget" {
-                let mut base_url = client_base(route.as_ref(), &host, &base, &req);
-                let mut rel = rel;
-                let mut version = served.current.clone();
-                let mut labelled = false;
-                if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
-                    let Ok(v) = app.labelled(&served.repo.name, label) else {
-                        return status(StatusCode::NOT_FOUND);
-                    };
-                    base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
-                    version = Some(v);
-                    labelled = true;
-                    rel.remove(0);
-                }
-                if rel.is_empty() && matches!(method, Method::GET | Method::HEAD) {
-                    if role.is_none() {
-                        return deny(&caller);
-                    }
-                    return client_note(
-                        StatusCode::OK,
-                        format!(
-                            "{}: a NuGet feed.\n\n  dotnet nuget add source {base_url}index.json -n {}\n  dotnet nuget push <package>.nupkg -s {base_url}index.json -k <token>\n\nIts packages are listed in pkgpod's console.\n",
-                            served.repo.name, served.repo.name
-                        ),
-                    );
-                }
-                let ask = crate::nuget::Ask {
-                    repo: served.repo,
-                    version,
-                    labelled,
-                    rel,
-                    base: base_url,
-                    caller,
-                    role,
-                };
-                return crate::nuget::handle(app, ask, req).await;
-            }
-            if served.repo.format == "cargo" {
-                let mut base_url = client_base(route.as_ref(), &host, &base, &req);
-                let mut rel = rel;
-                let mut version = served.current.clone();
-                let mut labelled = false;
-                if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
-                    let Ok(v) = app.labelled(&served.repo.name, label) else {
-                        return status(StatusCode::NOT_FOUND);
-                    };
-                    base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
-                    version = Some(v);
-                    labelled = true;
-                    rel.remove(0);
-                }
-                if rel.is_empty() && matches!(method, Method::GET | Method::HEAD) {
-                    if role.is_none() {
-                        return deny(&caller);
-                    }
-                    let r = served.repo.name.replace('.', "-");
-                    return client_note(
-                        StatusCode::OK,
-                        format!(
-                            "{}: a cargo registry.\n\n  # .cargo/config.toml\n  [registries.{r}]\n  index = \"sparse+{base_url}index/\"\n\n  cargo publish --registry {r}\n\nIts crates are listed in pkgpod's console.\n",
-                            served.repo.name
-                        ),
-                    );
-                }
-                let ask = crate::cargo::Ask {
-                    repo: served.repo,
-                    version,
-                    labelled,
-                    rel,
-                    base: base_url,
-                    caller,
-                    role,
-                };
-                return crate::cargo::handle(app, ask, req).await;
-            }
-            if served.repo.format == "oci" {
-                // Images go by /v2/; the stored tree is not for browsing.
-                if role.is_none() {
-                    return deny(&caller);
-                }
-                let at = if base.is_empty() {
-                    host.clone()
-                } else {
-                    format!("{host}/{}", base.join("/"))
-                };
-                let st = if rel.is_empty() {
-                    StatusCode::OK
-                } else {
-                    StatusCode::NOT_FOUND
-                };
-                return client_note(
-                    st,
-                    format!(
-                        "{}: a container image registry.\n\n  docker pull {at}/<image>:<tag>\n  docker push {at}/<image>:<tag>\n\nIts images are listed in pkgpod's console.\n",
-                        served.repo.name
-                    ),
-                );
-            }
-            if method == Method::DELETE {
-                return status(StatusCode::METHOD_NOT_ALLOWED);
-            }
-            if method == Method::POST {
-                // twine's upload: the repository's address, or legacy/.
-                if served.repo.format != "pypi" || !(rel.is_empty() || rel == ["legacy"]) {
-                    return status(StatusCode::METHOD_NOT_ALLOWED);
-                }
-                if role < Some(Role::Write) {
-                    return if role.is_some() && caller.user.is_some() {
-                        status(StatusCode::FORBIDDEN)
-                    } else {
-                        deny(&Caller::anonymous())
-                    };
-                }
-                return crate::pypi::upload(app, served.repo, caller, req).await;
-            }
-            if method == Method::PUT {
-                if role < Some(Role::Write) {
-                    // Clients send credentials only after a 401.
-                    return if role.is_some() && caller.user.is_some() {
-                        status(StatusCode::FORBIDDEN)
-                    } else {
-                        deny(&caller)
-                    };
-                }
-                return put(app, served.repo, rel, caller, req).await;
-            }
+            let at = At {
+                served,
+                role,
+                caller,
+                rel,
+                base,
+                route,
+                host,
+                raw_path,
+            };
+            serve_repo(app, at, req).await
+        }
+    }
+}
+
+/// A repository's request, once its route is found.
+pub(crate) struct At {
+    pub served: crate::Served,
+    /// The caller's role on the repository (a group's readers read its
+    /// members through it).
+    pub role: Option<Role>,
+    pub caller: Caller,
+    pub rel: Vec<String>,
+    pub base: Vec<String>,
+    pub route: Option<Route>,
+    pub host: String,
+    pub raw_path: String,
+}
+
+/// Answers a request to a repository, as the caller's `role` allows.
+pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response {
+    let At {
+        served,
+        role,
+        caller,
+        rel,
+        base,
+        route,
+        host,
+        raw_path,
+    } = at;
+    let method = req.method().clone();
+
+    if served.repo.format == "npm" {
+        // Tarball URLs are absolute: the address the request
+        // came in on (behind a proxy, its scheme).
+        let base_url = client_base(route.as_ref(), &host, &base, &req);
+        if rel.is_empty() && matches!(method, Method::GET | Method::HEAD) {
             if role.is_none() {
                 return deny(&caller);
             }
-            get(&app, served, rel, &raw_path, req).await
+            let r = &served.repo.name;
+            return client_note(
+                StatusCode::OK,
+                format!(
+                    "{r}: an npm registry.\n\n  npm install --registry {base_url} <package>\n  npm publish --registry {base_url}\n\nIts packages are listed in pkgpod's console.\n"
+                ),
+            );
         }
+        let ask = crate::npm::Ask {
+            repo: served.repo,
+            current: served.current,
+            rel,
+            base: base_url,
+            caller,
+            role,
+        };
+        return crate::npm::handle(app, ask, req).await;
     }
+    if served.repo.format == "terraform" && matches!(method, Method::GET | Method::HEAD) {
+        // A module archive through a signed URL needs no token.
+        if role.is_none()
+            && !crate::terraform::signed_ok(
+                &app,
+                &served.repo.name,
+                &rel.join("/"),
+                req.uri().query().unwrap_or(""),
+            )
+        {
+            return deny(&caller);
+        }
+        let mut base_url = client_base(route.as_ref(), &host, &base, &req);
+        let mut rel = rel;
+        let mut version = served.current.clone();
+        if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
+            let Ok(v) = app.labelled(&served.repo.name, label) else {
+                return status(StatusCode::NOT_FOUND);
+            };
+            base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
+            version = Some(v);
+            rel.remove(0);
+        }
+        if rel.is_empty() {
+            return client_note(
+                StatusCode::OK,
+                format!(
+                    "{}: a Terraform/OpenTofu registry.\n\n  source = \"<host>/<namespace>/<type>\"\n\nIts providers and modules are listed in pkgpod's console.\n",
+                    served.repo.name
+                ),
+            );
+        }
+        return crate::terraform::read(&app, &served.repo, version, &rel, &base_url, req).await;
+    }
+    if served.repo.format == "composer" && matches!(method, Method::GET | Method::HEAD) {
+        if role.is_none() {
+            return deny(&caller);
+        }
+        let mut base_url = client_base(route.as_ref(), &host, &base, &req);
+        let mut rel = rel;
+        let mut version = served.current.clone();
+        if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
+            let Ok(v) = app.labelled(&served.repo.name, label) else {
+                return status(StatusCode::NOT_FOUND);
+            };
+            base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
+            version = Some(v);
+            rel.remove(0);
+        }
+        if rel.is_empty() {
+            return client_note(
+                StatusCode::OK,
+                format!(
+                    "{}: a Composer repository.\n\n  composer config repositories.{} composer {base_url}\n\nIts packages are listed in pkgpod's console.\n",
+                    served.repo.name, served.repo.name
+                ),
+            );
+        }
+        return crate::composer::read(&app, &served.repo, version, &rel, &base_url, req).await;
+    }
+    if served.repo.format == "go" && matches!(method, Method::GET | Method::HEAD) {
+        if role.is_none() {
+            return deny(&caller);
+        }
+        let mut base_url = client_base(route.as_ref(), &host, &base, &req);
+        let mut rel = rel;
+        let mut version = served.current.clone();
+        if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@'))
+            && rel.len() > 1
+            && rel[0] != "@v"
+            && rel[0] != "@latest"
+        {
+            let Ok(v) = app.labelled(&served.repo.name, label) else {
+                return status(StatusCode::NOT_FOUND);
+            };
+            base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
+            version = Some(v);
+            rel.remove(0);
+        }
+        if rel.is_empty() {
+            return client_note(
+                StatusCode::OK,
+                format!(
+                    "{}: a Go module proxy.\n\n  GOPROXY={base_url},https://proxy.golang.org,direct\n  GONOSUMDB=<your module prefix>\n\nIts modules are listed in pkgpod's console.\n",
+                    served.repo.name
+                ),
+            );
+        }
+        return crate::go::read(&app, &served.repo, version, &rel, req).await;
+    }
+    // A dnf repository file per RPM group: <address><group>.repo.
+    if served.repo.format == "rpm"
+        && matches!(method, Method::GET | Method::HEAD)
+        && let Some(last) = rel.last()
+        && let Some(group) = last.strip_suffix(".repo")
+        && (rel.len() == 1 || (rel.len() == 2 && rel[0].starts_with('@')))
+    {
+        if role.is_none() {
+            return deny(&caller);
+        }
+        let mut base_url = client_base(route.as_ref(), &host, &base, &req);
+        let version = match rel
+            .first()
+            .and_then(|f| f.strip_prefix('@'))
+            .filter(|_| rel.len() == 2)
+        {
+            Some(label) => {
+                base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
+                app.labelled(&served.repo.name, label).ok()
+            }
+            None => served.current.clone(),
+        };
+        let there = version.is_some_and(|v| {
+            matches!(
+                app.engine
+                    .objects()
+                    .resolve(&v.served(), &format!("{group}/repodata/repomd.xml")),
+                Ok(Some(Entry::Blob { .. }))
+            )
+        });
+        if !there {
+            return status(StatusCode::NOT_FOUND);
+        }
+        return client_note(
+            StatusCode::OK,
+            rpm_repo_file(&served.repo, &base_url, group),
+        );
+    }
+    if served.repo.format == "helm" && crate::helm::is_api(&rel) {
+        let current = served.current.clone();
+        return crate::helm::handle(app, served.repo, current, caller, role, rel, req).await;
+    }
+    if served.repo.format == "gems" && crate::gems::is_api(&method, &rel) {
+        return crate::gems::handle(app, served.repo, caller, role, req).await;
+    }
+    if served.repo.format == "swift" {
+        let mut base_url = client_base(route.as_ref(), &host, &base, &req);
+        let mut rel = rel;
+        let mut version = served.current.clone();
+        let mut labelled = false;
+        if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
+            let Ok(v) = app.labelled(&served.repo.name, label) else {
+                return status(StatusCode::NOT_FOUND);
+            };
+            base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
+            version = Some(v);
+            labelled = true;
+            rel.remove(0);
+        }
+        if rel.is_empty() && matches!(method, Method::GET | Method::HEAD) {
+            if role.is_none() {
+                return deny(&caller);
+            }
+            return client_note(
+                StatusCode::OK,
+                format!(
+                    "{}: a Swift package registry.\n\n  swift package-registry set {base_url}\n  swift package-registry login {base_url} --token <token>\n\nIts packages are listed in pkgpod's console.\n",
+                    served.repo.name
+                ),
+            );
+        }
+        let ask = crate::swift::Ask {
+            repo: served.repo,
+            version,
+            labelled,
+            rel,
+            base: base_url,
+            caller,
+            role,
+        };
+        return crate::swift::handle(app, ask, req).await;
+    }
+    if served.repo.format == "conan" {
+        let mut rel = rel;
+        let mut version = served.current.clone();
+        let mut labelled = false;
+        if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
+            let Ok(v) = app.labelled(&served.repo.name, label) else {
+                return status(StatusCode::NOT_FOUND);
+            };
+            version = Some(v);
+            labelled = true;
+            rel.remove(0);
+        }
+        if rel.is_empty() && matches!(method, Method::GET | Method::HEAD) {
+            return client_note(
+                StatusCode::OK,
+                format!(
+                    "{}: a Conan remote.\n\n  conan remote add {} {}\n  conan remote login {} <user> -p <token>\n\nIts recipes and packages are listed in pkgpod's console.\n",
+                    served.repo.name,
+                    served.repo.name,
+                    client_base(route.as_ref(), &host, &base, &req),
+                    served.repo.name
+                ),
+            );
+        }
+        // A token given as a Basic password: what logging in gives back.
+        let token = req
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Basic "))
+            .and_then(|b| {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD
+                    .decode(b.trim())
+                    .ok()
+            })
+            .and_then(|b| String::from_utf8(b).ok())
+            .and_then(|s| s.split_once(':').map(|(_, p)| p.to_string()))
+            .filter(|p| p.starts_with(crate::auth::TOKEN_PREFIX));
+        let ask = crate::conan::Ask {
+            repo: served.repo,
+            version,
+            labelled,
+            rel,
+            caller,
+            role,
+            token,
+        };
+        return crate::conan::handle(app, ask, req).await;
+    }
+    if served.repo.format == "galaxy" {
+        let mut base_url = client_base(route.as_ref(), &host, &base, &req);
+        let mut rel = rel;
+        let mut version = served.current.clone();
+        let mut labelled = false;
+        if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
+            let Ok(v) = app.labelled(&served.repo.name, label) else {
+                return status(StatusCode::NOT_FOUND);
+            };
+            base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
+            version = Some(v);
+            labelled = true;
+            rel.remove(0);
+        }
+        let ask = crate::galaxy::Ask {
+            repo: served.repo,
+            version,
+            labelled,
+            rel,
+            base: base_url,
+            caller,
+            role,
+        };
+        return crate::galaxy::handle(app, ask, req).await;
+    }
+    if served.repo.format == "pub" {
+        let mut base_url = client_base(route.as_ref(), &host, &base, &req);
+        let mut rel = rel;
+        let mut version = served.current.clone();
+        let mut labelled = false;
+        if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
+            let Ok(v) = app.labelled(&served.repo.name, label) else {
+                return status(StatusCode::NOT_FOUND);
+            };
+            base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
+            version = Some(v);
+            labelled = true;
+            rel.remove(0);
+        }
+        if rel.is_empty() && matches!(method, Method::GET | Method::HEAD) {
+            if role.is_none() {
+                return deny(&caller);
+            }
+            return client_note(
+                StatusCode::OK,
+                format!(
+                    "{}: a pub repository.\n\n  dart pub token add {base_url}\n  dependencies:\n    <package>:\n      hosted: {base_url}\n      version: ^1.0.0\n\nIts packages are listed in pkgpod's console.\n",
+                    served.repo.name
+                ),
+            );
+        }
+        let ask = crate::pub_api::Ask {
+            repo: served.repo,
+            version,
+            labelled,
+            rel,
+            base: base_url,
+            caller,
+            role,
+        };
+        return crate::pub_api::handle(app, ask, req).await;
+    }
+    if served.repo.format == "nuget" {
+        let mut base_url = client_base(route.as_ref(), &host, &base, &req);
+        let mut rel = rel;
+        let mut version = served.current.clone();
+        let mut labelled = false;
+        if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
+            let Ok(v) = app.labelled(&served.repo.name, label) else {
+                return status(StatusCode::NOT_FOUND);
+            };
+            base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
+            version = Some(v);
+            labelled = true;
+            rel.remove(0);
+        }
+        if rel.is_empty() && matches!(method, Method::GET | Method::HEAD) {
+            if role.is_none() {
+                return deny(&caller);
+            }
+            return client_note(
+                StatusCode::OK,
+                format!(
+                    "{}: a NuGet feed.\n\n  dotnet nuget add source {base_url}index.json -n {}\n  dotnet nuget push <package>.nupkg -s {base_url}index.json -k <token>\n\nIts packages are listed in pkgpod's console.\n",
+                    served.repo.name, served.repo.name
+                ),
+            );
+        }
+        let ask = crate::nuget::Ask {
+            repo: served.repo,
+            version,
+            labelled,
+            rel,
+            base: base_url,
+            caller,
+            role,
+        };
+        return crate::nuget::handle(app, ask, req).await;
+    }
+    if served.repo.format == "cargo" {
+        let mut base_url = client_base(route.as_ref(), &host, &base, &req);
+        let mut rel = rel;
+        let mut version = served.current.clone();
+        let mut labelled = false;
+        if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
+            let Ok(v) = app.labelled(&served.repo.name, label) else {
+                return status(StatusCode::NOT_FOUND);
+            };
+            base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
+            version = Some(v);
+            labelled = true;
+            rel.remove(0);
+        }
+        if rel.is_empty() && matches!(method, Method::GET | Method::HEAD) {
+            if role.is_none() {
+                return deny(&caller);
+            }
+            let r = served.repo.name.replace('.', "-");
+            return client_note(
+                StatusCode::OK,
+                format!(
+                    "{}: a cargo registry.\n\n  # .cargo/config.toml\n  [registries.{r}]\n  index = \"sparse+{base_url}index/\"\n\n  cargo publish --registry {r}\n\nIts crates are listed in pkgpod's console.\n",
+                    served.repo.name
+                ),
+            );
+        }
+        let ask = crate::cargo::Ask {
+            repo: served.repo,
+            version,
+            labelled,
+            rel,
+            base: base_url,
+            caller,
+            role,
+        };
+        return crate::cargo::handle(app, ask, req).await;
+    }
+    if served.repo.format == "oci" {
+        // Images go by /v2/; the stored tree is not for browsing.
+        if role.is_none() {
+            return deny(&caller);
+        }
+        let at = if base.is_empty() {
+            host.clone()
+        } else {
+            format!("{host}/{}", base.join("/"))
+        };
+        let st = if rel.is_empty() {
+            StatusCode::OK
+        } else {
+            StatusCode::NOT_FOUND
+        };
+        return client_note(
+            st,
+            format!(
+                "{}: a container image registry.\n\n  docker pull {at}/<image>:<tag>\n  docker push {at}/<image>:<tag>\n\nIts images are listed in pkgpod's console.\n",
+                served.repo.name
+            ),
+        );
+    }
+    if method == Method::DELETE {
+        return status(StatusCode::METHOD_NOT_ALLOWED);
+    }
+    if method == Method::POST {
+        // twine's upload: the repository's address, or legacy/.
+        if served.repo.format != "pypi" || !(rel.is_empty() || rel == ["legacy"]) {
+            return status(StatusCode::METHOD_NOT_ALLOWED);
+        }
+        if role < Some(Role::Write) {
+            return if role.is_some() && caller.user.is_some() {
+                status(StatusCode::FORBIDDEN)
+            } else {
+                deny(&Caller::anonymous())
+            };
+        }
+        return crate::pypi::upload(app, served.repo, caller, req).await;
+    }
+    if method == Method::PUT {
+        if role < Some(Role::Write) {
+            // Clients send credentials only after a 401.
+            return if role.is_some() && caller.user.is_some() {
+                status(StatusCode::FORBIDDEN)
+            } else {
+                deny(&caller)
+            };
+        }
+        return put(app, served.repo, rel, caller, req).await;
+    }
+    if role.is_none() {
+        return deny(&caller);
+    }
+    get(&app, served, rel, &raw_path, req).await
 }
 
 async fn get(
