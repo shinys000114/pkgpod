@@ -808,11 +808,16 @@ impl Engine {
         self.preview(to, actor, |_, e| {
             f.check_copy(e, &picked)?;
             for (p, entry) in &picked {
-                if let Entry::Blob { sha256, .. } = entry
-                    && !dst_store.has(sha256)
-                {
-                    // Another storage: the bytes are copied once.
-                    dst_store.put_file(&src_store.path(sha256))?;
+                if let Entry::Blob { sha256, .. } = entry {
+                    // Another storage: the bytes are copied once, with
+                    // what the entry references (an image's layers).
+                    let mut need = vec![*sha256];
+                    need.extend(f.references(entry, &src_store));
+                    for d in need {
+                        if !dst_store.has(&d) && src_store.has(&d) {
+                            dst_store.put_file(&src_store.path(&d))?;
+                        }
+                    }
                 }
                 e.put(p, entry.clone())?;
             }
