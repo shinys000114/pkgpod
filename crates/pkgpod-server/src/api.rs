@@ -571,15 +571,33 @@ pub fn tree_entries(
 ) -> Result<Vec<Value>> {
     if r.kind == Kind::Mirror {
         let segs = crate::serve::segments(path).ok_or_else(|| Error::Invalid("bad path".into()))?;
-        let dir = r.tree_dir().join(segs.join("/"));
+        let tree = r.tree_dir();
+        let files = r.format == "files";
+        let hidden = |name: &str| {
+            if files {
+                pkgpod_files::engine_name(name)
+            } else {
+                name.starts_with('.')
+            }
+        };
+        let none = || Error::NotFound(format!("no directory {path}"));
+        if segs.iter().any(|s| hidden(s)) {
+            return Err(none());
+        }
+        // Never out of the tree through a link.
+        let dir = crate::serve::inside(&tree, &tree.join(segs.join("/"))).ok_or_else(none)?;
         let mut out = Vec::new();
-        let rd =
-            std::fs::read_dir(&dir).map_err(|_| Error::NotFound(format!("no directory {path}")))?;
+        let rd = std::fs::read_dir(&dir).map_err(|_| none())?;
         for d in rd.flatten() {
             let Ok(name) = d.file_name().into_string() else {
                 continue;
             };
-            if name.starts_with('.') {
+            if hidden(&name) {
+                continue;
+            }
+            if d.file_type().is_ok_and(|t| t.is_symlink())
+                && crate::serve::inside(&tree, &d.path()).is_none()
+            {
                 continue;
             }
             let Ok(md) = std::fs::metadata(d.path()) else {
