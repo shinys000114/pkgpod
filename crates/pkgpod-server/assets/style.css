@@ -511,9 +511,6 @@ details.more[open] > summary { margin-bottom: .5rem; }
 .card.narrow { max-width: 560px; }
 .pick-box { max-height: 9.5rem; overflow-y: auto; padding: .35rem .1rem; }
 button.link.small, a.small { font-size: 12px; }
-/* Listener form: what only one protocol uses. */
-form:has(select[name="proto"] option[value="ftp"]:checked) .only-http { display: none; }
-form:not(:has(select[name="proto"] option[value="ftp"]:checked)) .only-ftp { display: none; }
 .dist-switch { display: flex; gap: .25rem; align-items: center; flex-wrap: wrap; padding-bottom: 0; }
 .dist-switch button.link.on { background: var(--accent-soft); color: var(--fg); }
 .login .first-login { margin: .6rem 0 0; line-height: 1.45; }

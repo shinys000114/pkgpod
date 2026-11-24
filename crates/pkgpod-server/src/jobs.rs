@@ -237,8 +237,8 @@ pub(crate) struct TreeOpts {
     pub parallel: usize,
 }
 
-/// Brings `dest` to the tree at `source` (rsync, http(s) listings or
-/// ftp); `state` keeps what the engine needs between runs. Returns
+/// Brings `dest` to the tree at `source` (rsync or http(s) listings);
+/// `state` keeps what the engine needs between runs. Returns
 /// (ok, summary, report).
 pub(crate) fn fetch_tree(
     source: &str,

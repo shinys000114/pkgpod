@@ -15,7 +15,7 @@ Status: in development, nothing released.
   rsync), re-signed with your key if you like, packages promoted from
   them; imports of existing apt repositories.
 - **Files**: plain trees uploaded by path, or mirrored from a file server
-  (rsync, HTTP listings, FTP); public ones also served over FTP.
+  (rsync or HTTP listings).
 - **OCI images**: a registry speaking the distribution spec (push, pull,
   referrers; tried with docker), images imported from other registries.
 - **PyPI**: a simple index for pip, uploads as twine sends them;

@@ -3,7 +3,7 @@
 //! The files format: a plain tree of files, served as it is, with
 //! directory listings. Hosted repositories are filled by uploads to a
 //! path (every change a version); mirrors follow a file server over
-//! rsync, HTTP listings or FTP and are served where they are received.
+//! rsync or HTTP listings and are served where they are received.
 //!
 //! The state tree is the file tree: `<path>` -> blob, with the file's
 //! modification time (`mtime`, unix seconds) as metadata. There is no
@@ -82,7 +82,7 @@ pub fn mirror_settings() -> Vec<Field> {
         Field::text(
             "source",
             "",
-            "The upstream directory: rsync://host/module/path/, http(s)://host/path/ (its directory listings) or ftp://host/path/ (anonymous).",
+            "The upstream directory: rsync://host/module/path/, http(s)://host/path/ (its directory listings).",
         ),
         Field::list(
             "excludes",
@@ -104,7 +104,7 @@ pub fn mirror_settings() -> Vec<Field> {
             "Delete nothing when more files than this would go.",
         ),
         Field::int("bwlimit", 0, "Bandwidth limit in KiB/s; 0: none."),
-        Field::int("parallel", 4, "Listings and downloads at once (http, ftp)."),
+        Field::int("parallel", 4, "Listings and downloads at once (http)."),
     ]
 }
 
@@ -183,13 +183,13 @@ impl Format for Files {
         }
         let s = str_of(settings, "source").trim();
         let ok = s.is_empty()
-            || ["rsync://", "http://", "https://", "ftp://"]
+            || ["rsync://", "http://", "https://"]
                 .iter()
                 .any(|p| s.starts_with(p))
             || s.contains("::");
         if !ok {
             return Err(Error::Invalid(format!(
-                "{s:?}: a source is rsync://, host::module, http(s):// or ftp://"
+                "{s:?}: a source is rsync://, host::module or http(s)://"
             )));
         }
         Ok(())

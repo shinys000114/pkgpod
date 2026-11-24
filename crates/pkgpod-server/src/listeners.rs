@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Serving listeners: addresses (plain HTTP, TLS with certificate
-//! files, or FTP for public files repositories) on which repositories
-//! are served. They are kept in the
+//! Serving listeners: addresses (plain HTTP, or TLS with certificate
+//! files) on which repositories are served. They are kept in the
 //! database and started, changed and stopped while the server runs.
 
 use std::collections::HashMap;
@@ -29,16 +28,6 @@ pub struct Listener {
     pub key: String,
     #[serde(default = "yes")]
     pub enabled: bool,
-    /// `http` (with TLS when cert and key are set) or `ftp`.
-    #[serde(default = "http")]
-    pub proto: String,
-    /// FTP: passive data ports (`low-high`); empty: any.
-    #[serde(default)]
-    pub passive: String,
-}
-
-fn http() -> String {
-    "http".into()
 }
 
 fn yes() -> bool {
@@ -94,9 +83,8 @@ pub fn ensure_default(db: &Db) -> Result<()> {
 
 pub fn list(db: &Db) -> Result<Vec<Listener>> {
     Ok(db.read(|c| {
-        let mut st = c.prepare(
-            "SELECT name, addr, cert, key, enabled, proto, passive FROM listeners ORDER BY name",
-        )?;
+        let mut st =
+            c.prepare("SELECT name, addr, cert, key, enabled FROM listeners ORDER BY name")?;
         let v = st
             .query_map([], |r| {
                 Ok(Listener {
@@ -105,8 +93,6 @@ pub fn list(db: &Db) -> Result<Vec<Listener>> {
                     cert: r.get(2)?,
                     key: r.get(3)?,
                     enabled: r.get(4)?,
-                    proto: r.get(5)?,
-                    passive: r.get(6)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -127,37 +113,16 @@ pub fn set(db: &Db, l: &Listener) -> Result<()> {
             "TLS needs both a certificate and a key".into(),
         ));
     }
-    match l.proto.as_str() {
-        "http" => {
-            if !l.passive.is_empty() {
-                return Err(Error::Invalid("passive ports are for FTP listeners".into()));
-            }
-        }
-        "ftp" => {
-            if !l.cert.is_empty() {
-                return Err(Error::Invalid(
-                    "FTP listeners are plain: no TLS (FTPS is not offered)".into(),
-                ));
-            }
-            crate::ftp::parse_ports(&l.passive).map_err(Error::Invalid)?;
-        }
-        p => {
-            return Err(Error::Invalid(format!(
-                "{p:?}: a listener serves http or ftp"
-            )));
-        }
-    }
     if !l.cert.is_empty() {
         tls_acceptor(Path::new(&l.cert), Path::new(&l.key)).map_err(Error::Invalid)?;
     }
     db.write(|tx| {
         tx.execute(
-            "INSERT INTO listeners (name, addr, cert, key, enabled, proto, passive)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO listeners (name, addr, cert, key, enabled)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(name) DO UPDATE SET addr = excluded.addr, cert = excluded.cert,
-               key = excluded.key, enabled = excluded.enabled, proto = excluded.proto,
-               passive = excluded.passive",
-            params![l.name, l.addr, l.cert, l.key, l.enabled, l.proto, l.passive],
+               key = excluded.key, enabled = excluded.enabled",
+            params![l.name, l.addr, l.cert, l.key, l.enabled],
         )
     })?;
     Ok(())
@@ -204,18 +169,6 @@ pub fn reconcile(app: &Arc<App>) {
         let app2 = app.clone();
         let h = tokio::spawn(async move {
             let name = l.name.clone();
-            if l.proto == "ftp" {
-                app2.listeners
-                    .errors
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&name);
-                let ports = crate::ftp::parse_ports(&l.passive).unwrap_or(None);
-                if let Err(e) = crate::ftp::serve(app2.clone(), &l.addr, ports, rx).await {
-                    fail(&app2, &name, generation, e);
-                }
-                return;
-            }
             let tls = if l.cert.is_empty() {
                 None
             } else {

@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! File-server mirrors against a local listing HTTP server and a local FTP
-//! server (both minimal, in this file).
+//! File-server mirrors against a local listing HTTP server (minimal, in
+//! this file).
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -24,8 +24,6 @@ struct Faults {
     no_ims: bool,
     /// Send no Last-Modified (an ETag only; If-None-Match works).
     no_last_modified: bool,
-    /// FTP: refuse MLSD (LIST only) and EPSV (PASV only).
-    no_mlsd: bool,
     /// (path, Range) of every file request with a body.
     bodies: Vec<(String, Option<String>)>,
 }
@@ -214,220 +212,6 @@ fn serve_http(c: TcpStream, root: &Path, f: &Mutex<Faults>) -> std::io::Result<(
     }
 }
 
-/// FTP server (anonymous, passive only): USER PASS TYPE EPSV PASV MLSD
-/// CWD LIST MDTM REST RETR QUIT.
-fn ftp_server(root: &Path, faults: Arc<Mutex<Faults>>) -> String {
-    let l = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("ftp://{}/pub/", l.local_addr().unwrap());
-    let root = root.to_path_buf();
-    std::thread::spawn(move || {
-        for c in l.incoming().flatten() {
-            let (root, f) = (root.clone(), faults.clone());
-            std::thread::spawn(move || {
-                let _ = serve_ftp(c, &root, &f);
-            });
-        }
-    });
-    url
-}
-
-fn ftp_time(t: SystemTime) -> String {
-    let s = t.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() as i64;
-    let d = time::OffsetDateTime::from_unix_timestamp(s).unwrap();
-    format!(
-        "{:04}{:02}{:02}{:02}{:02}{:02}",
-        d.year(),
-        d.month() as u8,
-        d.day(),
-        d.hour(),
-        d.minute(),
-        d.second()
-    )
-}
-
-fn serve_ftp(c: TcpStream, root: &Path, f: &Mutex<Faults>) -> std::io::Result<()> {
-    let mut r = BufReader::new(c.try_clone()?);
-    let mut w = c;
-    let say = |w: &mut TcpStream, s: &str| w.write_all(format!("{s}\r\n").as_bytes());
-    say(&mut w, "220-Welcome\r\n220 ready")?;
-    let mut pasv: Option<TcpListener> = None;
-    let mut cwd = "/".to_string();
-    let mut rest = 0usize;
-    // "/pub/..." is the served root.
-    let local = |p: &str| -> PathBuf {
-        root.join(
-            p.trim_start_matches('/')
-                .trim_start_matches("pub")
-                .trim_start_matches('/'),
-        )
-    };
-    loop {
-        let mut line = String::new();
-        if r.read_line(&mut line)? == 0 {
-            return Ok(());
-        }
-        let line = line.trim_end();
-        let (cmd, arg) = line.split_once(' ').unwrap_or((line, ""));
-        let abs = |a: &str| {
-            if a.starts_with('/') {
-                a.to_string()
-            } else {
-                format!("{cwd}/{a}")
-            }
-        };
-        match cmd {
-            "USER" => say(&mut w, "331 password please")?,
-            "PASS" => say(&mut w, "230 ok")?,
-            "TYPE" => say(&mut w, "200 binary")?,
-            "QUIT" => return say(&mut w, "221 bye"),
-            "EPSV" if f.lock().unwrap().no_mlsd => say(&mut w, "502 not implemented")?,
-            "EPSV" => {
-                let l = TcpListener::bind("127.0.0.1:0")?;
-                say(
-                    &mut w,
-                    &format!(
-                        "229 Entering Extended Passive Mode (|||{}|)",
-                        l.local_addr()?.port()
-                    ),
-                )?;
-                pasv = Some(l);
-            }
-            "PASV" => {
-                let l = TcpListener::bind("127.0.0.1:0")?;
-                let p = l.local_addr()?.port();
-                // A wrong address, as servers behind NAT send.
-                say(
-                    &mut w,
-                    &format!(
-                        "227 Entering Passive Mode (192,0,2,1,{},{})",
-                        p / 256,
-                        p % 256
-                    ),
-                )?;
-                pasv = Some(l);
-            }
-            "CWD" => {
-                let p = abs(arg);
-                if local(&p).is_dir() {
-                    cwd = p.trim_end_matches('/').to_string();
-                    say(&mut w, "250 ok")?
-                } else {
-                    say(&mut w, "550 no such directory")?
-                }
-            }
-            "MLSD" | "LIST" => {
-                if cmd == "MLSD" && f.lock().unwrap().no_mlsd {
-                    say(&mut w, "500 unknown command")?;
-                    continue;
-                }
-                let dir = local(&if arg.is_empty() {
-                    cwd.clone()
-                } else {
-                    abs(arg)
-                });
-                if f.lock()
-                    .unwrap()
-                    .forbidden
-                    .iter()
-                    .any(|x| dir.ends_with(x.trim_end_matches('/')))
-                {
-                    say(&mut w, "550 permission denied")?;
-                    continue;
-                }
-                let Ok(rd) = std::fs::read_dir(&dir) else {
-                    say(&mut w, "550 no such directory")?;
-                    continue;
-                };
-                let mut text = String::new();
-                if cmd == "LIST" {
-                    text.push_str("total 3\r\n");
-                }
-                for e in rd.flatten() {
-                    let n = e.file_name().into_string().unwrap();
-                    let md = std::fs::symlink_metadata(e.path())?;
-                    if cmd == "MLSD" {
-                        let t = if md.is_symlink() {
-                            "OS.unix=symlink"
-                        } else if md.is_dir() {
-                            "dir"
-                        } else {
-                            "file"
-                        };
-                        text.push_str(&format!(
-                            "type={t};size={};modify={}; {n}\r\n",
-                            md.len(),
-                            ftp_time(md.modified()?)
-                        ));
-                    } else {
-                        let k = if md.is_symlink() {
-                            'l'
-                        } else if md.is_dir() {
-                            'd'
-                        } else {
-                            '-'
-                        };
-                        text.push_str(&format!(
-                            "{k}rw-r--r--   1 ftp ftp {:>10} Nov 23 07:29 {n}\r\n",
-                            md.len()
-                        ));
-                    }
-                }
-                let Some(l) = pasv.take() else {
-                    say(&mut w, "425 use PASV first")?;
-                    continue;
-                };
-                say(&mut w, "150 here it comes")?;
-                let (mut d, _) = l.accept()?;
-                d.write_all(text.as_bytes())?;
-                drop(d);
-                say(&mut w, "226 done")?;
-            }
-            "MDTM" => match std::fs::metadata(local(&abs(arg))) {
-                Ok(m) => say(&mut w, &format!("213 {}", ftp_time(m.modified()?)))?,
-                Err(_) => say(&mut w, "550 no such file")?,
-            },
-            "REST" => {
-                rest = arg.parse().unwrap_or(0);
-                say(&mut w, "350 restarting")?
-            }
-            "RETR" => {
-                let p = abs(arg);
-                let Ok(data) = std::fs::read(local(&p)) else {
-                    say(&mut w, "550 no such file")?;
-                    continue;
-                };
-                let rel = p.trim_start_matches("/pub/").to_string();
-                let cut = {
-                    let mut g = f.lock().unwrap();
-                    g.bodies
-                        .push((rel.clone(), (rest > 0).then(|| format!("bytes={rest}-"))));
-                    g.cut_once.remove(&rel)
-                };
-                let Some(l) = pasv.take() else {
-                    say(&mut w, "425 use PASV first")?;
-                    continue;
-                };
-                say(&mut w, "150 sending")?;
-                let (mut d, _) = l.accept()?;
-                let body = &data[rest.min(data.len())..];
-                rest = 0;
-                match cut {
-                    Some(n) => {
-                        d.write_all(&body[..n])?;
-                        drop(d);
-                        say(&mut w, "426 connection closed; transfer aborted")?;
-                        return Ok(()); // and hang up, like a dying server
-                    }
-                    None => d.write_all(body)?,
-                }
-                drop(d);
-                say(&mut w, "226 done")?;
-            }
-            _ => say(&mut w, "502 not implemented")?,
-        }
-    }
-}
-
 fn write(root: &Path, rel: &str, data: &[u8]) {
     let p = root.join(rel);
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -509,7 +293,6 @@ fn upstream() -> tempfile::TempDir {
     up
 }
 
-/// The same scenario over HTTP listings and over FTP.
 fn scenario(url: &str, up: &Path, faults: &Mutex<Faults>) {
     let out = tempfile::tempdir().unwrap();
     let dest = out.path().join("tree");
@@ -667,24 +450,6 @@ fn http_listings() {
         (0, first.transferred),
         "{r:?}"
     );
-}
-
-#[test]
-fn ftp_mlsd_and_list() {
-    let up = upstream();
-    let faults = Arc::new(Mutex::new(Faults::default()));
-    let url = ftp_server(up.path(), faults.clone());
-    scenario(&url, up.path(), &faults);
-
-    // LIST only (no MLSD) and PASV only (no EPSV): same-size files are
-    // checked with MDTM.
-    let up = upstream();
-    let faults = Arc::new(Mutex::new(Faults {
-        no_mlsd: true,
-        ..Default::default()
-    }));
-    let url = ftp_server(up.path(), faults.clone());
-    scenario(&url, up.path(), &faults);
 }
 
 #[test]

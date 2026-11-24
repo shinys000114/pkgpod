@@ -20,7 +20,7 @@ use crate::{App, Error, Result};
 #[derive(Debug, Clone, Deserialize)]
 pub struct ImportReq {
     /// deb: the archive root (`http(s)://host/debian/`); files: the
-    /// directory (rsync, http(s) listings or ftp).
+    /// directory (rsync or http(s) listings).
     pub source: String,
     /// deb: the dists to import.
     #[serde(default)]
@@ -92,13 +92,13 @@ pub fn start(app: &Arc<App>, repo: &str, req: ImportReq, actor: &str) -> Result<
             pkgpod_files::check_path(&prefix)?;
         }
         let s = req.source.trim();
-        if !(["rsync://", "http://", "https://", "ftp://"]
+        if !(["rsync://", "http://", "https://"]
             .iter()
             .any(|p| s.starts_with(p))
             || s.contains("::"))
         {
             return Err(Error::Invalid(format!(
-                "{s:?}: a source is rsync://, host::module, http(s):// or ftp://"
+                "{s:?}: a source is rsync://, host::module or http(s)://"
             )));
         }
         let actor2 = actor.to_string();

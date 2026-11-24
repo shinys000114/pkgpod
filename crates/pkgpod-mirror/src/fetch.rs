@@ -138,10 +138,6 @@ impl Http {
         self
     }
 
-    pub fn backoff_first(&self) -> Duration {
-        self.backoff
-    }
-
     fn classify(status: StatusCode) -> Option<FetchError> {
         match status.as_u16() {
             200..=299 => None,
@@ -715,7 +711,7 @@ impl Http {
     }
 
     /// Waits as the bandwidth limit asks after `n` bytes (for transfers
-    /// that do not go through this client, e.g. FTP).
+    /// that do not go through this client).
     pub fn throttle(&self, n: usize) {
         if let Some(l) = &self.limit {
             let wait = l.reserve(n);
@@ -900,10 +896,6 @@ pub fn part_path(dest: &Path) -> PathBuf {
 }
 
 /// Waits before retry `attempt` (doubling from `first`, up to 32x).
-pub(crate) fn pause(first: Duration, attempt: u32, cancel: &AtomicBool) -> Result<(), FetchError> {
-    backoff(first, attempt, cancel)
-}
-
 fn backoff(first: Duration, attempt: u32, cancel: &AtomicBool) -> Result<(), FetchError> {
     let wait = first * (1 << (attempt - 1).min(5));
     let step = Duration::from_millis(50).min(wait);

@@ -13,8 +13,9 @@ Formats:
   packages, imports of existing apt repositories (binaries and sources);
   mirrors over HTTP (the dists named, signature checked) or rsync, optionally re-signed
   with your key, packages promoted from them.
-- **Files**: trees uploaded by path; mirrors and imports over rsync, HTTP
-  listings and FTP; public ones also served read-only over FTP.
+- **Files**: trees uploaded by path; mirrors and imports over rsync and
+  HTTP listings. FTP is neither served nor followed: the clients that
+  still speak it reach the same trees over HTTP.
 - **OCI images**: a registry (distribution spec: uploads, mounts,
   manifests and indexes, tags, referrers); imports of chosen images from
   other registries.
