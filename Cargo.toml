@@ -27,6 +27,7 @@ pkgpod-helm = { path = "crates/pkgpod-helm" }
 pkgpod-maven = { path = "crates/pkgpod-maven" }
 pkgpod-gems = { path = "crates/pkgpod-gems" }
 pkgpod-arch = { path = "crates/pkgpod-arch" }
+pkgpod-nuget = { path = "crates/pkgpod-nuget" }
 pkgpod-mirror = { path = "crates/pkgpod-mirror" }
 pkgpod-server = { path = "crates/pkgpod-server" }
 clap = { version = "4.6", features = ["derive", "env"] }
@@ -54,6 +55,7 @@ semver = "1"
 crc32fast = "1"
 rsa = "0.9"
 yaml-rust2 = "0.13"
+quick-xml = "0.42"
 base64 = "0.22"
 httpdate = "1"
 mimalloc = { version = "0.1", default-features = false }
