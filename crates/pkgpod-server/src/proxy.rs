@@ -714,7 +714,8 @@ pub fn check_settings(format: &str, settings: &Value) -> Result<()> {
     }
     if let Some(u) = settings.get("upstream").and_then(Value::as_str) {
         let u = u.trim();
-        if !u.is_empty() {
+        // A registry may be named by its host (docker.io, ghcr.io/team).
+        if !u.is_empty() && !(format == "oci" && !u.contains("://")) {
             crate::routes::parse_url(u).map_err(Error::Invalid)?;
         }
     }

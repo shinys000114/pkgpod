@@ -49,6 +49,37 @@ impl Engine {
         let mut objects = HashSet::new();
         let mut checked: HashSet<(String, Digest)> = HashSet::new();
         for r in self.repos()? {
+            if r.kind == crate::Kind::Proxy {
+                // What its cache names is there (and, deep, is itself).
+                rep.repos += 1;
+                let store = r.store();
+                for d in self.cache_blobs(r.id)? {
+                    if !checked.insert((r.storage.clone(), d)) {
+                        continue;
+                    }
+                    rep.blobs += 1;
+                    let path = store.path(&d);
+                    if !path.is_file() {
+                        note(
+                            &mut rep,
+                            format!("{}: cached blob {d} is missing from the store", r.name),
+                        );
+                        continue;
+                    }
+                    if deep {
+                        let got = std::fs::File::open(&path)
+                            .and_then(Digest::of_reader)
+                            .map(|x| x.0);
+                        if got.as_ref().ok() != Some(&d) {
+                            note(
+                                &mut rep,
+                                format!("{}: cached blob {d} does not have that sha256", r.name),
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
             if !r.kind.versioned() {
                 continue;
             }

@@ -585,8 +585,27 @@ pub(crate) async fn cache_change(
     let out = match action.as_str() {
         "prefetch" => json!(crate::proxy::prefetch(&app, &r, &req.paths).await?),
         "pin" | "unpin" | "evict" => {
-            let (paths, a) = (req.paths.clone(), action.clone());
+            let (paths, a, oci) = (req.paths.clone(), action.clone(), r.format == "oci");
             let n = blocking(&app, move |app| {
+                // An image's tag or manifest: what it names too.
+                let paths = if oci && a != "evict" {
+                    let tagged: Vec<String> = paths
+                        .iter()
+                        .flat_map(|p| {
+                            let mut v = vec![p.clone()];
+                            if let Ok(Some(row)) = app.engine.cache_get(&repo, p)
+                                && let Some(sha) = row.sha256
+                                && let Some((image, _)) = p.split_once("/manifests/")
+                            {
+                                v.push(format!("{image}/manifests/sha256:{}", sha.hex()));
+                            }
+                            v
+                        })
+                        .collect();
+                    crate::oci::pin_closure(app, &repo, &tagged)
+                } else {
+                    paths
+                };
                 Ok(match a.as_str() {
                     "pin" => app.engine.cache_pin(&repo, &paths, true)?,
                     "unpin" => app.engine.cache_pin(&repo, &paths, false)?,
