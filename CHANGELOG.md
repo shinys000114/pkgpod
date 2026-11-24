@@ -1,0 +1,44 @@
+# Changes
+
+## Unreleased (to be 0.1.0)
+
+The first release. From it on, data one release writes is opened by the
+next (schema steps are only appended), and configuration keeps its
+meaning.
+
+Formats:
+
+- **Debian**: hosted repositories with signed indexes for every version
+  (including `binary-all` for architecture-independent packages), source
+  packages, imports of existing apt repositories (binaries and sources);
+  mirrors over HTTP (signature checked) or rsync, optionally re-signed
+  with your key, packages promoted from them.
+- **Files**: trees uploaded by path; mirrors and imports over rsync, HTTP
+  listings and FTP; public ones also served read-only over FTP.
+- **OCI images**: a registry (distribution spec: uploads, mounts,
+  manifests and indexes, tags, referrers); imports of chosen images from
+  other registries.
+- **PyPI**: a simple index (PEP 503, 691, 592, 658/714) for pip; twine's
+  upload; yanking.
+- **npm**: a registry for publish and install, dist-tags, deprecation,
+  unpublish.
+
+Everywhere: versions of every hosted repository with labels
+(`@label` addresses; `-/label/<label>/` for npm), diffs, rollback and
+promotion as previewed plans; repositories reached by their own host
+names and paths; users, teams, roles per repository and scoped tokens;
+a web console, the `/api/v1` API (described at `/api/v1/openapi.json`)
+and the `pkgpod` command.
+
+Operations:
+
+- `pkgpod admin check [--deep]` checks that every version reads whole
+  and every blob it names is stored (and, deep, has its hash).
+- `pkgpod admin backup <dir>` and `pkgpod admin restore <dir>`: the
+  database, signing keys and content stores (mirrors' trees with
+  `--mirrors`), while the server runs.
+- Stopping answers the requests in flight (30 s); the data survives the
+  server being killed.
+
+Before 0.1.0 is tagged, to decide: whether `/api/v1` is under the same
+promise as the data, or may still change.

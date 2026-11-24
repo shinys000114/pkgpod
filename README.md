@@ -65,6 +65,23 @@ Other formats are made the same way (`pkgpod repo create <name> -f
 files|oci|pypi|npm`); each repository's page in the console says how its
 clients use it.
 
+## Backup, restore and upgrading
+
+```sh
+pkgpod admin backup /backups/pkgpod-$(date +%F)   # while the server runs
+pkgpod admin check --deep                         # every version and blob
+```
+
+A backup holds the database, the signing keys and the content stores
+(hard links when on the same filesystem); mirrors' trees only with
+`--mirrors`, as they can be synced again. To restore, point the
+configuration's `data_dir` at an empty directory and run
+`pkgpod admin restore <backup>` before starting the server.
+
+To upgrade, stop the server, replace the binary and start it: the
+database is brought forward on start. An older pkgpod refuses data a
+newer one has written.
+
 ## Licence
 
 AGPL-3.0-only. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
