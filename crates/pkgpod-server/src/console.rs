@@ -676,6 +676,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                         ("gems", _) => "Ruby gems for gem and bundler",
                         ("arch", _) => "Arch packages for pacman, signed",
                         ("nuget", _) => ".NET packages for dotnet and NuGet",
+                        ("composer", _) => "PHP packages for Composer",
                         _ => "",
                     }
                     .to_string(),
@@ -892,6 +893,46 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String], host: &str) ->
         out.push(UseLine {
             label: "Note".into(),
             text: "pkgpod is no proxy: packages from npmjs need their own registry (a scope here, the rest from registry.npmjs.org). npm login is not offered; set the token in .npmrc. unpublish and deprecate are operations here.".into(),
+        });
+        return out;
+    }
+    if r.format == "composer" {
+        let host = base
+            .split_once("://")
+            .map_or(base.as_str(), |x| x.1)
+            .split('/')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        out.push(UseLine {
+            label: "composer.json".into(),
+            text: format!(
+                "\"repositories\": [{{\"type\": \"composer\", \"url\": \"{base}\"}}]\n# or: composer config repositories.{} composer {base}",
+                r.name
+            ),
+        });
+        if !r.setting_bool("public") {
+            out.push(UseLine {
+                label: "Login".into(),
+                text: format!("composer config http-basic.{host} token <token>"),
+            });
+        }
+        if base.starts_with("http://") {
+            out.push(UseLine {
+                label: "Over http".into(),
+                text: "composer config secure-http false".into(),
+            });
+        }
+        out.push(UseLine {
+            label: "Upload a version".into(),
+            text: format!(
+                "git archive --format=zip -o pkg.zip <tag>\ncurl -u token:<token> -T pkg.zip '{base}upload?version=<version>'\npkgpod upload {} pkg.zip -s version=<version>",
+                r.name
+            ),
+        });
+        out.push(UseLine {
+            label: "A labelled version".into(),
+            text: format!("\"url\": \"{base}@<label>/\""),
         });
         return out;
     }

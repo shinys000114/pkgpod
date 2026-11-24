@@ -28,6 +28,7 @@ pkgpod-maven = { path = "crates/pkgpod-maven" }
 pkgpod-gems = { path = "crates/pkgpod-gems" }
 pkgpod-arch = { path = "crates/pkgpod-arch" }
 pkgpod-nuget = { path = "crates/pkgpod-nuget" }
+pkgpod-composer = { path = "crates/pkgpod-composer" }
 pkgpod-mirror = { path = "crates/pkgpod-mirror" }
 pkgpod-server = { path = "crates/pkgpod-server" }
 clap = { version = "4.6", features = ["derive", "env"] }

@@ -53,6 +53,9 @@ Formats:
 - **NuGet**: the V3 API (service index, flat container, registrations,
   search) made per request; `dotnet nuget push` with the token as API
   key, symbol packages (.snupkg) beside their package; delete unlists.
+- **Composer**: packages.json and p2 metadata made per request; packages
+  uploaded as zips (composer.json at their top or in one directory), the
+  version from the upload or composer.json.
 
 Everywhere: versions of every hosted repository with labels
 (`@label` addresses; `-/label/<label>/` for npm), diffs, rollback and

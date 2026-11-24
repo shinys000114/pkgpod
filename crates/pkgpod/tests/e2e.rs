@@ -581,7 +581,7 @@ fn console_login_pages_and_csrf() {
     // page, usage and actions open.
     let src = s.url("/web/");
     type Fields<'a> = &'a [(&'a str, &'a str)];
-    let choices: [(&str, &str, &str, Fields); 16] = [
+    let choices: [(&str, &str, &str, Fields); 17] = [
         ("deb", "hosted", "c-deb", &[("first_dist", "noble")]),
         (
             "deb",
@@ -603,6 +603,7 @@ fn console_login_pages_and_csrf() {
         ("gems", "hosted", "c-gems", &[]),
         ("arch", "hosted", "c-arch", &[]),
         ("nuget", "hosted", "c-nuget", &[]),
+        ("composer", "hosted", "c-composer", &[]),
     ];
     for (format, kind, name, extra) in choices {
         let mut form = vec![("format", format), ("kind", kind), ("name", name)];
@@ -4657,6 +4658,7 @@ fn serving_root_lists_trees_not_registries() {
         ("reg-oci", "oci"),
         ("reg-cargo", "cargo"),
         ("reg-nuget", "nuget"),
+        ("reg-composer", "composer"),
         ("reg-go", "go"),
     ] {
         let mut args = vec!["repo", "create", name, "-f", format, "-s", "public=true"];
@@ -4689,6 +4691,7 @@ fn serving_root_lists_trees_not_registries() {
         "reg-cargo",
         "reg-go",
         "reg-nuget",
+        "reg-composer",
         "hidden-oci",
     ] {
         assert!(!root.contains(name), "{name}: {root}");
@@ -6758,4 +6761,82 @@ fn oci_with_docker_on_its_own_host() {
         .send()
         .unwrap();
     assert_ne!(r.status().as_u16(), 200);
+}
+
+const COMPOSER_IMAGE: &str = "composer:2";
+
+#[test]
+fn composer_packages_with_composer() {
+    if images_here(&[COMPOSER_IMAGE]).is_empty() || !have("zip") {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&["repo", "create", "php", "-f", "composer"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "php", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let base = s.url("/php/");
+    let host = format!("127.0.0.1:{}", s.serve_port);
+    // Packages zipped as an archive of a tag is: one directory, composer.json in it.
+    let work = s.dir.path().join("phpwork");
+    std::fs::create_dir_all(&work).unwrap();
+    let make = |version: &str| {
+        let d = work.join(format!("hello-{version}"));
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(
+            d.join("composer.json"),
+            r#"{"name": "acme/hello", "description": "test", "license": "MIT",
+                "autoload": {"psr-4": {"Acme\\Hello\\": "src/"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("src/Greeter.php"),
+            format!("<?php\nnamespace Acme\\Hello;\nclass Greeter {{ public static function hi() {{ return 'acme/hello {version}'; }} }}\n"),
+        )
+        .unwrap();
+        let zip = work.join(format!("hello-{version}.zip"));
+        let o = Command::new("zip")
+            .arg("-qr")
+            .arg(&zip)
+            .arg(format!("hello-{version}"))
+            .current_dir(&work)
+            .output()
+            .unwrap();
+        assert!(o.status.success());
+        std::fs::read(zip).unwrap()
+    };
+    let c = reqwest::blocking::Client::new();
+    let upload = |data: Vec<u8>, v: &str| {
+        let r = c
+            .put(s.url(&format!("/php/upload?version={v}")))
+            .basic_auth("token", Some(&tok))
+            .body(data)
+            .send()
+            .unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    let (st, out) = upload(make("1.0.0"), "1.0.0");
+    assert_eq!(st, 201, "{out}");
+    s.cli(&["label", "php", "first"]).unwrap();
+    let (st, out) = upload(make("1.1.0"), "1.1.0");
+    assert_eq!(st, 201, "{out}");
+    let (st, _) = upload(make("1.0.0-other"), "1.0.0");
+    assert_eq!(st, 409, "a version is uploaded once");
+    // A project that requires it, installed by composer.
+    let project = |at: &str, constraint: &str| {
+        format!(
+            "set -e; export COMPOSER_HOME=/tmp/ch; mkdir -p /tmp/app && cd /tmp/app; \
+             composer config -g secure-http false; composer config -g http-basic.{host} token {tok}; \
+             printf '{{\"repositories\": [{{\"type\": \"composer\", \"url\": \"{base}{at}\"}}], \"require\": {{\"acme/hello\": \"{constraint}\"}}}}' > composer.json; \
+             composer install -q --no-interaction; php -r 'require \"vendor/autoload.php\"; echo Acme\\Hello\\Greeter::hi(), PHP_EOL;'"
+        )
+    };
+    let (ok, out) = docker_sh(COMPOSER_IMAGE, &project("", "^1.0"));
+    assert!(ok && out.contains("acme/hello 1.1.0"), "{out}");
+    let (ok, out) = docker_sh(COMPOSER_IMAGE, &project("@first/", "^1.0"));
+    assert!(ok && out.contains("acme/hello 1.0.0"), "{out}");
+    let (ok, _) = docker_sh(COMPOSER_IMAGE, &project("@first/", "1.1.0"));
+    assert!(!ok, "the label has no 1.1.0");
 }
