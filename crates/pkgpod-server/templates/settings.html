@@ -5,7 +5,7 @@
   <div class="card-body">
   <form hx-post="/c/r/{{ repo }}/settings" hx-target="next .result">
     {% call m::fields(fields) %}{% endcall %}
-    {% if can_admin %}<div class="form-foot"><button type="submit">Save</button> <button type="button" hx-post="/c/r/{{ repo }}/republish" hx-target="next .result">Republish</button></div>{% endif %}
+    {% if can_admin %}<div class="form-foot"><button type="submit">Save</button> <button type="button" hx-post="/c/r/{{ repo }}/republish" hx-target="next .result" title="Make the indexes again (new signatures and dates) without changing the contents">Republish</button><span class="muted small">Republish: indexes made and signed again, contents as they are.</span></div>{% endif %}
   </form>
   <div class="result"></div>
   </div>
@@ -19,11 +19,12 @@
   </tbody></table></div>
   {% endif %}
   <div class="card-body">
+  {% if users.is_empty() && teams.is_empty() %}<p class="muted small">Only server admins so far, who may do everything; add users or teams in <a href="/admin/people">Users &amp; teams</a>.</p>{% else %}
   <form class="inline" hx-post="/c/r/{{ repo }}/grants" hx-target="#tab">
     <select name="subject">{% for u in users %}<option value="user:{{ u }}">user {{ u }}</option>{% endfor %}{% for t in teams %}<option value="team:{{ t }}">team {{ t }}</option>{% endfor %}</select>
     <select name="role"><option>read</option><option>write</option><option>admin</option></select>
     <button type="submit">Grant</button>
-  </form>
+  </form>{% endif %}
   </div>
 </div>
 {% endif %}
@@ -33,8 +34,8 @@
   <div class="panel-body">
   <form hx-post="/c/r/{{ repo }}/delete" hx-target="next .result">
     <p class="warning">All its versions and labels go; files no other repository uses are removed at the next garbage collection. A mirror's received files stay on disk unless you tick the box.</p>
-    <label class="check field"><input type="checkbox" name="remove_tree"> <span>also delete a mirror's received files</span></label>
-    <label class="field"><span>Type its name</span><input name="confirm" required></label>
+    <label class="check"><input type="checkbox" name="remove_tree"> <span>also delete a mirror's received files</span></label>
+    <label class="field"><span>Type its name</span><input name="confirm" required autocomplete="off" autocapitalize="off" spellcheck="false"></label>
     <div class="form-foot"><button class="danger" type="submit">Delete</button></div>
   </form>
   <div class="result"></div>

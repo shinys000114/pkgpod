@@ -3,7 +3,6 @@
 {% block title %}Account · pkgpod{% endblock %}
 {% block main %}
 <div class="page-head"><div class="title"><h1>{{ s.user }}</h1><p class="sub">Your password and the tokens programs use (apt, CI, the pkgpod command).</p></div></div>
-<div class="grid">
 <div class="card">
   <div class="card-head"><h2>Tokens</h2><span class="hint">a token is a password for programs; give it only the repositories and rights it needs</span></div>
   {% if tokens.is_empty() %}<p class="empty">No tokens.</p>{% else %}
@@ -15,17 +14,17 @@
   <div class="card-body">
   <form hx-post="/c/tokens" hx-target="next .result">
     <div class="fields">
-      <label class="field"><span>Name</span><input name="name" required placeholder="ci, laptop apt"></label>
-      <label class="field"><span>Repositories</span><input name="repos" placeholder="all"><small>Comma separated; empty: every one you may use.</small></label>
-      <label class="field"><span>Expires in days</span><input type="number" name="expires_days" placeholder="never"></label>
-      <label class="check field"><input type="checkbox" name="write"> <span>may write</span><small>Upload and change; otherwise read only.</small></label>
+      <label class="field"><span>Name</span><input name="name" required placeholder="ci, laptop apt" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+      <label class="field"><span>Expires in days</span><input type="number" name="expires_days" placeholder="never" min="1"></label>
+      <label class="check field"><span class="check-line"><input type="checkbox" name="write"> <span>May write</span></span><small>Upload and change; otherwise read only.</small></label>
+      <fieldset class="field wide dist-pick"><legend>Repositories</legend>{% if repos.is_empty() %}<span class="muted">none yet</span>{% endif %}<div class="check-row pick-box">{% for r in repos %}<label class="check"><input type="checkbox" name="repos" value="{{ r }}"> {{ r }}</label>{% endfor %}</div><small>None ticked: every one you may use, now and later.</small></fieldset>
     </div>
     <div class="form-foot"><button type="submit">Make token</button></div>
   </form>
   <div class="result"></div>
   </div>
 </div>
-<div class="card">
+<div class="card narrow">
   <div class="card-head"><h2>Password</h2></div>
   <div class="card-body">
   <form hx-post="/c/password" hx-target="next .result">
@@ -38,6 +37,5 @@
   </form>
   <div class="result"></div>
   </div>
-</div>
 </div>
 {% endblock %}

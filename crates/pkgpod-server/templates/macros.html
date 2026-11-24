@@ -1,24 +1,28 @@
 {# SPDX-License-Identifier: AGPL-3.0-only #}
-{# Form fields from a schema (FormField). #}
+{# Form fields from a schema (FormField). Names and addresses are not
+   spell-checked, capitalized or filled from the browser's history; values
+   to pick come in a datalist; a field with prefill fills in the form. #}
+{% macro attrs(f) %}{% if !f.natural %} autocomplete="off" autocapitalize="off" spellcheck="false"{% endif %}{% if !f.list.is_empty() %} list="{{ f.list }}"{% endif %}{% if !f.prefill.is_empty() %} data-prefill="{{ f.prefill }}"{% endif %}{% endmacro %}
+{% macro datalist(f) %}{% if !f.list.is_empty() %}<datalist id="{{ f.list }}">{% for o in f.suggest %}<option value="{{ o }}">{% endfor %}</datalist>{% endif %}{% endmacro %}
 {% macro fields(list) %}
 <div class="fields">
 {% for f in list.iter() %}
   {% if f.kind == "bool" %}
-  <label class="check field"><input type="checkbox" name="{{ f.name }}"{% if f.checked %} checked{% endif %}> <span>{{ f.name }}</span><small>{{ f.help }}</small></label>
+  <label class="check field"><span class="check-line"><input type="checkbox" name="{{ f.name }}"{% if f.checked %} checked{% endif %}> <span>{{ f.label }}</span></span><small>{{ f.help }}</small></label>
   {% else if f.kind == "choice" %}
-  <label class="field"><span>{{ f.name }}</span><select name="{{ f.name }}">{% for (c, on) in f.choices.iter() %}<option{% if on %} selected{% endif %}>{{ c }}</option>{% endfor %}</select><small>{{ f.help }}</small></label>
+  <label class="field"><span>{{ f.label }}</span><select name="{{ f.name }}">{% for (c, on) in f.choices.iter() %}<option{% if on %} selected{% endif %}>{{ c }}</option>{% endfor %}</select><small>{{ f.help }}</small></label>
   {% else if f.kind == "multi" %}
-  <fieldset class="field wide dist-pick"><legend>{{ f.name }}</legend>{% if f.choices.is_empty() %}<span class="muted">none yet</span>{% endif %}{% for (c, on) in f.choices.iter() %}<label class="check"><input type="checkbox" name="{{ f.name }}" value="{{ c }}"{% if on %} checked{% endif %}> {{ c }}</label> {% endfor %}<small>{{ f.help }}</small></fieldset>
+  <fieldset class="field wide dist-pick"><legend>{{ f.label }}</legend><div class="check-row">{% if f.choices.is_empty() %}<span class="muted">none yet</span>{% endif %}{% for (c, on) in f.choices.iter() %}<label class="check"><input type="checkbox" name="{{ f.name }}" value="{{ c }}"{% if on %} checked{% endif %}> {{ c }}</label>{% endfor %}</div><small>{{ f.help }}</small></fieldset>
   {% else if f.kind == "long" %}
-  <label class="field wide"><span>{{ f.name }}</span><textarea name="{{ f.name }}" rows="5" spellcheck="false">{{ f.value }}</textarea><small>{{ f.help }}</small></label>
+  <label class="field wide"><span>{{ f.label }}</span><textarea name="{{ f.name }}" rows="5" spellcheck="false">{{ f.value }}</textarea><small>{{ f.help }}</small></label>
   {% else if f.kind == "json" %}
-  <label class="field wide"><span>{{ f.name }}</span><textarea name="{{ f.name }}" rows="6" spellcheck="false">{{ f.value }}</textarea><small>{{ f.help }}</small></label>
+  <label class="field wide"><span>{{ f.label }}</span><textarea name="{{ f.name }}" rows="6" spellcheck="false">{{ f.value }}</textarea><small>{{ f.help }}</small></label>
   {% else if f.kind == "int" %}
-  <label class="field"><span>{{ f.name }}</span><input type="number" name="{{ f.name }}" value="{{ f.value }}"><small>{{ f.help }}</small></label>
+  <label class="field"><span>{{ f.label }}</span><input type="number" name="{{ f.name }}" value="{{ f.value }}"><small>{{ f.help }}</small></label>
   {% else if f.kind == "list" %}
-  <label class="field wide"><span>{{ f.name }}</span><input name="{{ f.name }}" value="{{ f.value }}" placeholder="comma separated"><small>{{ f.help }}</small></label>
+  <label class="field wide"><span>{{ f.label }}</span><input name="{{ f.name }}" value="{{ f.value }}" placeholder="comma separated"{% call attrs(f) %}{% endcall %}>{% call datalist(f) %}{% endcall %}<small>{{ f.help }}</small></label>
   {% else %}
-  <label class="field"><span>{{ f.name }}</span><input name="{{ f.name }}" value="{{ f.value }}"><small>{{ f.help }}</small></label>
+  <label class="field{% if f.natural %} wide{% endif %}"><span>{{ f.label }}</span><input name="{{ f.name }}" value="{{ f.value }}"{% call attrs(f) %}{% endcall %}>{% call datalist(f) %}{% endcall %}<small>{{ f.help }}</small></label>
   {% endif %}
 {% endfor %}
 </div>

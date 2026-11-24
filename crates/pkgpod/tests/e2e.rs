@@ -572,6 +572,26 @@ fn console_login_pages_and_csrf() {
     // How to use names the dist just made.
     let (_, usage) = page("/r/web/use");
     assert!(usage.contains(" noble main"), "{usage}");
+    // The forms offer the dists there are, and picking one to change
+    // fills in its settings.
+    let (_, actions) = page("/r/web/actions");
+    assert!(
+        actions.contains("<datalist id=\"dl-dist-remove-name\"><option value=\"noble\">")
+            && actions.contains("data-prefill=\"{&#34;noble&#34;:"),
+        "{actions}"
+    );
+    assert!(actions.contains("Add a dist or change one"), "{actions}");
+    // Pages that are not there; yourself not offered for deletion.
+    let (st, body) = page("/no/such/page");
+    assert!(st == 404 && body.contains("Nothing here"), "{st} {body}");
+    let r = c.get(format!("{}/api/v1/no/such", s.api)).send().unwrap();
+    assert_eq!(r.status().as_u16(), 404);
+    assert_eq!(r.text().unwrap(), r#"{"error":"not found"}"#);
+    let (_, people) = page("/admin/people");
+    assert!(
+        people.contains("your password") && !people.contains("/c/users/ann/delete"),
+        "{people}"
+    );
     let (_, shell) = page("/r/web?tab=use");
     assert!(
         shell.contains("id=\"tab\" hx-get=\"/r/web/use\""),
@@ -635,6 +655,22 @@ fn console_login_pages_and_csrf() {
     }
     let (_, usage) = page("/r/c-deb/use");
     assert!(usage.contains(" noble main"), "{usage}");
+    // An http mirror without dists is refused when made.
+    let r = c
+        .post(format!("{}/c/repos", s.api))
+        .header("cookie", format!("pkgpod_session={sid}"))
+        .header("x-csrf-token", &csrf)
+        .form(&[
+            ("format", "deb"),
+            ("kind", "mirror"),
+            ("name", "nodists"),
+            ("source", src.as_str()),
+        ])
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(r.contains("needs the dists to mirror"), "{r}");
     // Without a signing key, signed formats say so when made, as their
     // first upload would fail.
     let (_, home) = page("/");

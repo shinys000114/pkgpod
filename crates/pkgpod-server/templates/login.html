@@ -10,5 +10,6 @@
   <label class="field"><span>User</span><input name="user" autocomplete="username" required autofocus></label>
   <label class="field"><span>Password</span><input name="password" type="password" autocomplete="current-password" required></label>
   <button type="submit">Log in</button>
+  {% if first %}<p class="muted small first-login">First time here? The user is <b>admin</b>; its password is the text inside the file <span class="mono">admin-password</span> in the server's data directory (its contents, not its path). Change it under Account, then delete the file.</p>{% endif %}
 </form>
 {% endblock %}
