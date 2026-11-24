@@ -11,7 +11,7 @@ Formats:
 - **Debian**: hosted repositories with signed indexes for every version
   (including `binary-all` for architecture-independent packages), source
   packages, imports of existing apt repositories (binaries and sources);
-  mirrors over HTTP (signature checked) or rsync, optionally re-signed
+  mirrors over HTTP (the dists named, signature checked) or rsync, optionally re-signed
   with your key, packages promoted from them.
 - **Files**: trees uploaded by path; mirrors and imports over rsync, HTTP
   listings and FTP; public ones also served read-only over FTP.
@@ -77,7 +77,11 @@ The console gives each repository one page: its address, state at a
 glance and tabs for its contents, versions, how its clients use it
 (commands with its address, to copy), uploads and changes, and settings.
 A new Debian repository can be made with its first dist, and a signing
-key from the same form when the server has none.
+key from the same form when the server has none. Forms offer what the
+repository already has (dists, components, packages, paths, keys), and
+picking a dist or listener to change fills in its settings; changing a
+dist (`dist-set`, from the console or the command) changes only what is
+given.
 
 Signing keys are kept by pkgpod itself: OpenPGP keys are generated
 (Ed25519) or imported (`pkgpod key import`, as `gpg
