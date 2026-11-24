@@ -10,6 +10,7 @@ pub mod backup;
 pub mod cargo;
 pub mod config;
 pub mod ftp;
+pub mod gems;
 pub mod go;
 pub mod import;
 pub mod jobs;
@@ -151,6 +152,7 @@ pub fn formats() -> Vec<Arc<dyn pkgpod_engine::Format>> {
         Arc::new(pkgpod_rpm::Rpm),
         Arc::new(pkgpod_helm::Helm),
         Arc::new(pkgpod_maven::Maven),
+        Arc::new(pkgpod_gems::Gems),
     ]
 }
 
