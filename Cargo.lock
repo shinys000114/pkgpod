@@ -2319,6 +2319,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pkgpod-cargo"
+version = "0.0.0"
+dependencies = [
+ "flate2",
+ "jiff",
+ "pkgpod-base",
+ "pkgpod-engine",
+ "semver",
+ "serde_json",
+ "tar",
+]
+
+[[package]]
 name = "pkgpod-deb"
 version = "0.0.0"
 dependencies = [
@@ -2435,6 +2448,7 @@ dependencies = [
  "hyper-util",
  "jiff",
  "pkgpod-base",
+ "pkgpod-cargo",
  "pkgpod-deb",
  "pkgpod-engine",
  "pkgpod-files",

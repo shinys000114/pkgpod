@@ -27,7 +27,7 @@ use tower::ServiceExt;
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::auth::{Caller, Role};
-use crate::routes::Hit;
+use crate::routes::{Hit, Route};
 use crate::{App, Error};
 
 pub fn router(app: Arc<App>) -> Router {
@@ -47,6 +47,10 @@ pub fn basic_caller(app: &App, h: &HeaderMap) -> Result<Caller, Error> {
     };
     if let Some(t) = v.strip_prefix("Bearer ") {
         return app.auth.token(t.trim()).ok_or(Error::Unauthorized);
+    }
+    // A token alone, as cargo sends it.
+    if v.starts_with(crate::auth::TOKEN_PREFIX) {
+        return app.auth.token(v.trim()).ok_or(Error::Unauthorized);
     }
     let (user, pw) = v
         .strip_prefix("Basic ")
@@ -120,11 +124,46 @@ pub fn html(s: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-/// Formats whose repositories are trees to browse. npm and OCI
+/// A repository's URL as a request reached it, ending in `/`: its
+/// address's scheme and path, with the host (and port) asked when the
+/// address names no port; else the scheme (behind a proxy, as it says),
+/// the host asked and the repository's path. For URLs a registry hands
+/// its clients (npm tarballs, cargo's index and downloads).
+fn client_base(route: Option<&Route>, host: &str, base: &[String], req: &Request) -> String {
+    match route {
+        Some(r) => {
+            let mut u = r.url();
+            if !r.host.contains(':')
+                && host
+                    .to_ascii_lowercase()
+                    .starts_with(&format!("{}:", r.host))
+            {
+                u = u.replacen(&format!("://{}/", r.host), &format!("://{host}/"), 1);
+            }
+            u
+        }
+        None => {
+            let scheme = req
+                .headers()
+                .get("x-forwarded-proto")
+                .and_then(|v| v.to_str().ok())
+                .filter(|s| *s == "https" || *s == "http")
+                .unwrap_or("http");
+            let mut u = format!("{scheme}://{host}/");
+            for b in base {
+                u.push_str(&percent_encode(b));
+                u.push('/');
+            }
+            u
+        }
+    }
+}
+
+/// Formats whose repositories are trees to browse. npm, OCI and cargo
 /// repositories answer their clients' API only, as public registries do:
 /// they are left out of listings, and their address says how to use them.
 fn browsable(format: &str) -> bool {
-    !matches!(format, "npm" | "oci")
+    !matches!(format, "npm" | "oci" | "cargo")
 }
 
 /// A registry's address seen from a browser: how its clients use it.
@@ -262,36 +301,7 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
             if served.repo.format == "npm" {
                 // Tarball URLs are absolute: the address the request
                 // came in on (behind a proxy, its scheme).
-                let base_url = match &route {
-                    // The address's scheme and path; its host with the
-                    // port the request came to when it names none.
-                    Some(r) => {
-                        let mut u = r.url();
-                        if !r.host.contains(':')
-                            && host
-                                .to_ascii_lowercase()
-                                .starts_with(&format!("{}:", r.host))
-                        {
-                            u = u.replacen(&format!("://{}/", r.host), &format!("://{host}/"), 1);
-                        }
-                        u
-                    }
-                    None => {
-                        let scheme = req
-                            .headers()
-                            .get("x-forwarded-proto")
-                            .and_then(|v| v.to_str().ok())
-                            .filter(|s| *s == "https" || *s == "http")
-                            .unwrap_or("http")
-                            .to_string();
-                        let mut u = format!("{scheme}://{host}/");
-                        for b in &base {
-                            u.push_str(&percent_encode(b));
-                            u.push('/');
-                        }
-                        u
-                    }
-                };
+                let base_url = client_base(route.as_ref(), &host, &base, &req);
                 if rel.is_empty() && matches!(method, Method::GET | Method::HEAD) {
                     if role.is_none() {
                         return deny(&caller);
@@ -313,6 +323,44 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
                     role,
                 };
                 return crate::npm::handle(app, ask, req).await;
+            }
+            if served.repo.format == "cargo" {
+                let mut base_url = client_base(route.as_ref(), &host, &base, &req);
+                let mut rel = rel;
+                let mut version = served.current.clone();
+                let mut labelled = false;
+                if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
+                    let Ok(v) = app.labelled(&served.repo.name, label) else {
+                        return status(StatusCode::NOT_FOUND);
+                    };
+                    base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
+                    version = Some(v);
+                    labelled = true;
+                    rel.remove(0);
+                }
+                if rel.is_empty() && matches!(method, Method::GET | Method::HEAD) {
+                    if role.is_none() {
+                        return deny(&caller);
+                    }
+                    let r = served.repo.name.replace('.', "-");
+                    return client_note(
+                        StatusCode::OK,
+                        format!(
+                            "{}: a cargo registry.\n\n  # .cargo/config.toml\n  [registries.{r}]\n  index = \"sparse+{base_url}index/\"\n\n  cargo publish --registry {r}\n\nIts crates are listed in pkgpod's console.\n",
+                            served.repo.name
+                        ),
+                    );
+                }
+                let ask = crate::cargo::Ask {
+                    repo: served.repo,
+                    version,
+                    labelled,
+                    rel,
+                    base: base_url,
+                    caller,
+                    role,
+                };
+                return crate::cargo::handle(app, ask, req).await;
             }
             if served.repo.format == "oci" {
                 // Images go by /v2/; the stored tree is not for browsing.

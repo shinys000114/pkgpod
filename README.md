@@ -22,6 +22,8 @@ Status: in development, nothing released.
   yanking.
 - **npm**: a registry for npm (tried with npm 9); dist-tags,
   deprecation.
+- **Cargo**: a registry for cargo (sparse index); `cargo publish`,
+  yank, search.
 - Repositories are reached by their own addresses (host name and path);
   a reverse proxy in front only provides certificates. There is no
   pull-through proxy: packages from public registries are imported or
@@ -62,7 +64,7 @@ Snapshots: `pkgpod label ppa release-1`, then
 repositories: `<address>/-/label/release-1/`).
 
 Other formats are made the same way (`pkgpod repo create <name> -f
-files|oci|pypi|npm`); each repository's page in the console says how its
+files|oci|pypi|npm|cargo`); each repository's page in the console says how its
 clients use it.
 
 ## Backup, restore and upgrading

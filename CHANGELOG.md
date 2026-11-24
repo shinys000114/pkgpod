@@ -22,6 +22,8 @@ Formats:
   upload; yanking.
 - **npm**: a registry for publish and install, dist-tags, deprecation,
   unpublish.
+- **Cargo**: a registry with the sparse index protocol: `cargo publish`,
+  yank and unyank, search; labelled versions as read-only registries.
 
 Everywhere: versions of every hosted repository with labels
 (`@label` addresses; `-/label/<label>/` for npm), diffs, rollback and

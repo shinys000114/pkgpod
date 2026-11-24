@@ -667,6 +667,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                         ("oci", _) => "container images for docker and podman",
                         ("pypi", _) => "Python packages for pip, uploaded with twine",
                         ("npm", _) => "JavaScript packages for npm",
+                        ("cargo", _) => "Rust crates for cargo (sparse index)",
                         _ => "",
                     }
                     .to_string(),
@@ -883,6 +884,43 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String], host: &str) ->
         out.push(UseLine {
             label: "Note".into(),
             text: "pkgpod is no proxy: packages from npmjs need their own registry (a scope here, the rest from registry.npmjs.org). npm login is not offered; set the token in .npmrc. unpublish and deprecate are operations here.".into(),
+        });
+        return out;
+    }
+    if r.format == "cargo" {
+        // A registry name cargo takes: letters, digits, - and _.
+        let reg = r.name.replace('.', "-");
+        let public = r.setting_bool("public");
+        out.push(UseLine {
+            label: ".cargo/config.toml".into(),
+            text: if public {
+                format!("[registries.{reg}]\nindex = \"sparse+{base}index/\"")
+            } else {
+                format!(
+                    "[registries.{reg}]\nindex = \"sparse+{base}index/\"\n\n[registry]\nglobal-credential-providers = [\"cargo:token\"]"
+                )
+            },
+        });
+        out.push(UseLine {
+            label: "Token".into(),
+            text: format!(
+                "cargo login --registry {reg}   # paste a pkgpod token\n# or: export CARGO_REGISTRIES_{}_TOKEN=<token>",
+                reg.to_ascii_uppercase().replace('-', "_")
+            ),
+        });
+        out.push(UseLine {
+            label: "Publish".into(),
+            text: format!(
+                "# Cargo.toml: publish = [\"{reg}\"]\ncargo publish --registry {reg}\ncargo yank --registry {reg} <crate>@<version>"
+            ),
+        });
+        out.push(UseLine {
+            label: "Depend".into(),
+            text: format!("[dependencies]\n<crate> = {{ version = \"1\", registry = \"{reg}\" }}"),
+        });
+        out.push(UseLine {
+            label: "A labelled version".into(),
+            text: format!("index = \"sparse+{base}@<label>/index/\"   # read-only"),
         });
         return out;
     }
@@ -1572,6 +1610,7 @@ fn catalog_words(format: &str) -> (&'static str, [&'static str; 3], bool) {
         "files" => ("Files", ["Name", "Version", "Path"], true),
         "pypi" => ("Packages", ["Project", "Version", "File"], true),
         "npm" => ("Packages", ["Package", "Version", "Note"], true),
+        "cargo" => ("Crates", ["Crate", "Version", "Note"], true),
         "deb" => ("Packages", ["Package", "Version", "Where"], true),
         _ => ("Packages", ["Package", "Version", "Where"], true),
     }
