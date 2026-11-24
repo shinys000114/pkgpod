@@ -17,10 +17,8 @@
     <div class="fields">
       <label class="field"><span>Name</span><input id="listener-name" name="name" required placeholder="default" list="dl-listeners" autocomplete="off" autocapitalize="off" spellcheck="false" data-prefill="{{ listener_prefill }}"><datalist id="dl-listeners">{% for l in listeners %}<option value="{{ l.name }}">{% endfor %}</datalist><small>A new name adds a listener; an existing one (or "change…") shows its settings to change.</small></label>
       <label class="field"><span>Address</span><input name="addr" required placeholder="127.0.0.1:8080" autocomplete="off" spellcheck="false"></label>
-      <label class="field"><span>Protocol</span><select name="proto"><option value="http">http (TLS with a certificate)</option><option value="ftp">ftp</option></select><small class="only-ftp">Read-only, anonymous, public files repositories only.</small></label>
-      <label class="field only-http"><span>Certificate</span><input name="cert" placeholder="/etc/ssl/pkgpod.pem" autocomplete="off" spellcheck="false"><small>PEM chain; with a key: TLS.</small></label>
-      <label class="field only-http"><span>Key</span><input name="key" placeholder="/etc/ssl/private/pkgpod.key" autocomplete="off" spellcheck="false"></label>
-      <label class="field only-ftp"><span>Passive ports</span><input name="passive" placeholder="30000-30100" autocomplete="off" spellcheck="false"><small>Data ports for a firewall; empty: any.</small></label>
+      <label class="field"><span>Certificate</span><input name="cert" placeholder="/etc/ssl/pkgpod.pem" autocomplete="off" spellcheck="false"><small>PEM chain; with a key: TLS.</small></label>
+      <label class="field"><span>Key</span><input name="key" placeholder="/etc/ssl/private/pkgpod.key" autocomplete="off" spellcheck="false"></label>
       <label class="check field"><span class="check-line"><input type="checkbox" name="disabled"> <span>Disabled</span></span><small>Kept, but not listening.</small></label>
     </div>
     <div class="form-foot"><button type="submit">Save listener</button></div>

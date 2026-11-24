@@ -111,6 +111,12 @@ ALTER TABLE keys DROP COLUMN homedir;
 ALTER TABLE keys DROP COLUMN passphrase_file;
 ALTER TABLE keys ADD COLUMN uid TEXT NOT NULL DEFAULT '';
 ",
+    // FTP is not served any more: its listeners go.
+    "
+DELETE FROM listeners WHERE proto = 'ftp';
+ALTER TABLE listeners DROP COLUMN proto;
+ALTER TABLE listeners DROP COLUMN passive;
+",
 ];
 
 pub fn migrate(db: &Db) -> pkgpod_base::Result<()> {
@@ -129,6 +135,7 @@ mod tests {
             "9dade28c454c505b",
             "4f91e61340d6bc43",
             "ea67331ae65ecf81",
+            "af0a60b7120d6678",
         ];
         let got: Vec<String> = super::STEPS
             .iter()

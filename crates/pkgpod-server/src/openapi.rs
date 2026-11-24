@@ -487,24 +487,13 @@ fn schemas() -> Value {
                     ),
                     ("key", text("PEM key file.")),
                     ("enabled", boolean()),
-                    (
-                        "proto",
-                        json!({"type": "string", "enum": ["http", "ftp"], "description": "http (TLS with cert and key) or ftp (read-only, anonymous, public files repositories)."}),
-                    ),
-                    (
-                        "passive",
-                        text("FTP: passive data ports, low-high; empty: any."),
-                    ),
                     ("running", boolean()),
                     (
                         "error",
                         nullable("string", "Why it is not running, if it failed."),
                     ),
                 ],
-                &[
-                    "name", "addr", "cert", "key", "enabled", "proto", "passive", "running",
-                    "error",
-                ],
+                &["name", "addr", "cert", "key", "enabled", "running", "error"],
             ),
         ),
         (
@@ -792,14 +781,6 @@ fn schemas() -> Value {
                     ),
                     ("key", text("PEM key file.")),
                     ("enabled", json!({"type": "boolean", "default": true})),
-                    (
-                        "proto",
-                        json!({"type": "string", "enum": ["http", "ftp"], "default": "http"}),
-                    ),
-                    (
-                        "passive",
-                        text("FTP: passive data ports, low-high; empty: any."),
-                    ),
                 ],
                 &["addr"],
             ),
@@ -836,7 +817,7 @@ fn schemas() -> Value {
                     (
                         "source",
                         text(
-                            "deb: the archive root, http(s)://host/debian/; files: the directory (rsync://, host::module, http(s):// listings, ftp://).",
+                            "deb: the archive root, http(s)://host/debian/; files: the directory (rsync://, host::module, http(s):// listings).",
                         ),
                     ),
                     (

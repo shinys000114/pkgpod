@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Plain trees from file servers: HTTP(S) directory listings (the index
-//! pages nginx, Apache, lighttpd, Caddy and others generate) and FTP.
+//! pages nginx, Apache, lighttpd, Caddy and others generate).
 //!
 //! A sync walks the whole upstream tree, fetches what is new or changed
 //! and then deletes what upstream dropped. Changes are found by size and
-//! modification time: over FTP from the listing (MLSD, else LIST and
-//! MDTM), over HTTP by asking the server whether the local copy is
+//! modification time, by asking the server whether the local copy is
 //! current (If-Modified-Since; a 200 with the same length and
 //! Last-Modified counts as current too). Each file is written to a
 //! partial file and renamed into place, with the upstream's time.
@@ -29,21 +28,12 @@ use serde::Serialize;
 
 use crate::Error;
 use crate::fetch::{FetchError, Fetched, Have, Http, PART, meta_path, part_path};
-use crate::ftp::{EntryKind, Ftp, FtpError};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Proto {
-    Http,
-    Ftp,
-}
 
 #[derive(Debug, Clone)]
 pub struct FilesMirror {
-    /// The directory to mirror: `http(s)://...` or `ftp://...` (anonymous).
+    /// The directory to mirror: `http(s)://...`.
     pub url: String,
-    pub proto: Proto,
-    /// Listings and downloads at once (FTP: connections).
+    /// Listings and downloads at once.
     pub parallel: usize,
     pub retries: u32,
     /// Delete what upstream dropped.
@@ -58,19 +48,12 @@ pub struct FilesMirror {
     pub max_depth: usize,
     /// More entries than this stop the sync.
     pub max_entries: usize,
-    /// Connecting and reading (FTP).
-    pub timeout: Duration,
 }
 
 impl FilesMirror {
     pub fn new(url: &str) -> Self {
         Self {
             url: url.into(),
-            proto: if url.starts_with("ftp://") {
-                Proto::Ftp
-            } else {
-                Proto::Http
-            },
             parallel: 4,
             retries: 3,
             delete: true,
@@ -78,7 +61,6 @@ impl FilesMirror {
             excludes: vec![],
             max_depth: 32,
             max_entries: 2_000_000,
-            timeout: Duration::from_secs(60),
         }
     }
 
@@ -89,12 +71,8 @@ impl FilesMirror {
             Ok(u) => u,
             Err(e) => return bad(format!("{:?}: {e}", self.url)),
         };
-        let want = match self.proto {
-            Proto::Http => &["http", "https"][..],
-            Proto::Ftp => &["ftp"][..],
-        };
-        if !want.contains(&u.scheme()) || u.host_str().is_none() {
-            return bad(format!("{:?} is not an {} URL", self.url, want.join("/")));
+        if !["http", "https"].contains(&u.scheme()) || u.host_str().is_none() {
+            return bad(format!("{:?} is not an http(s) URL", self.url));
         }
         if !u.username().is_empty() || u.password().is_some() {
             return bad("credentials in the URL are not supported".into());
@@ -181,9 +159,7 @@ pub struct FilesCtx<'a> {
 /// An upstream file.
 #[derive(Debug, Clone)]
 struct RFile {
-    size: Option<u64>,
-    modified: Option<SystemTime>,
-    /// HTTP: its URL; FTP: its path.
+    /// Its URL.
     at: String,
 }
 
@@ -383,7 +359,7 @@ pub fn parse_listing(base: &Url, html: &str) -> (Vec<(String, bool, Url)>, u64) 
 /// One listed directory.
 struct Dir {
     rel: String,
-    /// HTTP: its URL; FTP: its path.
+    /// Its URL.
     at: String,
     depth: usize,
 }
@@ -408,91 +384,12 @@ fn join_rel(dir: &str, name: &str) -> String {
     }
 }
 
-fn ftp_target(url: &str) -> Result<(String, u16, String), Error> {
-    let u = Url::parse(url).map_err(|e| Error::Config(e.to_string()))?;
-    let host = u.host_str().unwrap_or_default().to_string();
-    let path = String::from_utf8(percent_decode(u.path()))
-        .map_err(|_| Error::Config("the FTP path is not UTF-8".into()))?;
-    Ok((host, u.port_or_known_default().unwrap_or(21), path))
-}
-
-fn ftp_fetch_error(e: FtpError) -> FetchError {
-    match e {
-        FtpError::Transient(m) => FetchError::Transient(m),
-        FtpError::Missing(_) => FetchError::Missing(550),
-        FtpError::Bad(m) => FetchError::Bad(m),
-        FtpError::Interrupted => FetchError::Interrupted,
-    }
-}
-
-/// An FTP connection per worker, made again after a failure.
-struct FtpConn<'a> {
-    host: &'a str,
-    port: u16,
-    timeout: Duration,
-    conn: Option<Ftp>,
-}
-
-impl FtpConn<'_> {
-    /// Runs `op`, on a new connection after a transient failure, up to
-    /// `retries` more times.
-    fn with<T>(
-        &mut self,
-        retries: u32,
-        backoff: Duration,
-        cancel: &AtomicBool,
-        mut op: impl FnMut(&mut Ftp, u32) -> Result<T, FtpError>,
-    ) -> Result<T, FtpError> {
-        let mut attempt = 0;
-        loop {
-            let r = match &mut self.conn {
-                Some(c) => op(c, attempt),
-                None => Ftp::connect(self.host, self.port, self.timeout).and_then(|c| {
-                    let c = self.conn.insert(c);
-                    op(c, attempt)
-                }),
-            };
-            match r {
-                Err(FtpError::Transient(m)) => {
-                    self.conn = None;
-                    if attempt >= retries {
-                        return Err(FtpError::Transient(m));
-                    }
-                    attempt += 1;
-                    if crate::fetch::pause(backoff, attempt, cancel).is_err() {
-                        return Err(FtpError::Interrupted);
-                    }
-                }
-                Err(FtpError::Interrupted) => {
-                    self.conn = None;
-                    return Err(FtpError::Interrupted);
-                }
-                r => return r,
-            }
-        }
-    }
-}
-
-impl Drop for FtpConn<'_> {
-    fn drop(&mut self) {
-        if let Some(c) = self.conn.take() {
-            c.quit();
-        }
-    }
-}
-
 /// Lists the whole upstream tree.
 fn walk(m: &FilesMirror, ctx: &FilesCtx, ex: &Excludes) -> Result<Walk, Error> {
     let out = Mutex::new(Walk::default());
     let entries = AtomicUsize::new(0);
     let listed = AtomicUsize::new(0);
-    let (root_at, ftp) = match m.proto {
-        Proto::Http => (m.url.clone(), None),
-        Proto::Ftp => {
-            let (h, p, path) = ftp_target(&m.url)?;
-            (path, Some((h, p)))
-        }
-    };
+    let root_at = m.url.clone();
     // HTTP: links must stay under the root as the server answers it
     // (after redirects of the root itself).
     let prefix: Mutex<Option<Url>> = Mutex::new(None);
@@ -501,7 +398,6 @@ fn walk(m: &FilesMirror, ctx: &FilesCtx, ex: &Excludes) -> Result<Walk, Error> {
         at: root_at,
         depth: 0,
     }]);
-    let backoff = ctx.http.backoff_first();
     let note = |w: &mut Walk, rel: &str, e: String| {
         if rel.is_empty() {
             w.fatal = Some(format!("listing the top directory: {e}"));
@@ -509,7 +405,7 @@ fn walk(m: &FilesMirror, ctx: &FilesCtx, ex: &Excludes) -> Result<Walk, Error> {
             w.failed.push(format!("{rel}/: {e}"));
         }
     };
-    let add = |rel: &str, name: &str, dir: bool, at: String, size, modified, depth| {
+    let add = |rel: &str, name: &str, dir: bool, at: String, depth| {
         let r = join_rel(rel, name);
         if ex.matches(&r, dir) {
             return;
@@ -539,10 +435,7 @@ fn walk(m: &FilesMirror, ctx: &FilesCtx, ex: &Excludes) -> Result<Walk, Error> {
                 depth: depth + 1,
             });
         } else {
-            out.lock()
-                .unwrap()
-                .files
-                .insert(r, RFile { size, modified, at });
+            out.lock().unwrap().files.insert(r, RFile { at });
         }
     };
     let progress = || {
@@ -555,134 +448,59 @@ fn walk(m: &FilesMirror, ctx: &FilesCtx, ex: &Excludes) -> Result<Walk, Error> {
         }
     };
     let workers = m.parallel.clamp(1, 64);
-    match ftp {
-        None => q.run(
-            workers,
-            || (),
-            |(), d: Dir| {
-                if ctx.cancel.load(Ordering::Relaxed) {
+    q.run(
+        workers,
+        || (),
+        |(), d: Dir| {
+            if ctx.cancel.load(Ordering::Relaxed) {
+                q.halt();
+                return;
+            }
+            let res = ctx.http.get_page_retry(&d.at, m.retries, ctx.cancel);
+            let (at, body) = match res {
+                Ok(r) => r,
+                Err(FetchError::Interrupted) => {
                     q.halt();
                     return;
                 }
-                let res = ctx.http.get_page_retry(&d.at, m.retries, ctx.cancel);
-                let (at, body) = match res {
-                    Ok(r) => r,
-                    Err(FetchError::Interrupted) => {
-                        q.halt();
-                        return;
-                    }
-                    Err(e) => return note(&mut out.lock().unwrap(), &d.rel, e.to_string()),
-                };
-                let Ok(mut base) = Url::parse(&at) else {
-                    return note(&mut out.lock().unwrap(), &d.rel, format!("bad URL {at:?}"));
-                };
-                if !base.path().ends_with('/') {
-                    base.set_path(&format!("{}/", base.path()));
-                }
-                {
-                    let mut p = prefix.lock().unwrap();
-                    match &*p {
-                        None => *p = Some(base.clone()),
-                        Some(root) => {
-                            if base.origin() != root.origin()
-                                || !base.path().starts_with(root.path())
-                            {
-                                return note(
-                                    &mut out.lock().unwrap(),
-                                    &d.rel,
-                                    format!("redirected out of the tree to {at}"),
-                                );
-                            }
+                Err(e) => return note(&mut out.lock().unwrap(), &d.rel, e.to_string()),
+            };
+            let Ok(mut base) = Url::parse(&at) else {
+                return note(&mut out.lock().unwrap(), &d.rel, format!("bad URL {at:?}"));
+            };
+            if !base.path().ends_with('/') {
+                base.set_path(&format!("{}/", base.path()));
+            }
+            {
+                let mut p = prefix.lock().unwrap();
+                match &*p {
+                    None => *p = Some(base.clone()),
+                    Some(root) => {
+                        if base.origin() != root.origin() || !base.path().starts_with(root.path()) {
+                            return note(
+                                &mut out.lock().unwrap(),
+                                &d.rel,
+                                format!("redirected out of the tree to {at}"),
+                            );
                         }
                     }
                 }
-                let (links, unusable) = parse_listing(&base, &String::from_utf8_lossy(&body));
-                if unusable > 0 {
-                    let mut w = out.lock().unwrap();
-                    w.skipped += unusable;
-                    w.warnings.push(format!(
-                        "{}/: {unusable} name(s) that cannot be stored left out",
-                        d.rel
-                    ));
-                }
-                for (name, dir, u) in links {
-                    add(&d.rel, &name, dir, u.to_string(), None, None, d.depth);
-                }
-                progress();
-            },
-        ),
-        Some((host, port)) => q.run(
-            workers,
-            || FtpConn {
-                host: &host,
-                port,
-                timeout: m.timeout,
-                conn: None,
-            },
-            |c, d: Dir| {
-                if ctx.cancel.load(Ordering::Relaxed) {
-                    q.halt();
-                    return;
-                }
-                let dir = if d.at.ends_with('/') {
-                    d.at.clone()
-                } else {
-                    format!("{}/", d.at)
-                };
-                let res = c.with(m.retries, backoff, ctx.cancel, |f, _| {
-                    f.list(&dir, ctx.cancel)
-                });
-                let list = match res {
-                    Ok(l) => l,
-                    Err(FtpError::Interrupted) => {
-                        q.halt();
-                        return;
-                    }
-                    Err(e) => return note(&mut out.lock().unwrap(), &d.rel, e.to_string()),
-                };
-                for e in list {
-                    if !usable(&e.name) || e.name.contains('\u{FFFD}') {
-                        let mut w = out.lock().unwrap();
-                        w.skipped += 1;
-                        if w.warnings.len() < 100 {
-                            w.warnings.push(format!(
-                                "{}: a name that cannot be stored left out",
-                                join_rel(&d.rel, &e.name)
-                            ));
-                        }
-                        continue;
-                    }
-                    match e.kind {
-                        EntryKind::File => add(
-                            &d.rel,
-                            &e.name,
-                            false,
-                            format!("{dir}{}", e.name),
-                            e.size,
-                            e.modified,
-                            d.depth,
-                        ),
-                        EntryKind::Dir => add(
-                            &d.rel,
-                            &e.name,
-                            true,
-                            format!("{dir}{}", e.name),
-                            None,
-                            None,
-                            d.depth,
-                        ),
-                        EntryKind::Link | EntryKind::Other => {
-                            let r = join_rel(&d.rel, &e.name);
-                            if !ex.matches(&r, false) {
-                                out.lock().unwrap().skipped += 1;
-                            }
-                        }
-                    }
-                }
-                progress();
-            },
-        ),
-    }
+            }
+            let (links, unusable) = parse_listing(&base, &String::from_utf8_lossy(&body));
+            if unusable > 0 {
+                let mut w = out.lock().unwrap();
+                w.skipped += unusable;
+                w.warnings.push(format!(
+                    "{}/: {unusable} name(s) that cannot be stored left out",
+                    d.rel
+                ));
+            }
+            for (name, dir, u) in links {
+                add(&d.rel, &name, dir, u.to_string(), d.depth);
+            }
+            progress();
+        },
+    );
     if ctx.cancel.load(Ordering::Relaxed) {
         return Err(Error::Interrupted);
     }
@@ -772,11 +590,6 @@ fn local_tree(
         }
     }
     Ok(out)
-}
-
-fn secs(t: SystemTime) -> u64 {
-    t.duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
 }
 
 /// Moves a finished partial file into place with the upstream's time.
@@ -986,30 +799,10 @@ pub fn sync(m: &FilesMirror, ctx: &FilesCtx) -> Result<FilesReport, Error> {
         .collect();
     let t = Tally::default();
     let etags = Mutex::new(load_etags(ctx.state));
-    // FTP with exact listings: unchanged files need no request.
-    let (todo, quick): (Vec<_>, Vec<_>) = items.into_iter().partition(|(_, f, have)| {
-        !(m.proto == Proto::Ftp
-            && matches!((have, f.size, f.modified), (Some((s, lt)), Some(rs), Some(rt)) if *s == rs && secs(*lt) == secs(rt)))
-    });
-    t.unchanged.store(quick.len() as u64, Ordering::Relaxed);
-    if !todo.is_empty() {
-        (ctx.log)(&format!(
-            "checking {} file(s){}",
-            todo.len(),
-            if quick.is_empty() {
-                String::new()
-            } else {
-                format!(" ({} unchanged by the listing)", quick.len())
-            }
-        ));
+    if !items.is_empty() {
+        (ctx.log)(&format!("checking {} file(s)", items.len()));
     }
-    let q = Queue::new(todo);
-    let ftp = match m.proto {
-        Proto::Ftp => Some(ftp_target(&m.url)?),
-        Proto::Http => None,
-    };
-    let backoff = ctx.http.backoff_first();
-    let no_mdtm_warned = AtomicBool::new(false);
+    let q = Queue::new(items);
     let done = |rel: &str, part: &Path, modified: Option<SystemTime>, bytes: u64| {
         let dest = ctx.dest.join(rel);
         match install(part, &dest, modified) {
@@ -1039,146 +832,43 @@ pub fn sync(m: &FilesMirror, ctx: &FilesCtx) -> Result<FilesReport, Error> {
         e => t.fail(rel, &e.to_string()),
     };
     let workers = m.parallel.clamp(1, 64);
-    match &ftp {
-        None => q.run(
-            workers,
-            || (),
-            |(), (rel, f, have)| {
-                if ctx.cancel.load(Ordering::Relaxed) {
-                    return q.halt();
+    q.run(
+        workers,
+        || (),
+        |(), (rel, f, have)| {
+            if ctx.cancel.load(Ordering::Relaxed) {
+                return q.halt();
+            }
+            let part = part_path(&ctx.dest.join(&rel));
+            let have = have.map(|(size, modified)| Have {
+                size,
+                modified,
+                etag: etags.lock().unwrap().get(&rel).cloned(),
+            });
+            match ctx
+                .http
+                .fetch_file(&f.at, &part, have.as_ref(), m.retries, ctx.cancel)
+            {
+                Ok(Fetched::Unchanged) => {
+                    t.unchanged.fetch_add(1, Ordering::Relaxed);
                 }
-                let part = part_path(&ctx.dest.join(&rel));
-                let have = have.map(|(size, modified)| Have {
-                    size,
+                Ok(Fetched::Done {
+                    bytes,
                     modified,
-                    etag: etags.lock().unwrap().get(&rel).cloned(),
-                });
-                match ctx
-                    .http
-                    .fetch_file(&f.at, &part, have.as_ref(), m.retries, ctx.cancel)
-                {
-                    Ok(Fetched::Unchanged) => {
-                        t.unchanged.fetch_add(1, Ordering::Relaxed);
-                    }
-                    Ok(Fetched::Done {
-                        bytes,
-                        modified,
-                        etag,
-                    }) => {
-                        let mut e = etags.lock().unwrap();
-                        match etag {
-                            Some(tag) => e.insert(rel.clone(), tag),
-                            None => e.remove(&rel),
-                        };
-                        drop(e);
-                        done(&rel, &part, modified, bytes)
-                    }
-                    Err(e) => outcome(&rel, e),
-                }
-            },
-        ),
-        Some((host, port, _)) => q.run(
-            workers,
-            || FtpConn {
-                host,
-                port: *port,
-                timeout: m.timeout,
-                conn: None,
-            },
-            |c, (rel, f, have)| {
-                if ctx.cancel.load(Ordering::Relaxed) {
-                    return q.halt();
-                }
-                // Same size, time unknown from the listing: ask (MDTM).
-                let mut modified = f.modified;
-                if let (Some((s, lt)), Some(rs), None) = (have, f.size, f.modified)
-                    && s == rs
-                {
-                    match c.with(m.retries, backoff, ctx.cancel, |x, _| x.mdtm(&f.at)) {
-                        Ok(Some(rt)) if secs(rt) == secs(lt) => {
-                            t.unchanged.fetch_add(1, Ordering::Relaxed);
-                            return;
-                        }
-                        Ok(Some(rt)) => modified = Some(rt),
-                        Ok(None) => {
-                            if !no_mdtm_warned.swap(true, Ordering::Relaxed) {
-                                t.warnings.lock().unwrap().push(
-                                    "the server tells no modification times: a change that keeps a file's size is not seen".into(),
-                                );
-                            }
-                            t.unchanged.fetch_add(1, Ordering::Relaxed);
-                            return;
-                        }
-                        Err(e) => return outcome(&rel, ftp_fetch_error(e)),
-                    }
-                }
-                let part = part_path(&ctx.dest.join(&rel));
-                let meta = meta_path(&part);
-                // What a partial file is part of: the time and size.
-                let stamp = |t: Option<SystemTime>| t.map(|t| format!("mdtm:{}\n{}\n", secs(t), f.size.unwrap_or(0)));
-                let left = fs::read_to_string(&meta).ok();
-                let res = c.with(m.retries, backoff, ctx.cancel, |x, attempt| {
-                    // Go on where a broken transfer stopped (in this run, or
-                    // one before) only while the file is still that one.
-                    let mut offset = fs::metadata(&part).map(|md| md.len()).unwrap_or(0);
-                    let same = if attempt == 0 {
-                        left.is_some() && left == stamp(modified)
-                    } else {
-                        modified.is_some() && x.mdtm(&f.at)? == modified
+                    etag,
+                }) => {
+                    let mut e = etags.lock().unwrap();
+                    match etag {
+                        Some(tag) => e.insert(rel.clone(), tag),
+                        None => e.remove(&rel),
                     };
-                    if offset == 0 || !same || f.size.is_some_and(|s| offset >= s) {
-                        offset = 0;
-                    }
-                    let mut file = if offset > 0 {
-                        fs::OpenOptions::new().append(true).open(&part)
-                    } else {
-                        crate::retry_fs(|| fs::File::create(&part))
-                    }
-                    .map_err(|e| FtpError::Bad(format!("{}: {e}", part.display())))?;
-                    let n = x.retr(&f.at, offset, ctx.cancel, &mut |b| {
-                        ctx.http.throttle(b.len());
-                        std::io::Write::write_all(&mut file, b)
-                            .map_err(|e| FtpError::Bad(format!("{}: {e}", part.display())))
-                    })?;
-                    let got = offset + n;
-                    if let Some(s) = f.size
-                        && got != s
-                    {
-                        return Err(FtpError::Transient(format!("got {got} of {s} bytes")));
-                    }
-                    Ok(got)
-                });
-                match res {
-                    Ok(bytes) => {
-                        if modified.is_none() {
-                            modified = c
-                                .with(m.retries, backoff, ctx.cancel, |x, _| x.mdtm(&f.at))
-                                .ok()
-                                .flatten();
-                        }
-                        let _ = fs::remove_file(&meta);
-                        done(&rel, &part, modified, bytes)
-                    }
-                    Err(e) => {
-                        // Kept for the next run when it can tell whether the
-                        // file is still the same.
-                        let keep = matches!(e, FtpError::Transient(_) | FtpError::Interrupted)
-                            && fs::metadata(&part).is_ok_and(|m| m.len() > 0);
-                        match stamp(modified).filter(|_| keep) {
-                            Some(s) => {
-                                let _ = fs::write(&meta, s);
-                            }
-                            None => {
-                                let _ = fs::remove_file(&part);
-                                let _ = fs::remove_file(&meta);
-                            }
-                        }
-                        outcome(&rel, ftp_fetch_error(e))
-                    }
+                    drop(e);
+                    done(&rel, &part, modified, bytes)
                 }
-            },
-        ),
-    }
+                Err(e) => outcome(&rel, e),
+            }
+        },
+    );
     if ctx.cancel.load(Ordering::Relaxed) {
         return Err(Error::Interrupted);
     }
@@ -1270,26 +960,15 @@ pub fn probe(m: &FilesMirror, http: &Http) -> Result<String, String> {
     let mut m = m.clone();
     m.validate().map_err(|e| e.to_string())?;
     let cancel = AtomicBool::new(false);
-    match m.proto {
-        Proto::Http => {
-            let (at, body) = http
-                .get_page_retry(&m.url, 1, &cancel)
-                .map_err(|e| e.to_string())?;
-            let mut base = Url::parse(&at).map_err(|e| e.to_string())?;
-            if !base.path().ends_with('/') {
-                base.set_path(&format!("{}/", base.path()));
-            }
-            let (links, _) = parse_listing(&base, &String::from_utf8_lossy(&body));
-            Ok(format!("reachable, {} top-level entries", links.len()))
-        }
-        Proto::Ftp => {
-            let (host, port, path) = ftp_target(&m.url).map_err(|e| e.to_string())?;
-            let mut c = Ftp::connect(&host, port, m.timeout).map_err(|e| e.to_string())?;
-            let n = c.list(&path, &cancel).map_err(|e| e.to_string())?.len();
-            c.quit();
-            Ok(format!("reachable, {n} top-level entries"))
-        }
+    let (at, body) = http
+        .get_page_retry(&m.url, 1, &cancel)
+        .map_err(|e| e.to_string())?;
+    let mut base = Url::parse(&at).map_err(|e| e.to_string())?;
+    if !base.path().ends_with('/') {
+        base.set_path(&format!("{}/", base.path()));
     }
+    let (links, _) = parse_listing(&base, &String::from_utf8_lossy(&body));
+    Ok(format!("reachable, {} top-level entries", links.len()))
 }
 
 #[cfg(test)]
@@ -1364,12 +1043,10 @@ mod tests {
     fn urls() {
         let mut m = FilesMirror::new("https://h/pub");
         m.validate().unwrap();
-        assert_eq!((m.url.as_str(), m.proto), ("https://h/pub/", Proto::Http));
-        let mut f = FilesMirror::new("ftp://h/pub/");
-        assert_eq!(f.proto, Proto::Ftp);
-        f.validate().unwrap();
+        assert_eq!(m.url.as_str(), "https://h/pub/");
         for bad in [
-            "ftp://u:p@h/",
+            "ftp://h/pub/",
+            "https://u:p@h/",
             "https://h/x?y",
             "rsync://h/x/",
             "https://h/x#f",
@@ -1378,8 +1055,5 @@ mod tests {
             let mut m = FilesMirror::new(bad);
             assert!(m.validate().is_err(), "{bad}");
         }
-        let mut wrong = FilesMirror::new("https://h/");
-        wrong.proto = Proto::Ftp;
-        assert!(wrong.validate().is_err());
     }
 }

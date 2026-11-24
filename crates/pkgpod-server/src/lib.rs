@@ -11,7 +11,6 @@ pub mod cargo;
 pub mod composer;
 pub mod conan;
 pub mod config;
-pub mod ftp;
 pub mod galaxy;
 pub mod gems;
 pub mod go;

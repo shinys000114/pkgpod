@@ -201,7 +201,7 @@ pub(crate) enum Cmd {
     Import {
         repo: String,
         /// deb: the archive root (http(s)://host/debian/); files: the
-        /// directory (rsync://, http(s):// listings, ftp://).
+        /// directory (rsync://, http(s):// listings).
         source: String,
         /// deb: the dists to import.
         #[arg(long, value_delimiter = ',')]

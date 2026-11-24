@@ -823,7 +823,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                     blurb: match (f.id(), *k) {
                         ("deb", Kind::Mirror) => "follow an apt archive; served as received",
                         ("deb", _) => "apt packages you upload, signed per version",
-                        ("files", Kind::Mirror) => "follow a file server (rsync, HTTP, FTP)",
+                        ("files", Kind::Mirror) => "follow a file server (rsync, HTTP)",
                         ("files", _) => "any files by path: builds, images, tools",
                         ("oci", _) => "container images for docker and podman",
                         ("pypi", _) => "Python packages for pip, uploaded with twine",
@@ -1339,7 +1339,7 @@ fn base_url(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String], host: &str)
     }
     let l = crate::listeners::list(&app.db)
         .ok()
-        .and_then(|v| v.into_iter().find(|l| l.enabled && l.proto == "http"));
+        .and_then(|v| v.into_iter().find(|l| l.enabled));
     let (scheme, port) = match &l {
         Some(l) => (
             if l.cert.is_empty() { "http" } else { "https" },
@@ -4436,7 +4436,7 @@ async fn member(
 pub struct ListenerRow {
     pub name: String,
     pub addr: String,
-    /// http, https or ftp (with its passive ports).
+    /// http or https.
     pub serves: String,
     pub state: String,
     pub ok: bool,
@@ -4492,8 +4492,7 @@ async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
             .map(|l| {
                 (
                     l.name.clone(),
-                    json!({"addr": l.addr, "cert": l.cert, "key": l.key, "proto": l.proto,
-                           "passive": l.passive, "disabled": !l.enabled}),
+                    json!({"addr": l.addr, "cert": l.cert, "key": l.key, "disabled": !l.enabled}),
                 )
             })
             .collect::<serde_json::Map<String, Value>>(),
@@ -4513,12 +4512,7 @@ async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
                 "stopped".into()
             };
             ListenerRow {
-                serves: match (l.proto.as_str(), l.cert.is_empty()) {
-                    ("ftp", _) if l.passive.is_empty() => "ftp".into(),
-                    ("ftp", _) => format!("ftp (passive {})", l.passive),
-                    (_, true) => "http".into(),
-                    (_, false) => "https".into(),
-                },
+                serves: if l.cert.is_empty() { "http" } else { "https" }.into(),
                 name: l.name,
                 addr: l.addr,
                 state,
@@ -4569,10 +4563,6 @@ async fn listener_set(
         cert: form_get(&form, "cert").trim().to_string(),
         key: form_get(&form, "key").trim().to_string(),
         enabled: form_get(&form, "disabled") != "on",
-        proto: Some(form_get(&form, "proto").trim().to_string())
-            .filter(|p| !p.is_empty())
-            .unwrap_or_else(|| "http".into()),
-        passive: form_get(&form, "passive").trim().to_string(),
     };
     match api::listener_set(
         State(app),

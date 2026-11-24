@@ -8,7 +8,6 @@
 pub mod cache;
 pub mod fetch;
 pub mod files;
-pub mod ftp;
 pub mod http;
 pub mod oci;
 pub mod release;
