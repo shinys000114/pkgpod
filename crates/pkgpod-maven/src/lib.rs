@@ -255,6 +255,43 @@ pub fn snapshot_metadata(
     Some(s)
 }
 
+/// The goal prefix and name of a Maven plugin, from its jar's
+/// META-INF/maven/plugin.xml; `None` for other jars.
+pub fn plugin_of(jar: &[u8]) -> Option<(String, String)> {
+    use pkgpod_base::zip;
+    let members = zip::members(jar).ok()?;
+    let m = members
+        .iter()
+        .find(|m| m.name == "META-INF/maven/plugin.xml")?;
+    let xml = String::from_utf8(zip::read(jar, m, 4 << 20).ok()?).ok()?;
+    // Top-level elements, before the mojos.
+    let head = xml.split("<mojos>").next().unwrap_or(&xml);
+    let tag = |t: &str| {
+        let open = format!("<{t}>");
+        let i = head.find(&open)? + open.len();
+        let j = head[i..].find(&format!("</{t}>"))? + i;
+        Some(head[i..j].trim().to_string())
+    };
+    let prefix = tag("goalPrefix").filter(|p| !p.is_empty())?;
+    Some((prefix, tag("name").unwrap_or_default()))
+}
+
+/// The `<plugins>` of a group's metadata: (artifact, prefix, name).
+pub fn plugins_block(plugins: &BTreeMap<String, (String, String)>) -> String {
+    let mut s = String::from("  <plugins>\n");
+    for (artifact, (prefix, name)) in plugins {
+        let _ = write!(
+            s,
+            "    <plugin>\n      <name>{}</name>\n      <prefix>{}</prefix>\n      <artifactId>{}</artifactId>\n    </plugin>\n",
+            xml(name),
+            xml(prefix),
+            xml(artifact)
+        );
+    }
+    s.push_str("  </plugins>\n");
+    s
+}
+
 /// What a checksum file holds: its first word.
 fn sum_text(data: &[u8]) -> String {
     String::from_utf8_lossy(data)
@@ -347,17 +384,19 @@ impl Format for Maven {
             }
         }
         let (md5, sha1, sha512) = checksums(std::fs::File::open(cx.store.path(&up.sha256))?)?;
-        e.put(
-            &path,
-            Entry::blob(
-                up.sha256,
-                up.size,
-                json!({
-                    "group": c.group, "artifact": c.artifact, "version": c.version,
-                    "time": pkgpod_base::now(), "md5": md5, "sha1": sha1, "sha512": sha512,
-                }),
-            ),
-        )?;
+        let mut meta = json!({
+            "group": c.group, "artifact": c.artifact, "version": c.version,
+            "time": pkgpod_base::now(), "md5": md5, "sha1": sha1, "sha512": sha512,
+        });
+        // A Maven plugin's jar: its goal prefix, for the group's metadata.
+        if path.ends_with(".jar")
+            && up.size <= 256 << 20
+            && let Some((prefix, name)) = plugin_of(&std::fs::read(cx.store.path(&up.sha256))?)
+        {
+            meta["plugin_prefix"] = json!(prefix);
+            meta["plugin_name"] = json!(name);
+        }
+        e.put(&path, Entry::blob(up.sha256, up.size, meta))?;
         Ok(format!("added {path}"))
     }
 
@@ -388,6 +427,8 @@ impl Format for Maven {
         // Artifact directory -> (group, artifact, version -> files).
         let mut arts: BTreeMap<String, (String, String, BTreeMap<String, VersionFiles>)> =
             BTreeMap::new();
+        // Group path -> artifact -> (goal prefix, name) of its plugins.
+        let mut plugins: BTreeMap<String, BTreeMap<String, (String, String)>> = BTreeMap::new();
         let put_sums = |view: &mut Edit, path: &str, sums: [String; 4]| -> Result<()> {
             for (ext, sum) in SUMS.iter().zip(sums) {
                 let (d, n) = cx.store.put_bytes(sum.as_bytes())?;
@@ -413,6 +454,12 @@ impl Format for Maven {
             )?;
             let c = coord(&path)?;
             let time = meta.get("time").and_then(Value::as_i64).unwrap_or(0);
+            if let Some(prefix) = meta.get("plugin_prefix").and_then(Value::as_str) {
+                plugins
+                    .entry(c.group.replace('.', "/"))
+                    .or_default()
+                    .insert(c.artifact.clone(), (prefix.to_string(), s("plugin_name")));
+            }
             let dir = path.rsplitn(3, '/').nth(2).unwrap_or("").to_string();
             let v = arts
                 .entry(dir)
@@ -435,16 +482,31 @@ impl Format for Maven {
             put_sums(view, &path, [md5, sha1, Digest::of(b).hex(), sha512])
         };
         for (dir, (group, artifact, versions)) in &arts {
-            put_text(
-                &mut view,
-                format!("{dir}/{METADATA}"),
-                artifact_metadata(group, artifact, versions),
-            )?;
+            let mut text = artifact_metadata(group, artifact, versions);
+            // A group path that is an artifact's too: one file with both.
+            if let Some(p) = plugins.remove(dir) {
+                text = text.replace(
+                    "</metadata>\n",
+                    &format!("{}</metadata>\n", plugins_block(&p)),
+                );
+            }
+            put_text(&mut view, format!("{dir}/{METADATA}"), text)?;
             for (v, files) in versions {
                 if let Some(m) = snapshot_metadata(group, artifact, v, &files.files) {
                     put_text(&mut view, format!("{dir}/{v}/{METADATA}"), m)?;
                 }
             }
+        }
+        // The groups' own metadata: their plugins, for mvn <prefix>:<goal>.
+        for (dir, p) in &plugins {
+            put_text(
+                &mut view,
+                format!("{dir}/{METADATA}"),
+                format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<metadata>\n{}</metadata>\n",
+                    plugins_block(p)
+                ),
+            )?;
         }
         Ok(Some(view.finish()?))
     }
@@ -523,6 +585,19 @@ mod tests {
         ] {
             assert!(s.contains(want), "{want}\n{s}");
         }
+        let jar = pkgpod_base::zip::make(&[(
+            "META-INF/maven/plugin.xml",
+            b"<plugin>\n  <name>Hello Plugin</name>\n  <goalPrefix>pkhello</goalPrefix>\n  <mojos><mojo><goalPrefix>no</goalPrefix></mojo></mojos>\n</plugin>",
+            true,
+        )]);
+        assert_eq!(
+            plugin_of(&jar),
+            Some(("pkhello".into(), "Hello Plugin".into()))
+        );
+        assert_eq!(
+            plugin_of(&pkgpod_base::zip::make(&[("a.class", b"", false)])),
+            None
+        );
         let (md5, sha1, _) = checksums(&b"abc"[..]).unwrap();
         assert_eq!(md5, "900150983cd24fb0d6963f7d28e17f72");
         assert_eq!(sha1, "a9993e364706816aba3e25717850c26c9cd0d89d");

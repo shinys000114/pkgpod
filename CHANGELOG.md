@@ -20,10 +20,11 @@ Formats:
   other registries.
 - **PyPI**: a simple index (PEP 503, 691, 592, 658/714) for pip; twine's
   upload; yanking.
-- **npm**: a registry for publish and install, dist-tags, deprecation,
-  unpublish.
+- **npm**: a registry for publish and install, dist-tags, deprecation
+  and unpublish (from npm itself too), npm search.
 - **Cargo**: a registry with the sparse index protocol: `cargo publish`,
-  yank and unyank, search; labelled versions as read-only registries.
+  yank and unyank, search, `cargo owner --list` (who may write);
+  labelled versions as read-only registries.
 - **Go**: a module proxy (`GOPROXY`): list, info, go.mod, zip, latest;
   modules uploaded as their zip; private ones over https.
 - **Alpine**: apk packages by branch, repository and architecture, an
@@ -31,14 +32,16 @@ Formats:
   first use, kept in `<data_dir>/rsa` and backed up); noarch packages in
   every architecture.
 - **RPM**: packages by group, repodata (primary, filelists, other) as
-  createrepo_c makes it, repomd.xml signed for `repo_gpgcheck`.
+  createrepo_c makes it, repomd.xml signed for `repo_gpgcheck`; a dnf
+  repository file per group at `<address><group>.repo`.
 - **Helm**: chart repositories: packaged charts uploaded (also through
   ChartMuseum's API, `api/charts`, as `helm cm-push` uses it),
   `index.yaml` made per version with relative URLs, so a label is a
   repository too.
 - **Maven**: files deployed at their Maven paths; maven-metadata.xml
   (artifact and SNAPSHOT version) and md5/sha1/sha256/sha512 made here,
-  uploaded checksums checked; releases deployed once unless `redeploy`.
+  uploaded checksums checked; releases deployed once unless `redeploy`;
+  the group metadata of Maven plugins, for `mvn <prefix>:<goal>`.
 - **RubyGems**: `gem push` and `gem yank`; the compact index (versions,
   names, info), the full index (specs.4.8.gz and its latest and
   prerelease kin, for `gem search -r`) and marshalled gemspecs
@@ -49,7 +52,7 @@ Formats:
   every architecture.
 - **NuGet**: the V3 API (service index, flat container, registrations,
   search) made per request; `dotnet nuget push` with the token as API
-  key; delete unlists.
+  key, symbol packages (.snupkg) beside their package; delete unlists.
 
 Everywhere: versions of every hosted repository with labels
 (`@label` addresses; `-/label/<label>/` for npm), diffs, rollback and
