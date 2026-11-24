@@ -110,3 +110,23 @@ CREATE TABLE oci_uploads (
 pub fn migrate(db: &Db) -> pkgpod_base::Result<()> {
     db.migrate("server", STEPS)
 }
+
+#[cfg(test)]
+mod tests {
+    /// Steps are only ever appended: data made by one release is opened
+    /// by the next. Changing a step fails here; a new step adds its hash.
+    #[test]
+    fn steps_are_only_ever_appended() {
+        let want: &[&str] = &[
+            "57e254758c1921f6",
+            "9d8e6322d6a6c85d",
+            "9dade28c454c505b",
+            "4f91e61340d6bc43",
+        ];
+        let got: Vec<String> = super::STEPS
+            .iter()
+            .map(|s| pkgpod_base::Digest::of(s.as_bytes()).hex()[..16].to_string())
+            .collect();
+        assert_eq!(got, want, "steps of the server's schema changed");
+    }
+}
