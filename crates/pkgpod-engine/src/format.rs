@@ -267,6 +267,11 @@ pub trait Format: Send + Sync {
         let _ = cx;
         Ok(None)
     }
+    /// Orders two versions of a package as the format's clients do
+    /// (the newest greatest).
+    fn version_cmp(&self, a: &str, b: &str) -> std::cmp::Ordering {
+        crate::version::cmp(a, b)
+    }
     /// The catalog row for a leaf of a state tree, if it is a package.
     fn catalog(&self, path: &str, entry: &Entry) -> Option<Item> {
         let _ = (path, entry);

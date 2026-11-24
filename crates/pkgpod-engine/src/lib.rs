@@ -12,6 +12,7 @@ pub mod format;
 pub mod schema;
 pub mod settings;
 pub mod tree;
+pub mod version;
 
 mod engine;
 mod gc;

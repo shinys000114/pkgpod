@@ -925,8 +925,6 @@ impl Engine {
         })?)
     }
 
-    /// Packages whose name contains `q` (all if empty), in one repository
-    /// or all.
     /// The package (name, version) the current version's catalog lists
     /// at `path`, or for a file with `sha` (served under another path).
     pub fn catalog_item(
@@ -959,6 +957,24 @@ impl Engine {
         })?)
     }
 
+    /// The versions of package `name` in a repository's current version,
+    /// oldest first by the format's order.
+    pub fn package_versions(&self, repo: &str, name: &str) -> Result<Vec<String>> {
+        let r = self.repo(repo)?;
+        let f = self.format(&r.format)?.clone();
+        let mut v: Vec<String> = self.db.read(|c| {
+            let mut st = c.prepare_cached(
+                "SELECT DISTINCT version FROM catalog WHERE repo = ?1 AND name = ?2",
+            )?;
+            st.query_map(params![r.id, name], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()
+        })?;
+        v.sort_by(|a, b| f.version_cmp(a, b));
+        Ok(v)
+    }
+
+    /// Packages whose name contains `q` (all if empty), in one repository
+    /// or all.
     pub fn search(&self, q: &str, repo: Option<&str>, limit: usize) -> Result<Vec<Found>> {
         let like = format!(
             "%{}%",
