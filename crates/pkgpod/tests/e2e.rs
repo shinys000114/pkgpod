@@ -7861,6 +7861,17 @@ fn go_modules_through_the_proxy() {
 
 /// The images of `wanted` that are here (none is pulled). With
 /// PKGPOD_REQUIRE_TOOLS (CI), having none fails instead of skipping.
+/// Whether docker has `image` (asked of images built here when missing:
+/// never fails for it).
+fn image_here(image: &str) -> bool {
+    Command::new("docker")
+        .args(["image", "inspect", image])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 fn images_here(wanted: &[&'static str]) -> Vec<&'static str> {
     if !have("docker") {
         return Vec::new();
@@ -10725,7 +10736,7 @@ fn conan_images() -> Vec<&'static str> {
         return Vec::new();
     }
     for (image, ver) in [(CONAN_NEW, "2.34.0"), (CONAN_OLD, "2.0.17")] {
-        if images_here(&[image]).is_empty() {
+        if !image_here(image) {
             let mut c = Command::new("docker")
                 .args(["build", "-q", "-t", image, "-"])
                 .stdin(Stdio::piped())
@@ -10868,7 +10879,7 @@ fn swift_image() -> bool {
     if !have("docker") || images_here(&["swift:6.1"]).is_empty() {
         return false;
     }
-    if images_here(&[SWIFT_IMAGE]).is_empty() {
+    if !image_here(SWIFT_IMAGE) {
         let mut c = Command::new("docker")
             .args(["build", "-q", "-t", SWIFT_IMAGE, "-"])
             .stdin(Stdio::piped())
