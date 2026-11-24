@@ -58,8 +58,13 @@ pub(crate) enum Cmd {
         #[arg(long)]
         password_stdin: bool,
     },
-    /// Server version and who you are.
-    Status,
+    /// Server version and who you are; with a repository, its state.
+    Status {
+        repo: Option<String>,
+        /// A package's latest version and downloads too.
+        #[arg(long)]
+        package: Option<String>,
+    },
     /// Repositories.
     #[command(subcommand)]
     Repo(cmd::RepoCmd),
@@ -258,6 +263,17 @@ pub(crate) enum Cmd {
         /// One package only.
         #[arg(long, default_value = "")]
         name: String,
+    },
+    /// A private repository's badge token (repository admin): shows its
+    /// badges at /.well-known/pkgpod/badges/<repo>/<kind>.svg?token=.
+    Badge {
+        repo: String,
+        /// Make a new one (the old one stops working).
+        #[arg(long, conflicts_with = "remove")]
+        new: bool,
+        /// Remove it: the badges are not shown.
+        #[arg(long)]
+        remove: bool,
     },
     /// Show the server's settings, or change them (server admin).
     Settings {

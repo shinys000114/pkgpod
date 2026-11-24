@@ -140,6 +140,17 @@ Operations:
   year by default (`pkgpod settings --downloads-days`). `pkgpod
   downloads <repo>`, `GET /api/v1/repos/<repo>/downloads`, and the
   console's overview and package list show them.
+- A repository's status (`pkgpod status <repo> [--package]`, `GET
+  /api/v1/repos/<repo>/status`): its version, packages, downloads, a
+  mirror's last sync, a package's latest version in the format's order.
+- SVG badges at `/.well-known/pkgpod/badges/<repo>/<kind>.svg` on every
+  serving listener (status, version, downloads, packages): open for
+  public repositories; a private one's need its badge token (`pkgpod
+  badge <repo> --new`), which shows its badges and nothing else. The
+  console's Settings tab has the Markdown for them.
+- `/metrics` on the management listener for Prometheus: repositories
+  (those the caller may read), versions, packages, mirrors' syncs,
+  files served and downloads since start.
 
 Before 0.1.0 is tagged, to decide: whether `/api/v1` is under the same
 promise as the data, or may still change.

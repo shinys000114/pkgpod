@@ -972,6 +972,14 @@ fn deb_mirror_of_a_hosted_repository() {
     assert!(inrel.contains("BEGIN PGP SIGNED MESSAGE"));
     let jobs = s.json(&["jobs", "mir"]);
     assert_eq!(jobs[0]["state"], "ok");
+    // Its status and badge: the last sync.
+    let st = s.json(&["status", "mir"]);
+    assert_eq!(st["ok"], true, "{st}");
+    assert_eq!(st["sync"]["state"], "ok", "{st}");
+    assert!(st["sync"]["last_ok"].is_i64(), "{st}");
+    let (st, svg) = get(&s.url("/.well-known/pkgpod/badges/mir/status.svg"), None);
+    assert_eq!(st, 200);
+    assert!(svg.contains(">synced<"), "{svg}");
 
     // Promotion from the mirror into a hosted repository, as a plan.
     s.cli(&["repo", "create", "kept"]).unwrap();
@@ -2218,6 +2226,20 @@ fn openapi_describes_what_the_api_sends() {
         200,
     );
     assert_eq!(d["daily"].as_array().unwrap().len(), 7, "{d}");
+    let st = a.ok(
+        "get",
+        "/api/v1/repos/{repo}/status",
+        "/api/v1/repos/web/status?package=hello",
+        None,
+        200,
+    );
+    assert_eq!(st["repo"], "web", "{st}");
+    let bt = "/api/v1/repos/{repo}/badge-token";
+    let t = a.ok("get", bt, "/api/v1/repos/web/badge-token", None, 200);
+    assert!(t["token"].is_null(), "{t}");
+    let t = a.ok("post", bt, "/api/v1/repos/web/badge-token", None, 200);
+    assert!(t["token"].is_string(), "{t}");
+    a.ok("delete", bt, "/api/v1/repos/web/badge-token", None, 204);
     let st = a.ok("get", "/api/v1/settings", "/api/v1/settings", None, 200);
     assert_eq!(st["downloads_days"], 365, "{st}");
     let st = a.ok(
@@ -2777,6 +2799,187 @@ fn download_counts() {
     s.cli(&["repo", "delete", "f", "-y"]).unwrap();
     s.cli(&["repo", "create", "f", "-f", "files"]).unwrap();
     assert_eq!(s.json(&["downloads", "f"])["total"], 0);
+}
+
+/// A repository's status, its badges (open when public, behind the
+/// badge token when not) and /metrics.
+#[test]
+fn status_badges_and_metrics() {
+    let s = Server::start();
+    s.cli(&["repo", "create", "pub", "-f", "files", "-s", "public=true"])
+        .unwrap();
+    s.cli(&["repo", "create", "priv", "-f", "files"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let c = reqwest::blocking::Client::new();
+    for (repo, path) in [
+        ("pub", "tool/1.2/tool.tar.gz"),
+        ("pub", "tool/1.10/tool.tar.gz"),
+        ("pub", "tool/1.10-rc1/tool.tar.gz"),
+        ("priv", "secret/2.0/secret.bin"),
+    ] {
+        let r = c
+            .put(s.url(&format!("/{repo}/{path}")))
+            .basic_auth("token", Some(&tok))
+            .body("x")
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 201);
+    }
+    assert_eq!(
+        c.get(s.url("/pub/tool/1.2/tool.tar.gz"))
+            .send()
+            .unwrap()
+            .status(),
+        200
+    );
+
+    // Status: the version, packages, downloads; a package's latest by
+    // the format's order (1.10 after 1.10-rc1 after 1.2).
+    let st = s.json(&["status", "pub", "--package", "tool.tar.gz"]);
+    assert_eq!(st["version"]["seq"], 4, "{st}");
+    assert_eq!(st["packages"], 3, "{st}");
+    assert_eq!(st["downloads"], 1, "{st}");
+    assert_eq!(st["ok"], true, "{st}");
+    assert_eq!(st["sync"], Value::Null, "{st}");
+    assert_eq!(st["package"]["latest"], "1.10", "{st}");
+    assert_eq!(st["package"]["versions"], 3, "{st}");
+    let out = s.cli(&["status", "pub"]).unwrap();
+    assert!(out.contains("3 packages, 1 downloads"), "{out}");
+
+    // Badges of a public repository: anyone.
+    let badge = |path: &str| {
+        let r = c
+            .get(s.url(&format!("/.well-known/pkgpod/badges/{path}")))
+            .send()
+            .unwrap();
+        let st = r.status().as_u16();
+        let ct = r
+            .headers()
+            .get("content-type")
+            .map(|v| v.to_str().unwrap().to_string())
+            .unwrap_or_default();
+        (st, ct, r.text().unwrap())
+    };
+    let (st, ct, svg) = badge("pub/version.svg?package=tool.tar.gz");
+    assert_eq!(
+        (st, ct.as_str()),
+        (200, "image/svg+xml; charset=utf-8"),
+        "{svg}"
+    );
+    assert!(svg.starts_with("<svg") && svg.contains(">1.10<"), "{svg}");
+    assert!(badge("pub/status.svg").2.contains(">version 4<"));
+    assert!(badge("pub/downloads.svg").2.contains(">1/month<"));
+    assert!(badge("pub/packages.svg").2.contains(">3<"));
+    // What is put in is escaped.
+    let (_, _, svg) = badge("pub/packages.svg?label=%3Cscript%3Ex");
+    assert!(
+        svg.contains("&lt;script&gt;x") && !svg.contains("<script"),
+        "{svg}"
+    );
+    assert_eq!(badge("pub/version.svg").0, 400);
+    assert_eq!(badge("pub/nothing.svg").0, 404);
+
+    // A private repository's: not there without its badge token, as if
+    // it did not exist; nor with another token.
+    let (st, _, none) = badge("nosuch/status.svg");
+    assert_eq!(st, 404);
+    let (st, _, body) = badge("priv/status.svg");
+    assert_eq!((st, body.as_str()), (404, none.as_str()));
+    assert_eq!(badge(&format!("priv/status.svg?token={tok}")).0, 404);
+    assert!(s.json(&["badge", "priv"])["token"].is_null());
+    let bt = s.json(&["badge", "priv", "--new"])["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (st, _, svg) = badge(&format!("priv/version.svg?package=secret.bin&token={bt}"));
+    assert_eq!(st, 200);
+    assert!(svg.contains(">2.0<"), "{svg}");
+    // The badge token opens nothing else.
+    for (who, pw) in [("token", bt.as_str()), ("admin", bt.as_str())] {
+        let r = c
+            .get(s.url("/priv/secret/2.0/secret.bin"))
+            .basic_auth(who, Some(pw))
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 401, "{who}");
+    }
+    let r = c
+        .get(format!("{}/api/v1/repos/priv/status", s.api))
+        .bearer_auth(&bt)
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 401);
+    // A new one: the old one stops working; removed: none works.
+    let bt2 = s.json(&["badge", "priv", "--new"])["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(bt, bt2);
+    assert_eq!(badge(&format!("priv/status.svg?token={bt}")).0, 404);
+    assert_eq!(badge(&format!("priv/status.svg?token={bt2}")).0, 200);
+    s.cli(&["badge", "priv", "--remove"]).unwrap();
+    assert_eq!(badge(&format!("priv/status.svg?token={bt2}")).0, 404);
+    // Only a repository admin manages it.
+    let reader = s
+        .cli(&["token", "create", "r", "--repos", "priv"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let r = c
+        .post(format!("{}/api/v1/repos/priv/badge-token", s.api))
+        .bearer_auth(&reader)
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 403);
+
+    // /metrics: the repositories the caller may read.
+    let metrics = |t: Option<&str>| {
+        let mut b = c.get(format!("{}/metrics", s.api));
+        if let Some(t) = t {
+            b = b.bearer_auth(t);
+        }
+        let r = b.send().unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+        assert!(
+            r.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("text/plain; version=0.0.4")
+        );
+        r.text().unwrap()
+    };
+    let anon = metrics(None);
+    assert!(
+        anon.contains("pkgpod_repository_packages{repo=\"pub\"} 3"),
+        "{anon}"
+    );
+    assert!(
+        anon.contains("pkgpod_downloads_total{repo=\"pub\"} 1"),
+        "{anon}"
+    );
+    assert!(
+        anon.contains("pkgpod_served_files_total{repo=\"pub\"} 1"),
+        "{anon}"
+    );
+    assert!(!anon.contains("priv"), "{anon}");
+    let all = metrics(Some(&tok));
+    assert!(
+        all.contains("pkgpod_repository_version{repo=\"priv\"} 2"),
+        "{all}"
+    );
+    // As Prometheus reads it.
+    let imgs = images_here(&["prom/prometheus:v3.5.0"]);
+    if let Some(img) = imgs.first() {
+        let dir = s.dir.path().join("prom");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("m.txt"), &all).unwrap();
+        let (ok, out) = docker_sh_in(img, Some(&dir), "promtool check metrics < m.txt");
+        assert!(ok, "{out}");
+    }
 }
 
 #[test]
@@ -7530,6 +7733,37 @@ fn console_packages_filter_download_details_bulk() {
         std::fs::read(fixtures.join("hello-rpm-1.0-1.noarch.rpm")).unwrap()
     );
     assert_eq!(page("/r/r/file?path=el9%2Fnothing.rpm").0, 404);
+    // The console's own downloads are not counted; the package list and
+    // the overview show what clients fetched.
+    let pk = text("/r/r/packages");
+    assert!(pk.contains(">Downloads</th>"), "{pk}");
+    let r = reqwest::blocking::Client::new()
+        .get(s.url("/r/el9/Packages/hello-rpm-1.0-1.noarch.rpm"))
+        .basic_auth("pk", Some("pk-password"))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(s.json(&["downloads", "r"])["total"], 1);
+    assert!(text("/r/r").contains("Downloads, 30 days"));
+    // Badges: a private repository's after a token is made.
+    let b = text("/r/r/badges");
+    assert!(
+        b.contains("Make a badge token") && !b.contains(".svg"),
+        "{b}"
+    );
+    let b = c
+        .post(format!("{}/c/r/r/badge-token", s.api))
+        .header("cookie", format!("pkgpod_session={sid}"))
+        .header("x-csrf-token", &csrf)
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(
+        b.contains("/.well-known/pkgpod/badges/r/version.svg?package=hello-rpm&#38;token=")
+            && b.contains("New token"),
+        "{b}"
+    );
     // Details: when it came, its digest.
     let d = text("/r/r/pkg?path=el9%2Fhello-rpm-1.0-1.noarch.rpm");
     assert!(

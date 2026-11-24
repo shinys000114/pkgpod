@@ -1,0 +1,19 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+<div class="card" id="badges">
+  <div class="card-head"><h2>Badges</h2><span class="hint">SVG images of this repository's state, for READMEs; {% if public %}open to anyone, as the repository is public{% else %}a private repository's need its badge token, which shows them and nothing else{% endif %}</span></div>
+  {% if shown %}
+  <div class="table-wrap"><table>
+    <thead><tr><th>Badge</th><th>Markdown</th></tr></thead>
+    <tbody>{% for b in badges %}<tr><td><img src="{{ b.url }}" alt="{{ b.kind }}" loading="lazy"></td><td class="mono-wrap"><code class="copy">{{ b.markdown }}</code></td></tr>{% endfor %}</tbody>
+  </table></div>
+  <p class="muted small card-body">version: <code>?package=&lt;name&gt;</code> (the latest by the format's order); downloads: in 30 days, all or <code>?package=</code>; any: <code>&amp;label=</code> for other words on the left.</p>
+  {% else %}
+  <p class="empty">{% if can_admin %}A private repository's badges need a badge token: make one to get their addresses.{% else %}Not shown: the repository is private and has no badge token (its admins can make one).{% endif %}</p>
+  {% endif %}
+  {% if can_admin && !public %}
+  <div class="card-body">
+    <button type="button" hx-post="/c/r/{{ repo }}/badge-token" hx-target="#badges" hx-swap="outerHTML"{% if has_token %} hx-confirm="Addresses with the old token stop showing the badges. Make a new one?"{% endif %}>{% if has_token %}New token{% else %}Make a badge token{% endif %}</button>
+    {% if has_token %}<button type="button" class="danger" hx-post="/c/r/{{ repo }}/badge-token/delete" hx-target="#badges" hx-swap="outerHTML" hx-confirm="The badges stop showing. Remove the token?">Remove the token</button>{% endif %}
+  </div>
+  {% endif %}
+</div>

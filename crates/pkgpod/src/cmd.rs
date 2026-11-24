@@ -379,7 +379,59 @@ pub fn run(
     let c = &x.c;
     match cmd {
         Cmd::Serve(_) | Cmd::Admin { .. } | Cmd::Login { .. } => unreachable!("handled before"),
-        Cmd::Status => {
+        Cmd::Status {
+            repo: Some(repo),
+            package,
+        } => {
+            let q = package
+                .as_deref()
+                .map(|p| format!("?package={}", enc(p)))
+                .unwrap_or_default();
+            let v = c.get(&format!("/api/v1/repos/{}/status{q}", enc(&repo)))?;
+            x.print(&v, |v| {
+                println!(
+                    "{} ({} {}): {}",
+                    s(&v["repo"]),
+                    s(&v["format"]),
+                    s(&v["kind"]),
+                    if v["ok"] == json!(true) {
+                        "ok"
+                    } else {
+                        "failing"
+                    }
+                );
+                if v["version"].is_object() {
+                    println!(
+                        "version {}: {}",
+                        s(&v["version"]["seq"]),
+                        s(&v["version"]["summary"])
+                    );
+                }
+                if v["sync"].is_object() {
+                    println!(
+                        "last sync {}: {}",
+                        s(&v["sync"]["state"]),
+                        s(&v["sync"]["summary"])
+                    );
+                }
+                println!(
+                    "{} packages, {} downloads in {} days",
+                    s(&v["packages"]),
+                    s(&v["downloads"]),
+                    30
+                );
+                if v["package"].is_object() {
+                    println!(
+                        "{}: latest {}, {} versions, {} downloads",
+                        s(&v["package"]["name"]),
+                        s(&v["package"]["latest"]),
+                        s(&v["package"]["versions"]),
+                        s(&v["package"]["downloads"])
+                    );
+                }
+            });
+        }
+        Cmd::Status { repo: None, .. } => {
             let v = c.get("/api/v1/status")?;
             x.print(&v, |v| {
                 println!("server {} at {}", s(&v["pkgpod"]), c.base);
@@ -1029,6 +1081,24 @@ pub fn run(
                     ]);
                 }
                 table(rows);
+            });
+        }
+        Cmd::Badge { repo, new, remove } => {
+            let path = format!("/api/v1/repos/{}/badge-token", enc(&repo));
+            if remove {
+                c.send(Method::DELETE, &path, &Value::Null)?;
+                return Ok(());
+            }
+            let v = if new {
+                c.post(&path, &Value::Null)?
+            } else {
+                c.get(&path)?
+            };
+            x.print(&v, |v| match v["token"].as_str() {
+                Some(t) => println!(
+                    "{t}\n  <serving address>/.well-known/pkgpod/badges/{repo}/status.svg?token={t}"
+                ),
+                None => println!("no badge token (make one with --new)"),
             });
         }
         Cmd::Settings { downloads_days } => {
