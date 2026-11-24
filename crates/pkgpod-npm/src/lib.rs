@@ -408,8 +408,11 @@ pub fn packument(pkg: &str, p: &Packages, base: &str) -> Option<Value> {
         .and_then(|l| vs.get(&l).cloned())
         .or_else(|| vs.values().next_back().cloned())
         .unwrap_or(Value::Null);
+    // npm puts the revision in the URLs of unpublish; any one is taken.
+    let rev = format!("{}-{last:x}", vs.len());
     let mut out = json!({
         "_id": pkg,
+        "_rev": rev,
         "name": pkg,
         "dist-tags": tags,
         "versions": vs,
