@@ -366,7 +366,13 @@ pub async fn run(app: Arc<App>) -> Result<(), String> {
     let addr = app.cfg.listen.clone();
     let tls = match (&app.cfg.tls_cert, &app.cfg.tls_key) {
         (Some(c), Some(k)) => Some(listeners::tls_acceptor(c, k)?),
-        _ => None,
+        (None, None) => None,
+        _ => {
+            return Err(
+                "tls_cert and tls_key go together: set both in the configuration file, or neither"
+                    .into(),
+            );
+        }
     };
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     tracing::info!("pkgpod {}: management on {addr}", pkgpod_base::version());
