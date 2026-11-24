@@ -472,6 +472,7 @@ pub(crate) async fn repo_status(
     blocking(&app, move |app| {
         let r = app.repo_for(&c, &repo, Role::Read)?;
         let p = q.package.as_deref().filter(|p| !p.is_empty());
+        app.stats.flush(app)?;
         Ok(Json(crate::status::status(app, &r, p)?))
     })
     .await

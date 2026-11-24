@@ -912,6 +912,17 @@ impl Engine {
 
     /// Catalog rows (packages, images' tags, files) of every repository,
     /// by name.
+    /// Catalog rows of one repository's current version.
+    pub fn catalog_count(&self, repo: &str) -> Result<i64> {
+        Ok(self.db.read(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM catalog c JOIN repos r ON r.id = c.repo WHERE r.name = ?1",
+                [repo],
+                |r| r.get(0),
+            )
+        })?)
+    }
+
     pub fn catalog_counts(&self) -> Result<std::collections::HashMap<String, i64>> {
         Ok(self.db.read(|c| {
             let mut st = c.prepare(

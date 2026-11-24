@@ -12,15 +12,11 @@ use crate::{App, Result};
 /// Days the download counts in a status cover.
 pub const DAYS: i64 = 30;
 
+/// The status as the counts written so far have it (callers that want
+/// the last few seconds' downloads too flush first).
 pub fn status(app: &App, r: &RepoInfo, package: Option<&str>) -> Result<Value> {
-    let _ = app.stats.flush(app);
     let cur = app.engine.current(r)?;
-    let packages = app
-        .engine
-        .catalog_counts()?
-        .get(&r.name)
-        .copied()
-        .unwrap_or(0);
+    let packages = app.engine.catalog_count(&r.name)?;
     let mut v = json!({
         "repo": r.name,
         "format": r.format,
