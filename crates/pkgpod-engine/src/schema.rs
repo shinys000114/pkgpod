@@ -69,6 +69,13 @@ INSERT INTO format_notes VALUES ('directories in parts');
     "
 CREATE INDEX catalog_sha ON catalog(repo, sha256);
 ",
+    // When a catalog row came in (cleanup rules go by it); rows already
+    // there count from their repository's current version, which is no
+    // older than they are.
+    "
+ALTER TABLE catalog ADD COLUMN added INTEGER NOT NULL DEFAULT 0;
+UPDATE catalog SET added = COALESCE((SELECT v.created FROM repos r JOIN versions v ON v.id = r.current WHERE r.id = catalog.repo), 0);
+",
 ];
 
 pub fn migrate(db: &Db) -> pkgpod_base::Result<()> {
@@ -81,7 +88,12 @@ mod tests {
     /// by the next. Changing a step fails here; a new step adds its hash.
     #[test]
     fn steps_are_only_ever_appended() {
-        let want: &[&str] = &["74f2eb1383deb982", "df4988794dabd0b4", "a45564131072578a"];
+        let want: &[&str] = &[
+            "74f2eb1383deb982",
+            "df4988794dabd0b4",
+            "a45564131072578a",
+            "773df03be3316758",
+        ];
         let got: Vec<String> = super::STEPS
             .iter()
             .map(|s| pkgpod_base::Digest::of(s.as_bytes()).hex()[..16].to_string())

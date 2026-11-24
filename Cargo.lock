@@ -2445,6 +2445,7 @@ version = "0.0.0"
 dependencies = [
  "pkgpod-base",
  "rusqlite",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",

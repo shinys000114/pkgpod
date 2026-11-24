@@ -286,6 +286,18 @@ impl Format for Helm {
         Ok(format!("added {} {}", chart.name, chart.version))
     }
 
+    fn version_cmp(&self, a: &str, b: &str) -> std::cmp::Ordering {
+        pkgpod_engine::version::semver_cmp(a, b)
+    }
+
+    fn cleanup(&self) -> bool {
+        true
+    }
+
+    fn prerelease(&self, v: &str) -> bool {
+        pkgpod_engine::version::semver_pre(v)
+    }
+
     fn catalog(&self, _path: &str, entry: &Entry) -> Option<Item> {
         let Entry::Blob { meta, .. } = entry else {
             return None;

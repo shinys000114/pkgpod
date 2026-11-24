@@ -272,6 +272,32 @@ pub trait Format: Send + Sync {
     fn version_cmp(&self, a: &str, b: &str) -> std::cmp::Ordering {
         crate::version::cmp(a, b)
     }
+    /// Whether cleanup rules may remove this format's package versions:
+    /// only where the version order is the clients' and removing one
+    /// leaves nothing of it behind.
+    fn cleanup(&self) -> bool {
+        false
+    }
+    /// A pre-release version (for the cleanup rule on them).
+    fn prerelease(&self, v: &str) -> bool {
+        let _ = v;
+        false
+    }
+    /// Where clients pick a package's versions from (a dist, a group):
+    /// cleanup keeps each place's newest. `extra` is the catalog row's.
+    fn cleanup_place(&self, path: &str, extra: &str) -> String {
+        let _ = (path, extra);
+        String::new()
+    }
+    /// Removes the package version at catalog row `path`, with what goes
+    /// with it.
+    fn remove_version(&self, edit: &mut Edit, path: &str) -> Result<()> {
+        if edit.remove(path)? {
+            Ok(())
+        } else {
+            Err(crate::Error::NotFound(format!("no {path}")))
+        }
+    }
     /// The catalog row for a leaf of a state tree, if it is a package.
     fn catalog(&self, path: &str, entry: &Entry) -> Option<Item> {
         let _ = (path, entry);

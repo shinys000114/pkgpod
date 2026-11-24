@@ -381,6 +381,30 @@ impl Format for Go {
         Ok(format!("added {}@{}", m.path, m.version))
     }
 
+    fn version_cmp(&self, a: &str, b: &str) -> std::cmp::Ordering {
+        pkgpod_engine::version::semver_cmp(a, b)
+    }
+
+    fn cleanup(&self) -> bool {
+        true
+    }
+
+    fn prerelease(&self, v: &str) -> bool {
+        pkgpod_engine::version::semver_pre(v)
+    }
+
+    /// The module zip and its go.mod.
+    fn remove_version(&self, e: &mut Edit, path: &str) -> Result<()> {
+        let Some(base) = path.strip_suffix(".zip") else {
+            return Err(Error::NotFound(format!("no {path}")));
+        };
+        if !e.remove(path)? {
+            return Err(Error::NotFound(format!("no {path}")));
+        }
+        e.remove(&format!("{base}.mod"))?;
+        Ok(())
+    }
+
     fn catalog(&self, path: &str, entry: &Entry) -> Option<Item> {
         if !path.ends_with(".zip") {
             return None;
