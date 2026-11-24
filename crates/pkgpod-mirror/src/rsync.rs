@@ -284,6 +284,9 @@ fn run_pass(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Its own process group: rsync forks a receiver that holds the pipes
+    // too, and a cancel has to stop both.
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     let mut child = cmd
         .spawn()
         .map_err(|e| Error::Config(format!("running {}: {e}", m.rsync.display())))?;
@@ -334,24 +337,32 @@ fn run_pass(
     Ok(pass)
 }
 
-/// Waits for rsync; on cancel sends SIGTERM (then SIGKILL) and reports
-/// the interruption.
+/// Waits for rsync; on cancel sends its process group SIGTERM (then
+/// SIGKILL) and reports the interruption. Signalling only the process
+/// rsync started with leaves its receiver running with the output pipes
+/// open, and the job then never ends.
 fn wait(child: &mut Child, cancel: &AtomicBool) -> Result<i32, Error> {
+    let pid = rustix::process::Pid::from_raw(child.id() as i32);
+    let group = |sig| {
+        if let Some(pid) = pid {
+            let _ = rustix::process::kill_process_group(pid, sig);
+        }
+    };
     loop {
         if let Some(st) = child.try_wait()? {
             return Ok(st.code().unwrap_or(20));
         }
         if cancel.load(Ordering::Relaxed) {
-            if let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32) {
-                let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
-            }
+            group(rustix::process::Signal::TERM);
             for _ in 0..50 {
                 if child.try_wait()?.is_some() {
+                    // A receiver that outlived it is not waited for.
+                    group(rustix::process::Signal::KILL);
                     return Err(Error::Interrupted);
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
-            let _ = child.kill();
+            group(rustix::process::Signal::KILL);
             let _ = child.wait();
             return Err(Error::Interrupted);
         }
