@@ -101,6 +101,27 @@
       }
     });
   });
+  // Each cell knows its column's name, for narrow screens where a table
+  // is shown a row at a time (the stylesheet puts the name before it).
+  function labelTables(root) {
+    (root || document).querySelectorAll(".table-wrap table").forEach(function (t) {
+      var names = Array.prototype.map.call(t.querySelectorAll("thead th"), function (th) {
+        return th.textContent.trim();
+      });
+      if (!names.length) return;
+      t.querySelectorAll("tbody tr").forEach(function (tr) {
+        Array.prototype.forEach.call(tr.children, function (td, i) {
+          if (!td.hasAttribute("data-label")) td.setAttribute("data-label", names[i] || "");
+        });
+      });
+    });
+  }
+  document.addEventListener("DOMContentLoaded", function () {
+    labelTables(document);
+  });
+  document.addEventListener("htmx:afterSettle", function (ev) {
+    labelTables(ev.detail.elt.closest ? ev.detail.elt.closest("main") || ev.detail.elt : document);
+  });
   // A running job's log: its new lines come as a stream (Server-Sent
   // Events) and are added to what is shown, which is never replaced, so
   // a selection or the place read stay; followed at the bottom only when
