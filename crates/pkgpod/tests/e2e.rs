@@ -2747,3 +2747,547 @@ fn ftp_serves_public_files_repositories() {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+
+/// A registry client for the tests: Basic auth with a token.
+struct Reg<'a> {
+    c: reqwest::blocking::Client,
+    base: String,
+    tok: Option<&'a str>,
+}
+
+impl Reg<'_> {
+    fn req(&self, m: reqwest::Method, path: &str) -> reqwest::blocking::RequestBuilder {
+        let r = self.c.request(m, format!("{}{path}", self.base));
+        match self.tok {
+            Some(t) => r.basic_auth("token", Some(t)),
+            None => r,
+        }
+    }
+
+    /// Uploads a blob in two chunks; its digest.
+    fn blob(&self, name: &str, data: &[u8]) -> String {
+        let d = format!("sha256:{}", pkgpod_deb::hash::hash_bytes(data).sha256);
+        let r = self
+            .req(reqwest::Method::POST, &format!("/v2/{name}/blobs/uploads/"))
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 202, "{}", r.text().unwrap());
+        let loc = r.headers()["location"].to_str().unwrap().to_string();
+        let half = data.len() / 2;
+        let r = self
+            .req(reqwest::Method::PATCH, &loc)
+            .header("content-range", format!("0-{}", half.max(1) - 1))
+            .body(data[..half].to_vec())
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 202);
+        let loc = r.headers()["location"].to_str().unwrap().to_string();
+        let r = self
+            .req(reqwest::Method::PATCH, &loc)
+            .body(data[half..].to_vec())
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 202);
+        let r = self
+            .req(reqwest::Method::PUT, &format!("{loc}?digest={d}"))
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 201, "{}", r.text().unwrap());
+        assert_eq!(r.headers()["docker-content-digest"], d.as_str());
+        d
+    }
+
+    fn manifest(&self, name: &str, re: &str, mt: &str, body: &str) -> (u16, String) {
+        let r = self
+            .req(reqwest::Method::PUT, &format!("/v2/{name}/manifests/{re}"))
+            .header("content-type", mt)
+            .body(body.to_string())
+            .send()
+            .unwrap();
+        let st = r.status().as_u16();
+        let digest = r
+            .headers()
+            .get("docker-content-digest")
+            .map(|v| v.to_str().unwrap().to_string());
+        (st, digest.unwrap_or_else(|| r.text().unwrap()))
+    }
+}
+
+fn image_manifest(config: &str, layers: &[(&str, usize)], subject: Option<&str>) -> String {
+    let layers: Vec<String> = layers
+        .iter()
+        .map(|(d, n)| {
+            format!(r#"{{"mediaType":"application/vnd.oci.image.layer.v1.tar","digest":"{d}","size":{n}}}"#)
+        })
+        .collect();
+    let subject = subject
+        .map(|s| format!(r#","subject":{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"{s}","size":1}}"#))
+        .unwrap_or_default();
+    format!(
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{config}","size":2}},"layers":[{}]{subject}}}"#,
+        layers.join(",")
+    )
+}
+
+const OCI_M: &str = "application/vnd.oci.image.manifest.v1+json";
+
+#[test]
+fn oci_registry_protocol() {
+    let s = Server::start();
+    s.cli(&["repo", "create", "img", "-f", "oci"]).unwrap();
+    s.cli(&["repo", "create", "other", "-f", "oci"]).unwrap();
+    assert!(
+        s.cli(&["repo", "create", "v2", "-f", "files"]).is_err(),
+        "v2 is kept"
+    );
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "img", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let tok2 = s
+        .cli(&["token", "create", "ci2", "--repos", "other", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let base = s.url("");
+    let reg = Reg {
+        c: reqwest::blocking::Client::new(),
+        base: base.clone(),
+        tok: Some(&tok),
+    };
+    let anon = Reg {
+        c: reqwest::blocking::Client::new(),
+        base: base.clone(),
+        tok: None,
+    };
+    // The version check: 401 with a challenge without credentials.
+    let r = anon.req(reqwest::Method::GET, "/v2/").send().unwrap();
+    assert_eq!(r.status().as_u16(), 401);
+    assert!(
+        r.headers()["www-authenticate"]
+            .to_str()
+            .unwrap()
+            .starts_with("Basic")
+    );
+    assert_eq!(
+        reg.req(reqwest::Method::GET, "/v2/")
+            .send()
+            .unwrap()
+            .status()
+            .as_u16(),
+        200
+    );
+
+    let cfg = reg.blob("img/app", b"{}");
+    let layer = reg.blob("img/app", &vec![7u8; 100_000]);
+    // A manifest naming a blob not uploaded is refused.
+    let missing = format!("sha256:{}", "e".repeat(64));
+    let (st, body) = reg.manifest(
+        "img/app",
+        "1.0",
+        OCI_M,
+        &image_manifest(&cfg, &[(&missing, 1)], None),
+    );
+    assert_eq!(st, 400);
+    assert!(body.contains("MANIFEST_BLOB_UNKNOWN"), "{body}");
+    let m = image_manifest(&cfg, &[(&layer, 100_000)], None);
+    let (st, digest) = reg.manifest("img/app", "1.0", OCI_M, &m);
+    assert_eq!(st, 201, "{digest}");
+    // Pull by tag and by digest.
+    let r = reg
+        .req(reqwest::Method::GET, "/v2/img/app/manifests/1.0")
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(r.headers()["content-type"], OCI_M);
+    assert_eq!(r.headers()["docker-content-digest"], digest.as_str());
+    assert_eq!(r.text().unwrap(), m);
+    let r = reg
+        .req(
+            reqwest::Method::HEAD,
+            &format!("/v2/img/app/manifests/{digest}"),
+        )
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    let r = reg
+        .req(reqwest::Method::GET, &format!("/v2/img/app/blobs/{layer}"))
+        .header("range", "bytes=0-9")
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 206);
+    assert_eq!(r.bytes().unwrap().as_ref(), &[7u8; 10]);
+    // A signature referring to it, and the referrers API.
+    let sig_cfg = reg.blob("img/app", b"{\"sig\":1}");
+    let (st, sig) = reg.manifest(
+        "img/app",
+        &format!(
+            "sha256:{}",
+            pkgpod_deb::hash::hash_bytes(image_manifest(&sig_cfg, &[], Some(&digest)).as_bytes())
+                .sha256
+        ),
+        OCI_M,
+        &image_manifest(&sig_cfg, &[], Some(&digest)),
+    );
+    assert_eq!(st, 201, "{sig}");
+    let refs: Value = reg
+        .req(
+            reqwest::Method::GET,
+            &format!("/v2/img/app/referrers/{digest}"),
+        )
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(refs["manifests"][0]["digest"], sig.as_str(), "{refs}");
+    // An index, whose children must be there.
+    let index = |child: &str| {
+        format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{{"mediaType":"{OCI_M}","digest":"{child}","size":1}}]}}"#
+        )
+    };
+    let idx = "application/vnd.oci.image.index.v1+json";
+    assert_eq!(
+        reg.manifest("img/app", "multi", idx, &index(&missing)).0,
+        400
+    );
+    assert_eq!(
+        reg.manifest("img/app", "multi", idx, &index(&digest)).0,
+        201
+    );
+    // Tags, paged.
+    for t in ["a", "b", "c"] {
+        assert_eq!(reg.manifest("img/app", t, OCI_M, &m).0, 201);
+    }
+    let r = reg
+        .req(reqwest::Method::GET, "/v2/img/app/tags/list?n=2")
+        .send()
+        .unwrap();
+    assert!(r.headers()["link"].to_str().unwrap().contains("last=a"));
+    let t: Value = r.json().unwrap();
+    assert_eq!(t["tags"], serde_json::json!(["1.0", "a"]));
+    let t: Value = reg
+        .req(reqwest::Method::GET, "/v2/img/app/tags/list?last=b")
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(t["tags"], serde_json::json!(["c", "multi"]));
+    // A manifest a tag names cannot be removed by path; by the API its
+    // tags go with it.
+    let path = format!("app/_manifests/{digest}");
+    assert!(s.cli(&["rm", "img", &path, "-y"]).is_err());
+    assert_eq!(
+        reg.req(reqwest::Method::DELETE, "/v2/img/app/manifests/c")
+            .send()
+            .unwrap()
+            .status()
+            .as_u16(),
+        202
+    );
+    assert_eq!(
+        reg.req(reqwest::Method::GET, "/v2/img/app/manifests/c")
+            .send()
+            .unwrap()
+            .status()
+            .as_u16(),
+        404
+    );
+
+    // Docker's own schema2 manifests, as the classic image store pushes
+    // them; a blob of a few MiB in chunks; references checked.
+    let big = reg.blob("img/d2", &vec![3u8; 5 << 20]);
+    let c2 = reg.blob("img/d2", b"{\"d2\":1}");
+    let d2m = "application/vnd.docker.distribution.manifest.v2+json";
+    let schema2 = format!(
+        r#"{{"schemaVersion":2,"mediaType":"{d2m}","config":{{"mediaType":"application/vnd.docker.container.image.v1+json","digest":"{c2}","size":8}},"layers":[{{"mediaType":"application/vnd.docker.image.rootfs.diff.tar.gzip","digest":"{big}","size":{}}}]}}"#,
+        5 << 20
+    );
+    assert_eq!(reg.manifest("img/d2", "latest", d2m, &schema2).0, 201);
+    let r = reg
+        .req(reqwest::Method::GET, "/v2/img/d2/manifests/latest")
+        .send()
+        .unwrap();
+    assert_eq!(r.headers()["content-type"], d2m);
+    assert_eq!(r.text().unwrap(), schema2);
+    let r = reg
+        .req(reqwest::Method::GET, &format!("/v2/img/d2/blobs/{big}"))
+        .send()
+        .unwrap();
+    assert_eq!(r.bytes().unwrap().len(), 5 << 20);
+    for bad in ["sha256:xyz", "-bad", "sha512:aa"] {
+        let r = reg
+            .req(reqwest::Method::GET, &format!("/v2/img/d2/manifests/{bad}"))
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 400, "{bad}");
+    }
+
+    // Another repository: neither sees nor mounts img's blobs without
+    // read access to img.
+    let reg2 = Reg {
+        c: reqwest::blocking::Client::new(),
+        base: base.clone(),
+        tok: Some(&tok2),
+    };
+    let r = reg2
+        .req(reqwest::Method::GET, &format!("/v2/other/x/blobs/{layer}"))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 404);
+    let r = reg2
+        .req(
+            reqwest::Method::POST,
+            &format!("/v2/other/x/blobs/uploads/?mount={layer}&from=img/app"),
+        )
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 202, "no mount: a new upload instead");
+    // With read access to both, the mount is made.
+    let both = s
+        .cli(&["token", "create", "both", "--repos", "img,other", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let reg3 = Reg {
+        c: reqwest::blocking::Client::new(),
+        base,
+        tok: Some(&both),
+    };
+    let r = reg3
+        .req(
+            reqwest::Method::POST,
+            &format!("/v2/other/x/blobs/uploads/?mount={layer}&from=img/app"),
+        )
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 201);
+    assert_eq!(
+        reg2.req(reqwest::Method::HEAD, &format!("/v2/other/x/blobs/{layer}"))
+            .send()
+            .unwrap()
+            .status()
+            .as_u16(),
+        200
+    );
+    // Writing without the right: 403 for a known caller, 401 without.
+    assert_eq!(
+        reg2.req(reqwest::Method::POST, "/v2/img/app/blobs/uploads/")
+            .send()
+            .unwrap()
+            .status()
+            .as_u16(),
+        404,
+        "img is not other's to see"
+    );
+    assert_eq!(
+        anon.req(reqwest::Method::POST, "/v2/img/app/blobs/uploads/")
+            .send()
+            .unwrap()
+            .status()
+            .as_u16(),
+        401
+    );
+    // Every push was a version; the catalog has the tags.
+    let found = s.json(&["search", "app"]);
+    assert!(found.to_string().contains("multi"), "{found}");
+}
+
+/// docker with its own config directory; (ok, output).
+fn docker(cfg: &Path, args: &[&str], stdin: Option<&str>) -> (bool, String) {
+    use std::io::Write;
+    let mut c = Command::new("docker");
+    c.env("DOCKER_CONFIG", cfg)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut ch = c.spawn().unwrap();
+    if let Some(i) = stdin {
+        ch.stdin.take().unwrap().write_all(i.as_bytes()).unwrap();
+    }
+    drop(ch.stdin.take());
+    let o = ch.wait_with_output().unwrap();
+    (
+        o.status.success(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        ),
+    )
+}
+
+#[test]
+fn oci_with_docker() {
+    let probe = Command::new("docker").arg("info").output();
+    if !probe.is_ok_and(|o| o.status.success()) {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&["repo", "create", "img", "-f", "oci"]).unwrap();
+    s.cli(&["repo", "create", "pub", "-f", "oci", "-s", "public=true"])
+        .unwrap();
+    s.cli(&["repo", "create", "copy", "-f", "oci"]).unwrap();
+    let tok = s
+        .cli(&[
+            "token",
+            "create",
+            "ci",
+            "--repos",
+            "img,pub,copy",
+            "--write",
+        ])
+        .unwrap()
+        .trim()
+        .to_string();
+    let host = format!("127.0.0.1:{}", s.serve_port);
+    let cfg = s.dir.path().join("docker");
+    std::fs::create_dir_all(&cfg).unwrap();
+    // Images built here, from nothing: no network.
+    let build = |tag: &str, text: &str| {
+        let d = s
+            .dir
+            .path()
+            .join(format!("ctx-{}", tag.replace(['/', ':'], "_")));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("hello.txt"), text).unwrap();
+        std::fs::write(
+            d.join("Dockerfile"),
+            "FROM scratch\nCOPY hello.txt /hello.txt\n",
+        )
+        .unwrap();
+        let (ok, out) = docker(&cfg, &["build", "-q", "-t", tag, d.to_str().unwrap()], None);
+        assert!(ok, "{out}");
+    };
+    let content = |tag: &str| {
+        let (ok, id) = docker(&cfg, &["create", tag, "/x"], None);
+        assert!(ok, "{id}");
+        let id = id.trim().to_string();
+        let (ok, out) = docker(&cfg, &["cp", &format!("{id}:/hello.txt"), "-"], None);
+        docker(&cfg, &["rm", &id], None);
+        assert!(ok, "{out}");
+        out
+    };
+    let mine: Vec<String> = ["img/hello:1", "pub/hello:1", "copy/hello:1"]
+        .iter()
+        .map(|t| format!("{host}/{t}"))
+        .collect();
+    // Only the tags made here go, also when an assertion fails.
+    struct Cleanup(PathBuf, Vec<String>);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            for t in &self.1 {
+                docker(&self.0, &["rmi", "-f", t], None);
+            }
+        }
+    }
+    let _cleanup = Cleanup(cfg.clone(), mine.clone());
+    for t in &mine {
+        docker(&cfg, &["rmi", "-f", t], None);
+    }
+    let unique = format!("pkgpod {}", s.serve_port);
+
+    // A private repository: login with a token, push, remove, pull.
+    let (ok, out) = docker(
+        &cfg,
+        &["login", &host, "-u", "token", "--password-stdin"],
+        Some(&tok),
+    );
+    assert!(ok, "{out}");
+    build(&mine[0], &format!("{unique} one"));
+    let (ok, out) = docker(&cfg, &["push", &mine[0]], None);
+    assert!(ok, "{out}");
+    docker(&cfg, &["rmi", "-f", &mine[0]], None);
+    let (ok, out) = docker(&cfg, &["pull", &mine[0]], None);
+    assert!(ok, "{out}");
+    assert!(content(&mine[0]).contains(&format!("{unique} one")));
+    // Pushed again with other content, then rolled back: the old one.
+    let first = s.json(&["versions", "img"])[0]["seq"].as_i64().unwrap();
+    build(&mine[0], &format!("{unique} two"));
+    let (ok, out) = docker(&cfg, &["push", &mine[0]], None);
+    assert!(ok, "{out}");
+    let plan = s
+        .cli(&["rollback", "img", &first.to_string(), "-y"])
+        .unwrap();
+    assert!(!plan.contains("not applied"), "{plan}");
+    docker(&cfg, &["rmi", "-f", &mine[0]], None);
+    let (ok, out) = docker(&cfg, &["pull", &mine[0]], None);
+    assert!(ok, "{out}");
+    assert!(content(&mine[0]).contains(&format!("{unique} one")));
+    // Promoted into another repository, pulled from there.
+    s.cli(&["promote", "img", "copy", "hello", "-y"]).unwrap();
+    let (ok, out) = docker(&cfg, &["pull", &mine[2]], None);
+    assert!(ok, "{out}");
+    assert!(content(&mine[2]).contains(&format!("{unique} one")));
+
+    // A public repository: pushed with the token, pulled without, and
+    // no push without.
+    build(&mine[1], &format!("{unique} public"));
+    let (ok, out) = docker(&cfg, &["push", &mine[1]], None);
+    assert!(ok, "{out}");
+    docker(&cfg, &["logout", &host], None);
+    docker(&cfg, &["rmi", "-f", &mine[1]], None);
+    let (ok, out) = docker(&cfg, &["pull", &mine[1]], None);
+    assert!(ok, "anonymous pull: {out}");
+    assert!(content(&mine[1]).contains(&format!("{unique} public")));
+    build(&mine[1], &format!("{unique} anonymous"));
+    let (ok, out) = docker(&cfg, &["push", &mine[1]], None);
+    assert!(!ok, "anonymous push: {out}");
+}
+
+#[test]
+fn v2_paths_stay_with_file_trees() {
+    let s = Server::start();
+    s.cli(&[
+        "repo",
+        "create",
+        "ft",
+        "-f",
+        "files",
+        "-s",
+        "public=true",
+        "-s",
+        "urls=http://files.test/",
+    ])
+    .unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "ft", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let c = reqwest::blocking::Client::new();
+    let on_host =
+        |m: reqwest::Method, path: &str| c.request(m, s.url(path)).header("host", "files.test");
+    // Anonymous writes get 401 (clients send credentials after it).
+    let r = on_host(reqwest::Method::PUT, "/v2/readme.txt")
+        .body("x")
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 401);
+    assert!(r.headers().contains_key("www-authenticate"));
+    let r = on_host(reqwest::Method::PUT, "/v2/readme.txt")
+        .basic_auth("token", Some(&tok))
+        .body("a file under v2/")
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 201, "{}", r.text().unwrap());
+    let check = || {
+        let r = on_host(reqwest::Method::GET, "/v2/readme.txt")
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+        assert_eq!(r.text().unwrap(), "a file under v2/");
+        let r = on_host(reqwest::Method::GET, "/v2/").send().unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+        assert!(r.text().unwrap().contains("readme.txt"));
+    };
+    check();
+    // An OCI repository without an address (reached on every host) does
+    // not take them over.
+    s.cli(&["repo", "create", "o", "-f", "oci"]).unwrap();
+    check();
+    let r = c.get(s.url("/v2/")).send().unwrap();
+    assert_eq!(r.status().as_u16(), 401, "the registry on other hosts");
+}

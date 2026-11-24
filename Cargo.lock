@@ -2414,6 +2414,7 @@ dependencies = [
  "pkgpod-engine",
  "pkgpod-files",
  "pkgpod-mirror",
+ "pkgpod-oci",
  "reqwest",
  "rusqlite",
  "rustls",

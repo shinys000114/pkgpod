@@ -73,6 +73,8 @@ pub struct Table {
     pub routes: Vec<Route>,
     /// Repositories without addresses.
     pub unrouted: BTreeSet<String>,
+    /// OCI repositories (reached through `/v2/` at a host root).
+    pub oci: BTreeSet<String>,
 }
 
 /// What a request resolved to.
@@ -122,6 +124,9 @@ impl Table {
     pub fn build(repos: &[RepoInfo]) -> Table {
         let mut t = Table::default();
         for r in repos {
+            if r.format == "oci" {
+                t.oci.insert(r.name.clone());
+            }
             let urls = r.setting_list("urls");
             if urls.is_empty() {
                 t.unrouted.insert(r.name.clone());
@@ -148,6 +153,37 @@ impl Table {
             .iter()
             .find(|r| r.host == host && r.prefix == prefix && r.repo != by_other_than)
             .map(|r| r.repo.clone())
+    }
+
+    /// Does `/v2/` on `host` belong to the OCI registry: an OCI
+    /// repository has an address on it, or one without addresses is
+    /// reached on every host?
+    pub fn has_registry(&self, host: &str) -> bool {
+        let host = host.to_ascii_lowercase();
+        self.routes
+            .iter()
+            .any(|r| self.oci.contains(&r.repo) && host_matches(&r.host, &host))
+            || self.unrouted.iter().any(|r| self.oci.contains(r))
+    }
+
+    /// The OCI repository holding the image `name` (segments) on `host`,
+    /// and the image's name in it: the repository whose address is the
+    /// longest prefix of the name (a host root: all of it), else one
+    /// without addresses named by the name's first segment.
+    pub fn registry(&self, host: &str, name: &[String]) -> Option<(String, String)> {
+        let host = host.to_ascii_lowercase();
+        let best = self
+            .routes
+            .iter()
+            .filter(|r| self.oci.contains(&r.repo) && host_matches(&r.host, &host))
+            .filter(|r| name.len() > r.prefix.len() && name[..r.prefix.len()] == r.prefix[..])
+            .max_by_key(|r| r.prefix.len());
+        if let Some(r) = best {
+            return Some((r.repo.clone(), name[r.prefix.len()..].join("/")));
+        }
+        let first = name.first()?;
+        (name.len() > 1 && self.unrouted.contains(first) && self.oci.contains(first))
+            .then(|| (first.clone(), name[1..].join("/")))
     }
 
     pub fn route(&self, host: &str, path: &[String]) -> Hit {

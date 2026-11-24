@@ -291,6 +291,10 @@ impl Engine {
 
     pub fn create_repo(&self, n: NewRepo, actor: &str) -> Result<RepoInfo> {
         check_name("repository", &n.name)?;
+        if n.name == "v2" {
+            // /v2/ is the OCI registry's at a host root.
+            return Err(Error::Invalid("v2 is kept for the OCI registry API".into()));
+        }
         let f = self.format(&n.format)?.clone();
         if !f.kinds().contains(&n.kind) {
             return Err(Error::Invalid(format!(
