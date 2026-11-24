@@ -45,10 +45,15 @@ fn yes() -> bool {
     true
 }
 
+/// A running listener: its configuration, stop signal and generation.
+type Task = (Listener, watch::Sender<bool>, u64);
+
 /// The listener tasks running now.
 #[derive(Default)]
 pub struct Running {
-    tasks: Mutex<HashMap<String, (Listener, watch::Sender<bool>)>>,
+    /// By name: the configuration, the stop signal, and the task's
+    /// generation (a task that ends tells only on its own behalf).
+    tasks: Mutex<HashMap<String, Task>>,
     /// The tasks of listeners told to stop, until they have drained.
     handles: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     errors: Mutex<HashMap<String, String>>,
@@ -180,7 +185,7 @@ pub fn reconcile(app: &Arc<App>) {
         .tasks
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    tasks.retain(|name, (cfg, stop)| {
+    tasks.retain(|name, (cfg, stop, _)| {
         let keep = want.iter().any(|w| w == cfg && w.enabled);
         if !keep {
             tracing::info!("listener {name}: stopping");
@@ -193,7 +198,9 @@ pub fn reconcile(app: &Arc<App>) {
             continue;
         }
         let (tx, rx) = watch::channel(false);
-        tasks.insert(l.name.clone(), (l.clone(), tx));
+        static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tasks.insert(l.name.clone(), (l.clone(), tx, generation));
         let app2 = app.clone();
         let h = tokio::spawn(async move {
             let name = l.name.clone();
@@ -205,7 +212,7 @@ pub fn reconcile(app: &Arc<App>) {
                     .remove(&name);
                 let ports = crate::ftp::parse_ports(&l.passive).unwrap_or(None);
                 if let Err(e) = crate::ftp::serve(app2.clone(), &l.addr, ports, rx).await {
-                    fail(&app2, &name, e);
+                    fail(&app2, &name, generation, e);
                 }
                 return;
             }
@@ -215,7 +222,7 @@ pub fn reconcile(app: &Arc<App>) {
                 match tls_acceptor(Path::new(&l.cert), Path::new(&l.key)) {
                     Ok(a) => Some(a),
                     Err(e) => {
-                        fail(&app2, &name, e);
+                        fail(&app2, &name, generation, e);
                         return;
                     }
                 }
@@ -227,7 +234,7 @@ pub fn reconcile(app: &Arc<App>) {
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&name);
             if let Err(e) = serve_router(&l.addr, tls, router, rx).await {
-                fail(&app2, &name, e);
+                fail(&app2, &name, generation, e);
             }
         });
         let mut hs = app
@@ -240,24 +247,32 @@ pub fn reconcile(app: &Arc<App>) {
     }
 }
 
-fn fail(app: &App, name: &str, e: String) {
+/// A listener task of `generation` could not serve: recorded, and its
+/// entry dropped, unless the listener has been started anew since (a
+/// task still retrying an old address must not stop its successor).
+fn fail(app: &App, name: &str, generation: u64, e: String) {
+    let mut tasks = app
+        .listeners
+        .tasks
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if tasks.get(name).is_some_and(|t| t.2 != generation) {
+        tracing::debug!("listener {name}: an earlier start ended: {e}");
+        return;
+    }
     tracing::error!("listener {name}: {e}");
+    tasks.remove(name);
     app.listeners
         .errors
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(name.to_string(), e);
-    app.listeners
-        .tasks
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(name);
 }
 
 /// Tells every listener to stop; returns their tasks, which end once
 /// the requests in flight are answered.
 pub fn stop_all(app: &App) -> Vec<tokio::task::JoinHandle<()>> {
-    for (_, (_, stop)) in app
+    for (_, (_, stop, _)) in app
         .listeners
         .tasks
         .lock()
@@ -277,9 +292,16 @@ pub fn stop_all(app: &App) -> Vec<tokio::task::JoinHandle<()>> {
 
 /// Binds `addr`, waiting a little if it is in use: a listener changed
 /// in place may take a moment to close its old socket.
-pub async fn bind(addr: &str) -> Result<tokio::net::TcpListener, String> {
+/// Gives up at once when `stop` turns true meanwhile.
+pub async fn bind(
+    addr: &str,
+    stop: &watch::Receiver<bool>,
+) -> Result<tokio::net::TcpListener, String> {
     let mut tries = 0;
     loop {
+        if *stop.borrow() {
+            return Err(format!("{addr}: stopped before it could listen"));
+        }
         match tokio::net::TcpListener::bind(addr).await {
             Ok(l) => return Ok(l),
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && tries < 20 => {
@@ -300,7 +322,7 @@ pub async fn serve_router(
     router: Router,
     mut stop: watch::Receiver<bool>,
 ) -> Result<(), String> {
-    let listener = bind(addr).await?;
+    let listener = bind(addr, &stop).await?;
     tracing::info!(
         "serving on {}{}",
         listener
