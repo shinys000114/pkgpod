@@ -4,6 +4,18 @@
 {% block main %}
 <div class="page-head"><div class="title"><h1>Job {{ job.id }}</h1>
   <p class="sub">sync of <a href="/r/{{ repo }}">{{ repo }}</a> · by {{ job.actor }} · started {{ job.started }}</p></div></div>
+{% if !missing.is_empty() %}
+<div class="card">
+  <div class="card-head"><h2>{{ missing.len() }} file(s) gone upstream</h2></div>
+  <div class="card-body">
+    <p>The upstream answered 404 or 410 for these files, so the dists that list them kept their previous indices. When the upstream dropped them for good, allow them to be missing (Settings, Missing files allowed) and the next sync goes past them.</p>
+    {% if can_allow %}<p><button class="primary" hx-post="/c/jobs/{{ job.id }}/allow-missing" hx-target="next .result">Allow these and sync again</button></p>
+    <div class="result"></div>{% endif %}
+    <details><summary>The files</summary><pre class="log">{% for p in missing %}{{ p }}
+{% endfor %}</pre></details>
+  </div>
+</div>
+{% endif %}
 <div class="card">
   {% include "job_log.html" %}
 </div>

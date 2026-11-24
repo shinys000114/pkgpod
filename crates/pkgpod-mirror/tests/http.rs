@@ -271,6 +271,7 @@ fn failures_keep_the_previous_dist() {
         r.dists[0].error.as_deref().unwrap().contains("HTTP 404"),
         "{r:#?}"
     );
+    assert_eq!(r.missing_upstream, std::slice::from_ref(&cpath));
     m.ignore_missing.insert(cpath.clone());
     let r = e.run(&m);
     ok(&r);

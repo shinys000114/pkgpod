@@ -426,6 +426,12 @@ fn sync(
             d.error.as_deref().unwrap_or("failed")
         ));
     }
+    if !rep.missing_upstream.is_empty() {
+        s.push_str(&format!(
+            "; {} file(s) gone upstream: the job's page can allow them",
+            rep.missing_upstream.len()
+        ));
+    }
     Ok((rep.ok(), s, json!(rep)))
 }
 
