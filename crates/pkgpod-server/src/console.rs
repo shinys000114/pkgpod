@@ -748,18 +748,55 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String]) -> Vec<UseLine
                 ),
             });
         }
+        let has_src = pkgpod_deb::source::dirs(&mut e)
+            .map(|v| v.iter().any(|(_, d, _, _)| *d == dist))
+            .unwrap_or(false);
+        let opt = if r.setting_bool("sign") {
+            format!(" [signed-by={key}]")
+        } else {
+            " [trusted=yes]".into()
+        };
         out.push(UseLine {
             label: "Source".into(),
             text: format!(
-                "echo 'deb{} {base} {dist} {comps}' | sudo tee /etc/apt/sources.list.d/{}.list",
-                if r.setting_bool("sign") {
-                    format!(" [signed-by={key}]")
-                } else {
-                    " [trusted=yes]".into()
-                },
+                "echo 'deb{opt} {base} {dist} {comps}' | sudo tee /etc/apt/sources.list.d/{}.list",
                 r.name
             ),
         });
+        out.push(UseLine {
+            label: "Or as deb822 (apt 2.x)".into(),
+            text: format!(
+                "sudo tee /etc/apt/sources.list.d/{}.sources <<'EOF'\nTypes: deb{}\nURIs: {base}\nSuites: {dist}\nComponents: {comps}\n{}\nEOF",
+                r.name,
+                if has_src { " deb-src" } else { "" },
+                if r.setting_bool("sign") {
+                    format!("Signed-By: {key}")
+                } else {
+                    "Trusted: yes".into()
+                }
+            ),
+        });
+        if has_src {
+            out.push(UseLine {
+                label: "Sources".into(),
+                text: format!(
+                    "echo 'deb-src{opt} {base} {dist} {comps}' | sudo tee -a /etc/apt/sources.list.d/{}.list; apt-get source <package>",
+                    r.name
+                ),
+            });
+        }
+        // A labelled version, served as it was at its own address.
+        if let Some(label) = app
+            .engine
+            .versions(&r.name)
+            .ok()
+            .and_then(|v| v.into_iter().find_map(|v| v.labels.first().cloned()))
+        {
+            out.push(UseLine {
+                label: format!("Pinned to the label {label}"),
+                text: format!("deb{opt} {base}@{label}/ {dist} {comps}"),
+            });
+        }
         if !r.setting_bool("public") {
             let host = base
                 .split("://")
@@ -778,7 +815,8 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String]) -> Vec<UseLine
         out.push(UseLine {
             label: "Upload".into(),
             text: format!(
-                "curl -u token:<token> -T hello_1.0_amd64.deb '{base}upload/?dists={dist}'"
+                "curl -u token:<token> -T hello_1.0_amd64.deb '{base}upload/?dists={dist}'\npkgpod upload {} hello_1.0-1.dsc -s dists={dist}   # a source package with its files",
+                r.name
             ),
         });
         if !dists.is_empty() {
