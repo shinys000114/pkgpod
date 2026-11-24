@@ -5510,7 +5510,7 @@ fn helm_charts_with_helm() {
     let (st, out) = upload(other);
     assert_eq!(st, 409, "{out}");
     let base = s.url("/charts/");
-    for image in images {
+    for &image in &images {
         let script = format!(
             "set -e; export HOME=/tmp; \
              helm repo add pk {base} --username token --password {tok} >/dev/null; \
@@ -5534,6 +5534,81 @@ fn helm_charts_with_helm() {
             "{image}: helm template: {out}"
         );
     }
+    // ChartMuseum's API, as helm cm-push and CI scripts use it.
+    let (ok, out) = docker_sh_in(
+        images[0],
+        Some(&work),
+        "set -e; sed -i \"s/^version: .*/version: 0.3.0/\" web/Chart.yaml; helm package web >/dev/null",
+    );
+    assert!(ok, "{out}");
+    let api = s.url("/charts/api/charts");
+    let form = |data: Vec<u8>| {
+        reqwest::blocking::multipart::Form::new().part(
+            "chart",
+            reqwest::blocking::multipart::Part::bytes(data).file_name("c.tgz"),
+        )
+    };
+    let r = c
+        .post(&api)
+        .basic_auth("token", Some(&tok))
+        .multipart(form(chart("web-0.3.0.tgz")))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 201, "{}", r.text().unwrap());
+    let mut changed = chart("web-0.3.0.tgz");
+    changed.extend_from_slice(&[0; 16]);
+    let r = c
+        .post(&api)
+        .basic_auth("token", Some(&tok))
+        .body(changed.clone())
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 409);
+    let r = c
+        .post(format!("{api}?force"))
+        .basic_auth("token", Some(&tok))
+        .body(changed)
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 201);
+    let list: Value = c
+        .get(&api)
+        .basic_auth("token", Some(&tok))
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(list["web"].as_array().unwrap().len(), 3, "{list}");
+    let one: Value = c
+        .get(format!("{api}/web/0.3.0"))
+        .basic_auth("token", Some(&tok))
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(one["urls"][0], "charts/web-0.3.0.tgz");
+    let (ok, out) = docker_sh(
+        images[0],
+        &format!(
+            "set -e; export HOME=/tmp; helm repo add pk {base} --username token --password {tok} >/dev/null; \
+             helm search repo pk/web"
+        ),
+    );
+    assert!(ok && out.contains("0.3.0"), "{out}");
+    let r = c
+        .delete(format!("{api}/web/0.3.0"))
+        .basic_auth("token", Some(&tok))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    let r = c
+        .get(format!("{api}/web/0.3.0"))
+        .basic_auth("token", Some(&tok))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 404);
+    let r = c.post(&api).body(chart("web-0.3.0.tgz")).send().unwrap();
+    assert_eq!(r.status().as_u16(), 401, "anonymous");
 }
 
 /// Runs mvn's `script` in the Maven image with `work` at /work. Plugins

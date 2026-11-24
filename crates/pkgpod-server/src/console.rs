@@ -1041,7 +1041,8 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String], host: &str) ->
         out.push(UseLine {
             label: "Upload".into(),
             text: format!(
-                "helm package <chart dir>\ncurl -u token:<token> -T <chart>-<version>.tgz {base}upload\npkgpod upload {} <chart>-<version>.tgz",
+                "helm package <chart dir>\nhelm cm-push <chart>-<version>.tgz {}   # the helm-push plugin, ChartMuseum's API\ncurl -u token:<token> --data-binary @<chart>-<version>.tgz {base}api/charts\npkgpod upload {} <chart>-<version>.tgz",
+                r.name,
                 r.name
             ),
         });
