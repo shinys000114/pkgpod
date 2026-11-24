@@ -251,6 +251,36 @@ fn tree_mode_and_cancel() {
     );
 }
 
+/// A cancel stops every process of the rsync run, not only the first:
+/// a forked one that ignores SIGTERM and holds the output pipes would
+/// otherwise keep the sync from ever returning.
+#[test]
+fn cancel_stops_a_forked_rsync() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = dir.path().join("rsync");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\ntrap '' TERM\necho started\nsh -c \"trap '' TERM; sleep 600\" &\nwait\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut m = RsyncMirror::new("rsync://127.0.0.1:1/up/", Mode::Tree);
+    m.rsync = fake;
+    let dest = dir.path().join("t");
+    let cancel = AtomicBool::new(false);
+    let t = Instant::now();
+    let res = std::thread::scope(|s| {
+        s.spawn(|| {
+            std::thread::sleep(Duration::from_millis(500));
+            cancel.store(true, Ordering::Relaxed);
+        });
+        run(&m, &dest, &cancel).0
+    });
+    assert!(matches!(res, Err(Error::Interrupted)), "{res:?}");
+    assert!(t.elapsed() < Duration::from_secs(15), "{:?}", t.elapsed());
+}
+
 #[test]
 fn only_daemon_sources() {
     let out = tempfile::tempdir().unwrap();
