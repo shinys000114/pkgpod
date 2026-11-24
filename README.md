@@ -16,10 +16,12 @@ Status: in development, nothing released.
   them; imports of existing apt repositories.
 - **Files**: plain trees uploaded by path, or mirrored from a file server
   (rsync, HTTP listings, FTP); public ones also served over FTP.
-- **OCI images**: a registry for docker, podman and oras (push, pull,
-  referrers), images imported from other registries.
-- **PyPI**: an index for pip and uv, uploads with twine; yanking.
-- **npm**: a registry for npm, yarn and pnpm; dist-tags, deprecation.
+- **OCI images**: a registry speaking the distribution spec (push, pull,
+  referrers; tried with docker), images imported from other registries.
+- **PyPI**: a simple index for pip, uploads as twine sends them;
+  yanking.
+- **npm**: a registry for npm (tried with npm 9); dist-tags,
+  deprecation.
 - Repositories are reached by their own addresses (host name and path);
   a reverse proxy in front only provides certificates. There is no
   pull-through proxy: packages from public registries are imported or
