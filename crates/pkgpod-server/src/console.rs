@@ -20,6 +20,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use pkgpod_engine::Kind;
 use pkgpod_engine::settings::{Field, FieldKind};
+use pkgpod_engine::tree::Entry;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -65,6 +66,8 @@ pub fn router() -> Router<Arc<App>> {
         .route("/r/{repo}/changes", get(changes_part))
         .route("/r/{repo}/settings", get(settings_part))
         .route("/r/{repo}/use", get(use_part))
+        .route("/r/{repo}/file", get(file_download))
+        .route("/r/{repo}/pkg", get(pkg_detail))
         .route("/c/r/{repo}/use-token", post(use_token))
         .route("/r/{repo}/actions", get(actions_part))
         .route("/c/repos", post(repo_create))
@@ -2314,6 +2317,10 @@ pub struct TreeRow {
 struct TreePart {
     /// The stored and served trees differ.
     both: bool,
+    /// A mirror: files are on disk, not blobs (no console download).
+    mirror: bool,
+    /// Clients' address of what is shown (served, current or a label).
+    base: String,
     repo: String,
     path: String,
     crumbs: Vec<(String, String)>,
@@ -2338,6 +2345,7 @@ async fn tree_part(
     v: Viewer,
     Path(repo): Path<String>,
     Query(q): Query<TreeQ>,
+    headers: HeaderMap,
 ) -> Response {
     // What clients get, unless the stored tree is asked for (a files
     // repository's are the same).
@@ -2408,8 +2416,27 @@ async fn tree_part(
             .then(|| app.auth.role(&v.caller, &repo, r.setting_bool("public")))
             .flatten()
     }) >= Some(Role::Write);
+    let info = app.engine.repo(&repo).ok();
+    let mirror = info.as_ref().is_some_and(|r| r.kind == Kind::Mirror);
+    // What clients fetch the shown files at: the served tree (a files
+    // repository's or a mirror's is the stored one), current or labelled.
+    let base = match &info {
+        Some(r) if served || format == "files" || mirror => {
+            let b = base_url(&app, r, &r.setting_list("urls"), &host_of(&headers));
+            if q.version.is_empty() {
+                b
+            } else if q.version.parse::<i64>().is_err() {
+                format!("{b}@{}/", q.version)
+            } else {
+                String::new()
+            }
+        }
+        _ => String::new(),
+    };
     render(&TreePart {
         both: format != "files",
+        mirror,
+        base,
         repo,
         path,
         crumbs,
@@ -2418,6 +2445,182 @@ async fn tree_part(
         served,
         can_write: can_write && !served,
     })
+}
+
+#[derive(Deserialize)]
+struct FileQ {
+    path: String,
+    #[serde(default)]
+    served: String,
+    #[serde(default)]
+    version: String,
+}
+
+/// A file of a hosted repository's stored (or served) tree, downloaded
+/// through the console (its session is not the serving listeners'):
+/// always as an attachment, never shown on the console's origin.
+async fn file_download(
+    State(app): St,
+    v: Viewer,
+    Path(repo): Path<String>,
+    Query(q): Query<FileQ>,
+    req: Request,
+) -> Response {
+    let r = match app.repo_for(&v.caller, &repo, Role::Read) {
+        Ok(r) => r,
+        Err(e) => return err_part(e),
+    };
+    let (app2, r2, q2) = (app.clone(), r.clone(), (q.path.clone(), q.version.clone()));
+    let found = tokio::task::spawn_blocking(
+        move || -> Result<Option<(pkgpod_base::Digest, std::path::PathBuf)>> {
+            let ver = if q2.1.is_empty() {
+                app2.engine.current(&r2)?
+            } else {
+                Some(app2.engine.resolve(&r2.name, &q2.1)?)
+            };
+            let Some(ver) = ver else { return Ok(None) };
+            let root = if q.served == "1" {
+                ver.served()
+            } else {
+                ver.root
+            };
+            Ok(match app2.engine.objects().resolve(&root, &q2.0)? {
+                Some(Entry::Blob { sha256, .. }) => Some((sha256, r2.store().path(&sha256))),
+                _ => None,
+            })
+        },
+    )
+    .await;
+    let Ok(Ok(Some((sha, file)))) = found else {
+        return status_page(StatusCode::NOT_FOUND);
+    };
+    let name = q.path.rsplit('/').next().unwrap_or("file").to_string();
+    let mut resp = crate::serve::serve_blob(&file, &sha, &name, None, false, req).await;
+    let h = resp.headers_mut();
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_graphic() && c != '"' && c != '\\' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{safe}\"")) {
+        h.insert(header::CONTENT_DISPOSITION, v);
+    }
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    resp
+}
+
+fn status_page(st: StatusCode) -> Response {
+    let mut r = msg(false, st.canonical_reason().unwrap_or("error").to_string());
+    *r.status_mut() = st;
+    r
+}
+
+#[derive(Template)]
+#[template(path = "pkg_detail.html")]
+struct PkgDetail {
+    repo: String,
+    path: String,
+    size: String,
+    sha256: String,
+    meta: String,
+    added: String,
+    labels: Vec<String>,
+    looked: usize,
+}
+
+#[derive(Deserialize)]
+struct PathQ {
+    path: String,
+}
+
+/// One file of the catalog: its metadata, digest, the version that
+/// brought it (among the last 300) and the labels that have it.
+async fn pkg_detail(
+    State(app): St,
+    v: Viewer,
+    Path(repo): Path<String>,
+    Query(q): Query<PathQ>,
+) -> Response {
+    let r = match app.repo_for(&v.caller, &repo, Role::Read) {
+        Ok(r) => r,
+        Err(e) => return err_part(e),
+    };
+    let (app2, path) = (app.clone(), q.path.clone());
+    let res = tokio::task::spawn_blocking(move || -> Result<PkgDetail> {
+        let cur = app2
+            .engine
+            .current(&r)?
+            .ok_or_else(|| Error::NotFound("no version".into()))?;
+        let objects = app2.engine.objects();
+        let Some(Entry::Blob { sha256, size, meta }) = objects.resolve(&cur.root, &path)? else {
+            return Err(Error::NotFound(format!("no file {path}")));
+        };
+        let mut versions = app2.engine.versions(&r.name)?;
+        versions.sort_by_key(|v| std::cmp::Reverse(v.seq));
+        versions.truncate(300);
+        let looked = versions.len();
+        let mut added = String::new();
+        let mut labels = Vec::new();
+        for v in &versions {
+            let same = matches!(objects.resolve(&v.root, &path), Ok(Some(Entry::Blob { sha256: s, .. })) if s == sha256);
+            if same {
+                added = format!("version {} · {} · {}", v.seq, when(Some(v.created)), v.actor);
+                labels.extend(v.labels.iter().cloned());
+            } else if !added.is_empty() {
+                break;
+            }
+        }
+        // Labelled versions older than the run above.
+        for v in &versions {
+            if !v.labels.is_empty()
+                && !v.labels.iter().all(|l| labels.contains(l))
+                && matches!(objects.resolve(&v.root, &path), Ok(Some(Entry::Blob { sha256: s, .. })) if s == sha256)
+            {
+                labels.extend(v.labels.iter().cloned());
+            }
+        }
+        labels.sort();
+        labels.dedup();
+        // A deb's control text reads better than its JSON.
+        let meta_text = match meta.get("control").and_then(Value::as_str) {
+            Some(c) => c.to_string(),
+            None => {
+                let mut m = meta.clone();
+                if let Some(o) = m.as_object_mut() {
+                    o.retain(|_, v| v.to_string().len() < 4000);
+                }
+                serde_json::to_string_pretty(&m).unwrap_or_default()
+            }
+        };
+        Ok(PkgDetail {
+            repo: r.name.clone(),
+            path,
+            size: crate::serve::human(size),
+            sha256: sha256.hex(),
+            meta: meta_text,
+            added,
+            labels,
+            looked,
+        })
+    })
+    .await;
+    match res {
+        Ok(Ok(d)) => render(&d),
+        Ok(Err(e)) => err_part(e),
+        Err(e) => msg(false, e.to_string()),
+    }
 }
 
 /// What a package row removes: the file, or a source package's whole
@@ -2447,7 +2650,10 @@ pub struct PkgRow {
     pub version: String,
     pub extra: String,
     pub size: String,
+    /// What removing it removes (a source package's directory).
     pub path: String,
+    /// The file itself, in the stored tree.
+    pub file: String,
 }
 
 #[derive(Template)]
@@ -2457,6 +2663,12 @@ struct PackagesPart {
     show_repo: bool,
     can_write: bool,
     repo: String,
+    /// The name filter, and the "where" filter with its choices.
+    q: String,
+    at: String,
+    wheres: Vec<(String, bool)>,
+    /// Repositories the chosen rows can be promoted into.
+    others: Vec<String>,
     limit_hit: bool,
     /// The card's title and the columns' names, by format.
     title: &'static str,
@@ -2507,6 +2719,7 @@ fn catalog_words(format: &str) -> (&'static str, [&'static str; 3], bool) {
         "maven" => ("Artifacts", ["Group:artifact", "Version", "Note"], true),
         "gems" => ("Gems", ["Gem", "Version", "Note"], true),
         "nuget" => ("Packages", ["Package", "Version", "Note"], true),
+        "pub" | "composer" | "cran" => ("Packages", ["Package", "Version", "Note"], true),
         "deb" => ("Packages", ["Package", "Version", "Where"], true),
         _ => ("Packages", ["Package", "Version", "Where"], true),
     }
@@ -2526,6 +2739,7 @@ fn pkg_rows(v: &Value) -> Vec<PkgRow> {
                 .map(crate::serve::human)
                 .unwrap_or_default(),
             path: package_path(&s(&h["path"])),
+            file: s(&h["path"]),
         })
         .collect()
 }
@@ -2540,6 +2754,9 @@ struct QQ {
 struct MirrorQ {
     #[serde(default)]
     q: String,
+    /// Hosted: only rows of this "where".
+    #[serde(default)]
+    at: String,
     #[serde(default)]
     dist: String,
     #[serde(default)]
@@ -2651,6 +2868,7 @@ async fn mirror_packages(app: Arc<App>, v: Viewer, repo: String, q: MirrorQ) -> 
                     extra: p.arch.clone(),
                     size: crate::serve::human(p.size),
                     path: p.filename.clone(),
+                    file: p.filename.clone(),
                 })
                 .collect();
         }
@@ -2675,56 +2893,79 @@ async fn packages_part(
         }
         _ => {}
     }
-    let q = QQ { q: mq.q };
     let limit = 500;
-    let res = api::packages(
-        State(app.clone()),
-        v.who(),
-        Path(repo.clone()),
-        Query(api::SearchQ {
-            q: q.q,
-            repo: None,
-            limit: Some(limit),
-        }),
-    )
-    .await;
-    match json_of(res) {
-        Ok(list) => {
-            let rows = pkg_rows(&list);
-            // npm versions go by the unpublish operation (a dist-tag may
-            // name one), Go's by remove (a version is a .zip and a .mod),
-            // not by path; a Maven row is a version's .pom, not its files.
-            let can_write = app
-                .engine
-                .repo(&repo)
-                .ok()
-                .filter(|r| !matches!(r.format.as_str(), "npm" | "go" | "maven"))
-                .and_then(|r| app.auth.role(&v.caller, &repo, r.setting_bool("public")))
-                >= Some(Role::Write);
-            let format = app.engine.repo(&repo).map(|r| r.format).unwrap_or_default();
-            let (title, cols, show_size) = catalog_words(&format);
-            let mut rows = rows;
-            if format == "oci" {
-                // A digest's first 12 hex digits tell images apart.
-                for r in &mut rows {
-                    if r.extra.len() > 19 {
-                        r.extra = format!("{}…", &r.extra[..19]);
-                    }
-                }
-            }
-            render(&PackagesPart {
-                limit_hit: rows.len() >= limit,
-                rows,
-                show_repo: false,
-                can_write,
-                repo,
-                title,
-                cols,
-                show_size,
-            })
+    let r = match app.repo_for(&v.caller, &repo, Role::Read) {
+        Ok(r) => r,
+        Err(e) => return err_part(e),
+    };
+    let (title, cols, show_size) = catalog_words(&r.format);
+    // Filtered before the rows are cut to the limit.
+    let (app2, name, q, at) = (app.clone(), repo.clone(), mq.q.clone(), mq.at.clone());
+    let found = tokio::task::spawn_blocking(move || app2.engine.search(&q, Some(&name), 1_000_000))
+        .await
+        .map_err(|e| Error::Invalid(e.to_string()))
+        .and_then(|x| x.map_err(Error::from));
+    let found = match found {
+        Ok(f) => f,
+        Err(e) => return err_part(e),
+    };
+    let wheres: Vec<(String, bool)> = if cols[2] == "Where" {
+        let mut w: Vec<String> = found.iter().map(|f| f.extra.clone()).collect();
+        w.sort();
+        w.dedup();
+        if w.len() > 1 && w.len() <= 80 {
+            w.into_iter().map(|x| (x.clone(), x == at)).collect()
+        } else {
+            Vec::new()
         }
-        Err(e) => err_part(e),
+    } else {
+        Vec::new()
+    };
+    let hits: Vec<_> = found
+        .into_iter()
+        .filter(|f| at.is_empty() || f.extra == at)
+        .take(limit)
+        .collect();
+    let mut rows = pkg_rows(&json!(hits));
+    let can_write = !matches!(r.format.as_str(), "npm" | "go" | "maven")
+        && r.kind != Kind::Mirror
+        && app.auth.role(&v.caller, &repo, r.setting_bool("public")) >= Some(Role::Write);
+    if r.format == "oci" {
+        // A digest's first 12 hex digits tell images apart.
+        for r in &mut rows {
+            if r.extra.len() > 19 {
+                r.extra = format!("{}…", &r.extra[..19]);
+            }
+        }
     }
+    let others = if can_write {
+        app.engine
+            .repos()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|o| o.format == r.format && o.name != r.name && o.kind != Kind::Mirror)
+            .filter(|o| {
+                app.auth.role(&v.caller, &o.name, o.setting_bool("public")) >= Some(Role::Write)
+            })
+            .map(|o| o.name)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    render(&PackagesPart {
+        limit_hit: rows.len() >= limit,
+        rows,
+        show_repo: false,
+        can_write,
+        repo,
+        q: mq.q,
+        at: mq.at,
+        wheres,
+        others,
+        title,
+        cols,
+        show_size,
+    })
 }
 
 pub struct VersionRow {
@@ -3290,6 +3531,10 @@ async fn search_rows(State(app): St, v: Viewer, Query(q): Query<QQ>) -> Response
                 show_repo: true,
                 can_write: false,
                 repo: String::new(),
+                q: String::new(),
+                at: String::new(),
+                wheres: Vec::new(),
+                others: Vec::new(),
                 title: "Packages",
                 cols: ["Name", "Version", "Where"],
                 show_size: true,

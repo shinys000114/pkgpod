@@ -88,6 +88,49 @@
       }
     });
   });
+  function bytes(s) {
+    var m = /^([0-9.]+)\s*(B|KiB|MiB|GiB|TiB)?$/.exec(s.trim());
+    if (!m) return null;
+    var k = { B: 1, KiB: 1024, MiB: 1048576, GiB: 1073741824, TiB: 1099511627776 }[m[2] || "B"];
+    return parseFloat(m[1]) * k;
+  }
+  function sortBy(th) {
+    var table = th.closest("table");
+    var i = Array.prototype.indexOf.call(th.parentElement.children, th);
+    var up = th.getAttribute("aria-sort") !== "ascending";
+    table.querySelectorAll("th[aria-sort]").forEach(function (h) {
+      h.removeAttribute("aria-sort");
+    });
+    th.setAttribute("aria-sort", up ? "ascending" : "descending");
+    var body = table.tBodies[0];
+    var rows = Array.prototype.slice.call(body.rows);
+    var key = function (r) {
+      var c = r.cells[i];
+      return c ? c.textContent.trim() : "";
+    };
+    rows.sort(function (a, b) {
+      var x = key(a), y = key(b);
+      var bx = bytes(x), by = bytes(y);
+      var c = bx !== null && by !== null ? bx - by : x.localeCompare(y, undefined, { numeric: true });
+      return up ? c : -c;
+    });
+    rows.forEach(function (r) {
+      body.appendChild(r);
+    });
+  }
+  // Rows chosen for a bulk action: the count, and choosing all.
+  document.addEventListener("change", function (ev) {
+    var form = ev.target.closest && ev.target.closest("#pkg-pick");
+    if (!form) return;
+    if (ev.target.classList.contains("pick-all")) {
+      form.querySelectorAll("input[name=path]").forEach(function (c) {
+        c.checked = ev.target.checked;
+      });
+    }
+    var n = form.querySelectorAll("input[name=path]:checked").length;
+    var out = form.querySelector(".pick-count");
+    if (out) out.textContent = String(n);
+  });
   document.addEventListener("click", function (ev) {
     var b = ev.target.closest("button.copy");
     if (b) {
@@ -102,6 +145,17 @@
           b.textContent = label;
         }, 1400);
       });
+      return;
+    }
+    var close = ev.target.closest(".close-detail");
+    if (close) {
+      close.closest(".pkg-detail").remove();
+      return;
+    }
+    // Sort a table by a column's text (sizes by their bytes).
+    var th = ev.target.closest("table.sortable th");
+    if (th && !th.classList.contains("pick")) {
+      sortBy(th);
       return;
     }
     // "change…" on a row: its name into the form, which fills the rest.
