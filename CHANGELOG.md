@@ -72,6 +72,9 @@ Formats:
   detached) with the repository's key; the packages, sums and module
   archives the clients fetch without a token are reached by short-lived
   signed URLs.
+- **Ansible Galaxy**: Galaxy's API v3 for collections: publishing (the
+  multipart upload ansible-galaxy sends, its file base64-encoded, and
+  the import task it polls) and installing, `Token` authorization.
 - **Pub**: Dart and Flutter packages with the hosted pub repository API
   (v2): package documents made per request, dart pub publish with the
   outcome told at the finalizing URL, retract and unretract.

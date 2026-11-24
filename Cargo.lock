@@ -2453,6 +2453,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pkgpod-galaxy"
+version = "0.0.0"
+dependencies = [
+ "flate2",
+ "jiff",
+ "pkgpod-base",
+ "pkgpod-engine",
+ "semver",
+ "serde_json",
+ "tar",
+]
+
+[[package]]
 name = "pkgpod-gems"
 version = "0.0.0"
 dependencies = [
@@ -2632,6 +2645,7 @@ dependencies = [
  "pkgpod-deb",
  "pkgpod-engine",
  "pkgpod-files",
+ "pkgpod-galaxy",
  "pkgpod-gems",
  "pkgpod-go",
  "pkgpod-helm",
@@ -2652,6 +2666,7 @@ dependencies = [
  "rustix",
  "rustls",
  "rustls-pki-types",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.11.0",
