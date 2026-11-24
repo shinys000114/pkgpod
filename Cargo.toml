@@ -31,6 +31,7 @@ pkgpod-nuget = { path = "crates/pkgpod-nuget" }
 pkgpod-composer = { path = "crates/pkgpod-composer" }
 pkgpod-conda = { path = "crates/pkgpod-conda" }
 pkgpod-cran = { path = "crates/pkgpod-cran" }
+pkgpod-pub = { path = "crates/pkgpod-pub" }
 pkgpod-mirror = { path = "crates/pkgpod-mirror" }
 pkgpod-server = { path = "crates/pkgpod-server" }
 clap = { version = "4.6", features = ["derive", "env"] }

@@ -679,6 +679,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                         ("composer", _) => "PHP packages for Composer",
                         ("conda", _) => "conda packages for conda and mamba",
                         ("cran", _) => "R packages for install.packages",
+                        ("pub", _) => "Dart and Flutter packages for dart pub",
                         _ => "",
                     }
                     .to_string(),
@@ -895,6 +896,27 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String], host: &str) ->
         out.push(UseLine {
             label: "Note".into(),
             text: "pkgpod is no proxy: packages from npmjs need their own registry (a scope here, the rest from registry.npmjs.org). npm login is not offered; set the token in .npmrc. unpublish and deprecate are operations here.".into(),
+        });
+        return out;
+    }
+    if r.format == "pub" {
+        out.push(UseLine {
+            label: "Log in".into(),
+            text: format!("dart pub token add {base}   # paste a pkgpod token"),
+        });
+        out.push(UseLine {
+            label: "pubspec.yaml: depend".into(),
+            text: format!("dependencies:\n  <package>:\n    hosted: {base}\n    version: ^1.0.0"),
+        });
+        out.push(UseLine {
+            label: "pubspec.yaml: publish".into(),
+            text: format!("publish_to: {base}\n# then: dart pub publish"),
+        });
+        out.push(UseLine {
+            label: "A labelled version".into(),
+            text: format!(
+                "hosted: {base}@<label>/\n# its own token: dart pub token add {base}@<label>/"
+            ),
         });
         return out;
     }

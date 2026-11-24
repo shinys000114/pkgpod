@@ -581,7 +581,7 @@ fn console_login_pages_and_csrf() {
     // page, usage and actions open.
     let src = s.url("/web/");
     type Fields<'a> = &'a [(&'a str, &'a str)];
-    let choices: [(&str, &str, &str, Fields); 19] = [
+    let choices: [(&str, &str, &str, Fields); 20] = [
         ("deb", "hosted", "c-deb", &[("first_dist", "noble")]),
         (
             "deb",
@@ -606,6 +606,7 @@ fn console_login_pages_and_csrf() {
         ("composer", "hosted", "c-composer", &[]),
         ("conda", "hosted", "c-conda", &[]),
         ("cran", "hosted", "c-cran", &[]),
+        ("pub", "hosted", "c-pub", &[]),
     ];
     for (format, kind, name, extra) in choices {
         let mut form = vec![("format", format), ("kind", kind), ("name", name)];
@@ -4663,6 +4664,7 @@ fn serving_root_lists_trees_not_registries() {
         ("reg-cargo", "cargo"),
         ("reg-nuget", "nuget"),
         ("reg-composer", "composer"),
+        ("reg-pub", "pub"),
         ("reg-go", "go"),
     ] {
         let mut args = vec!["repo", "create", name, "-f", format, "-s", "public=true"];
@@ -4698,6 +4700,7 @@ fn serving_root_lists_trees_not_registries() {
         "reg-go",
         "reg-nuget",
         "reg-composer",
+        "reg-pub",
         "hidden-oci",
     ] {
         assert!(!root.contains(name), "{name}: {root}");
@@ -7051,4 +7054,131 @@ fn cran_packages_with_r() {
         "install.packages(\"hellopk\", repos = \"{repo}@first/\", quiet = TRUE); cat(hellopk::hi(), \"\\n\")"
     ));
     assert!(ok && out.contains("hellopk 1.0"), "{out}");
+}
+
+const DART_IMAGE: &str = "dart:stable";
+
+#[test]
+fn pub_packages_with_dart() {
+    if images_here(&[DART_IMAGE]).is_empty() {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&["repo", "create", "dartpkgs", "-f", "pub"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "dartpkgs", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let url = s.url("/dartpkgs/");
+    let work = s.dir.path().join("dartwork");
+    let package = |ver: &str, greeting: &str| {
+        let d = work.join(format!("hello_pk-{ver}"));
+        std::fs::create_dir_all(d.join("lib")).unwrap();
+        std::fs::write(
+            d.join("pubspec.yaml"),
+            format!(
+                "name: hello_pk\nversion: {ver}\n\
+                 description: A small test package for pkgpod, to see that dart pub publishes and gets it.\n\
+                 publish_to: {url}\nenvironment:\n  sdk: ^3.0.0\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(d.join("LICENSE"), "MIT License\n\nCopyright 2026 T\n").unwrap();
+        std::fs::write(d.join("README.md"), "# hello_pk\n").unwrap();
+        std::fs::write(
+            d.join("CHANGELOG.md"),
+            format!("## {ver}\n\n- {greeting}\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("lib/hello_pk.dart"),
+            format!("String hello() => 'hello_pk {ver} {greeting}';\n"),
+        )
+        .unwrap();
+    };
+    package("1.0.0", "first");
+    package("1.1.0", "second");
+    // dart pub takes a token for one repository URL: a label's is another.
+    let login = |url: &str| {
+        format!(
+            "set -e; cd /work; export PUB_TOKEN={tok}; dart --disable-analytics >/dev/null 2>&1 || true; \
+             dart pub token add {url} --env-var PUB_TOKEN >/dev/null\n"
+        )
+    };
+    let publish = |ver: &str| {
+        docker_sh_in(
+            DART_IMAGE,
+            Some(&work),
+            &format!(
+                "{}cd hello_pk-{ver} && dart pub publish --force",
+                login(&url)
+            ),
+        )
+    };
+    let (ok, out) = publish("1.0.0");
+    assert!(
+        ok && out.contains("Successfully uploaded hello_pk version 1.0.0"),
+        "{out}"
+    );
+    s.cli(&["label", "dartpkgs", "first"]).unwrap();
+    let (ok, out) = publish("1.1.0");
+    assert!(ok, "{out}");
+    // A version is published once.
+    std::fs::write(work.join("hello_pk-1.1.0/README.md"), "# changed\n").unwrap();
+    let (ok, out) = publish("1.1.0");
+    assert!(!ok && out.contains("already exists"), "{out}");
+
+    // An app that depends on it: the newest, a label's, without a
+    // retracted version.
+    let app = |name: &str, hosted: &str| {
+        let d = work.join(name);
+        std::fs::create_dir_all(d.join("bin")).unwrap();
+        std::fs::write(
+            d.join("pubspec.yaml"),
+            format!(
+                "name: {name}\npublish_to: none\nenvironment:\n  sdk: ^3.0.0\n\
+                 dependencies:\n  hello_pk:\n    hosted: {hosted}\n    version: ^1.0.0\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            d.join(format!("bin/{name}.dart")),
+            "import 'package:hello_pk/hello_pk.dart';\nvoid main() => print(hello());\n",
+        )
+        .unwrap();
+        docker_sh_in(
+            DART_IMAGE,
+            Some(&work),
+            &format!(
+                "{}cd {name} && rm -rf .dart_tool pubspec.lock && dart pub get >/dev/null && dart run",
+                login(hosted)
+            ),
+        )
+    };
+    let (ok, out) = app("app_new", &url);
+    assert!(ok && out.contains("hello_pk 1.1.0 second"), "{out}");
+    let (ok, out) = app("app_label", &format!("{url}@first/"));
+    assert!(ok && out.contains("hello_pk 1.0.0 first"), "{out}");
+    s.cli(&[
+        "op",
+        "dartpkgs",
+        "retract",
+        "package=hello_pk",
+        "version=1.1.0",
+        "-y",
+    ])
+    .unwrap();
+    let (ok, out) = app("app_retracted", &url);
+    assert!(ok && out.contains("hello_pk 1.0.0 first"), "{out}");
+
+    // Without a token: asked for one.
+    let r = reqwest::blocking::get(s.url("/dartpkgs/api/packages/hello_pk")).unwrap();
+    assert_eq!(r.status().as_u16(), 401);
+    assert!(
+        r.headers()["www-authenticate"]
+            .to_str()
+            .unwrap()
+            .starts_with("Bearer")
+    );
 }
