@@ -224,6 +224,10 @@ impl Format for Cran {
         Ok(format!("added {name} {version}"))
     }
 
+    fn version_cmp(&self, a: &str, b: &str) -> std::cmp::Ordering {
+        version_cmp(a, b)
+    }
+
     fn catalog(&self, _path: &str, entry: &Entry) -> Option<Item> {
         let Entry::Blob { meta, .. } = entry else {
             return None;

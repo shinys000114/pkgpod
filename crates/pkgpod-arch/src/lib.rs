@@ -504,6 +504,10 @@ impl Format for Arch {
         }
     }
 
+    fn version_cmp(&self, a: &str, b: &str) -> std::cmp::Ordering {
+        vercmp(a, b)
+    }
+
     fn catalog(&self, path: &str, entry: &Entry) -> Option<Item> {
         let Entry::Blob { meta, .. } = entry else {
             return None;

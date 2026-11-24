@@ -1207,6 +1207,10 @@ impl Format for Deb {
         Ok(())
     }
 
+    fn version_cmp(&self, a: &str, b: &str) -> std::cmp::Ordering {
+        crate::version::compare(a, b)
+    }
+
     fn catalog(&self, path: &str, entry: &Entry) -> Option<Item> {
         if let Some((d, c, _, f)) = crate::source::split_path(path) {
             let m = crate::source::meta(entry).filter(|_| f.ends_with(".dsc"))?;
