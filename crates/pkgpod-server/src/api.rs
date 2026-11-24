@@ -276,6 +276,7 @@ pub fn router() -> Router<Arc<App>> {
             )),
         )
         .route("/api/v1/repos/{repo}/remove", post(remove))
+        .route("/api/v1/repos/{repo}/cleanup", post(cleanup))
         .route("/api/v1/repos/{repo}/rollback", post(rollback))
         .route("/api/v1/repos/{repo}/promote", post(promote))
         .route("/api/v1/repos/{repo}/republish", post(republish))
@@ -324,6 +325,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/api/v1/jobs/{id}", get(job))
         .route("/api/v1/jobs/{id}/cancel", post(job_cancel))
         .route("/api/v1/gc", post(gc))
+        .route("/api/v1/cleanup", post(cleanup_all))
         .route("/api/v1/audit", get(audit))
 }
 
@@ -545,8 +547,9 @@ pub(crate) async fn settings_patch(
     blocking(&app, move |app| {
         if let Some(d) = req.downloads_days {
             crate::stats::check_days(d)?;
+            let old = crate::stats::days_kept(app);
             crate::keys::set_setting(&app.db, crate::stats::SETTING, Some(&d.to_string()))?;
-            crate::stats::trim(app, d)?;
+            crate::stats::days_changed(app, old, d)?;
             app.auth
                 .audit(c.name(), "settings", "", &format!("downloads_days={d}"));
         }
@@ -887,6 +890,32 @@ pub(crate) async fn remove(
         Ok(Json(app.plan_reply(&c, plan, q.yes())?))
     })
     .await
+}
+
+/// Plans (or applies) what the repository's cleanup rules remove now.
+pub(crate) async fn cleanup(
+    State(app): St,
+    Who(c): Who,
+    Path(repo): Path<String>,
+    Query(q): Query<ApplyQ>,
+) -> Result<Json<Value>> {
+    blocking(&app, move |app| {
+        let r = app.repo_for(&c, &repo, Role::Write)?;
+        let _ = app.stats.flush(app);
+        let p = crate::cleanup::propose(app, &r, c.name())?;
+        let extra = p.json();
+        let mut v = app.plan_reply(&c, p.plan, q.yes())?;
+        v["removals"] = extra["removals"].clone();
+        v["notes"] = extra["notes"].clone();
+        Ok(Json(v))
+    })
+    .await
+}
+
+/// The daily cleanup, now (server admins).
+pub(crate) async fn cleanup_all(State(app): St, Who(c): Who) -> Result<Json<Value>> {
+    app.require_admin(&c)?;
+    blocking(&app, move |app| Ok(Json(json!(crate::cleanup::daily(app))))).await
 }
 
 #[derive(Deserialize)]

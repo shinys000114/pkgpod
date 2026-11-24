@@ -10,6 +10,15 @@
   <div class="result"></div>
   </div>
 </div>
+{% if cleanup %}
+<div class="card">
+  <div class="card-head"><h2>Cleanup</h2><span class="hint">the cleanup settings above run daily; each package's newest version in each place stays; a rollback brings removed versions back while retention keeps the version before</span></div>
+  <div class="card-body">
+  <button type="button" hx-post="/c/r/{{ repo }}/cleanup" hx-target="next .result">Preview cleanup</button>
+  <div class="result"></div>
+  </div>
+</div>
+{% endif %}
 <div hx-get="/r/{{ repo }}/badges" hx-trigger="load" hx-swap="outerHTML"></div>
 {% if can_admin %}
 <div class="card">

@@ -9,6 +9,7 @@ pub mod auth;
 pub mod backup;
 pub mod badge;
 pub mod cargo;
+pub mod cleanup;
 pub mod composer;
 pub mod conan;
 pub mod config;
@@ -327,6 +328,13 @@ pub async fn run(app: Arc<App>) -> Result<(), String> {
             );
             loop {
                 every.tick().await;
+                // Cleanup rules first: what they remove goes with the
+                // versions retention lets go.
+                let app2 = app.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    cleanup::daily(&app2);
+                })
+                .await;
                 let e = app.engine.clone();
                 match tokio::task::spawn_blocking(move || e.gc(Duration::from_secs(86400), false))
                     .await

@@ -32,6 +32,10 @@ pub const DEFAULT_DAYS: i64 = 365;
 /// The server setting that holds the days kept (0: nothing counted).
 pub const SETTING: &str = "downloads_days";
 
+/// The server setting that holds the day counting began (since when the
+/// counts are whole).
+pub const SINCE: &str = "downloads_since";
+
 const SECS_A_DAY: i64 = 86400;
 
 /// What was served, before it is named.
@@ -52,6 +56,8 @@ pub struct Stats {
     totals: Mutex<HashMap<String, (u64, u64)>>,
     /// When counts were last trimmed to the days kept.
     trimmed: Mutex<i64>,
+    /// The day counting began is in the settings.
+    since_set: Mutex<bool>,
 }
 
 /// How a request counts when it is answered.
@@ -209,6 +215,15 @@ impl Stats {
     /// Writes the counts waiting; trims to the days kept once an hour.
     pub fn flush(&self, app: &App) -> Result<()> {
         let keep = days_kept(app);
+        if keep > 0 {
+            let mut set = self.since_set.lock().unwrap_or_else(|e| e.into_inner());
+            if !*set {
+                if crate::keys::get_setting(&app.db, SINCE)?.is_none() {
+                    crate::keys::set_setting(&app.db, SINCE, Some(&today().to_string()))?;
+                }
+                *set = true;
+            }
+        }
         let pending = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
         let mut rows: HashMap<(String, i64, String, String), u64> = HashMap::new();
         for ((repo, day, what), n) in pending {
@@ -256,6 +271,52 @@ impl Stats {
         }
         Ok(())
     }
+}
+
+/// The setting's value changes from `old` to `new` days: the counts
+/// are whole since when they began, or since what the old value kept.
+pub fn days_changed(app: &App, old: i64, new: i64) -> Result<()> {
+    if new == 0 || old == 0 {
+        // Counting starts again when there is something to count.
+        crate::keys::set_setting(&app.db, SINCE, None)?;
+        *app.stats
+            .since_set
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = false;
+    } else if new > old
+        && let Some(s) =
+            crate::keys::get_setting(&app.db, SINCE)?.and_then(|s| s.parse::<i64>().ok())
+    {
+        // What the old value kept is all there is.
+        let s = s.max(today() - old + 1);
+        crate::keys::set_setting(&app.db, SINCE, Some(&s.to_string()))?;
+    }
+    trim(app, new)
+}
+
+/// The first day whose downloads are all counted and kept.
+pub fn counted_since(app: &App) -> Option<i64> {
+    let keep = days_kept(app);
+    if keep <= 0 {
+        return None;
+    }
+    let since: i64 = crate::keys::get_setting(&app.db, SINCE)
+        .ok()
+        .flatten()?
+        .parse()
+        .ok()?;
+    Some(since.max(today() - keep + 1))
+}
+
+/// The last day each package version was downloaded.
+pub fn last_downloads(app: &App, repo: &str) -> Result<HashMap<(String, String), i64>> {
+    Ok(app.db.read(|c| {
+        let mut st = c.prepare_cached(
+            "SELECT name, version, MAX(day) FROM downloads WHERE repo = ?1 GROUP BY name, version",
+        )?;
+        st.query_map([repo], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()
+    })?)
 }
 
 /// Removes the counts older than the days kept (all of them for 0).

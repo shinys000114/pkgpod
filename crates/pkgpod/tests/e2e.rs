@@ -388,6 +388,311 @@ fn deb_repository_with_apt() {
     assert!(body.contains("href=\"ppa/\""), "{body}");
 }
 
+/// Moves a package version's catalog rows `days` back, as if it came
+/// in then.
+fn age_rows(s: &Server, repo: &str, name: &str, version: &str, days: i64) {
+    let c = rusqlite::Connection::open(s.dir.path().join("data/pkgpod.db")).unwrap();
+    c.busy_timeout(Duration::from_secs(10)).unwrap();
+    let n = c
+        .execute(
+            "UPDATE catalog SET added = added - ?4 * 86400
+             WHERE repo = (SELECT id FROM repos WHERE name = ?1) AND name = ?2 AND version = ?3",
+            rusqlite::params![repo, name, version, days],
+        )
+        .unwrap();
+    assert!(n > 0, "no {name} {version} in {repo}");
+}
+
+/// Runs SQL on the server's database (what a test cannot wait for).
+fn sql(s: &Server, q: &str) {
+    let c = rusqlite::Connection::open(s.dir.path().join("data/pkgpod.db")).unwrap();
+    c.busy_timeout(Duration::from_secs(10)).unwrap();
+    c.execute_batch(q).unwrap();
+}
+
+/// Cleanup rules on a Debian repository, checked with apt: per dist,
+/// the newest always kept, pre-releases and unused versions by age.
+#[test]
+fn cleanup_rules_with_apt() {
+    if !have("dpkg-deb") {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&[
+        "key",
+        "generate",
+        "main",
+        "pkgpod e2e <e2e@example.invalid>",
+    ])
+    .unwrap();
+    s.cli(&["repo", "create", "ppa", "-s", "public=true"])
+        .unwrap();
+    for d in ["noble", "jammy"] {
+        s.cli(&[
+            "op",
+            "ppa",
+            "dist-set",
+            &format!("name={d}"),
+            "components=main",
+            "-y",
+        ])
+        .unwrap();
+    }
+    let debs = s.dir.path().join("debs");
+    std::fs::create_dir_all(&debs).unwrap();
+    let up = |v: &str, dist: &str| {
+        let f = build_deb(&debs, "hello", v, "all", "xz", "");
+        s.cli(&[
+            "upload",
+            "ppa",
+            f.to_str().unwrap(),
+            "-s",
+            &format!("dists={dist}"),
+        ])
+        .unwrap();
+    };
+    for v in ["1.0", "1.1", "2.0~rc1", "2.0"] {
+        up(v, "noble");
+    }
+    up("0.9", "jammy");
+    let packages = |d: &str| {
+        let (st, body) = get(
+            &s.url(&format!("/ppa/dists/{d}/main/binary-all/Packages")),
+            None,
+        );
+        assert_eq!(st, 200);
+        let mut v: Vec<String> = body
+            .lines()
+            .filter_map(|l| l.strip_prefix("Version: "))
+            .map(String::from)
+            .collect();
+        v.sort();
+        v
+    };
+    // No rules: nothing; not a format without them.
+    let p = s.json(&["cleanup", "ppa"]);
+    assert_eq!(p["total_changes"], 0, "{p}");
+    assert_eq!(p["notes"][0], "no cleanup rules are set", "{p}");
+    s.cli(&["repo", "create", "img", "-f", "oci"]).unwrap();
+    let e = s.cli(&["cleanup", "img"]).unwrap_err();
+    assert!(e.contains("no cleanup rules"), "{e}");
+    assert!(
+        s.cli(&["repo", "set", "img", "cleanup_keep_last=1"])
+            .is_err()
+    );
+
+    // Keep two: noble's 1.0 and 1.1 go; jammy's only one stays.
+    s.cli(&["repo", "set", "ppa", "cleanup_keep_last=2"])
+        .unwrap();
+    let p = s.json(&["cleanup", "ppa"]);
+    let gone: Vec<String> = p["removals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| format!("{} {} {}", r["version"], r["place"], r["why"]))
+        .collect();
+    assert_eq!(gone.len(), 2, "{p}");
+    assert!(
+        gone[0].contains("\"1.0\" \"noble/main all\" \"3 newer"),
+        "{gone:?}"
+    );
+    assert_eq!(packages("noble").len(), 4, "a preview changes nothing");
+    let out = s.cli(&["cleanup", "ppa", "-y"]).unwrap();
+    assert!(out.contains("removed 2 versions"), "{out}");
+    assert_eq!(packages("noble"), ["2.0", "2.0~rc1"]);
+    assert_eq!(packages("jammy"), ["0.9"]);
+    // Nothing of them is left.
+    assert_eq!(
+        get(&s.url("/ppa/pool/main/h/hello/hello_1.0_all.deb"), None).0,
+        404
+    );
+    assert_eq!(
+        get(&s.url("/ppa/pool/main/h/hello/hello_2.0_all.deb"), None).0,
+        200
+    );
+    // Undone by a rollback while retention keeps the version before.
+    let v = s.json(&["versions", "ppa"]);
+    assert!(
+        v[0]["summary"]
+            .as_str()
+            .unwrap()
+            .starts_with("cleanup: removed 2"),
+        "{v}"
+    );
+
+    // Pre-releases in for over a week go (not the newest).
+    s.cli(&[
+        "repo",
+        "set",
+        "ppa",
+        "cleanup_keep_last=0",
+        "cleanup_prerelease_days=7",
+    ])
+    .unwrap();
+    assert_eq!(s.json(&["cleanup", "ppa"])["total_changes"], 0);
+    age_rows(&s, "ppa", "hello", "2.0~rc1", 10);
+    let p = s.json(&["cleanup", "ppa", "-y"]);
+    assert_eq!(p["removals"][0]["version"], "2.0~rc1", "{p}");
+    assert!(
+        p["removals"][0]["why"]
+            .as_str()
+            .unwrap()
+            .contains("pre-release"),
+        "{p}"
+    );
+    assert_eq!(packages("noble"), ["2.0"]);
+
+    // Not downloaded for 30 days: waits until downloads have been
+    // counted that long.
+    up("3.0", "noble");
+    s.cli(&[
+        "repo",
+        "set",
+        "ppa",
+        "cleanup_prerelease_days=0",
+        "cleanup_unused_days=30",
+    ])
+    .unwrap();
+    age_rows(&s, "ppa", "hello", "2.0", 40);
+    let p = s.json(&["cleanup", "ppa"]);
+    assert_eq!(p["total_changes"], 0, "{p}");
+    assert!(
+        p["notes"][0]
+            .as_str()
+            .unwrap()
+            .contains("counted for 1 days"),
+        "{p}"
+    );
+    sql(
+        &s,
+        "UPDATE settings SET value = CAST(value AS INTEGER) - 60 WHERE name = 'downloads_since'",
+    );
+    // Downloaded today: kept.
+    let (st, _) = get(&s.url("/ppa/pool/main/h/hello/hello_2.0_all.deb"), None);
+    assert_eq!(st, 200);
+    assert_eq!(s.json(&["cleanup", "ppa"])["total_changes"], 0);
+    // Last downloaded 31 days ago: goes.
+    sql(&s, "UPDATE downloads SET day = day - 31 WHERE repo = 'ppa'");
+    let p = s.json(&["cleanup", "ppa", "-y"]);
+    assert_eq!(p["removals"][0]["version"], "2.0", "{p}");
+    assert!(
+        p["removals"][0]["why"]
+            .as_str()
+            .unwrap()
+            .contains("not downloaded"),
+        "{p}"
+    );
+    assert_eq!(packages("noble"), ["3.0"]);
+    // Counting kept for fewer days than the rule: it waits.
+    s.cli(&["settings", "--downloads-days", "20"]).unwrap();
+    let p = s.json(&["cleanup", "ppa"]);
+    assert!(
+        p["notes"][0].as_str().unwrap().contains("kept 20 days"),
+        "{p}"
+    );
+    // The console previews it, with why.
+    s.cli(&[
+        "repo",
+        "set",
+        "ppa",
+        "cleanup_unused_days=0",
+        "cleanup_keep_last=1",
+    ])
+    .unwrap();
+    let (c, sid, csrf) = console_session(&s, "cl", "cl-password");
+    let settings = c
+        .get(format!("{}/r/ppa/settings", s.api))
+        .header("cookie", format!("pkgpod_session={sid}"))
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(settings.contains("Preview cleanup") && settings.contains("cleanup_keep_last"));
+    let plan = c
+        .post(format!("{}/c/r/ppa/cleanup", s.api))
+        .header("cookie", format!("pkgpod_session={sid}"))
+        .header("x-csrf-token", &csrf)
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(
+        plan.contains("Preview:") && plan.contains("nothing to remove"),
+        "{plan}"
+    );
+    s.cli(&["repo", "set", "ppa", "cleanup_keep_last=0"])
+        .unwrap();
+
+    // apt installs what is left.
+    if have("apt-get") {
+        let a = s.dir.path().join("apt");
+        for d in ["etc", "state/lists/partial", "cache/archives/partial"] {
+            std::fs::create_dir_all(a.join(d)).unwrap();
+        }
+        std::fs::write(a.join("status"), "").unwrap();
+        std::fs::write(
+            a.join("etc/sources.list"),
+            format!(
+                "deb [trusted=yes] {} noble main\ndeb [trusted=yes] {} jammy main\n",
+                s.url("/ppa/"),
+                s.url("/ppa/")
+            ),
+        )
+        .unwrap();
+        let out = apt(&a, &["update"]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let out = apt(&a, &["download", "hello"]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(a.join("hello_3.0_all.deb").is_file());
+        let out = apt(&a, &["download", "hello=0.9"]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // The daily run (here at once): held over cleanup_max, applied
+    // under it.
+    up("3.1", "noble");
+    up("3.2", "noble");
+    s.cli(&["repo", "set", "ppa", "cleanup_keep_last=1", "cleanup_max=1"])
+        .unwrap();
+    let out = s.cli(&["cleanup"]).unwrap();
+    assert!(out.contains("ppa: held would remove 2 versions"), "{out}");
+    assert_eq!(packages("noble"), ["3.0", "3.1", "3.2"]);
+    let admin = s
+        .cli(&["token", "create", "au", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let audit = reqwest::blocking::Client::new()
+        .get(format!("{}/api/v1/audit", s.api))
+        .bearer_auth(&admin)
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(audit.contains("cleanup held"), "{audit}");
+    s.cli(&["repo", "set", "ppa", "cleanup_max=5"]).unwrap();
+    let out = s.cli(&["cleanup"]).unwrap();
+    assert!(
+        out.contains("ppa: applied cleanup: removed 2 versions"),
+        "{out}"
+    );
+    assert_eq!(packages("noble"), ["3.2"]);
+    let v = s.json(&["versions", "ppa"]);
+    assert_eq!(v[0]["actor"], "cleanup", "{v}");
+}
+
 #[test]
 fn rights_and_errors() {
     let s = Server::start();
@@ -2240,6 +2545,16 @@ fn openapi_describes_what_the_api_sends() {
     let t = a.ok("post", bt, "/api/v1/repos/web/badge-token", None, 200);
     assert!(t["token"].is_string(), "{t}");
     a.ok("delete", bt, "/api/v1/repos/web/badge-token", None, 204);
+    let cl = a.ok(
+        "post",
+        "/api/v1/repos/{repo}/cleanup",
+        "/api/v1/repos/web/cleanup",
+        None,
+        200,
+    );
+    assert_eq!(cl["notes"][0], "no cleanup rules are set", "{cl}");
+    let all = a.ok("post", "/api/v1/cleanup", "/api/v1/cleanup", None, 200);
+    assert!(all.is_array(), "{all}");
     let st = a.ok("get", "/api/v1/settings", "/api/v1/settings", None, 200);
     assert_eq!(st["downloads_days"], 365, "{st}");
     let st = a.ok(
@@ -4540,6 +4855,60 @@ fn npm_publish_and_install() {
         .bytes()
         .unwrap();
     assert_eq!(got.as_ref(), tgz.as_slice());
+
+    // Cleanup keeping the newest: 1.0.0 goes, with the dist-tag naming
+    // it; npm installs what is left, the label still has the old one.
+    let (ok, out) = npm(&home, &src, &["dist-tag", "add", "hello-pkg@1.0.0", "old"]);
+    assert!(ok, "{out}");
+    s.cli(&["repo", "set", "js", "cleanup_keep_last=1"])
+        .unwrap();
+    let p = s.json(&["cleanup", "js", "-y"]);
+    let gone: Vec<String> = p["removals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            format!(
+                "{}@{}",
+                r["name"].as_str().unwrap(),
+                r["version"].as_str().unwrap()
+            )
+        })
+        .collect();
+    assert_eq!(gone, ["hello-pkg@1.0.0"], "{p}");
+    let doc: Value = c
+        .get(format!("{reg}hello-pkg"))
+        .bearer_auth(&tok)
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert!(doc["versions"]["1.0.0"].is_null(), "{doc}");
+    assert_eq!(doc["dist-tags"]["latest"], "1.1.0", "{doc}");
+    assert!(doc["dist-tags"]["old"].is_null(), "{doc}");
+    let fresh = s.dir.path().join("fresh2");
+    std::fs::create_dir_all(&fresh).unwrap();
+    std::fs::copy(home.join("npmrc"), fresh.join("npmrc")).unwrap();
+    let app = s.dir.path().join("app6");
+    std::fs::create_dir_all(&app).unwrap();
+    let (ok, out) = npm(&fresh, &app, &["install", "--no-audit", "hello-pkg"]);
+    assert!(ok, "{out}");
+    let v = std::fs::read_to_string(app.join("node_modules/hello-pkg/index.js")).unwrap();
+    assert!(v.contains("1.1.0"), "{v}");
+    let app = s.dir.path().join("app7");
+    std::fs::create_dir_all(&app).unwrap();
+    let (ok, out) = npm(
+        &fresh,
+        &app,
+        &[
+            "install",
+            "--no-audit",
+            "--registry",
+            &at,
+            "hello-pkg@1.0.0",
+        ],
+    );
+    assert!(ok, "{out}");
 }
 
 fn b64(data: &[u8]) -> String {
@@ -5360,6 +5729,36 @@ fn cargo_publish_build_yank() {
     // A private registry asks for the token.
     let r = c.get(s.url("/crates/index/config.json")).send().unwrap();
     assert_eq!(r.status().as_u16(), 401);
+
+    // Cleanup keeping the newest: the index has it alone, and cargo
+    // builds with it.
+    let (ok, out) = publish(&lib("0.3.0"));
+    assert!(ok, "{out}");
+    s.cli(&["repo", "set", "crates", "cleanup_keep_last=1"])
+        .unwrap();
+    let p = s.json(&["cleanup", "crates", "-y"]);
+    let gone: Vec<&str> = p["removals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["version"].as_str().unwrap())
+        .collect();
+    assert_eq!(gone, ["0.1.0", "0.2.0"], "{p}");
+    let (_, lines) = index("/crates/index/he/ll/hello_pod");
+    assert_eq!(lines.lines().count(), 1, "{lines}");
+    assert!(lines.contains("\"vers\":\"0.3.0\""), "{lines}");
+    let app = cargo_crate(
+        &src,
+        "app3",
+        "0.1.0",
+        "hello_pod = { version = \"0.3\", registry = \"crates\" }\n",
+        (
+            "main.rs",
+            "fn main() { println!(\"{}\", hello_pod::hello()); }\n",
+        ),
+    );
+    let (ok, out) = cargo(&home, &app, &["run", "-q"], &tok);
+    assert!(ok && out.contains("hello 0.3.0"), "{out}");
 }
 
 /// Runs go with its own home, module cache and build cache in `home`,
@@ -5587,6 +5986,22 @@ fn go_modules_through_the_proxy() {
             .unwrap();
         assert_eq!(r.status().as_u16(), 401, "{f}");
     }
+
+    // Cleanup keeping the newest: v1.0.0's zip and go.mod go; go lists
+    // what is left.
+    s.cli(&["repo", "set", "gomods", "cleanup_keep_last=1"])
+        .unwrap();
+    let p = s.json(&["cleanup", "gomods", "-y"]);
+    assert_eq!(p["removals"][0]["version"], "v1.0.0", "{p}");
+    assert_eq!(p["removals"].as_array().unwrap().len(), 1, "{p}");
+    assert_eq!(p["total_changes"], 2, "the zip and its go.mod: {p}");
+    let (ok, out) = go(
+        &home,
+        &app,
+        &reg,
+        &["list", "-m", "-versions", "example.com/greet"],
+    );
+    assert!(ok && out.trim() == "example.com/greet v1.1.0", "{out}");
 }
 
 /// The images of `wanted` that are here (none is pulled). With
@@ -6102,6 +6517,33 @@ fn helm_charts_with_helm() {
     assert_eq!(r.status().as_u16(), 404);
     let r = c.post(&api).body(chart("web-0.3.0.tgz")).send().unwrap();
     assert_eq!(r.status().as_u16(), 401, "anonymous");
+
+    // Cleanup keeping the newest: helm sees it alone, and pulls it.
+    s.cli(&["repo", "set", "charts", "cleanup_keep_last=1"])
+        .unwrap();
+    let p = s.json(&["cleanup", "charts", "-y"]);
+    assert_eq!(p["removals"].as_array().unwrap().len(), 1, "{p}");
+    assert_eq!(p["removals"][0]["version"], "0.1.0", "{p}");
+    let file = |v: &str| {
+        c.get(s.url(&format!("/charts/charts/web-{v}.tgz")))
+            .basic_auth("token", Some(&tok))
+            .send()
+            .unwrap()
+            .status()
+            .as_u16()
+    };
+    assert_eq!((file("0.1.0"), file("0.2.0")), (404, 200));
+    let (ok, out) = docker_sh(
+        images[0],
+        &format!(
+            "set -e; export HOME=/tmp; cd /tmp; helm repo add pk {base} --username token --password {tok} >/dev/null; \
+             helm search repo pk/web --versions; helm pull pk/web --version 0.2.0; ls web-0.2.0.tgz"
+        ),
+    );
+    assert!(
+        ok && out.contains("0.2.0") && !out.contains("0.1.0"),
+        "{out}"
+    );
 }
 
 /// Runs mvn's `script` in the Maven image with `work` at /work. Plugins
