@@ -2388,6 +2388,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pkgpod-npm"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "pkgpod-base",
+ "pkgpod-engine",
+ "serde_json",
+ "sha1 0.11.0",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "pkgpod-oci"
 version = "0.0.0"
 dependencies = [
