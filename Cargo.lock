@@ -2380,6 +2380,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pkgpod-conda"
+version = "0.0.0"
+dependencies = [
+ "bzip2",
+ "md-5 0.11.0",
+ "pkgpod-base",
+ "pkgpod-engine",
+ "serde_json",
+ "tar",
+ "zstd",
+]
+
+[[package]]
 name = "pkgpod-deb"
 version = "0.0.0"
 dependencies = [
@@ -2574,6 +2587,7 @@ dependencies = [
  "pkgpod-base",
  "pkgpod-cargo",
  "pkgpod-composer",
+ "pkgpod-conda",
  "pkgpod-deb",
  "pkgpod-engine",
  "pkgpod-files",

@@ -677,6 +677,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                         ("arch", _) => "Arch packages for pacman, signed",
                         ("nuget", _) => ".NET packages for dotnet and NuGet",
                         ("composer", _) => "PHP packages for Composer",
+                        ("conda", _) => "conda packages for conda and mamba",
                         _ => "",
                     }
                     .to_string(),
@@ -893,6 +894,36 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String], host: &str) ->
         out.push(UseLine {
             label: "Note".into(),
             text: "pkgpod is no proxy: packages from npmjs need their own registry (a scope here, the rest from registry.npmjs.org). npm login is not offered; set the token in .npmrc. unpublish and deprecate are operations here.".into(),
+        });
+        return out;
+    }
+    if r.format == "conda" {
+        let channel = if r.setting_bool("public") {
+            base.clone()
+        } else {
+            let (scheme, rest) = base.split_once("://").unwrap_or(("https", &base));
+            format!("{scheme}://token:<token>@{rest}")
+        };
+        out.push(UseLine {
+            label: "Install".into(),
+            text: format!(
+                "conda install --override-channels -c {channel} <package>\nmicromamba install -c {channel} <package>"
+            ),
+        });
+        out.push(UseLine {
+            label: "~/.condarc".into(),
+            text: format!("channels:\n  - {channel}\n  - conda-forge"),
+        });
+        out.push(UseLine {
+            label: "Upload".into(),
+            text: format!(
+                "curl -u token:<token> -T <name>-<version>-<build>.conda {base}upload\npkgpod upload {} <name>-<version>-<build>.conda   # or .tar.bz2",
+                r.name
+            ),
+        });
+        out.push(UseLine {
+            label: "A labelled version".into(),
+            text: format!("conda install -c {channel}@<label>/ <package>"),
         });
         return out;
     }

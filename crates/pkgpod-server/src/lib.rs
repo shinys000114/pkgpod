@@ -159,6 +159,7 @@ pub fn formats() -> Vec<Arc<dyn pkgpod_engine::Format>> {
         Arc::new(pkgpod_arch::Arch),
         Arc::new(pkgpod_nuget::Nuget),
         Arc::new(pkgpod_composer::Composer),
+        Arc::new(pkgpod_conda::Conda),
     ]
 }
 
