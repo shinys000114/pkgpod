@@ -736,7 +736,7 @@ fn console_login_pages_and_csrf() {
     // page, usage and actions open.
     let src = s.url("/web/");
     type Fields<'a> = &'a [(&'a str, &'a str)];
-    let choices: [(&str, &str, &str, Fields); 21] = [
+    let choices: [(&str, &str, &str, Fields); 22] = [
         (
             "deb",
             "hosted",
@@ -771,6 +771,7 @@ fn console_login_pages_and_csrf() {
         ("cran", "hosted", "c-cran", &[]),
         ("pub", "hosted", "c-pub", &[]),
         ("ipk", "hosted", "c-ipk", &[]),
+        ("terraform", "hosted", "c-terraform", &[]),
     ];
     for (format, kind, name, extra) in choices {
         let mut form = vec![("format", format), ("kind", kind), ("name", name)];
@@ -4872,6 +4873,7 @@ fn serving_root_lists_trees_not_registries() {
         ("reg-cargo", "cargo"),
         ("reg-nuget", "nuget"),
         ("reg-composer", "composer"),
+        ("reg-terraform", "terraform"),
         ("reg-pub", "pub"),
         ("reg-go", "go"),
     ] {
@@ -4910,6 +4912,7 @@ fn serving_root_lists_trees_not_registries() {
         "reg-nuget",
         "reg-composer",
         "reg-pub",
+        "reg-terraform",
         "hidden-oci",
     ] {
         assert!(!root.contains(name), "{name}: {root}");
@@ -7800,4 +7803,251 @@ fn ipk_feeds_with_opkg() {
         "opkg install hello-ipk && cat /usr/share/hello-ipk/msg",
     );
     assert!(ok && out.ends_with("first"), "{out}");
+}
+
+const TERRAFORM_IMAGE: &str = "hashicorp/terraform:1.13";
+const TOFU_IMAGE: &str = "ghcr.io/opentofu/opentofu:1.10";
+/// The registry's host name in the clients' containers (module sources
+/// want a dot in it).
+const TF_HOST: &str = "registry.pkgpod.test";
+
+/// Runs `script` with sh in `image`: /work mounted, as the user running
+/// the tests, `TF_HOST` resolving to this machine, the test's CA trusted
+/// and `rc` (in /work) as the CLI configuration when given.
+fn tf_sh(image: &str, work: &Path, rc: Option<&str>, script: &str) -> (bool, String) {
+    let uid = rustix::process::getuid().as_raw();
+    let gid = rustix::process::getgid().as_raw();
+    let mut c = Command::new("docker");
+    c.args(["run", "--rm", "--network", "host", "--entrypoint", "sh"])
+        .args(["--add-host", &format!("{TF_HOST}:127.0.0.1")])
+        .arg("-v")
+        .arg(format!("{}:/work", work.display()))
+        .args([
+            "-w",
+            "/work",
+            "-u",
+            &format!("{uid}:{gid}"),
+            "-e",
+            "HOME=/tmp",
+        ]);
+    if let Some(rc) = rc {
+        c.args(["-e", "SSL_CERT_FILE=/work/ca.pem"])
+            .args(["-e", &format!("TF_CLI_CONFIG_FILE=/work/{rc}")]);
+    }
+    let o = c.arg(image).arg("-c").arg(script).output().unwrap();
+    (
+        o.status.success(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        ),
+    )
+}
+
+#[test]
+fn terraform_registry_with_terraform_and_tofu() {
+    let here = images_here(&[TERRAFORM_IMAGE, TOFU_IMAGE]);
+    if here.len() < 2 {
+        return;
+    }
+    let mut s = Server::start();
+    let work = s.dir.path().join("tf");
+    std::fs::create_dir_all(&work).unwrap();
+    // https on a name of its own, as the clients want.
+    let (cert, key) = (work.join("ca.pem"), work.join("key.pem"));
+    let o = Command::new("openssl")
+        .args([
+            "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+        ])
+        .args(["-subj", &format!("/CN={TF_HOST}")])
+        .args(["-addext", &format!("subjectAltName=DNS:{TF_HOST}")])
+        .arg("-keyout")
+        .arg(&key)
+        .arg("-out")
+        .arg(&cert)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let port = free_port();
+    s.cli(&[
+        "listener",
+        "set",
+        "tls",
+        &format!("127.0.0.1:{port}"),
+        "--cert",
+        cert.to_str().unwrap(),
+        "--key",
+        key.to_str().unwrap(),
+    ])
+    .unwrap();
+    let t0 = Instant::now();
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(t0.elapsed() < Duration::from_secs(10), "the TLS listener");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let host = format!("{TF_HOST}:{port}");
+    s.cli(&["key", "generate", "main", "Test <t@example.invalid>"])
+        .unwrap();
+    s.cli(&[
+        "repo",
+        "create",
+        "tf",
+        "-f",
+        "terraform",
+        "-s",
+        &format!("urls=https://{host}/tf/"),
+    ])
+    .unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "tf", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    // A real provider (null), from the public registry, published here.
+    std::fs::write(
+        work.join("get.tf"),
+        "terraform {\n  required_providers {\n    null = { source = \"hashicorp/null\", version = \"3.2.4\" }\n  }\n}\n",
+    )
+    .unwrap();
+    let (ok, out) = tf_sh(
+        TERRAFORM_IMAGE,
+        &work,
+        None,
+        "mkdir -p get && cp get.tf get/ && cd get && terraform providers mirror -platform=linux_amd64 /work/mirror",
+    );
+    assert!(ok, "{out}");
+    let zip = work.join(
+        "mirror/registry.terraform.io/hashicorp/null/terraform-provider-null_3.2.4_linux_amd64.zip",
+    );
+    // Uploads to the repository's address: TF_HOST here too.
+    let c = reqwest::blocking::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .resolve(TF_HOST, ([127, 0, 0, 1], port).into())
+        .build()
+        .unwrap();
+    let put = |path: &str, body: Vec<u8>| {
+        let r = c
+            .put(format!("https://{host}/tf/{path}"))
+            .basic_auth("token", Some(&tok))
+            .body(body)
+            .send()
+            .unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    let (st, out) = put(
+        "upload/terraform-provider-null_3.2.4_linux_amd64.zip?namespace=team",
+        std::fs::read(&zip).unwrap(),
+    );
+    assert_eq!(st, 201, "{out}");
+    // A module that uses it, in two versions.
+    let module = |ver: &str| {
+        let d = work.join(format!("mod-{ver}"));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(
+            d.join("main.tf"),
+            format!(
+                "terraform {{\n  required_providers {{\n    null = {{ source = \"{host}/team/null\" }}\n  }}\n}}\n\
+                 variable \"who\" {{\n  default = \"pkgpod\"\n}}\n\
+                 resource \"null_resource\" \"x\" {{\n  triggers = {{ who = var.who }}\n}}\n\
+                 output \"msg\" {{\n  value = \"hello ${{var.who}} {ver}\"\n}}\n"
+            ),
+        )
+        .unwrap();
+        let o = Command::new("tar")
+            .arg("czf")
+            .arg(work.join(format!("mod-{ver}.tar.gz")))
+            .arg("-C")
+            .arg(&d)
+            .arg("main.tf")
+            .output()
+            .unwrap();
+        assert!(o.status.success());
+        std::fs::read(work.join(format!("mod-{ver}.tar.gz"))).unwrap()
+    };
+    let (st, out) = put(
+        "upload?namespace=team&name=greeting&system=null&version=1.0.0",
+        module("1.0.0"),
+    );
+    assert_eq!(st, 201, "{out}");
+    s.cli(&["label", "tf", "first"]).unwrap();
+    let (st, out) = put(
+        "upload?namespace=team&name=greeting&system=null&version=1.1.0",
+        module("1.1.0"),
+    );
+    assert_eq!(st, 201, "{out}");
+    // The configuration: the provider and the module from here.
+    std::fs::write(
+        work.join("main.tf"),
+        format!(
+            "terraform {{\n  required_providers {{\n    null = {{ source = \"{host}/team/null\", version = \"3.2.4\" }}\n  }}\n}}\n\
+             module \"g\" {{\n  source  = \"{host}/team/greeting/null\"\n  version = \"~> 1.0\"\n}}\n\
+             output \"msg\" {{\n  value = module.g.msg\n}}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        work.join("rc.tfrc"),
+        format!("credentials \"{host}\" {{\n  token = \"{tok}\"\n}}\n"),
+    )
+    .unwrap();
+    // Each client in a directory of its own; init, apply, the output.
+    let run = |image: &str, cli: &str, dir: &str, rc: &str| {
+        let script = format!(
+            "set -e; rm -rf {dir}; mkdir -p {dir}; cp main.tf {dir}/; cd {dir}; \
+             {cli} init -no-color -input=false; {cli} apply -no-color -auto-approve -input=false >/dev/null; \
+             echo MSG=$({cli} output -no-color -raw msg)"
+        );
+        tf_sh(image, &work, Some(rc), &script)
+    };
+    for (image, cli) in [(TERRAFORM_IMAGE, "terraform"), (TOFU_IMAGE, "tofu")] {
+        let (ok, out) = run(image, cli, &format!("run-{cli}"), "rc.tfrc");
+        assert!(ok && out.contains("MSG=hello pkgpod 1.1.0"), "{cli}: {out}");
+        // The provider's signature checked with the repository's key.
+        assert!(out.contains("signed, key ID"), "{cli}: {out}");
+    }
+    // A label: the registry as it was, through a host block.
+    std::fs::write(
+        work.join("label.tfrc"),
+        format!(
+            "credentials \"{host}\" {{\n  token = \"{tok}\"\n}}\n\
+             host \"{host}\" {{\n  services = {{\n    \"modules.v1\" = \"https://{host}/tf/@first/v1/modules/\",\n    \"providers.v1\" = \"https://{host}/tf/@first/v1/providers/\"\n  }}\n}}\n"
+        ),
+    )
+    .unwrap();
+    let (ok, out) = run(TERRAFORM_IMAGE, "terraform", "run-label", "label.tfrc");
+    assert!(ok && out.contains("MSG=hello pkgpod 1.0.0"), "{out}");
+    // Without a token: refused.
+    std::fs::write(work.join("none.tfrc"), "").unwrap();
+    let (ok, out) = run(TERRAFORM_IMAGE, "terraform", "run-none", "none.tfrc");
+    assert!(!ok, "{out}");
+    // A version is uploaded once; removed, the older one; restarted, the same.
+    let (st, out) = put(
+        "upload?namespace=team&name=greeting&system=null&version=1.1.0",
+        module("1.1.0")
+            .into_iter()
+            .chain([0u8; 0])
+            .collect::<Vec<u8>>(),
+    );
+    assert!(st == 201 || st == 409, "{out}");
+    std::fs::write(work.join("mod-1.1.0/extra.tf"), "# changed\n").unwrap();
+    let o = Command::new("tar")
+        .arg("czf")
+        .arg(work.join("changed.tar.gz"))
+        .arg("-C")
+        .arg(work.join("mod-1.1.0"))
+        .args(["main.tf", "extra.tf"])
+        .output()
+        .unwrap();
+    assert!(o.status.success());
+    let (st, out) = put(
+        "upload?namespace=team&name=greeting&system=null&version=1.1.0",
+        std::fs::read(work.join("changed.tar.gz")).unwrap(),
+    );
+    assert_eq!(st, 409, "{out}");
+    s.cli(&["rm", "tf", "modules/team/greeting/null/1.1.0.tar.gz", "-y"])
+        .unwrap();
+    s.restart();
+    let (ok, out) = run(TOFU_IMAGE, "tofu", "run-after", "rc.tfrc");
+    assert!(ok && out.contains("MSG=hello pkgpod 1.0.0"), "{out}");
 }

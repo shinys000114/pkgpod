@@ -2644,6 +2644,7 @@ dependencies = [
  "pkgpod-pub",
  "pkgpod-pypi",
  "pkgpod-rpm",
+ "pkgpod-terraform",
  "rand 0.8.8",
  "reqwest",
  "rsa",
@@ -2662,6 +2663,19 @@ dependencies = [
  "tower",
  "tower-http 0.7.1",
  "tracing",
+]
+
+[[package]]
+name = "pkgpod-terraform"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "flate2",
+ "pkgpod-base",
+ "pkgpod-engine",
+ "semver",
+ "serde_json",
+ "tar",
 ]
 
 [[package]]

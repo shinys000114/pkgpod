@@ -110,6 +110,37 @@ impl Keys {
         Ok(made)
     }
 
+    /// The server's secret for signed URLs (32 bytes beside its other
+    /// keys, made on first use; backed up with them).
+    pub fn url_secret(&self) -> Result<Vec<u8>> {
+        let path = self.rsa_dir.join("server.secret");
+        match std::fs::read(&path) {
+            Ok(s) if s.len() == 32 => return Ok(s),
+            Ok(_) => return Err(Error::Invalid(format!("{}: not 32 bytes", path.display()))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(Error::Invalid(format!("{}: {e}", path.display()))),
+        }
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::create_dir_all(&self.rsa_dir)
+            .map_err(|e| Error::Invalid(format!("{}: {e}", self.rsa_dir.display())))?;
+        let s: [u8; 32] = rand::random();
+        let tmp = self.rsa_dir.join("server.secret.tmp");
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(|e| Error::Invalid(format!("{}: {e}", tmp.display())))?;
+        f.write_all(&s)
+            .and_then(|_| f.sync_all())
+            .map_err(|e| Error::Invalid(format!("{}: {e}", tmp.display())))?;
+        std::fs::rename(&tmp, &path)
+            .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
+        Ok(s.to_vec())
+    }
+
     /// The server's usign key, made on first use.
     pub fn usign_key(&self) -> Result<Arc<crate::usign_key::UsignKey>> {
         let mut k = self.usign.lock().unwrap_or_else(|e| e.into_inner());

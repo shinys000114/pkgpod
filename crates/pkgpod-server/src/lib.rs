@@ -30,6 +30,7 @@ pub mod routes;
 pub mod rsa_key;
 pub mod schema;
 pub mod serve;
+pub mod terraform;
 pub mod usign_key;
 
 mod console;
@@ -165,6 +166,7 @@ pub fn formats() -> Vec<Arc<dyn pkgpod_engine::Format>> {
         Arc::new(pkgpod_cran::Cran),
         Arc::new(pkgpod_pub::Pub),
         Arc::new(pkgpod_ipk::Ipk),
+        Arc::new(pkgpod_terraform::Terraform),
     ]
 }
 
