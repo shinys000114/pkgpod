@@ -131,6 +131,82 @@
     var out = form.querySelector(".pick-count");
     if (out) out.textContent = String(n);
   });
+  // Repositories found by name, description or format.
+  function filterRepos() {
+    var q = document.getElementById("repo-q");
+    var f = document.getElementById("repo-format");
+    if (!q || !f) return;
+    var words = q.value.toLowerCase().split(/\s+/).filter(Boolean);
+    var shown = 0, all = 0;
+    document.querySelectorAll("table.repos tbody tr").forEach(function (tr) {
+      all++;
+      var text = (tr.getAttribute("data-find") || "").toLowerCase();
+      var ok = (!f.value || tr.getAttribute("data-format") === f.value) &&
+        words.every(function (w) { return text.indexOf(w) >= 0; });
+      tr.hidden = !ok;
+      if (ok) shown++;
+    });
+    var none = document.querySelector(".repo-none");
+    if (none) none.hidden = shown > 0;
+    var c = document.querySelector(".repo-count");
+    if (c) c.textContent = shown === all ? "" : shown + " of " + all;
+  }
+  document.addEventListener("input", function (ev) {
+    if (ev.target.id === "repo-q" || ev.target.id === "repo-format") filterRepos();
+  });
+  document.addEventListener("change", function (ev) {
+    if (ev.target.id === "repo-format") filterRepos();
+  });
+  // Files dropped on an upload form, listed; its progress while sent.
+  function listFiles(input) {
+    var ul = input.closest(".dropzone").querySelector(".drop-list");
+    if (!ul) return;
+    ul.textContent = "";
+    Array.prototype.forEach.call(input.files, function (f) {
+      var li = document.createElement("li");
+      li.textContent = f.name + " (" + Math.ceil(f.size / 1024) + " KiB)";
+      ul.appendChild(li);
+    });
+  }
+  document.addEventListener("change", function (ev) {
+    if (ev.target.type === "file" && ev.target.closest(".dropzone")) listFiles(ev.target);
+  });
+  ["dragenter", "dragover"].forEach(function (t) {
+    document.addEventListener(t, function (ev) {
+      var z = ev.target.closest && ev.target.closest(".dropzone");
+      if (!z) return;
+      ev.preventDefault();
+      z.classList.add("over");
+    });
+  });
+  document.addEventListener("dragleave", function (ev) {
+    var z = ev.target.closest && ev.target.closest(".dropzone");
+    if (z && !z.contains(ev.relatedTarget)) z.classList.remove("over");
+  });
+  document.addEventListener("drop", function (ev) {
+    var z = ev.target.closest && ev.target.closest(".dropzone");
+    if (!z) return;
+    ev.preventDefault();
+    z.classList.remove("over");
+    var input = z.querySelector("input[type=file]");
+    input.files = ev.dataTransfer.files;
+    listFiles(input);
+  });
+  document.addEventListener("htmx:xhr:progress", function (ev) {
+    var form = ev.target.closest && ev.target.closest(".upload-form");
+    if (!form || !ev.detail.lengthComputable) return;
+    var bar = form.querySelector(".upload-progress");
+    var pct = Math.round((ev.detail.loaded / ev.detail.total) * 100);
+    bar.hidden = false;
+    bar.value = pct;
+    form.querySelector(".upload-pct").textContent = pct < 100 ? pct + "%" : "taking it in…";
+  });
+  document.addEventListener("htmx:afterRequest", function (ev) {
+    var form = ev.target.closest && ev.target.closest(".upload-form");
+    if (!form) return;
+    form.querySelector(".upload-progress").hidden = true;
+    form.querySelector(".upload-pct").textContent = "";
+  });
   document.addEventListener("click", function (ev) {
     var b = ev.target.closest("button.copy");
     if (b) {

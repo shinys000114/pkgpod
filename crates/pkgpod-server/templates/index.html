@@ -14,11 +14,16 @@
     {% else %}<p>Nothing is shared with you yet.</p>{% endif %}
   </div>
   {% else %}
+  <div class="toolbar repo-filter">
+    <input type="search" id="repo-q" placeholder="find a repository" autocomplete="off" spellcheck="false" aria-label="Find a repository">
+    <select id="repo-format" aria-label="Format"><option value="">all formats</option>{% for (id, t) in present %}<option value="{{ id }}">{{ t }}</option>{% endfor %}</select>
+    <span class="muted small repo-count"></span>
+  </div>
   <div class="table-wrap"><table class="repos">
     <thead><tr><th>Repository</th><th>Format</th><th>Contents</th><th>Updated</th><th>Address</th></tr></thead>
     <tbody>
     {% for r in repos %}
-    <tr>
+    <tr data-format="{{ r.format }}" data-find="{{ r.name }} {{ r.description }} {{ r.format_title }}">
       <td class="nowrap"><a class="repo-name" href="/r/{{ r.name }}">{{ r.name }}</a>{% if r.public %} <span class="tag">public</span>{% endif %}
         {% if !r.description.is_empty() %}<div class="muted small desc">{{ r.description }}</div>{% endif %}</td>
       <td class="nowrap"><span class="fmt fmt-{{ r.format }}">{{ r.format_title }}</span>{% if r.kind == "mirror" %} <span class="tag">mirror</span>{% endif %}</td>
@@ -29,6 +34,7 @@
     {% endfor %}
     </tbody>
   </table></div>
+  <p class="empty repo-none" hidden>No repository matches.</p>
   {% endif %}
 </div>
 {% if s.admin %}

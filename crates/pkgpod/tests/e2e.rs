@@ -7538,6 +7538,13 @@ fn console_packages_filter_download_details_bulk() {
         b.contains("copy address") && b.contains("/r/el9/Packages/hello-rpm-1.1-1.noarch.rpm"),
         "{b}"
     );
+    // The list can be searched; uploads take dropped files.
+    let home = text("/");
+    assert!(
+        home.contains("id=\"repo-q\"") && home.contains("data-format=\"rpm\""),
+        "{home}"
+    );
+    assert!(text("/r/r/actions").contains("class=\"field wide dropzone\""));
     // Several rows removed in one plan.
     let plan = c
         .post(format!("{}/c/r/r/remove", s.api))
