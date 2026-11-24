@@ -40,8 +40,9 @@ Formats:
   (artifact and SNAPSHOT version) and md5/sha1/sha256/sha512 made here,
   uploaded checksums checked; releases deployed once unless `redeploy`.
 - **RubyGems**: `gem push` and `gem yank`; the compact index (versions,
-  names, info) and marshalled gemspecs (quick/Marshal.4.8) made from
-  each gem's metadata.
+  names, info), the full index (specs.4.8.gz and its latest and
+  prerelease kin, for `gem search -r`) and marshalled gemspecs
+  (quick/Marshal.4.8) made from each gem's metadata.
 - **Arch**: pacman repositories by name and architecture: the .db and
   .files databases with the newest version of each package, packages
   and databases signed with the repository's key, `any` packages in
