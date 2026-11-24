@@ -159,11 +159,11 @@ fn client_base(route: Option<&Route>, host: &str, base: &[String], req: &Request
     }
 }
 
-/// Formats whose repositories are trees to browse. npm, OCI and cargo
-/// repositories answer their clients' API only, as public registries do:
+/// Formats whose repositories are trees to browse. npm, OCI, cargo and
+/// Go repositories answer their clients' API only, as public registries do:
 /// they are left out of listings, and their address says how to use them.
 fn browsable(format: &str) -> bool {
-    !matches!(format, "npm" | "oci" | "cargo")
+    !matches!(format, "npm" | "oci" | "cargo" | "go")
 }
 
 /// A registry's address seen from a browser: how its clients use it.
@@ -323,6 +323,36 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
                     role,
                 };
                 return crate::npm::handle(app, ask, req).await;
+            }
+            if served.repo.format == "go" && matches!(method, Method::GET | Method::HEAD) {
+                if role.is_none() {
+                    return deny(&caller);
+                }
+                let mut base_url = client_base(route.as_ref(), &host, &base, &req);
+                let mut rel = rel;
+                let mut version = served.current.clone();
+                if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@'))
+                    && rel.len() > 1
+                    && rel[0] != "@v"
+                    && rel[0] != "@latest"
+                {
+                    let Ok(v) = app.labelled(&served.repo.name, label) else {
+                        return status(StatusCode::NOT_FOUND);
+                    };
+                    base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
+                    version = Some(v);
+                    rel.remove(0);
+                }
+                if rel.is_empty() {
+                    return client_note(
+                        StatusCode::OK,
+                        format!(
+                            "{}: a Go module proxy.\n\n  GOPROXY={base_url},https://proxy.golang.org,direct\n  GONOSUMDB=<your module prefix>\n\nIts modules are listed in pkgpod's console.\n",
+                            served.repo.name
+                        ),
+                    );
+                }
+                return crate::go::read(&app, &served.repo, version, &rel, req).await;
             }
             if served.repo.format == "cargo" {
                 let mut base_url = client_base(route.as_ref(), &host, &base, &req);

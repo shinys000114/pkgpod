@@ -668,6 +668,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                         ("pypi", _) => "Python packages for pip, uploaded with twine",
                         ("npm", _) => "JavaScript packages for npm",
                         ("cargo", _) => "Rust crates for cargo (sparse index)",
+                        ("go", _) => "Go modules for go (GOPROXY)",
                         _ => "",
                     }
                     .to_string(),
@@ -884,6 +885,41 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String], host: &str) ->
         out.push(UseLine {
             label: "Note".into(),
             text: "pkgpod is no proxy: packages from npmjs need their own registry (a scope here, the rest from registry.npmjs.org). npm login is not offered; set the token in .npmrc. unpublish and deprecate are operations here.".into(),
+        });
+        return out;
+    }
+    if r.format == "go" {
+        let public = r.setting_bool("public");
+        let hostport = base
+            .split_once("://")
+            .map_or(base.as_str(), |x| x.1)
+            .split('/')
+            .next()
+            .unwrap_or("");
+        out.push(UseLine {
+            label: "Environment".into(),
+            text: format!(
+                "go env -w GOPROXY={base},https://proxy.golang.org,direct\ngo env -w GONOSUMDB=<your module prefix>   # e.g. example.com/team/*: not in the public checksum database"
+            ),
+        });
+        if !public {
+            out.push(UseLine {
+                label: "Login (~/.netrc)".into(),
+                text: format!(
+                    "machine {hostport} login token password <token>\n# go sends it over https only, matching host:port"
+                ),
+            });
+        }
+        out.push(UseLine {
+            label: "Upload a version".into(),
+            text: format!(
+                "git archive --format=zip --prefix=<module>@<version>/ -o module.zip <version>\ncurl -u token:<token> -T module.zip {base}upload\npkgpod upload {} module.zip",
+                r.name
+            ),
+        });
+        out.push(UseLine {
+            label: "A labelled version".into(),
+            text: format!("GOPROXY={base}@<label>/ go list -m -versions <module>"),
         });
         return out;
     }
@@ -1611,6 +1647,7 @@ fn catalog_words(format: &str) -> (&'static str, [&'static str; 3], bool) {
         "pypi" => ("Packages", ["Project", "Version", "File"], true),
         "npm" => ("Packages", ["Package", "Version", "Note"], true),
         "cargo" => ("Crates", ["Crate", "Version", "Note"], true),
+        "go" => ("Modules", ["Module", "Version", "Note"], true),
         "deb" => ("Packages", ["Package", "Version", "Where"], true),
         _ => ("Packages", ["Package", "Version", "Where"], true),
     }

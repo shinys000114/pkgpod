@@ -2378,6 +2378,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pkgpod-go"
+version = "0.0.0"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "jiff",
+ "pkgpod-base",
+ "pkgpod-engine",
+ "semver",
+ "serde_json",
+]
+
+[[package]]
 name = "pkgpod-mirror"
 version = "0.0.0"
 dependencies = [
@@ -2452,6 +2465,7 @@ dependencies = [
  "pkgpod-deb",
  "pkgpod-engine",
  "pkgpod-files",
+ "pkgpod-go",
  "pkgpod-mirror",
  "pkgpod-npm",
  "pkgpod-oci",
