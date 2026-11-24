@@ -4306,8 +4306,13 @@ fn go_proxy_cache() {
 
 /// A stand-in upstream: answers each path with its body, and 404.
 fn stub_upstream(files: Vec<(String, Vec<u8>)>) -> u16 {
+    stub_upstream_on(0, files)
+}
+
+/// [`stub_upstream`] on a port (0: any).
+fn stub_upstream_on(port: u16, files: Vec<(String, Vec<u8>)>) -> u16 {
     use std::io::{BufRead, Write};
-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let l = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
     let port = l.local_addr().unwrap().port();
     std::thread::spawn(move || {
         for mut c in l.incoming().flatten() {
@@ -4490,6 +4495,129 @@ fn maven_proxy_cache() {
         .unwrap();
     assert_eq!(r.status().as_u16(), 200);
     assert_eq!(r.text().unwrap(), "good");
+}
+
+/// An npm proxy of another pkgpod's registry, with npm: tarballs from
+/// where the document says, checked against its integrity.
+#[test]
+fn npm_proxy_cache() {
+    if !have("npm") {
+        return;
+    }
+    let up = Server::start();
+    up.cli(&["repo", "create", "js", "-f", "npm", "-s", "public=true"])
+        .unwrap();
+    let ut = up
+        .cli(&["token", "create", "w", "--repos", "js", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let uport = up.serve_port;
+    let pubhome = up.dir.path().join("pub");
+    std::fs::create_dir_all(&pubhome).unwrap();
+    std::fs::write(
+        pubhome.join("npmrc"),
+        format!("registry=http://127.0.0.1:{uport}/js/\n//127.0.0.1:{uport}/js/:_authToken={ut}\n"),
+    )
+    .unwrap();
+    for (n, v) in [("hello-pkg", "1.0.0"), ("@team/lib", "1.0.0")] {
+        let d = npm_package(&up.dir.path().join("src"), n, v);
+        let (ok, out) = npm(&pubhome, &d, &["publish"]);
+        assert!(ok, "{out}");
+    }
+    let s = Server::start();
+    s.cli(&[
+        "repo",
+        "create",
+        "np",
+        "-f",
+        "npm",
+        "-k",
+        "proxy",
+        "-s",
+        &format!("upstream=http://127.0.0.1:{uport}/js/"),
+        "-s",
+        "public=true",
+        "-s",
+        "exclude=@acme/*",
+    ])
+    .unwrap();
+    let port = s.serve_port;
+    let client = |name: &str| {
+        let home = s.dir.path().join(name);
+        std::fs::create_dir_all(home.join("app")).unwrap();
+        std::fs::write(
+            home.join("npmrc"),
+            format!("registry=http://127.0.0.1:{port}/np/\n"),
+        )
+        .unwrap();
+        home
+    };
+    // The document's tarballs are ours.
+    let doc: Value = reqwest::blocking::get(s.url("/np/hello-pkg"))
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(
+        doc["versions"]["1.0.0"]["dist"]["tarball"],
+        format!("http://127.0.0.1:{port}/np/hello-pkg/-/hello-pkg-1.0.0.tgz"),
+        "{doc}"
+    );
+    let h = client("c1");
+    let (ok, out) = npm(
+        &h,
+        &h.join("app"),
+        &["install", "--no-audit", "hello-pkg", "@team/lib"],
+    );
+    assert!(ok, "{out}");
+    assert!(h.join("app/node_modules/@team/lib/index.js").is_file());
+    let d = s.json(&["downloads", "np"]);
+    assert_eq!(d["total"], 2, "{d}");
+    // With the upstream gone, from the cache.
+    drop(up);
+    let h = client("c2");
+    let (ok, out) = npm(&h, &h.join("app"), &["install", "hello-pkg", "@team/lib"]);
+    assert!(ok, "{out}");
+    // An excluded name is not asked for.
+    let r = reqwest::blocking::get(s.url("/np/@acme%2fsecret")).unwrap();
+    assert_eq!(r.status().as_u16(), 404);
+    assert!(!s.json(&["cache", "np"]).to_string().contains("acme"));
+    // A tarball whose integrity is not the document's.
+    let stub = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let sport = stub.local_addr().unwrap().port();
+    drop(stub);
+    let doc = serde_json::json!({
+        "name": "bad", "dist-tags": {"latest": "1.0.0"},
+        "versions": {"1.0.0": {"name": "bad", "version": "1.0.0", "dist": {
+            "tarball": format!("http://127.0.0.1:{sport}/r/bad/-/bad-1.0.0.tgz"),
+            "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+        }}},
+    });
+    let _ = stub_upstream_on(
+        sport,
+        vec![
+            ("/r/bad".into(), doc.to_string().into_bytes()),
+            ("/r/bad/-/bad-1.0.0.tgz".into(), b"not a tarball".to_vec()),
+        ],
+    );
+    s.cli(&[
+        "repo",
+        "create",
+        "bp",
+        "-f",
+        "npm",
+        "-k",
+        "proxy",
+        "-s",
+        &format!("upstream=http://127.0.0.1:{sport}/r/"),
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let r = reqwest::blocking::get(s.url("/bp/bad/-/bad-1.0.0.tgz")).unwrap();
+    assert_eq!(r.status().as_u16(), 502);
+    let cache = s.json(&["cache", "bp"]).to_string();
+    assert!(!cache.contains("bad-1.0.0.tgz"), "{cache}");
 }
 
 #[test]

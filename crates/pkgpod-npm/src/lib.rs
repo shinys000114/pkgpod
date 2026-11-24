@@ -508,6 +508,10 @@ impl Format for Npm {
         true
     }
 
+    fn proxy(&self) -> bool {
+        true
+    }
+
     fn id(&self) -> &'static str {
         "npm"
     }

@@ -133,7 +133,12 @@ pub fn html(s: &str) -> String {
 /// address names no port; else the scheme (behind a proxy, as it says),
 /// the host asked and the repository's path. For URLs a registry hands
 /// its clients (npm tarballs, cargo's index and downloads).
-fn client_base(route: Option<&Route>, host: &str, base: &[String], req: &Request) -> String {
+pub(crate) fn client_base(
+    route: Option<&Route>,
+    host: &str,
+    base: &[String],
+    req: &Request,
+) -> String {
     match route {
         Some(r) => {
             let mut u = r.url();
