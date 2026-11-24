@@ -8709,6 +8709,13 @@ fn terraform_registry_with_terraform_and_tofu() {
     let (ok, out) = run(TERRAFORM_IMAGE, "terraform", "run-label", "label.tfrc");
     assert!(ok && out.contains("MSG=hello pkgpod 1.0.0"), "{out}");
     // The signed URLs: good as handed out, not when changed or moved.
+    // A fresh client: the old one's pooled connection may have idled
+    // past the server's keep-alive while terraform ran.
+    let c = reqwest::blocking::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .resolve(TF_HOST, ([127, 0, 0, 1], port).into())
+        .build()
+        .unwrap();
     let dl: serde_json::Value = c
         .get(format!(
             "https://{host}/tf/v1/providers/team/null/3.2.4/download/linux/amd64"

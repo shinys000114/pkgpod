@@ -303,6 +303,17 @@ pub fn info(v: &str, time: i64) -> Value {
     json!({"Version": v, "Time": t})
 }
 
+/// A pseudo-version: its pre-release ends in a 14-digit time and a
+/// 12-digit commit hash (`v0.0.0-20240101000000-abcdef123456`,
+/// `v1.2.4-0.20240101000000-abcdef123456`).
+pub fn pseudo(v: &str) -> bool {
+    let core = v.split('+').next().unwrap_or(v);
+    let parts: Vec<&str> = core.rsplitn(3, ['-', '.']).collect();
+    matches!(parts.as_slice(), [hash, time, _]
+        if hash.len() == 12 && hash.bytes().all(|b| b.is_ascii_hexdigit())
+            && time.len() == 14 && time.bytes().all(|b| b.is_ascii_digit()))
+}
+
 impl Format for Go {
     fn id(&self) -> &'static str {
         "go"
@@ -389,8 +400,10 @@ impl Format for Go {
         true
     }
 
+    /// A pre-release, but not a pseudo-version (a commit someone pinned:
+    /// `v0.0.0-20240101000000-abcdef123456`).
     fn prerelease(&self, v: &str) -> bool {
-        pkgpod_engine::version::semver_pre(v)
+        pkgpod_engine::version::semver_pre(v) && !pseudo(v)
     }
 
     /// The module zip and its go.mod.
@@ -437,6 +450,17 @@ impl Format for Go {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pseudo_versions() {
+        assert!(pseudo("v0.0.0-20240101000000-abcdef123456"));
+        assert!(pseudo("v1.2.4-0.20240101000000-abcdef123456"));
+        assert!(pseudo("v1.2.4-rc.1.0.20240101000000-abcdef123456"));
+        assert!(!pseudo("v1.2.4-rc.1"));
+        assert!(
+            Go.prerelease("v1.2.4-rc.1") && !Go.prerelease("v0.0.0-20240101000000-abcdef123456")
+        );
+    }
 
     #[test]
     fn paths_versions_escaping() {
