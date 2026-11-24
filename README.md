@@ -132,6 +132,17 @@ To upgrade, stop the server, replace the binary and start it: the
 database is brought forward on start. An older pkgpod refuses data a
 newer one has written.
 
+## Documentation
+
+- [Using repositories](docs/usage/README.md): the console, the API and
+  the CLI, and a page for every format.
+- [Operations](docs/operations.md): installing, configuration,
+  listeners, storages, keys, backups, upgrades, monitoring.
+- [Architecture](docs/architecture.md): the crates, the data, how a
+  change and a request are handled.
+- [Format plugins](docs/format-plugins.md): adding a repository format.
+- [Development](docs/development.md): building, tests, conventions.
+
 ## Licence
 
 AGPL-3.0-only. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
