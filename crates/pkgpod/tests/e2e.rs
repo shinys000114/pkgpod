@@ -1038,3 +1038,198 @@ fn resigned_deb_mirror_with_apt() {
         tree_inrel
     );
 }
+
+/// Writes a source package of `hello` (a .dsc listing `parts`, written
+/// next to it unless already there) into `dir`; returns the .dsc.
+fn write_source(dir: &Path, version: &str, parts: &[(&str, &[u8])]) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let (mut sha, mut md5) = (String::new(), String::new());
+    for (name, data) in parts {
+        let h = pkgpod_deb::hash::hash_bytes(data);
+        sha.push_str(&format!("\n {} {} {name}", h.sha256, data.len()));
+        md5.push_str(&format!("\n {} {} {name}", h.md5, data.len()));
+        std::fs::write(dir.join(name), data).unwrap();
+    }
+    let dsc = format!(
+        "Format: 3.0 (quilt)\nSource: hello\nBinary: hello\nArchitecture: any\nVersion: {version}\nMaintainer: e2e <e2e@example.invalid>\nStandards-Version: 4.6.0\nChecksums-Sha256:{sha}\nFiles:{md5}\n"
+    );
+    let p = dir.join(format!("hello_{version}.dsc"));
+    std::fs::write(&p, dsc).unwrap();
+    p
+}
+
+#[test]
+fn source_packages_with_apt() {
+    if !have("gpg") {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&[
+        "key",
+        "generate",
+        "main",
+        "pkgpod e2e <e2e@example.invalid>",
+    ])
+    .unwrap();
+    s.cli(&["repo", "create", "src", "-s", "public=true"])
+        .unwrap();
+    s.cli(&[
+        "op",
+        "src",
+        "dist-set",
+        "name=noble",
+        "components=main",
+        "-y",
+    ])
+    .unwrap();
+    let root = s.dir.path().join("work");
+    let orig: &[u8] = b"upstream source, version 1.0\n";
+    let one = write_source(
+        &root.join("one"),
+        "1.0-1",
+        &[
+            ("hello_1.0.orig.tar.gz", orig),
+            ("hello_1.0-1.debian.tar.xz", b"packaging, revision 1\n"),
+        ],
+    );
+    let out = s.cli(&["upload", "src", one.to_str().unwrap()]).unwrap();
+    assert!(out.contains("added source hello 1.0-1"), "{out}");
+
+    // The next revision shares the orig tarball, which the repository has.
+    let two_dir = root.join("two");
+    let two = write_source(
+        &two_dir,
+        "1.0-2",
+        &[
+            ("hello_1.0.orig.tar.gz", orig),
+            ("hello_1.0-2.debian.tar.xz", b"packaging, revision 2\n"),
+        ],
+    );
+    std::fs::remove_file(two_dir.join("hello_1.0.orig.tar.gz")).unwrap();
+    s.cli(&["upload", "src", two.to_str().unwrap()]).unwrap();
+
+    // What is refused: a .dsc without its files, a file no .dsc lists,
+    // an orig tarball of the same name with other content.
+    let three_dir = root.join("three");
+    let three = write_source(
+        &three_dir,
+        "1.0-3",
+        &[("hello_1.0-3.debian.tar.xz", b"packaging, revision 3\n")],
+    );
+    std::fs::remove_file(three_dir.join("hello_1.0-3.debian.tar.xz")).unwrap();
+    let e = s
+        .cli(&["upload", "src", three.to_str().unwrap()])
+        .unwrap_err();
+    assert!(e.contains("together with its files"), "{e}");
+    let stray = root.join("stray.txt");
+    std::fs::write(&stray, "not a package").unwrap();
+    let e = s
+        .cli(&[
+            "upload",
+            "src",
+            two.to_str().unwrap(),
+            stray.to_str().unwrap(),
+        ])
+        .unwrap_err();
+    assert!(e.contains("no .dsc of this upload lists it"), "{e}");
+    let four = write_source(
+        &root.join("four"),
+        "1.0-4",
+        &[
+            ("hello_1.0.orig.tar.gz", b"another upstream tarball\n"),
+            ("hello_1.0-4.debian.tar.xz", b"packaging, revision 4\n"),
+        ],
+    );
+    let e = s
+        .cli(&["upload", "src", four.to_str().unwrap()])
+        .unwrap_err();
+    assert!(e.contains("one per name"), "{e}");
+    // Half a source package is not a state the repository takes.
+    let e = s
+        .cli(&[
+            "rm",
+            "src",
+            "dists/noble/main/hello_1.0-2_source/hello_1.0.orig.tar.gz",
+            "-y",
+        ])
+        .unwrap_err();
+    assert!(e.contains("lacks hello_1.0.orig.tar.gz"), "{e}");
+
+    s.cli(&["op", "src", "remove", "packages=hello_1.0-1_source", "-y"])
+        .unwrap();
+    let (st, sources) = get(&s.url("/src/dists/noble/main/source/Sources"), None);
+    assert_eq!(st, 200);
+    assert!(sources.starts_with("Package: hello\n"), "{sources}");
+    assert!(sources.contains("Version: 1.0-2"), "{sources}");
+    assert!(!sources.contains("Version: 1.0-1"), "{sources}");
+    assert!(
+        sources.contains("Directory: pool/main/h/hello"),
+        "{sources}"
+    );
+    assert!(sources.contains(" hello_1.0-2.dsc\n"), "{sources}");
+    let (_, release) = get(&s.url("/src/dists/noble/Release"), None);
+    assert!(release.contains("main/source/Sources.xz"), "{release}");
+    // The shared tarball stays, for 1.0-2.
+    assert_eq!(
+        get(&s.url("/src/pool/main/h/hello/hello_1.0.orig.tar.gz"), None).0,
+        200
+    );
+    assert_eq!(
+        get(
+            &s.url("/src/pool/main/h/hello/hello_1.0-1.debian.tar.xz"),
+            None
+        )
+        .0,
+        404
+    );
+    let found = s.json(&["search", "hello"]);
+    assert!(found.to_string().contains("source"), "{found}");
+
+    if have("apt-get") {
+        let a = s.dir.path().join("apt");
+        for d in [
+            "etc/keyrings",
+            "state/lists/partial",
+            "cache/archives/partial",
+        ] {
+            std::fs::create_dir_all(a.join(d)).unwrap();
+        }
+        std::fs::write(a.join("status"), "").unwrap();
+        let (_, key) = get(&s.url("/src/key.asc"), None);
+        let kr = a.join("etc/keyrings/k.asc");
+        std::fs::write(&kr, key).unwrap();
+        std::fs::write(
+            a.join("etc/sources.list"),
+            format!(
+                "deb-src [signed-by={}] {} noble main\n",
+                kr.display(),
+                s.url("/src/")
+            ),
+        )
+        .unwrap();
+        let out = apt(&a, &["update"]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let out = apt(&a, &["source", "--download-only", "hello"]);
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        for f in [
+            "hello_1.0-2.dsc",
+            "hello_1.0.orig.tar.gz",
+            "hello_1.0-2.debian.tar.xz",
+        ] {
+            assert!(a.join(f).is_file(), "{f} not fetched");
+        }
+        assert_eq!(
+            std::fs::read(a.join("hello_1.0.orig.tar.gz")).unwrap(),
+            orig
+        );
+    }
+}

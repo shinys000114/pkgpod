@@ -172,6 +172,17 @@ impl Client {
         self.send(Method::POST, path, body)
     }
 
+    /// Sends files as one multipart upload (other params in the query).
+    pub fn upload_many(&self, path: &str, files: &[std::path::PathBuf]) -> Result<Value, CliError> {
+        let mut form = reqwest::blocking::multipart::Form::new();
+        for f in files {
+            form = form
+                .file("file", f)
+                .map_err(|e| CliError::other(format!("{}: {e}", f.display())))?;
+        }
+        self.finish(self.req(Method::POST, path).multipart(form).send())
+    }
+
     /// Streams a file as the raw body.
     pub fn upload(&self, path: &str, file: &Path) -> Result<Value, CliError> {
         let f = fs::File::open(file)

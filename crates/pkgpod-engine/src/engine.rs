@@ -710,6 +710,19 @@ impl Engine {
         self.change(name, actor, |cx, e| f.ingest(cx, up, params, e))
     }
 
+    /// Takes in several files as one upload and one version.
+    pub fn upload_batch(
+        &self,
+        name: &str,
+        ups: &[Upload],
+        params: &Value,
+        actor: &str,
+    ) -> Result<Outcome> {
+        let r = self.repo(name)?;
+        let f = self.format(&r.format)?.clone();
+        self.change(name, actor, |cx, e| f.ingest_batch(cx, ups, params, e))
+    }
+
     /// Plans removing paths (whole subtrees for directories).
     pub fn plan_remove(&self, name: &str, paths: &[String], actor: &str) -> Result<Plan> {
         self.preview(name, actor, |_, e| {

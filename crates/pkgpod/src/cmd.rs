@@ -403,6 +403,38 @@ pub fn run(
             params,
         } => {
             let q = query(&params)?;
+            // A source package goes with the files its .dsc lists (found
+            // next to it; those the repository has already may be left
+            // out), as one upload.
+            let mut files = files;
+            let mut parts = Vec::new();
+            for f in files
+                .iter()
+                .filter(|f| f.extension().is_some_and(|e| e == "dsc"))
+            {
+                let data = std::fs::read(f)
+                    .map_err(|e| CliError::other(format!("{}: {e}", f.display())))?;
+                let d = pkgpod_deb::dsc::parse_dsc(&data)
+                    .map_err(|e| CliError::other(format!("{}: {e}", f.display())))?;
+                let dir = f.parent().unwrap_or(std::path::Path::new("."));
+                for part in d.files {
+                    let p = dir.join(&part.name);
+                    if p.is_file() && !files.contains(&p) && !parts.contains(&p) {
+                        parts.push(p);
+                    }
+                }
+            }
+            if !parts.is_empty() || files.len() > 1 {
+                files.extend(parts);
+                let path = format!("/api/v1/repos/{}/upload?{q}", enc(&repo));
+                let v = c.upload_many(&path, &files)?;
+                x.print(&v, |v| {
+                    for r in v.as_array().into_iter().flatten() {
+                        show_outcome(r);
+                    }
+                });
+                return Ok(());
+            }
             for f in files {
                 let fname = f
                     .file_name()
