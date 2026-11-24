@@ -1,0 +1,18 @@
+[package]
+name = "pkgpod-go"
+description = "pkgpod Go format: Go modules served as a module proxy (GOPROXY)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+pkgpod-base.workspace = true
+pkgpod-engine.workspace = true
+serde_json.workspace = true
+semver.workspace = true
+flate2.workspace = true
+crc32fast.workspace = true
+jiff.workspace = true

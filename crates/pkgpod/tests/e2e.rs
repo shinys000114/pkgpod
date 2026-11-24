@@ -586,7 +586,7 @@ fn console_login_pages_and_csrf() {
     // page, usage and actions open.
     let src = s.url("/web/");
     type Fields<'a> = &'a [(&'a str, &'a str)];
-    let choices: [(&str, &str, &str, Fields); 8] = [
+    let choices: [(&str, &str, &str, Fields); 9] = [
         ("deb", "hosted", "c-deb", &[("first_dist", "noble")]),
         (
             "deb",
@@ -600,6 +600,7 @@ fn console_login_pages_and_csrf() {
         ("pypi", "hosted", "c-pypi", &[]),
         ("npm", "hosted", "c-npm", &[]),
         ("cargo", "hosted", "c-cargo", &[]),
+        ("go", "hosted", "c-go", &[]),
     ];
     for (format, kind, name, extra) in choices {
         let mut form = vec![("format", format), ("kind", kind), ("name", name)];
@@ -4589,6 +4590,7 @@ fn serving_root_lists_trees_not_registries() {
         ("reg-npm", "npm"),
         ("reg-oci", "oci"),
         ("reg-cargo", "cargo"),
+        ("reg-go", "go"),
     ] {
         let mut args = vec!["repo", "create", name, "-f", format, "-s", "public=true"];
         if format == "deb" {
@@ -4604,7 +4606,7 @@ fn serving_root_lists_trees_not_registries() {
     for name in ["tree-deb", "tree-files", "tree-pypi"] {
         assert!(root.contains(name), "{name}: {root}");
     }
-    for name in ["reg-npm", "reg-oci", "reg-cargo", "hidden-oci"] {
+    for name in ["reg-npm", "reg-oci", "reg-cargo", "reg-go", "hidden-oci"] {
         assert!(!root.contains(name), "{name}: {root}");
     }
     let (st, note) = get(&s.url("/reg-oci/"), None);
@@ -4627,6 +4629,9 @@ fn serving_root_lists_trees_not_registries() {
         note.contains("index = \"sparse+http://127.0.0.1:"),
         "{note}"
     );
+    let (st, note) = get(&s.url("/reg-go/"), None);
+    assert_eq!(st, 200);
+    assert!(note.contains("GOPROXY=http://127.0.0.1:"), "{note}");
     let (st, _) = get(&s.url("/hidden-oci/"), None);
     assert_eq!(st, 401, "a private registry's address says nothing");
 }
@@ -4812,4 +4817,213 @@ fn cargo_publish_build_yank() {
     // A private registry asks for the token.
     let r = c.get(s.url("/crates/index/config.json")).send().unwrap();
     assert_eq!(r.status().as_u16(), 401);
+}
+
+/// Runs go with its own home, module cache and build cache in `home`,
+/// GOPROXY set to `proxy`, credentials from `home/netrc` (go sends them
+/// over https only) and `home/ca.pem` trusted.
+fn go(home: &Path, cwd: &Path, proxy: &str, args: &[&str]) -> (bool, String) {
+    let o = Command::new("go")
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", home)
+        .env("GOPATH", home.join("gopath"))
+        .env("GOCACHE", home.join("gocache"))
+        .env("GOPROXY", proxy)
+        .env("GOSUMDB", "off")
+        .env("GOFLAGS", "-mod=mod")
+        .env("GOTOOLCHAIN", "local")
+        .env("NETRC", home.join("netrc"))
+        .env("SSL_CERT_FILE", home.join("ca.pem"))
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap();
+    (
+        o.status.success(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        ),
+    )
+}
+
+/// A module zip as `git archive` makes it, of a module with one package.
+fn go_module_zip(dir: &Path, module: &str, version: &str, body: &str) -> Vec<u8> {
+    let d = dir.join(format!("{}-{version}", module.replace('/', "_")));
+    std::fs::create_dir_all(&d).unwrap();
+    let pkg = module.rsplit('/').next().unwrap().to_lowercase();
+    std::fs::write(d.join("go.mod"), format!("module {module}\n\ngo 1.21\n")).unwrap();
+    std::fs::write(
+        d.join(format!("{pkg}.go")),
+        format!("package {pkg}\n\nfunc Hello() string {{ return {body:?} }}\n"),
+    )
+    .unwrap();
+    let git = |args: &[&str]| {
+        let o = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .current_dir(&d)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    };
+    git(&["init", "-q"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", version]);
+    let out = d.join("module.zip");
+    git(&[
+        "archive",
+        "--format=zip",
+        &format!("--prefix={module}@{version}/"),
+        "-o",
+        out.to_str().unwrap(),
+        "HEAD",
+    ]);
+    std::fs::read(out).unwrap()
+}
+
+#[test]
+fn go_modules_through_the_proxy() {
+    if !have("go") || !have("git") || !have("openssl") {
+        return;
+    }
+    let s = Server::start();
+    // A private proxy is reached over https: a listener with a
+    // certificate of its own for 127.0.0.1.
+    let home = s.dir.path().join("gohome");
+    std::fs::create_dir_all(&home).unwrap();
+    let (cert, key) = (home.join("ca.pem"), home.join("key.pem"));
+    let o = Command::new("openssl")
+        .args([
+            "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+        ])
+        .args([
+            "-subj",
+            "/CN=127.0.0.1",
+            "-addext",
+            "subjectAltName=IP:127.0.0.1",
+        ])
+        .arg("-keyout")
+        .arg(&key)
+        .arg("-out")
+        .arg(&cert)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let tls_port = free_port();
+    s.cli(&[
+        "listener",
+        "set",
+        "tls",
+        &format!("127.0.0.1:{tls_port}"),
+        "--cert",
+        cert.to_str().unwrap(),
+        "--key",
+        key.to_str().unwrap(),
+    ])
+    .unwrap();
+    let t0 = Instant::now();
+    while std::net::TcpStream::connect(("127.0.0.1", tls_port)).is_err() {
+        assert!(t0.elapsed() < Duration::from_secs(10), "the TLS listener");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    s.cli(&["repo", "create", "gomods", "-f", "go"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "gomods", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let src = s.dir.path().join("gosrc");
+    let c = reqwest::blocking::Client::new();
+    let upload = |zip: Vec<u8>| {
+        let r = c
+            .put(s.url("/gomods/upload"))
+            .basic_auth("token", Some(&tok))
+            .body(zip)
+            .send()
+            .unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    for (m, v) in [
+        ("example.com/greet", "v1.0.0"),
+        ("example.com/Team/tool", "v0.1.0"),
+    ] {
+        let (st, out) = upload(go_module_zip(&src, m, v, &format!("{m} {v}")));
+        assert_eq!(st, 201, "{out}");
+    }
+    s.cli(&["label", "gomods", "first"]).unwrap();
+    let (st, out) = upload(go_module_zip(
+        &src,
+        "example.com/greet",
+        "v1.1.0",
+        "greet v1.1.0",
+    ));
+    assert_eq!(st, 201, "{out}");
+    // A version is published once.
+    let (st, out) = upload(go_module_zip(
+        &src,
+        "example.com/greet",
+        "v1.0.0",
+        "changed",
+    ));
+    assert_eq!(st, 409, "{out}");
+    std::fs::write(
+        home.join("netrc"),
+        // go matches the machine against host:port.
+        format!("machine 127.0.0.1:{tls_port} login token password {tok}\n"),
+    )
+    .unwrap();
+    let reg = format!("https://127.0.0.1:{tls_port}/gomods/");
+    let app = src.join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(
+        app.join("go.mod"),
+        "module example.com/app\n\ngo 1.21\n\nrequire (\n\texample.com/greet v1.0.0\n\texample.com/Team/tool v0.1.0\n)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("main.go"),
+        "package main\n\nimport (\n\t\"fmt\"\n\t\"example.com/greet\"\n\t\"example.com/Team/tool\"\n)\n\nfunc main() { fmt.Println(greet.Hello(), \"|\", tool.Hello()) }\n",
+    )
+    .unwrap();
+    let (ok, out) = go(&home, &app, &reg, &["run", "."]);
+    assert!(
+        ok && out.contains("example.com/greet v1.0.0 | example.com/Team/tool v0.1.0"),
+        "{out}"
+    );
+    let (ok, out) = go(
+        &home,
+        &app,
+        &reg,
+        &["list", "-m", "-versions", "example.com/greet"],
+    );
+    assert!(
+        ok && out.contains("example.com/greet v1.0.0 v1.1.0"),
+        "{out}"
+    );
+    let (ok, out) = go(
+        &home,
+        &app,
+        &reg,
+        &["list", "-m", "example.com/greet@latest"],
+    );
+    assert!(ok && out.trim() == "example.com/greet v1.1.0", "{out}");
+    // A label is a proxy of its own.
+    let (ok, out) = go(
+        &home,
+        &app,
+        &format!("{reg}@first/"),
+        &["list", "-m", "-versions", "example.com/greet"],
+    );
+    assert!(ok && out.trim() == "example.com/greet v1.0.0", "{out}");
+    // A private proxy asks who is there, for every file.
+    for f in ["list", "v1.0.0.info", "v1.0.0.mod", "v1.0.0.zip"] {
+        let r = c
+            .get(s.url(&format!("/gomods/example.com/greet/@v/{f}")))
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 401, "{f}");
+    }
 }
