@@ -101,6 +101,44 @@
       }
     });
   });
+  // A running job's log: its new lines come as a stream (Server-Sent
+  // Events) and are added to what is shown, which is never replaced, so
+  // a selection or the place read stay; followed at the bottom only when
+  // the reader is there. The end gives the job's state.
+  function streamLogs(root) {
+    (root || document).querySelectorAll("[data-stream]").forEach(function (box) {
+      if (box.dataset.streaming) return;
+      box.dataset.streaming = "1";
+      var pre = box.querySelector("pre.log");
+      var es = new EventSource(box.dataset.stream);
+      es.addEventListener("log", function (ev) {
+        var atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 24;
+        var text = ev.data + "\n";
+        if (pre.textContent && !/\n$/.test(pre.textContent)) text = "\n" + text;
+        pre.appendChild(document.createTextNode(text));
+        if (atBottom) pre.scrollTop = pre.scrollHeight;
+      });
+      es.addEventListener("end", function (ev) {
+        es.close();
+        var badge = box.querySelector(".job-state");
+        if (badge) {
+          badge.textContent = ev.data;
+          badge.classList.remove("run");
+          badge.classList.add(ev.data === "ok" ? "ok" : "bad");
+        }
+        var stop = box.querySelector(".job-stop");
+        if (stop) stop.remove();
+      });
+      // Gone (the server restarting, the page left): the browser tries
+      // again by itself, from the last line it had.
+    });
+  }
+  document.addEventListener("DOMContentLoaded", function () {
+    streamLogs(document);
+  });
+  document.addEventListener("htmx:afterSettle", function (ev) {
+    streamLogs(ev.detail.elt);
+  });
   // A form with data-sparse sends only the fields changed in it (an
   // unticked box as false): an operation keeps what it is not given.
   document.addEventListener("htmx:configRequest", function (ev) {

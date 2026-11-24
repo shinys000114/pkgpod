@@ -26,9 +26,9 @@
     <tr data-format="{{ r.format }}" data-find="{{ r.name }} {{ r.description }} {{ r.format_title }}">
       <td class="nowrap"><a class="repo-name" href="/r/{{ r.name }}">{{ r.name }}</a>{% if r.public %} <span class="tag">public</span>{% endif %}
         {% if !r.description.is_empty() %}<div class="muted small desc">{{ r.description }}</div>{% endif %}</td>
-      <td class="nowrap"><span class="fmt fmt-{{ r.format }}">{{ r.format_title }}</span>{% if r.kind == "mirror" %} <span class="tag">mirror</span>{% endif %}</td>
+      <td class="nowrap"><span class="fmt fmt-{{ r.format }}">{{ r.format_title }}</span>{% if r.kind != "hosted" %} <span class="tag">{{ r.kind }}</span>{% endif %}</td>
       <td class="nowrap{% if !r.state.is_empty() %} st-{{ r.state }}{% endif %}">{{ r.content }}</td>
-      <td class="nowrap muted">{% if r.kind == "mirror" %}—{% else %}v{{ r.version }} · {{ r.updated }}{% endif %}</td>
+      <td class="nowrap muted">{% if r.kind == "mirror" || r.kind == "group" || r.kind == "proxy" %}—{% else %}v{{ r.version }} · {{ r.updated }}{% endif %}</td>
       <td class="mono small nowrap">{% for u in r.urls %}{{ u }}<br>{% endfor %}</td>
     </tr>
     {% endfor %}
@@ -40,10 +40,12 @@
 {% if s.admin %}
 <div class="card" id="new">
   <div class="card-head"><h2>New repository</h2><span class="hint">choose what it holds</span></div>
+  {% for k in kinds %}
+  <h3 class="chooser-kind">{{ k.title }} <span class="hint">{{ k.hint }}</span></h3>
   <div class="card-body chooser">
-  {% for f in formats %}
+  {% for f in k.formats %}
     <input type="radio" name="newrepo" id="new-{{ f.id }}-{{ f.kind }}" class="choice-input"{% if f.id == "deb" && f.kind == "hosted" %} checked{% endif %}>
-    <label for="new-{{ f.id }}-{{ f.kind }}" class="choice"><span class="choice-title"><span class="fmt fmt-{{ f.id }}">{{ f.title }}</span>{% if f.kind == "mirror" %}<span class="tag">mirror</span>{% endif %}</span><small>{{ f.blurb }}</small></label>
+    <label for="new-{{ f.id }}-{{ f.kind }}" class="choice"><span class="choice-title"><span class="fmt fmt-{{ f.id }}">{{ f.title }}</span>{% if f.kind != "hosted" %}<span class="tag">{{ f.kind }}</span>{% endif %}</span><small>{{ f.blurb }}</small></label>
     <form class="choice-form" hx-post="/c/repos" hx-target="next .result">
       <input type="hidden" name="format" value="{{ f.id }}">
       <input type="hidden" name="kind" value="{{ f.kind }}">
@@ -55,20 +57,21 @@
       </div>
       {% endif %}
       <div class="fields">
-        <label class="field"><span>Name</span><input name="name" placeholder="{% if f.kind == "mirror" %}e.g. debian{% else %}e.g. team{% endif %}" required pattern="[a-z0-9][a-z0-9._-]*" autocomplete="off" autocapitalize="off" spellcheck="false"><small>Lowercase letters, digits, '.', '_', '-'.</small></label>
+        <label class="field"><span>Name</span><input name="name" placeholder="{% if f.kind == "mirror" %}e.g. debian{% else if f.kind == "proxy" %}e.g. {{ f.id }}-public{% else if f.kind == "group" %}e.g. {{ f.id }}-all{% else %}e.g. team{% endif %}" required pattern="[a-z0-9][a-z0-9._-]*" autocomplete="off" autocapitalize="off" spellcheck="false"><small>Lowercase letters, digits, '.', '_', '-'.</small></label>
         {% if f.id == "deb" && f.kind == "hosted" %}
         <label class="field wide"><span>Dists</span><textarea name="dists" rows="3" spellcheck="false" autocapitalize="off" placeholder="focal jammy noble: rockchip amlogic&#10;resolute: internal-realtek"></textarea><small>A line per group: the dists clients put in sources.list, then after a colon their components (none: main). More can be added or changed later.</small></label>
         {% endif %}
         {% if storages.len() > 1 %}<label class="field"><span>Storage</span><select name="storage">{% for st in storages %}<option>{{ st }}</option>{% endfor %}</select></label>{% endif %}
       </div>
-      <details class="more"{% if f.kind == "mirror" %} open{% endif %}><summary>{% if f.kind == "mirror" %}Upstream and settings{% else %}More settings{% endif %}</summary>
+      <details class="more"{% if f.kind != "hosted" %} open{% endif %}><summary>{% if f.kind == "mirror" || f.kind == "proxy" %}Upstream and settings{% else if f.kind == "group" %}Members and settings{% else %}More settings{% endif %}</summary>
       {% call m::fields(f.fields) %}{% endcall %}
       </details>
-      <div class="form-foot"><button type="submit">Create {{ f.title }}{% if f.kind == "mirror" %} mirror{% endif %}</button></div>
+      <div class="form-foot"><button type="submit">Create {{ f.title }}{% if f.kind != "hosted" %} {{ f.kind }}{% endif %}</button></div>
     </form>
     <div class="choice-result result"></div>
   {% endfor %}
   </div>
+  {% endfor %}
 </div>
 {% endif %}
 {% endblock %}

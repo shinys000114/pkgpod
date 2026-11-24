@@ -443,6 +443,10 @@ impl Format for Cargo {
         true
     }
 
+    fn proxy_upstream(&self) -> &'static str {
+        "https://index.crates.io/"
+    }
+
     fn id(&self) -> &'static str {
         "cargo"
     }

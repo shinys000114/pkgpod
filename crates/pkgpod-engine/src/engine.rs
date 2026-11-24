@@ -155,7 +155,12 @@ impl Engine {
         let fmt = self.format(format)?;
         if matches!(kind, Kind::Group | Kind::Proxy) {
             // A group holds nothing: only which repositories it reads; a
-            // proxy, where it fetches from and how long it keeps it.
+            // proxy, where it fetches from (the public registry unless
+            // told) and how long it keeps it.
+            let up = fmt.proxy_upstream();
+            if let Some(u) = f.iter_mut().find(|x| x.name == "upstream") {
+                u.default = serde_json::json!(up);
+            }
             return Ok(f);
         }
         if kind.versioned() && fmt.cleanup() {

@@ -233,6 +233,10 @@ impl Format for Pypi {
         true
     }
 
+    fn proxy_upstream(&self) -> &'static str {
+        "https://pypi.org/simple/"
+    }
+
     fn id(&self) -> &'static str {
         "pypi"
     }
