@@ -736,7 +736,7 @@ fn console_login_pages_and_csrf() {
     // page, usage and actions open.
     let src = s.url("/web/");
     type Fields<'a> = &'a [(&'a str, &'a str)];
-    let choices: [(&str, &str, &str, Fields); 20] = [
+    let choices: [(&str, &str, &str, Fields); 21] = [
         (
             "deb",
             "hosted",
@@ -770,6 +770,7 @@ fn console_login_pages_and_csrf() {
         ("conda", "hosted", "c-conda", &[]),
         ("cran", "hosted", "c-cran", &[]),
         ("pub", "hosted", "c-pub", &[]),
+        ("ipk", "hosted", "c-ipk", &[]),
     ];
     for (format, kind, name, extra) in choices {
         let mut form = vec![("format", format), ("kind", kind), ("name", name)];
@@ -4865,6 +4866,7 @@ fn serving_root_lists_trees_not_registries() {
         ("tree-cran", "cran"),
         ("tree-gems", "gems"),
         ("tree-arch", "arch"),
+        ("tree-ipk", "ipk"),
         ("reg-npm", "npm"),
         ("reg-oci", "oci"),
         ("reg-cargo", "cargo"),
@@ -4896,6 +4898,7 @@ fn serving_root_lists_trees_not_registries() {
         "tree-cran",
         "tree-gems",
         "tree-arch",
+        "tree-ipk",
     ] {
         assert!(root.contains(name), "{name}: {root}");
     }
@@ -7684,4 +7687,117 @@ fn console_copy_access_usage_and_glance() {
             && usage.contains("saved by keeping each file once"),
         "{usage}"
     );
+}
+
+const OPENWRT_IMAGE: &str = "openwrt/rootfs:x86-64-openwrt-24.10";
+
+#[test]
+fn ipk_feeds_with_opkg() {
+    if images_here(&[OPENWRT_IMAGE]).is_empty() {
+        return;
+    }
+    let mut s = Server::start();
+    s.cli(&["repo", "create", "ipks", "-f", "ipk"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "ipks", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let dir = s.dir.path().join("ipk");
+    std::fs::create_dir_all(&dir).unwrap();
+    let make = |ver: &str, msg: &str| {
+        let control = format!(
+            "Package: hello-ipk\nVersion: {ver}\nDepends: libc\nSource: hello-ipk\nSection: utils\nArchitecture: all\nInstalled-Size: 4\nDescription: A sample package for pkgpod's tests.\n"
+        );
+        let p = dir.join(format!("hello-ipk_{ver}_all.ipk"));
+        std::fs::write(
+            &p,
+            pkgpod_ipk::make_ipk(&control, &[("./usr/share/hello-ipk/msg", msg.as_bytes())]),
+        )
+        .unwrap();
+        p
+    };
+    let c = reqwest::blocking::Client::new();
+    let upload = |p: &Path| {
+        let r = c
+            .put(s.url("/ipks/upload?feed=main"))
+            .basic_auth("token", Some(&tok))
+            .body(std::fs::read(p).unwrap())
+            .send()
+            .unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    let (st, out) = upload(&make("1.0-1", "first"));
+    assert_eq!(st, 201, "{out}");
+    s.cli(&["label", "ipks", "first"]).unwrap();
+    // With opkg's own fetcher and usign, signature checks on (OpenWrt's
+    // default): the key added, the feed private (a token in its URL).
+    let base = s
+        .url("/ipks/")
+        .replacen("http://", &format!("http://token:{tok}@"), 1);
+    let opkg = |feed: &str, then: &str| {
+        docker_sh(
+            OPENWRT_IMAGE,
+            &format!(
+                "set -e; mkdir -p /var/lock; grep -q '^option check_signature' /etc/opkg.conf; : > /etc/opkg/distfeeds.conf; \
+                 wget -q -O /tmp/k.pub {base}key.pub && opkg-key add /tmp/k.pub; \
+                 echo 'src/gz pk {base}{feed}' > /etc/opkg/customfeeds.conf; \
+                 opkg update; {then}"
+            ),
+        )
+    };
+    let (ok, out) = opkg(
+        "main",
+        "opkg install hello-ipk && cat /usr/share/hello-ipk/msg",
+    );
+    assert!(ok && out.ends_with("first"), "{out}");
+    // A newer version: upgraded to; usign itself checks the index.
+    let (st, out) = upload(&make("1.1-1", "second"));
+    assert_eq!(st, 201, "{out}");
+    // Installed from the label's feed (1.0), then upgraded from main;
+    // usign itself checks the index opkg fetched.
+    let (ok, out) = opkg(
+        "@first/main",
+        &format!(
+            "opkg install hello-ipk && cat /usr/share/hello-ipk/msg && echo; \
+             echo 'src/gz pk {base}main' > /etc/opkg/customfeeds.conf; opkg update; \
+             opkg upgrade hello-ipk && cat /usr/share/hello-ipk/msg && echo; \
+             zcat /var/opkg-lists/pk | usign -V -m - -P /etc/opkg/keys -x /var/opkg-lists/pk.sig && echo usign-ok"
+        ),
+    );
+    assert!(
+        ok && out.contains("first\n") && out.contains("second\n") && out.contains("usign-ok"),
+        "{out}"
+    );
+    // A label's feed: the version it had.
+    let (ok, out) = opkg(
+        "@first/main",
+        "opkg install hello-ipk && cat /usr/share/hello-ipk/msg",
+    );
+    assert!(ok && out.ends_with("first"), "{out}");
+    // Without the key, opkg refuses the feed.
+    let (ok, out) = docker_sh(
+        OPENWRT_IMAGE,
+        &format!(
+            "mkdir -p /var/lock; : > /etc/opkg/distfeeds.conf; echo 'src/gz pk {base}main' > /etc/opkg/customfeeds.conf; \
+             opkg update 2>&1; opkg install hello-ipk"
+        ),
+    );
+    assert!(!ok && out.contains("ignature"), "{out}");
+    // Without the token, nothing.
+    let (st, _) = get(&s.url("/ipks/main/Packages"), None);
+    assert_eq!(st, 401);
+    // A version is uploaded once.
+    let other = make("1.1-1", "changed");
+    let (st, out) = upload(&other);
+    assert_eq!(st, 409, "{out}");
+    // Removed: gone from the feed. After a restart, served as before.
+    s.cli(&["rm", "ipks", "main/hello-ipk_1.1-1_all.ipk", "-y"])
+        .unwrap();
+    s.restart();
+    let (ok, out) = opkg(
+        "main",
+        "opkg install hello-ipk && cat /usr/share/hello-ipk/msg",
+    );
+    assert!(ok && out.ends_with("first"), "{out}");
 }

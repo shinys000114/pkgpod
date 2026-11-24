@@ -841,6 +841,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                         ("conda", _) => "conda packages for conda and mamba",
                         ("cran", _) => "R packages for install.packages",
                         ("pub", _) => "Dart and Flutter packages for dart pub",
+                        ("ipk", _) => "opkg feeds for OpenWrt and Yocto, signed",
                         _ => "",
                     }
                     .to_string(),
@@ -1435,7 +1436,7 @@ fn usage_places(app: &App, r: &pkgpod_engine::RepoInfo) -> Vec<String> {
     };
     match r.format.as_str() {
         "deb" => dirs("dists"),
-        "rpm" | "arch" => dirs(""),
+        "rpm" | "arch" | "ipk" => dirs(""),
         "apk" => dirs("")
             .into_iter()
             .flat_map(|b| dirs(&b).into_iter().map(move |rp| format!("{b}/{rp}")))
@@ -1480,6 +1481,47 @@ fn usage(
         out.push(UseLine {
             label: "Note".into(),
             text: "pkgpod is no proxy: packages from npmjs need their own registry (a scope here, the rest from registry.npmjs.org). npm login is not offered; set the token in .npmrc. unpublish and deprecate are operations here.".into(),
+        });
+        return out;
+    }
+    if r.format == "ipk" {
+        // Private: opkg's fetcher takes the token in the URL.
+        let url = if r.setting_bool("public") {
+            base.clone()
+        } else {
+            let (scheme, rest) = base.split_once("://").unwrap_or(("https", &base));
+            format!("{scheme}://token:<token>@{rest}")
+        };
+        let feed = if want.is_empty() { "<feed>" } else { want };
+        let eg = if want.is_empty() { "main" } else { want };
+        out.push(UseLine {
+            label: "Trust the key".into(),
+            text: format!("wget -O /tmp/pkgpod.pub {url}key.pub && opkg-key add /tmp/pkgpod.pub"),
+        });
+        out.push(UseLine {
+            label: "Feed".into(),
+            text: format!(
+                "echo 'src/gz {} {url}{feed}' >> /etc/opkg/customfeeds.conf",
+                r.name.replace(['.', '-'], "_")
+            ),
+        });
+        out.push(UseLine {
+            label: "Install".into(),
+            text: "opkg update && opkg install <package>".into(),
+        });
+        out.push(UseLine {
+            label: "Upload".into(),
+            text: format!(
+                "curl -u token:<token> -T hello_1.0-1_all.ipk '{base}upload?feed={eg}'\npkgpod upload {} hello_1.0-1_all.ipk -s feed={eg}",
+                r.name
+            ),
+        });
+        out.push(UseLine {
+            label: "A labelled version".into(),
+            text: format!(
+                "src/gz {}_label {url}@<label>/{feed}",
+                r.name.replace(['.', '-'], "_")
+            ),
         });
         return out;
     }
@@ -2436,6 +2478,7 @@ fn use_render(
         noun: match r.format.as_str() {
             "deb" => "dist",
             "rpm" => "group",
+            "ipk" => "feed",
             "apk" => "branch/repository",
             _ => "repository",
         },

@@ -118,6 +118,16 @@ pub trait Signer: Send + Sync {
     fn rsa_public_key(&self) -> Result<(String, Vec<u8>)> {
         Err(crate::Error::Invalid("no RSA signing key".into()))
     }
+    /// For formats that sign with usign (opkg): the key's number (16 hex
+    /// digits, its fingerprint) and the signature file of `data`.
+    fn usign_sign(&self, data: &[u8]) -> Result<(String, Vec<u8>)> {
+        let _ = data;
+        Err(crate::Error::Invalid("no usign key".into()))
+    }
+    /// That key's number and public key file.
+    fn usign_public_key(&self) -> Result<(String, Vec<u8>)> {
+        Err(crate::Error::Invalid("no usign key".into()))
+    }
 }
 
 /// A signer that has no key.

@@ -62,6 +62,10 @@ Formats:
 - **CRAN**: R source packages (as R CMD build makes them); PACKAGES and
   PACKAGES.gz with the newest version of each, the older ones under
   src/contrib/Archive/<package>/.
+- **ipk**: opkg feeds (OpenWrt's tar.gz packages and Yocto's ar ones):
+  Packages, Packages.gz and a usign Packages.sig per feed (the server's
+  usign key, made on first use and backed up), the newest version of
+  each package listed, every version kept.
 - **Pub**: Dart and Flutter packages with the hosted pub repository API
   (v2): package documents made per request, dart pub publish with the
   outcome told at the finalizing URL, retract and unretract.
