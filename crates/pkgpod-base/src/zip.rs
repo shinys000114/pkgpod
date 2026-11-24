@@ -1,11 +1,24 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Just enough of the zip format to read a Go module zip: the central
-//! directory and stored or deflated members (no zip64, no encryption).
+//! Just enough of the zip format to read packages that are zips (Go
+//! modules, NuGet packages): the central directory and stored or
+//! deflated members (no zip64, no encryption).
 
 use std::io::Read;
 
-use pkgpod_engine::{Error, Result};
+/// What is wrong with a zip.
+#[derive(Debug)]
+pub struct Error(pub String);
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Error {}
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// A member of the archive.
 #[derive(Debug, Clone)]
@@ -20,7 +33,7 @@ pub struct Member {
 }
 
 fn bad(m: impl Into<String>) -> Error {
-    Error::Invalid(format!("the zip: {}", m.into()))
+    Error(format!("the zip: {}", m.into()))
 }
 
 fn u16_at(b: &[u8], at: usize) -> Result<u16> {
@@ -121,63 +134,63 @@ pub fn read(data: &[u8], m: &Member, max: u64) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-#[cfg(test)]
-pub mod tests {
-    use super::*;
-
-    /// A zip of `(name, content, deflate)` members, as zip tools write it.
-    pub fn make(files: &[(&str, &[u8], bool)]) -> Vec<u8> {
-        let mut out = Vec::new();
-        let mut central = Vec::new();
-        for (name, data, deflate) in files {
-            let body = if *deflate {
-                let mut e =
-                    flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
-                std::io::Write::write_all(&mut e, data).unwrap();
-                e.finish().unwrap()
-            } else {
-                data.to_vec()
-            };
-            let method: u16 = if *deflate { 8 } else { 0 };
-            let crc = crc32fast::hash(data);
-            let at = out.len() as u32;
-            out.extend_from_slice(b"PK\x03\x04");
-            out.extend_from_slice(&20u16.to_le_bytes());
-            out.extend_from_slice(&0u16.to_le_bytes());
-            out.extend_from_slice(&method.to_le_bytes());
-            out.extend_from_slice(&[0; 4]);
-            out.extend_from_slice(&crc.to_le_bytes());
-            out.extend_from_slice(&(body.len() as u32).to_le_bytes());
-            out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-            out.extend_from_slice(&0u16.to_le_bytes());
-            out.extend_from_slice(name.as_bytes());
-            out.extend_from_slice(&body);
-            central.extend_from_slice(b"PK\x01\x02");
-            central.extend_from_slice(&20u16.to_le_bytes());
-            central.extend_from_slice(&20u16.to_le_bytes());
-            central.extend_from_slice(&0u16.to_le_bytes());
-            central.extend_from_slice(&method.to_le_bytes());
-            central.extend_from_slice(&[0; 4]);
-            central.extend_from_slice(&crc.to_le_bytes());
-            central.extend_from_slice(&(body.len() as u32).to_le_bytes());
-            central.extend_from_slice(&(data.len() as u32).to_le_bytes());
-            central.extend_from_slice(&(name.len() as u16).to_le_bytes());
-            central.extend_from_slice(&[0; 12]);
-            central.extend_from_slice(&at.to_le_bytes());
-            central.extend_from_slice(name.as_bytes());
-        }
-        let cd_at = out.len() as u32;
-        out.extend_from_slice(&central);
-        out.extend_from_slice(b"PK\x05\x06");
-        out.extend_from_slice(&[0; 4]);
-        out.extend_from_slice(&(files.len() as u16).to_le_bytes());
-        out.extend_from_slice(&(files.len() as u16).to_le_bytes());
-        out.extend_from_slice(&(central.len() as u32).to_le_bytes());
-        out.extend_from_slice(&cd_at.to_le_bytes());
+/// A zip of `(name, content, deflate)` members, as zip tools write it.
+#[cfg(any(test, feature = "testutil"))]
+pub fn make(files: &[(&str, &[u8], bool)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut central = Vec::new();
+    for (name, data, deflate) in files {
+        let body = if *deflate {
+            let mut e = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+            std::io::Write::write_all(&mut e, data).unwrap();
+            e.finish().unwrap()
+        } else {
+            data.to_vec()
+        };
+        let method: u16 = if *deflate { 8 } else { 0 };
+        let crc = crc32fast::hash(data);
+        let at = out.len() as u32;
+        out.extend_from_slice(b"PK\x03\x04");
+        out.extend_from_slice(&20u16.to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes());
-        out
+        out.extend_from_slice(&method.to_le_bytes());
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&crc.to_le_bytes());
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(&body);
+        central.extend_from_slice(b"PK\x01\x02");
+        central.extend_from_slice(&20u16.to_le_bytes());
+        central.extend_from_slice(&20u16.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&method.to_le_bytes());
+        central.extend_from_slice(&[0; 4]);
+        central.extend_from_slice(&crc.to_le_bytes());
+        central.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        central.extend_from_slice(&[0; 12]);
+        central.extend_from_slice(&at.to_le_bytes());
+        central.extend_from_slice(name.as_bytes());
     }
+    let cd_at = out.len() as u32;
+    out.extend_from_slice(&central);
+    out.extend_from_slice(b"PK\x05\x06");
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&(files.len() as u16).to_le_bytes());
+    out.extend_from_slice(&(files.len() as u16).to_le_bytes());
+    out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+    out.extend_from_slice(&cd_at.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
 
     #[test]
     fn stored_and_deflated() {

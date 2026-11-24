@@ -16,9 +16,8 @@
 //! version; `list`, `.info` and `@latest` are made per request. A version
 //! is published once: the checksum database and every go.sum hold it.
 
-pub mod zip;
-
 use pkgpod_base::Digest;
+use pkgpod_base::zip;
 use pkgpod_engine::format::{OpSpec, PublishCx};
 use pkgpod_engine::settings::Field;
 use pkgpod_engine::tree::{Edit, Entry};
@@ -203,7 +202,7 @@ pub fn read_module_zip(data: &[u8]) -> Result<Module> {
     if data.len() as u64 > MAX_ZIP {
         return Err(invalid("a module zip is at most 500 MiB"));
     }
-    let members = zip::members(data)?;
+    let members = zip::members(data).map_err(|e| invalid(e.to_string()))?;
     let first = members.first().ok_or_else(|| invalid("the zip is empty"))?;
     let at = first
         .name
@@ -235,7 +234,7 @@ pub fn read_module_zip(data: &[u8]) -> Result<Module> {
             return Err(invalid("a module is at most 500 MiB unzipped"));
         }
         if rest == "go.mod" {
-            gomod = Some(zip::read(data, m, MAX_GOMOD)?);
+            gomod = Some(zip::read(data, m, MAX_GOMOD).map_err(|e| invalid(e.to_string()))?);
         }
     }
     let gomod = match gomod {
@@ -464,7 +463,7 @@ mod tests {
 
     #[test]
     fn module_zips() {
-        let z = zip::tests::make(&[
+        let z = zip::make(&[
             ("a.com/x@v1.0.0/", b"", false),
             (
                 "a.com/x@v1.0.0/go.mod",
@@ -477,16 +476,16 @@ mod tests {
         assert_eq!((m.path.as_str(), m.version.as_str()), ("a.com/x", "v1.0.0"));
         assert!(m.gomod.starts_with(b"module a.com/x"));
         // Without go.mod one is made; names outside, a wrong module.
-        let z = zip::tests::make(&[("a.com/x@v1.0.0/x.go", b"package x\n", false)]);
+        let z = zip::make(&[("a.com/x@v1.0.0/x.go", b"package x\n", false)]);
         assert_eq!(read_module_zip(&z).unwrap().gomod, b"module a.com/x\n");
-        let z = zip::tests::make(&[
+        let z = zip::make(&[
             ("a.com/x@v1.0.0/x.go", b"", false),
             ("a.com/y@v1.0.0/y.go", b"", false),
         ]);
         assert!(read_module_zip(&z).is_err());
-        let z = zip::tests::make(&[("a.com/x@v1.0.0/go.mod", b"module a.com/y\n", false)]);
+        let z = zip::make(&[("a.com/x@v1.0.0/go.mod", b"module a.com/y\n", false)]);
         assert!(read_module_zip(&z).is_err());
-        let z = zip::tests::make(&[("a.com/x@v1.0.0/../go.mod", b"", false)]);
+        let z = zip::make(&[("a.com/x@v1.0.0/../go.mod", b"", false)]);
         assert!(read_module_zip(&z).is_err());
     }
 
