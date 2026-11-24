@@ -297,13 +297,17 @@ fn serve(a: &ServerArgs) -> Result<(), client::CliError> {
         .enable_all()
         .build()
         .map_err(|e| client::CliError::other(e.to_string()))?;
-    rt.block_on(async {
+    let r = rt.block_on(async {
         let app =
             pkgpod_server::App::open(cfg).map_err(|e| client::CliError::other(e.to_string()))?;
         pkgpod_server::run(app)
             .await
             .map_err(client::CliError::other)
-    })
+    });
+    // Blocking work still running (a GC pass, a long upload's ingest)
+    // does not hold the exit up once the requests have been answered.
+    rt.shutdown_timeout(std::time::Duration::from_secs(5));
+    r
 }
 
 fn admin(a: &ServerArgs, cmd: AdminCmd) -> Result<(), client::CliError> {

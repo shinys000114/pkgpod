@@ -38,6 +38,8 @@ fn yes() -> bool {
 #[derive(Default)]
 pub struct Running {
     tasks: Mutex<HashMap<String, (Listener, watch::Sender<bool>)>>,
+    /// The tasks of listeners told to stop, until they have drained.
+    handles: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     errors: Mutex<HashMap<String, String>>,
 }
 
@@ -157,7 +159,7 @@ pub fn reconcile(app: &Arc<App>) {
         let (tx, rx) = watch::channel(false);
         tasks.insert(l.name.clone(), (l.clone(), tx));
         let app2 = app.clone();
-        tokio::spawn(async move {
+        let h = tokio::spawn(async move {
             let name = l.name.clone();
             let tls = if l.cert.is_empty() {
                 None
@@ -180,6 +182,13 @@ pub fn reconcile(app: &Arc<App>) {
                 fail(&app2, &name, e);
             }
         });
+        let mut hs = app
+            .listeners
+            .handles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        hs.retain(|h| !h.is_finished());
+        hs.push(h);
     }
 }
 
@@ -197,7 +206,9 @@ fn fail(app: &App, name: &str, e: String) {
         .remove(name);
 }
 
-pub fn stop_all(app: &App) {
+/// Tells every listener to stop; returns their tasks, which end once
+/// the requests in flight are answered.
+pub fn stop_all(app: &App) -> Vec<tokio::task::JoinHandle<()>> {
     for (_, (_, stop)) in app
         .listeners
         .tasks
@@ -207,9 +218,18 @@ pub fn stop_all(app: &App) {
     {
         let _ = stop.send(true);
     }
+    std::mem::take(
+        &mut *app
+            .listeners
+            .handles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    )
 }
 
-/// Serves `router` on `addr` until `stop` turns true.
+/// Serves `router` on `addr` until `stop` turns true; then accepts no
+/// more connections, closes idle ones and returns once the requests in
+/// flight are answered.
 pub async fn serve_router(
     addr: &str,
     tls: Option<tokio_rustls::TlsAcceptor>,
@@ -253,8 +273,9 @@ pub async fn serve_router(
         .await
         .map_err(|e| format!("serving: {e}"));
     };
+    let graceful = hyper_util::server::graceful::GracefulShutdown::new();
     loop {
-        let (tcp, _) = tokio::select! {
+        let (tcp, peer) = tokio::select! {
             r = listener.accept() => match r {
                 Ok(c) => c,
                 Err(e) => {
@@ -262,22 +283,28 @@ pub async fn serve_router(
                     continue;
                 }
             },
-            _ = stop.wait_for(|s| *s) => return Ok(()),
+            _ = stop.wait_for(|s| *s) => break,
         };
         let acceptor = acceptor.clone();
         let app = router.clone();
+        let watcher = graceful.watcher();
         let _ = tcp.set_nodelay(true);
         tokio::spawn(async move {
             let Ok(tls) = acceptor.accept(tcp).await else {
                 return;
             };
+            // The peer address, as the plain listener gives it.
+            let app = app.layer(axum::Extension(axum::extract::ConnectInfo(peer)));
             let service = hyper_util::service::TowerToHyperService::new(app);
-            let _ =
-                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
-                    .serve_connection(hyper_util::rt::TokioIo::new(tls), service)
-                    .await;
+            let builder =
+                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+            let conn = builder.serve_connection(hyper_util::rt::TokioIo::new(tls), service);
+            let _ = watcher.watch(conn).await;
         });
     }
+    drop(listener);
+    graceful.shutdown().await;
+    Ok(())
 }
 
 /// A TLS acceptor from PEM files.
