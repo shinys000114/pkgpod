@@ -35,6 +35,9 @@ pub struct HttpMirror {
     pub udebs: bool,
     /// Source indices and their files.
     pub sources: bool,
+    /// With `sources`: a component whose Release lists no Sources is
+    /// taken without (an import of what is there), rather than failed.
+    pub sources_if_listed: bool,
     /// Further index files to keep, as globs on paths relative to
     /// `dists/<dist>/` (e.g. `*/i18n/*`, `Contents-*`).
     pub extras: Vec<String>,
@@ -63,6 +66,7 @@ impl HttpMirror {
             architectures: vec![],
             udebs: false,
             sources: false,
+            sources_if_listed: false,
             extras: vec![],
             keyring: None,
             ignore_missing: BTreeSet::new(),
@@ -549,7 +553,11 @@ pub(crate) fn index_groups(
         {
             groups.push((format!("{c}/binary-all"), "Packages", false));
         }
-        if m.sources {
+        let listed = rel
+            .files
+            .keys()
+            .any(|p| p.starts_with(&format!("{c}/source/Sources")));
+        if m.sources && (listed || !m.sources_if_listed) {
             groups.push((format!("{c}/source"), "Sources", true));
         }
     }

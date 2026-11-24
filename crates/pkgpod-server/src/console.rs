@@ -2363,6 +2363,7 @@ async fn import(
         architectures: list("architectures"),
         keyring: form_get(&form, "keyring").to_string(),
         replace: form_get(&form, "replace") == "on",
+        sources: form_get(&form, "no_sources") != "on",
     };
     match api::import(State(app), v.who(), Path(repo), Json(req)).await {
         Ok((_, Json(j))) => msg(

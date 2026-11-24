@@ -34,6 +34,13 @@ pub struct ImportReq {
     /// Replace package files of the same name with other content.
     #[serde(default)]
     pub replace: bool,
+    /// Source packages too: by default those the upstream lists.
+    #[serde(default = "yes")]
+    pub sources: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// Starts an import job into a hosted deb repository.
@@ -103,6 +110,8 @@ fn fetch_and_take_in(
     let mut m = pkgpod_mirror::http::HttpMirror::new(&req.source, &dists);
     m.components = req.components.clone();
     m.architectures = req.architectures.clone();
+    m.sources = req.sources;
+    m.sources_if_listed = true;
     if !req.keyring.trim().is_empty() {
         m.keyring = Some(
             pkgpod_deb::verify::Keyring::from_bytes(req.keyring.trim().as_bytes())
@@ -147,6 +156,8 @@ fn fetch_and_take_in(
         description: String,
         components: Vec<String>,
         files: Vec<(String, String)>, // (component, path in staging)
+        /// Source packages: (component, the files' paths, .dsc first).
+        sources: Vec<(String, Vec<String>)>,
     }
     let mut plan = Vec::new();
     for d in &req.dists {
@@ -188,6 +199,32 @@ fn fetch_and_take_in(
         }
         files.sort();
         files.dedup();
+        let mut sources = Vec::new();
+        if req.sources {
+            for c in &comps {
+                let dir = staging.join("dists").join(d).join(c).join("source");
+                let Some(text) = crate::mirror_pkgs::read_sources(&dir)? else {
+                    continue;
+                };
+                for p in pkgpod_deb::control::parse_paragraphs(&text)
+                    .map_err(|e| format!("{}: {e}", dir.display()))?
+                {
+                    let dir_s = p.get("Directory").unwrap_or("").trim().to_string();
+                    let mut names: Vec<String> = p
+                        .get("Checksums-Sha256")
+                        .unwrap_or("")
+                        .lines()
+                        .filter_map(|l| l.split_whitespace().nth(2))
+                        .map(|n| format!("{dir_s}/{n}"))
+                        .collect();
+                    // The .dsc first.
+                    names.sort_by_key(|n| !n.ends_with(".dsc"));
+                    if names.first().is_some_and(|n| n.ends_with(".dsc")) {
+                        sources.push((c.clone(), names));
+                    }
+                }
+            }
+        }
         let field = |k: &str| rel.fields.get(k).unwrap_or("").trim().to_string();
         plan.push(Dist {
             name: d.clone(),
@@ -196,6 +233,7 @@ fn fetch_and_take_in(
             description: field("Description"),
             components: comps,
             files,
+            sources,
         });
     }
 
@@ -220,6 +258,26 @@ fn fetch_and_take_in(
             ));
         }
     }
+    let mut src_uploads: Vec<(String, String, Vec<Upload>)> = Vec::new();
+    for d in &plan {
+        for (c, paths) in &d.sources {
+            let mut ups = Vec::new();
+            for path in paths {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err("interrupted".into());
+                }
+                let p = staging.join(path);
+                let (sha256, size) = store.put_file(&p).map_err(|e| e.to_string())?;
+                ups.push(Upload {
+                    sha256,
+                    size,
+                    filename: p.file_name().map(|n| n.to_string_lossy().into_owned()),
+                });
+            }
+            src_uploads.push((d.name.clone(), c.clone(), ups));
+        }
+    }
+    let n_src = src_uploads.len();
     let f = app
         .engine
         .format(&r.format)
@@ -261,9 +319,13 @@ fn fetch_and_take_in(
             for (d, c, up) in &uploads {
                 f.ingest(cx, up, &json!({"dists": [d], "component": c, "replace": req.replace}), e)?;
             }
+            for (d, c, ups) in &src_uploads {
+                f.ingest_batch(cx, ups, &json!({"dists": [d], "component": c, "replace": req.replace}), e)?;
+            }
             let new: Vec<&str> = plan.iter().map(|d| d.name.as_str()).filter(|d| !have.contains(*d)).collect();
             Ok(format!(
-                "imported {n} package file(s) from {source} into {}{}",
+                "imported {n} package file(s){} from {source} into {}{}",
+                if n_src > 0 { format!(" and {n_src} source package(s)") } else { String::new() },
                 plan.iter().map(|d| d.name.as_str()).collect::<Vec<_>>().join(", "),
                 if new.is_empty() { String::new() } else { format!(" (new: {})", new.join(", ")) }
             ))
@@ -276,6 +338,6 @@ fn fetch_and_take_in(
     Ok((
         true,
         summary,
-        json!({"files": n, "changes": out.changes.len()}),
+        json!({"files": n, "sources": n_src, "changes": out.changes.len()}),
     ))
 }

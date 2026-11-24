@@ -214,6 +214,9 @@ pub(crate) enum Cmd {
         /// Replace package files of the same name with other content.
         #[arg(long)]
         replace: bool,
+        /// Leave out the source packages the upstream lists.
+        #[arg(long)]
+        no_sources: bool,
         /// Wait for it and print its log.
         #[arg(long, short)]
         wait: bool,

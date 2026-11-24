@@ -901,6 +901,7 @@ pub fn run(
             architectures,
             keyring,
             replace,
+            no_sources,
             wait,
         } => {
             let keyring = match keyring {
@@ -911,7 +912,8 @@ pub fn run(
             let v = c.post(
                 &format!("/api/v1/repos/{}/import", enc(&repo)),
                 &json!({"source": source, "dists": dists, "components": components,
-                        "architectures": architectures, "keyring": keyring, "replace": replace}),
+                        "architectures": architectures, "keyring": keyring, "replace": replace,
+                        "sources": !no_sources}),
             )?;
             follow(&x, &v, wait)?;
         }
