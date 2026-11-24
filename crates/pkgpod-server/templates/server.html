@@ -29,20 +29,24 @@
 <div class="card">
   <div class="card-head"><h2>Signing keys</h2><span class="hint">repositories are signed with the default key unless their key setting names another</span></div>
   {% if keys.is_empty() %}<p class="empty">No keys: signed repositories cannot publish until one is added.</p>{% else %}
-  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Fingerprint</th><th></th></tr></thead><tbody>
-  {% for k in keys %}<tr><td><b>{{ k.name }}</b>{% if k.default %} <span class="tag accent">default</span>{% endif %}</td><td class="mono">{{ k.fingerprint }}</td>
+  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Key</th><th></th></tr></thead><tbody>
+  {% for k in keys %}<tr><td><b>{{ k.name }}</b>{% if k.default %} <span class="tag accent">default</span>{% endif %}{% if k.missing %} <span class="tag st-bad">no secret key: import it again</span>{% endif %}</td><td>{{ k.uid }}<div class="mono small">{{ k.fingerprint }}</div></td>
     <td class="acts nowrap"><a href="/api/v1/keys/{{ k.name|urlencode }}/public">public key</a>
     {% if !k.default %}<button class="link" hx-post="/c/keys/{{ k.name|urlencode }}/default" hx-target="#server-result">make default</button>{% endif %}
-    <button class="link danger" hx-post="/c/keys/{{ k.name|urlencode }}/delete" hx-target="#server-result" hx-confirm="Forget key {{ k.name }}? (it stays in its gpg home)">remove</button></td></tr>{% endfor %}
+    <button class="link danger" hx-post="/c/keys/{{ k.name|urlencode }}/delete" hx-target="#server-result" hx-confirm="Delete key {{ k.name }}? Its secret key is deleted; repositories signed with it cannot be signed again with it.">remove</button></td></tr>{% endfor %}
   </tbody></table></div>
   {% endif %}
   <div class="card-body">
   <form class="inline" hx-post="/c/keys/generate" hx-target="#server-result">
     New key <input name="name" required placeholder="main" size="10"> for <input name="uid" required placeholder="Team packages &lt;packages@example.org&gt;" size="36"> <button type="submit">Generate</button>
   </form>
-  <form class="inline mt" hx-post="/c/keys" hx-target="#server-result">
-    Existing key <input name="name" required placeholder="name" size="10"> <input name="fingerprint" required placeholder="fingerprint" size="42">
-    <input name="homedir" placeholder="gpg home (default: the server's)" size="24"> <input name="passphrase_file" placeholder="passphrase file" size="18"> <button type="submit">Add</button>
+  <form class="mt" hx-post="/c/keys" hx-target="#server-result">
+    <div class="fields">
+      <label class="field"><span>Import a key as</span><input name="name" required placeholder="name"></label>
+      <label class="field"><span>Its passphrase</span><input name="passphrase" type="password" autocomplete="off" placeholder="if it has one"></label>
+      <label class="field wide"><span>Secret key</span><textarea name="secret_key" rows="4" required spellcheck="false" placeholder="gpg --export-secret-keys --armor &lt;fingerprint&gt;"></textarea><small>Kept by pkgpod in its data directory (mode 0600) and in backups.</small></label>
+    </div>
+    <div class="form-foot"><button type="submit">Import</button></div>
   </form>
   </div>
 </div>

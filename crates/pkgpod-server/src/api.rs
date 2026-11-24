@@ -1395,11 +1395,10 @@ pub(crate) async fn keys(State(app): St, Who(c): Who) -> Result<Json<Value>> {
 
 #[derive(Deserialize)]
 pub(crate) struct KeyReq {
-    pub(crate) fingerprint: String,
+    /// The secret key, armored (gpg --export-secret-keys --armor).
+    pub(crate) secret_key: String,
     #[serde(default)]
-    pub(crate) homedir: String,
-    #[serde(default)]
-    pub(crate) passphrase_file: String,
+    pub(crate) passphrase: String,
 }
 
 pub(crate) async fn key_set(
@@ -1409,11 +1408,17 @@ pub(crate) async fn key_set(
     Json(req): Json<KeyReq>,
 ) -> Result<Json<Value>> {
     app.require_admin(&c)?;
-    let k = app
-        .keys
-        .set(&name, &req.fingerprint, &req.homedir, &req.passphrase_file)?;
-    app.auth.audit(c.name(), "key", &name, &req.fingerprint);
-    Ok(Json(json!(k)))
+    blocking(&app, move |app| {
+        let k = app.keys.import(
+            &name,
+            req.secret_key.as_bytes(),
+            Some(req.passphrase.as_str()),
+        )?;
+        app.auth
+            .audit(c.name(), "key import", &name, &k.fingerprint);
+        Ok(Json(json!(k)))
+    })
+    .await
 }
 
 pub(crate) async fn key_delete(

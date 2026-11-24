@@ -61,6 +61,13 @@ glance and tabs for its contents, versions, how its clients use it
 A new Debian repository can be made with its first dist, and a signing
 key from the same form when the server has none.
 
+Signing keys are kept by pkgpod itself: OpenPGP keys are generated
+(Ed25519) or imported (`pkgpod key import`, as `gpg
+--export-secret-keys --armor` writes them, with their passphrase) and
+kept in `<data_dir>/keys`; signing (InRelease, Release.gpg,
+repomd.xml.asc, pacman signatures) and checking upstream signatures run
+in process, without gpg.
+
 Operations:
 
 - `pkgpod admin check [--deep]` checks that every version reads whole

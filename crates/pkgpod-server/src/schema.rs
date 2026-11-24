@@ -105,6 +105,12 @@ CREATE TABLE oci_uploads (
     PRIMARY KEY (repo, digest)
 ) WITHOUT ROWID;
 ",
+    // Keys are kept by pkgpod (rpgp), not in gpg homes.
+    "
+ALTER TABLE keys DROP COLUMN homedir;
+ALTER TABLE keys DROP COLUMN passphrase_file;
+ALTER TABLE keys ADD COLUMN uid TEXT NOT NULL DEFAULT '';
+",
 ];
 
 pub fn migrate(db: &Db) -> pkgpod_base::Result<()> {
@@ -122,6 +128,7 @@ mod tests {
             "9d8e6322d6a6c85d",
             "9dade28c454c505b",
             "4f91e61340d6bc43",
+            "ea67331ae65ecf81",
         ];
         let got: Vec<String> = super::STEPS
             .iter()

@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Backup and restore of a server's data: the database (a consistent
-//! copy, taken first), the server's gpg home and RSA key (its signing
-//! keys), every
+//! copy, taken first), the server's signing keys (OpenPGP and RSA), every
 //! storage's content store, and with `mirrors` the mirrors' received
 //! trees (which can otherwise be synced again).
 //!
@@ -128,7 +127,7 @@ pub fn backup(app: &App, to: &Path, mirrors: bool, log: &mut dyn FnMut(&str)) ->
     let db_path = to.join("pkgpod.db");
     app.db.backup(&db_path)?;
     log("database copied");
-    copy_tree(&app.cfg.gnupg(), &to.join("gnupg"), &[], &mut rep)?;
+    copy_tree(app.keys.dir(), &to.join("keys"), &[], &mut rep)?;
     copy_tree(
         &app.cfg.data_dir.join("rsa"),
         &to.join("rsa"),
@@ -136,10 +135,10 @@ pub fn backup(app: &App, to: &Path, mirrors: bool, log: &mut dyn FnMut(&str)) ->
         &mut rep,
     )?;
     for k in app.keys.list()? {
-        if !k.homedir.is_empty() {
+        if k.missing {
             rep.warnings.push(format!(
-                "key {} lives in {}, which is not in the backup",
-                k.name, k.homedir
+                "key {} has no secret key file: it is not in the backup",
+                k.name
             ));
         }
     }
@@ -205,7 +204,7 @@ pub fn restore(from: &Path, data_dir: &Path, log: &mut dyn FnMut(&str)) -> Resul
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(data_dir, std::fs::Permissions::from_mode(0o750));
-        for d in ["gnupg", "rsa"] {
+        for d in ["keys", "rsa"] {
             let _ =
                 std::fs::set_permissions(data_dir.join(d), std::fs::Permissions::from_mode(0o700));
         }

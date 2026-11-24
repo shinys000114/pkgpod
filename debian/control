@@ -16,9 +16,9 @@ Vcs-Git: https://github.com/shinys000114/pkgpod.git
 
 Package: pkgpod
 Architecture: amd64 arm64
-# gpg: signing; ca-certificates: the HTTP client reads the system trust
-# store; rsync: mirrors from rsync sources.
-Depends: ${misc:Depends}, adduser, gpg, ca-certificates
+# ca-certificates: the HTTP client reads the system trust store; rsync:
+# mirrors from rsync sources. Signing is done in process (no gpg).
+Depends: ${misc:Depends}, adduser, ca-certificates
 Recommends: rsync
 Description: package server for a team
  pkgpod hosts, mirrors and serves packages. Every hosted repository keeps

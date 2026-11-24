@@ -77,11 +77,6 @@ impl Config {
     pub fn default_storage(&self) -> PathBuf {
         self.data_dir.join("storages").join("main")
     }
-
-    /// gpg home of keys added without one.
-    pub fn gnupg(&self) -> PathBuf {
-        self.data_dir.join("gnupg")
-    }
 }
 
 #[cfg(test)]

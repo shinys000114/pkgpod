@@ -61,7 +61,7 @@ password to `<data_dir>/admin-password`. Then, with the console at
 
 ```sh
 pkgpod login -u admin
-pkgpod key generate main "Team packages <packages@example.org>"
+pkgpod key generate main "Team packages <packages@example.org>"   # or: key import
 pkgpod repo create ppa -s urls=https://ppa.example.org/
 pkgpod op ppa dist-set name=noble components=main -y
 pkgpod upload ppa hello_1.0_amd64.deb
