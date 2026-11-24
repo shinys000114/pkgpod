@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Static (musl) on purpose: one package for every Debian and Ubuntu release.
 pkgpod: statically-linked-binary [usr/bin/pkgpod]
+# yaml-rust2 (Helm, RubyGems, Pub metadata) is a Rust parser ported from
+# libyaml and keeps its messages; there is no C library to link instead.
+pkgpod: embedded-library libyaml [usr/bin/pkgpod]
 # It may name TLS key files: not for everyone.
 pkgpod: non-standard-file-perm 0640 != 0644 [etc/pkgpod/pkgpod.toml]
 # Not in the Debian archive; `pkgpod --help` documents every command.
