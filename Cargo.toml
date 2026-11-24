@@ -32,6 +32,7 @@ pkgpod-composer = { path = "crates/pkgpod-composer" }
 pkgpod-conda = { path = "crates/pkgpod-conda" }
 pkgpod-cran = { path = "crates/pkgpod-cran" }
 pkgpod-pub = { path = "crates/pkgpod-pub" }
+pkgpod-ipk = { path = "crates/pkgpod-ipk" }
 pkgpod-mirror = { path = "crates/pkgpod-mirror" }
 pkgpod-server = { path = "crates/pkgpod-server" }
 clap = { version = "4.6", features = ["derive", "env"] }
@@ -61,6 +62,7 @@ rsa = "0.9"
 yaml-rust2 = "0.13"
 quick-xml = "0.42"
 rand = "0.8"
+ed25519-dalek = "2.2"
 bzip2 = "0.6"
 base64 = "0.22"
 httpdate = "1"

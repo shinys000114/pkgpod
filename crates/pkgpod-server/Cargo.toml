@@ -9,6 +9,8 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+rand.workspace = true
+ed25519-dalek.workspace = true
 rustix.workspace = true
 pkgpod-base.workspace = true
 pkgpod-engine.workspace = true
@@ -30,6 +32,7 @@ pkgpod-composer.workspace = true
 pkgpod-conda.workspace = true
 pkgpod-cran.workspace = true
 pkgpod-pub.workspace = true
+pkgpod-ipk.workspace = true
 pkgpod-mirror.workspace = true
 axum.workspace = true
 tokio.workspace = true

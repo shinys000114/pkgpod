@@ -429,6 +429,7 @@ form.inline + form.inline { margin-top: .5rem; }
 .fmt-conda { --c: #43b02a; }
 .fmt-cran { --c: #276dc3; }
 .fmt-pub { --c: #0175c2; }
+.fmt-ipk { --c: #00a3e0; }
 .fmt-npm { --c: #c92a2a; }
 .page-head h1 .fmt, .page-head h1 .tag { font-size: 12px; }
 

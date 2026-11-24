@@ -40,6 +40,8 @@ pub struct Keys {
     /// Where the server's RSA key is (made on first use).
     rsa_dir: PathBuf,
     rsa: Mutex<Option<Arc<crate::rsa_key::RsaKey>>>,
+    /// The server's usign key (beside the RSA key, made on first use).
+    usign: Mutex<Option<Arc<crate::usign_key::UsignKey>>>,
     /// Keys read, by name, with the fingerprint they were read for.
     loaded: Mutex<HashMap<String, Arc<PgpKey>>>,
 }
@@ -92,6 +94,7 @@ impl Keys {
             dir: dir.to_path_buf(),
             rsa_dir: rsa_dir.to_path_buf(),
             rsa: Mutex::new(None),
+            usign: Mutex::new(None),
             loaded: Mutex::new(HashMap::new()),
         }
     }
@@ -103,6 +106,17 @@ impl Keys {
             return Ok(k.clone());
         }
         let made = Arc::new(crate::rsa_key::RsaKey::load_or_make(&self.rsa_dir)?);
+        *k = Some(made.clone());
+        Ok(made)
+    }
+
+    /// The server's usign key, made on first use.
+    pub fn usign_key(&self) -> Result<Arc<crate::usign_key::UsignKey>> {
+        let mut k = self.usign.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(k) = &*k {
+            return Ok(k.clone());
+        }
+        let made = Arc::new(crate::usign_key::UsignKey::load_or_make(&self.rsa_dir)?);
         *k = Some(made.clone());
         Ok(made)
     }
@@ -304,5 +318,17 @@ impl pkgpod_engine::Signer for Keys {
             .rsa_key()
             .map_err(|e| pkgpod_engine::Error::Invalid(e.to_string()))?;
         Ok((k.name.clone(), k.public_pem.clone().into_bytes()))
+    }
+    fn usign_sign(&self, data: &[u8]) -> pkgpod_engine::Result<(String, Vec<u8>)> {
+        let k = self
+            .usign_key()
+            .map_err(|e| pkgpod_engine::Error::Invalid(e.to_string()))?;
+        Ok((k.id(), k.sign(data)))
+    }
+    fn usign_public_key(&self) -> pkgpod_engine::Result<(String, Vec<u8>)> {
+        let k = self
+            .usign_key()
+            .map_err(|e| pkgpod_engine::Error::Invalid(e.to_string()))?;
+        Ok((k.id(), k.public_file()))
     }
 }

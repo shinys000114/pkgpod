@@ -2300,6 +2300,7 @@ dependencies = [
  "pkgpod-apk",
  "pkgpod-base",
  "pkgpod-deb",
+ "pkgpod-ipk",
  "pkgpod-server",
  "reqwest",
  "rusqlite",
@@ -2491,6 +2492,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pkgpod-ipk"
+version = "0.0.0"
+dependencies = [
+ "flate2",
+ "pkgpod-base",
+ "pkgpod-deb",
+ "pkgpod-engine",
+ "serde_json",
+ "tar",
+]
+
+[[package]]
 name = "pkgpod-maven"
 version = "0.0.0"
 dependencies = [
@@ -2602,6 +2615,7 @@ dependencies = [
  "askama",
  "axum",
  "base64 0.22.1",
+ "ed25519-dalek",
  "futures-util",
  "glob",
  "httpdate",
@@ -2621,6 +2635,7 @@ dependencies = [
  "pkgpod-gems",
  "pkgpod-go",
  "pkgpod-helm",
+ "pkgpod-ipk",
  "pkgpod-maven",
  "pkgpod-mirror",
  "pkgpod-npm",
@@ -2629,6 +2644,7 @@ dependencies = [
  "pkgpod-pub",
  "pkgpod-pypi",
  "pkgpod-rpm",
+ "rand 0.8.8",
  "reqwest",
  "rsa",
  "rusqlite",
