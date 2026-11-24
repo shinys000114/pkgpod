@@ -176,7 +176,10 @@ Operations:
   (tarballs fetched from where the package document says, checked
   against its integrity, and served through the proxy's address) and
   PyPI (the upstream index's PEP 691 JSON kept, served as JSON or HTML
-  with its files through the proxy, each checked against its sha256):
+  with its files through the proxy, each checked against its sha256)
+  and Cargo (the upstream sparse index's files kept, .crate files
+  fetched from where its config.json says and checked against the
+  index's cksum):
   a registry's files fetched when asked for and kept (garbage
   collection keeps them), its metadata asked for again after
   `metadata_minutes` and served as it was while the upstream is not

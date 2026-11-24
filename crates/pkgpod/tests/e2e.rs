@@ -4734,6 +4734,150 @@ fn pypi_proxy_cache() {
     );
 }
 
+/// A Cargo proxy of another pkgpod's registry, with cargo.
+#[test]
+fn cargo_proxy_cache() {
+    if !have("cargo") {
+        return;
+    }
+    let up = Server::start();
+    up.cli(&[
+        "repo",
+        "create",
+        "crates",
+        "-f",
+        "cargo",
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let ut = up
+        .cli(&["token", "create", "w", "--repos", "crates", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let home_for = |name: &str, index: &str| {
+        let home = up.dir.path().join(name);
+        std::fs::create_dir_all(home.join("cargo")).unwrap();
+        std::fs::write(
+            home.join("cargo").join("config.toml"),
+            format!(
+                "[registries.crates]\nindex = \"sparse+{index}\"\n\n\
+                 [registry]\nglobal-credential-providers = [\"cargo:token\"]\n"
+            ),
+        )
+        .unwrap();
+        home
+    };
+    let uindex = up.url("/crates/index/");
+    let d = cargo_crate(
+        &up.dir.path().join("src"),
+        "hello_pod",
+        "0.1.0",
+        "",
+        (
+            "lib.rs",
+            "pub fn hello() -> &'static str { \"hello 0.1.0\" }\n",
+        ),
+    );
+    let (ok, out) = cargo(
+        &home_for("pub", &uindex),
+        &d,
+        &["publish", "--registry", "crates", "--no-verify"],
+        &ut,
+    );
+    assert!(ok, "{out}");
+    let s = Server::start();
+    s.cli(&[
+        "repo",
+        "create",
+        "cp",
+        "-f",
+        "cargo",
+        "-k",
+        "proxy",
+        "-s",
+        &format!("upstream={uindex}"),
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let pindex = s.url("/cp/index/");
+    let cfg: Value = reqwest::blocking::get(format!("{pindex}config.json"))
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(cfg["dl"], s.url("/cp/api/v1/crates"), "{cfg}");
+    let app = cargo_crate(
+        &s.dir.path().join("apps"),
+        "app",
+        "0.1.0",
+        "hello_pod = { version = \"0.1\", registry = \"crates\" }\n",
+        (
+            "main.rs",
+            "fn main() { println!(\"{}\", hello_pod::hello()); }\n",
+        ),
+    );
+    let (ok, out) = cargo(&home_for("c1", &pindex), &app, &["run", "-q"], "");
+    assert!(ok && out.contains("hello 0.1.0"), "{out}");
+    assert_eq!(
+        s.json(&["downloads", "cp"])["packages"][0]["name"],
+        "hello_pod"
+    );
+    // With the upstream gone, from the cache.
+    drop(up);
+    let (ok, out) = cargo(&home_for_in(&s, "c2", &pindex), &app, &["run", "-q"], "");
+    assert!(ok && out.contains("hello 0.1.0"), "{out}");
+    // A crate whose checksum is not the index's.
+    let sport = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    stub_upstream_on(
+        sport,
+        vec![
+            ("/index/config.json".into(), format!("{{\"dl\":\"http://127.0.0.1:{sport}/dl\"}}").into_bytes()),
+            (
+                "/index/ba/d_/bad_crate".into(),
+                format!("{{\"name\":\"bad_crate\",\"vers\":\"1.0.0\",\"deps\":[],\"features\":{{}},\"cksum\":\"{}\"}}\n", "0".repeat(64)).into_bytes(),
+            ),
+            ("/dl/bad_crate/1.0.0/download".into(), b"not it".to_vec()),
+        ],
+    );
+    s.cli(&[
+        "repo",
+        "create",
+        "bp",
+        "-f",
+        "cargo",
+        "-k",
+        "proxy",
+        "-s",
+        &format!("upstream=http://127.0.0.1:{sport}/index/"),
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let r = reqwest::blocking::get(s.url("/bp/api/v1/crates/bad_crate/1.0.0/download")).unwrap();
+    assert_eq!(r.status().as_u16(), 502);
+    assert!(!s.json(&["cache", "bp"]).to_string().contains("download"));
+}
+
+/// A cargo home under the server's directory, its registry at `index`.
+fn home_for_in(s: &Server, name: &str, index: &str) -> PathBuf {
+    let home = s.dir.path().join(name);
+    std::fs::create_dir_all(home.join("cargo")).unwrap();
+    std::fs::write(
+        home.join("cargo").join("config.toml"),
+        format!(
+            "[registries.crates]\nindex = \"sparse+{index}\"\n\n\
+             [registry]\nglobal-credential-providers = [\"cargo:token\"]\n"
+        ),
+    )
+    .unwrap();
+    home
+}
+
 #[test]
 fn files_hosted() {
     let s = Server::start();
