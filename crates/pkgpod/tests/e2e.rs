@@ -2292,3 +2292,92 @@ fn openapi_describes_what_the_api_sends() {
     j.as_object_mut().unwrap().remove("log");
     assert!(validate(&doc, &job, &j, "").is_err(), "allOf: no log");
 }
+
+#[test]
+fn files_hosted() {
+    let s = Server::start();
+    s.cli(&["repo", "create", "f", "-f", "files", "-s", "public=true"])
+        .unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "f", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let c = reqwest::blocking::Client::new();
+    let put = |path: &str, body: &'static [u8]| {
+        let r = c
+            .put(s.url(&format!("/f/{path}")))
+            .basic_auth("token", Some(&tok))
+            .body(body)
+            .send()
+            .unwrap();
+        let st = r.status().as_u16();
+        (st, r.text().unwrap())
+    };
+    let (st, body) = put("tools/v1/tool.tar.gz", b"tool one");
+    assert_eq!(st, 201, "{body}");
+    let r = c.get(s.url("/f/tools/v1/tool.tar.gz")).send().unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(r.headers()["content-security-policy"], "sandbox");
+    let lm = r.headers()["last-modified"].to_str().unwrap().to_string();
+    assert_eq!(r.bytes().unwrap().as_ref(), b"tool one");
+    // Since then: not modified, by our time.
+    let r = c
+        .get(s.url("/f/tools/v1/tool.tar.gz"))
+        .header("if-modified-since", &lm)
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 304);
+
+    // The same again changes nothing; other content needs replace.
+    let n = s.json(&["versions", "f"]).as_array().unwrap().len();
+    let (st, body) = put("tools/v1/tool.tar.gz", b"tool one");
+    assert_eq!(st, 201, "{body}");
+    assert!(body.contains("unchanged"), "{body}");
+    assert_eq!(s.json(&["versions", "f"]).as_array().unwrap().len(), n);
+    let (st, body) = put("tools/v1/tool.tar.gz", b"tool one, changed");
+    assert_eq!(st, 409, "{body}");
+    let (st, _) = put("tools/v1/tool.tar.gz?replace=1", b"tool one, changed");
+    assert_eq!(st, 201);
+    // Never over a directory, nor at a label's address, nor elsewhere
+    // than the URL says.
+    assert_eq!(put("tools", b"x").0, 409);
+    assert_eq!(put("tools/v1/tool.tar.gz/inner", b"x").0, 409);
+    assert_eq!(put("@first/x", b"x").0, 400);
+    assert_eq!(put("a/b?path=c/d", b"x").0, 400);
+    assert_eq!(
+        get(&s.url("/f/tools/v1/tool.tar.gz"), None).1,
+        "tool one, changed"
+    );
+
+    // A listing, several files as one version, a move, a label.
+    let (st, list) = get(&s.url("/f/tools/"), None);
+    assert_eq!(st, 200);
+    assert!(list.contains("href=\"v1/\""), "{list}");
+    let dir = s.dir.path().join("up");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a.txt"), "a").unwrap();
+    std::fs::write(dir.join("b.txt"), "b").unwrap();
+    let n = s.json(&["versions", "f"]).as_array().unwrap().len();
+    s.cli(&[
+        "upload",
+        "f",
+        dir.join("a.txt").to_str().unwrap(),
+        dir.join("b.txt").to_str().unwrap(),
+        "-s",
+        "path=docs/",
+    ])
+    .unwrap();
+    assert_eq!(s.json(&["versions", "f"]).as_array().unwrap().len(), n + 1);
+    s.cli(&["label", "f", "first"]).unwrap();
+    s.cli(&["op", "f", "move", "from=docs", "to=manual", "-y"])
+        .unwrap();
+    assert_eq!(get(&s.url("/f/manual/b.txt"), None).1, "b");
+    assert_eq!(get(&s.url("/f/docs/b.txt"), None).0, 404);
+    assert_eq!(get(&s.url("/f/@first/docs/b.txt"), None).1, "b");
+    let found = s.json(&["search", "tools"]);
+    assert!(
+        found.to_string().contains("tools/v1/tool.tar.gz"),
+        "{found}"
+    );
+}

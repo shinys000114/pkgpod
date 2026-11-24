@@ -675,6 +675,45 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String]) -> Vec<UseLine
         format!("http://{addr}/{}/", r.name)
     });
     let mut out = Vec::new();
+    if r.format == "files" {
+        let auth = if r.setting_bool("public") {
+            ""
+        } else {
+            " -u token:<token>"
+        };
+        out.push(UseLine {
+            label: "Download".into(),
+            text: format!("curl -fO{auth} {base}<path>"),
+        });
+        out.push(UseLine {
+            label: "Copy the tree".into(),
+            text: format!(
+                "wget -m -np -nH --cut-dirs={}{} {base}",
+                base.split("://")
+                    .nth(1)
+                    .map_or(0, |h| h.trim_end_matches('/').matches('/').count()),
+                if r.setting_bool("public") {
+                    ""
+                } else {
+                    " --user=token --password=<token>"
+                }
+            ),
+        });
+        if r.kind != Kind::Mirror {
+            out.push(UseLine {
+                label: "Upload".into(),
+                text: format!(
+                    "curl -u token:<token> -T tool-1.0.tar.gz {base}tool/1.0/tool-1.0.tar.gz\npkgpod upload {} a.tar.gz b.tar.gz -s path=tool/1.0/   # several files, one version",
+                    r.name
+                ),
+            });
+            out.push(UseLine {
+                label: "A labelled version".into(),
+                text: format!("{base}@<label>/<path>"),
+            });
+        }
+        return out;
+    }
     if r.format == "deb" && r.kind == Kind::Mirror {
         let (dists, comps, _) = crate::mirror_pkgs::tree_index(&r.tree_dir());
         let dist = dists.first().cloned().unwrap_or_else(|| "<dist>".into());

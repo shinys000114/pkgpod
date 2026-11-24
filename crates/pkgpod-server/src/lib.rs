@@ -131,7 +131,7 @@ struct Cache {
 
 /// Formats compiled into this server.
 pub fn formats() -> Vec<Arc<dyn pkgpod_engine::Format>> {
-    vec![Arc::new(pkgpod_deb::Deb)]
+    vec![Arc::new(pkgpod_deb::Deb), Arc::new(pkgpod_files::Files)]
 }
 
 impl App {
