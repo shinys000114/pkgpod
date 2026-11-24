@@ -266,6 +266,24 @@ fn conflicts_operations_and_rollback() {
         "{:?}",
         v.iter().map(|v| &v.summary).collect::<Vec<_>>()
     );
+    // Several dists at once get the same settings.
+    f.op(
+        "dist-set",
+        json!({"name": "x y", "components": ["main", "rt"]}),
+    )
+    .unwrap();
+    for d in ["x", "y"] {
+        let rel = String::from_utf8(f.served(&format!("dists/{d}/Release")).unwrap()).unwrap();
+        assert!(rel.contains("Components: main rt\n"), "{d}: {rel}");
+    }
+    assert!(
+        pkgpod_deb::format::parse_dist_groups("a b: main\nc")
+            .unwrap()
+            .len()
+            == 3
+    );
+    assert!(pkgpod_deb::format::parse_dist_groups(": main").is_err());
+    assert!(pkgpod_deb::format::parse_dist_groups("a\na").is_err());
     // An empty value is the default again.
     f.op("dist-set", json!({"name": "c", "components": ""}))
         .unwrap();
