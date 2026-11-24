@@ -65,7 +65,7 @@ pub async fn serve(
     passive: Option<(u16, u16)>,
     mut stop: watch::Receiver<bool>,
 ) -> Result<(), String> {
-    let listener = crate::listeners::bind(addr).await?;
+    let listener = crate::listeners::bind(addr, &stop).await?;
     tracing::info!(
         "serving FTP on {}",
         listener

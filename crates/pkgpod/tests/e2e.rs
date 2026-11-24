@@ -9,12 +9,24 @@ use std::time::{Duration, Instant};
 use pkgpod_deb::testutil::{build_deb, have};
 use serde_json::Value;
 
+/// A port nothing listens on, never handed out twice in this process:
+/// tests run in parallel, and the system may give a port just released
+/// to the next asker, so two servers of two tests could otherwise share
+/// one and each test talk to the other's.
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    static GIVEN: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
+    loop {
+        let p = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut g = GIVEN.lock().unwrap();
+        if !g.contains(&p) {
+            g.push(p);
+            return p;
+        }
+    }
 }
 
 struct Server {
@@ -207,7 +219,7 @@ fn deb_repository_with_apt() {
         .unwrap();
     let tok = tok.trim();
     let (st, body) = get(
-        &s.url("/team/ppa/dists/noble/main/binary-amd64/Packages"),
+        &s.url("/team/ppa/dists/noble/main/binary-all/Packages"),
         Some(("token", tok)),
     );
     assert_eq!(st, 200);
@@ -287,6 +299,21 @@ fn deb_repository_with_apt() {
             String::from_utf8_lossy(&out.stderr)
         );
         assert!(a.join("hello-e2e_2.0_all.deb").is_file());
+        // An arm64 client finds the arch:all package too.
+        std::fs::remove_file(a.join("hello-e2e_2.0_all.deb")).unwrap();
+        let out = apt(&a, &["-oAPT::Architecture=arm64", "update"]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let out = apt(&a, &["-oAPT::Architecture=arm64", "download", "hello-e2e"]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(a.join("hello-e2e_2.0_all.deb").is_file());
         src(&format!("{addr}@before-two/"));
         let out = apt(&a, &["update"]);
         assert!(
@@ -315,7 +342,7 @@ fn deb_repository_with_apt() {
         .unwrap();
     s.cli(&["apply", id]).unwrap();
     let (_, body) = get(
-        &s.url("/team/ppa/dists/noble/main/binary-amd64/Packages"),
+        &s.url("/team/ppa/dists/noble/main/binary-all/Packages"),
         Some(("token", tok)),
     );
     assert!(
@@ -3928,13 +3955,16 @@ fn npm_publish_and_install() {
         "_attachments": {"routed-1.0.0.tgz": {"data": b64(&tgz), "length": tgz.len()}},
     });
     let host = format!("npm.test:{port}");
+    // A fresh client: the old one's pooled connection may have idled
+    // past the server's keep-alive while npm ran.
+    let c = reqwest::blocking::Client::new();
     let r = c
         .put(s.url("/routed"))
         .header("host", &host)
         .bearer_auth(&rt)
         .json(&body)
         .send()
-        .unwrap();
+        .unwrap_or_else(|e| panic!("{e:?}"));
     assert_eq!(r.status().as_u16(), 201, "{}", r.text().unwrap());
     let doc: Value = c
         .get(s.url("/routed"))
@@ -4000,4 +4030,33 @@ fn npm_hashes(data: &[u8]) -> (String, String) {
         sha1.split_whitespace().next().unwrap().to_string(),
         format!("sha512-{}", b64(&raw)),
     )
+}
+
+#[test]
+fn a_listener_moved_while_retrying_keeps_serving() {
+    let s = Server::start();
+    // An address in use: the listener retries it for a while.
+    let busy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let busy_port = busy.local_addr().unwrap().port();
+    s.cli(&[
+        "listener",
+        "set",
+        "default",
+        &format!("127.0.0.1:{busy_port}"),
+    ])
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    // Moved meanwhile: the new address serves, and keeps serving after
+    // the old attempt gives up.
+    let port = free_port();
+    s.cli(&["listener", "set", "default", &format!("127.0.0.1:{port}")])
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(6));
+    assert!(
+        std::net::TcpStream::connect(("127.0.0.1", port)).is_ok(),
+        "the moved listener stopped"
+    );
+    let ls = s.cli(&["listener", "list"]).unwrap();
+    assert!(ls.contains("running"), "{ls}");
+    drop(busy);
 }
