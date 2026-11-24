@@ -96,6 +96,11 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
                 read(&app, &a.repo, Some(v), rest, &base, req).await
             }
             ([p, rest @ ..], _) if p == "package" => dist_tags(&app, &a, rest, req).await,
+            ([v1, s], m)
+                if v1 == "v1" && s == "search" && (*m == Method::GET || *m == Method::HEAD) =>
+            {
+                search(&app, &a, req.uri().query().unwrap_or("")).await
+            }
             _ => not_found(),
         };
     }
@@ -162,7 +167,7 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
             };
         }
     }
-    // Endpoints not offered (audit, search, login): npm goes on without.
+    // Endpoints not offered (audit, login): npm goes on without.
     not_found()
 }
 
@@ -267,6 +272,73 @@ async fn read(
         }
         _ => not_found(),
     }
+}
+
+/// npm search: packages whose name, description or keywords hold every
+/// word asked, each with its latest version.
+async fn search(app: &Arc<App>, a: &Ask, query: &str) -> Response {
+    let q = crate::serve::query_params(query);
+    let s = |k: &str| q.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let words: Vec<String> = s("text")
+        .to_lowercase()
+        .split_whitespace()
+        .map(String::from)
+        .collect();
+    let size: usize = s("size").parse().unwrap_or(20).clamp(1, 250);
+    let from: usize = s("from").parse().unwrap_or(0);
+    let Some(v) = a.current.clone() else {
+        return reply(StatusCode::OK, json!({"objects": [], "total": 0}));
+    };
+    let app2 = app.clone();
+    let found = tokio::task::spawn_blocking(move || {
+        let leaves = app2.engine.objects().walk(&v.root, "").unwrap_or_default();
+        let p = Packages::of(&leaves);
+        let mut out = Vec::new();
+        for (name, versions) in &p.versions {
+            let latest = p
+                .tags
+                .get(name)
+                .and_then(|t| t.get("latest"))
+                .and_then(|l| versions.get(l))
+                .or_else(|| versions.values().next_back());
+            let Some((m, _, _)) = latest else {
+                continue;
+            };
+            let man = &m.manifest;
+            let hay = format!(
+                "{name} {} {}",
+                man.get("description").and_then(Value::as_str).unwrap_or(""),
+                man.get("keywords").map(|k| k.to_string()).unwrap_or_default()
+            )
+            .to_lowercase();
+            if !words.iter().all(|w| hay.contains(w.as_str())) {
+                continue;
+            }
+            out.push(json!({
+                "package": {
+                    "name": name,
+                    "version": man.get("version").cloned().unwrap_or(Value::Null),
+                    "description": man.get("description").cloned().unwrap_or(Value::Null),
+                    "keywords": man.get("keywords").cloned().unwrap_or(json!([])),
+                    "date": pkgpod_npm::iso_time(m.time),
+                    "links": {},
+                    "publisher": {"username": ""},
+                    "maintainers": [],
+                },
+                "score": {"final": 1.0, "detail": {"quality": 1.0, "popularity": 1.0, "maintenance": 1.0}},
+                "searchScore": 1.0,
+            }));
+        }
+        out
+    })
+    .await
+    .unwrap_or_default();
+    let total = found.len();
+    let objects: Vec<Value> = found.into_iter().skip(from).take(size).collect();
+    reply(
+        StatusCode::OK,
+        json!({"objects": objects, "total": total, "time": pkgpod_npm::iso_time(pkgpod_base::now())}),
+    )
 }
 
 enum Change {
