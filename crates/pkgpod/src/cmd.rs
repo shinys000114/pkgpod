@@ -820,10 +820,11 @@ pub fn run(
                                 vec![
                                     s(&k["name"]),
                                     s(&k["fingerprint"]),
-                                    if k["default"] == json!(true) {
-                                        "default".into()
-                                    } else {
-                                        String::new()
+                                    match (k["default"] == json!(true), k["missing"] == json!(true))
+                                    {
+                                        (_, true) => "no secret key: import it".into(),
+                                        (true, _) => "default".into(),
+                                        _ => String::new(),
                                     },
                                 ]
                             })

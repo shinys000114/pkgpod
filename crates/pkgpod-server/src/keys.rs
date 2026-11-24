@@ -242,9 +242,13 @@ impl Keys {
         }
         let k = self.get(&name)?;
         let data = std::fs::read(self.file(&name)).map_err(|_| {
+            // Keys made before pkgpod kept its own were in <data_dir>/gnupg.
+            let gnupg = self.dir.parent().unwrap_or(&self.dir).join("gnupg");
             Error::Invalid(format!(
-                "key {name} ({}) has no secret key file: import it (gpg --export-secret-keys --armor {} | pkgpod key import {name} -)",
-                k.fingerprint, k.fingerprint
+                "key {name} ({}) has no secret key file: import it (gpg --homedir {} --export-secret-keys --armor {} | pkgpod key import {name} -)",
+                k.fingerprint,
+                gnupg.display(),
+                k.fingerprint
             ))
         })?;
         let pass = std::fs::read_to_string(self.pass_file(&name)).ok();
