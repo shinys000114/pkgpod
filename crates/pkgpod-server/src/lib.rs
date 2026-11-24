@@ -22,6 +22,7 @@ pub mod promote;
 pub mod pypi;
 pub mod resign;
 pub mod routes;
+pub mod rsa_key;
 pub mod schema;
 pub mod serve;
 
@@ -146,6 +147,7 @@ pub fn formats() -> Vec<Arc<dyn pkgpod_engine::Format>> {
         Arc::new(pkgpod_npm::Npm),
         Arc::new(pkgpod_cargo::Cargo),
         Arc::new(pkgpod_go::Go),
+        Arc::new(pkgpod_apk::Apk),
     ]
 }
 
@@ -163,7 +165,11 @@ impl App {
         }
         let db = Arc::new(Db::open(&cfg.db_path())?);
         schema::migrate(&db)?;
-        let keys = Arc::new(Keys::new(db.clone(), &cfg.gnupg()));
+        let keys = Arc::new(Keys::new(
+            db.clone(),
+            &cfg.gnupg(),
+            &cfg.data_dir.join("rsa"),
+        ));
         let engine = Arc::new(Engine::open(
             db.clone(),
             &cfg.default_storage(),

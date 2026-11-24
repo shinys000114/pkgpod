@@ -1,0 +1,23 @@
+[package]
+name = "pkgpod-apk"
+description = "pkgpod Alpine format: apk packages with signed APKINDEX per branch, repository and arch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+pkgpod-base.workspace = true
+pkgpod-engine.workspace = true
+serde_json.workspace = true
+flate2.workspace = true
+tar.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+base64.workspace = true
+
+[features]
+# Packages made the way abuild makes them, for tests.
+testutil = []

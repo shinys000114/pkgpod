@@ -31,6 +31,7 @@ jiff.workspace = true
 [dev-dependencies]
 rusqlite.workspace = true
 pkgpod-deb = { workspace = true, features = ["testutil"] }
+pkgpod-apk = { workspace = true, features = ["testutil"] }
 tempfile.workspace = true
 reqwest = { workspace = true, features = ["form"] }
 serde_json.workspace = true

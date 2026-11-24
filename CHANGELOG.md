@@ -26,6 +26,10 @@ Formats:
   yank and unyank, search; labelled versions as read-only registries.
 - **Go**: a module proxy (`GOPROXY`): list, info, go.mod, zip, latest;
   modules uploaded as their zip; private ones over https.
+- **Alpine**: apk packages by branch, repository and architecture, an
+  APKINDEX per architecture signed with the server's RSA key (made on
+  first use, kept in `<data_dir>/rsa` and backed up); noarch packages in
+  every architecture.
 
 Everywhere: versions of every hosted repository with labels
 (`@label` addresses; `-/label/<label>/` for npm), diffs, rollback and

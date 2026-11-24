@@ -106,6 +106,17 @@ pub trait Signer: Send + Sync {
         let _ = key;
         Err(crate::Error::Invalid("no public key".into()))
     }
+    /// For formats that sign with a bare RSA key (apk): the key's file
+    /// name as clients keep it (`<name>.rsa.pub`) and the PKCS#1 v1.5
+    /// signature of the SHA-256 of `data`.
+    fn rsa_sign(&self, data: &[u8]) -> Result<(String, Vec<u8>)> {
+        let _ = data;
+        Err(crate::Error::Invalid("no RSA signing key".into()))
+    }
+    /// That RSA key's file name and public key (PEM).
+    fn rsa_public_key(&self) -> Result<(String, Vec<u8>)> {
+        Err(crate::Error::Invalid("no RSA signing key".into()))
+    }
 }
 
 /// A signer that has no key.

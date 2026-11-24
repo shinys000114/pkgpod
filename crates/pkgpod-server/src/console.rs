@@ -669,6 +669,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                         ("npm", _) => "JavaScript packages for npm",
                         ("cargo", _) => "Rust crates for cargo (sparse index)",
                         ("go", _) => "Go modules for go (GOPROXY)",
+                        ("apk", _) => "Alpine packages for apk, signed per version",
                         _ => "",
                     }
                     .to_string(),
@@ -885,6 +886,42 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String], host: &str) ->
         out.push(UseLine {
             label: "Note".into(),
             text: "pkgpod is no proxy: packages from npmjs need their own registry (a scope here, the rest from registry.npmjs.org). npm login is not offered; set the token in .npmrc. unpublish and deprecate are operations here.".into(),
+        });
+        return out;
+    }
+    if r.format == "apk" {
+        let public = r.setting_bool("public");
+        let key = app
+            .keys
+            .rsa_key()
+            .map(|k| k.name.clone())
+            .unwrap_or_else(|_| "<key>.rsa.pub".into());
+        let repo_url = if public {
+            base.clone()
+        } else {
+            let (scheme, rest) = base.split_once("://").unwrap_or(("https", &base));
+            format!("{scheme}://token:<token>@{rest}")
+        };
+        out.push(UseLine {
+            label: "Key".into(),
+            text: format!("wget -O /etc/apk/keys/{key} {base}{key}"),
+        });
+        out.push(UseLine {
+            label: "Repository".into(),
+            text: format!(
+                "echo {repo_url}<branch>/<repository> >> /etc/apk/repositories   # e.g. v3.22/main\napk update && apk add <package>"
+            ),
+        });
+        out.push(UseLine {
+            label: "Upload".into(),
+            text: format!(
+                "curl -u token:<token> -T hello-1.0-r0.apk '{base}upload?branch=v3.22&repository=main'\npkgpod upload {} hello-1.0-r0.apk -s branch=v3.22 -s repository=main",
+                r.name
+            ),
+        });
+        out.push(UseLine {
+            label: "A labelled version".into(),
+            text: format!("{repo_url}@<label>/<branch>/<repository>"),
         });
         return out;
     }

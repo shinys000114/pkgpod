@@ -2291,6 +2291,7 @@ dependencies = [
  "jiff",
  "libc",
  "mimalloc",
+ "pkgpod-apk",
  "pkgpod-base",
  "pkgpod-deb",
  "pkgpod-server",
@@ -2303,6 +2304,20 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "pkgpod-apk"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "flate2",
+ "pkgpod-base",
+ "pkgpod-engine",
+ "serde_json",
+ "sha1 0.11.0",
+ "sha2 0.11.0",
+ "tar",
 ]
 
 [[package]]
@@ -2460,6 +2475,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "jiff",
+ "pkgpod-apk",
  "pkgpod-base",
  "pkgpod-cargo",
  "pkgpod-deb",
@@ -2471,6 +2487,7 @@ dependencies = [
  "pkgpod-oci",
  "pkgpod-pypi",
  "reqwest",
+ "rsa",
  "rusqlite",
  "rustls",
  "rustls-pki-types",
