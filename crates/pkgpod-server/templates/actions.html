@@ -27,7 +27,7 @@
 <details class="card panel">
   <summary>{{ o.title }} <code class="op-id">{{ o.name }}</code>{% if !o.help.is_empty() %} <span class="hint">{{ o.help }}</span>{% endif %}</summary>
   <div class="panel-body">
-  <form hx-post="/c/r/{{ name }}/ops/{{ o.name }}" hx-target="next .result">
+  <form hx-post="/c/r/{{ name }}/ops/{{ o.name }}" hx-target="next .result" data-sparse>
     {% call m::fields(o.fields) %}{% endcall %}
     <div class="form-foot"><button type="submit">Preview</button></div>
   </form>

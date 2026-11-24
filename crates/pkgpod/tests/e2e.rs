@@ -379,7 +379,16 @@ fn deb_repository_with_apt() {
 fn rights_and_errors() {
     let s = Server::start();
     s.cli(&["repo", "create", "a", "-s", "sign=false"]).unwrap();
-    s.cli(&["repo", "create", "b", "-s", "sign=false"]).unwrap();
+    s.cli(&[
+        "repo",
+        "create",
+        "b",
+        "-s",
+        "sign=false",
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
     s.cli_in(&["user", "add", "dev", "--password-stdin"], "dev-password")
         .unwrap();
     s.cli(&["grant", "set", "a", "user:dev", "write"]).unwrap();
@@ -456,6 +465,141 @@ fn rights_and_errors() {
         .send()
         .unwrap();
     assert_eq!(r.status().as_u16(), 404);
+}
+
+/// A console session for `user` (made an admin with `password`): the
+/// client, its session cookie and CSRF token.
+fn console_session(
+    s: &Server,
+    user: &str,
+    password: &str,
+) -> (reqwest::blocking::Client, String, String) {
+    s.cli_in(
+        &["user", "add", user, "--admin", "--password-stdin"],
+        password,
+    )
+    .unwrap();
+    let c = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let cookie_of = |r: &reqwest::blocking::Response, name: &str| {
+        r.headers()
+            .get_all("set-cookie")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .find_map(|v| {
+                v.strip_prefix(&format!("{name}="))
+                    .map(|x| x.split(';').next().unwrap().to_string())
+            })
+    };
+    let r = c.get(format!("{}/login", s.api)).send().unwrap();
+    let lc = cookie_of(&r, "pkgpod_login").unwrap();
+    let r = c
+        .post(format!("{}/login", s.api))
+        .header("cookie", format!("pkgpod_login={lc}"))
+        .form(&[
+            ("user", user),
+            ("password", password),
+            ("csrf", lc.as_str()),
+        ])
+        .send()
+        .unwrap();
+    let sid = cookie_of(&r, "pkgpod_session").expect("session cookie");
+    let home = c
+        .get(format!("{}/", s.api))
+        .header("cookie", format!("pkgpod_session={sid}"))
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    let csrf = home
+        .split("\"X-CSRF-Token\": \"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap()
+        .to_string();
+    (c, sid, csrf)
+}
+
+#[test]
+fn console_operations_change_only_what_is_sent() {
+    let s = Server::start();
+    s.cli(&[
+        "repo",
+        "create",
+        "b",
+        "-s",
+        "sign=false",
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    s.cli(&[
+        "op",
+        "b",
+        "dist-set",
+        "name=focal jammy",
+        "components=rockchip,amlogic",
+        "-y",
+    ])
+    .unwrap();
+    let (c, sid, csrf) = console_session(&s, "ops", "ops-password");
+    let post = |path: &str, form: &[(&str, &str)]| {
+        c.post(format!("{}{path}", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .header("x-csrf-token", &csrf)
+            .form(form)
+            .send()
+            .unwrap()
+            .text()
+            .unwrap()
+    };
+    // Two dists, only Origin sent (what the console sends when only it
+    // was changed): their components stay.
+    let plan = post(
+        "/c/r/b/ops/dist-set",
+        &[("name", "focal jammy"), ("origin", "Boards")],
+    );
+    assert!(
+        plan.contains("dist focal: origin - -&#62; Boards; dist jammy: origin - -&#62; Boards"),
+        "{plan}"
+    );
+    let id = plan
+        .split("/c/plans/")
+        .nth(1)
+        .unwrap()
+        .split('/')
+        .next()
+        .unwrap();
+    post(&format!("/c/plans/{id}/apply"), &[]);
+    let rel = get(&s.url("/b/dists/jammy/Release"), None).1;
+    assert!(
+        rel.contains("Components: rockchip amlogic\n") && rel.contains("Origin: Boards\n"),
+        "{rel}"
+    );
+    // A box sent unticked is false; one not sent stays.
+    let plan = post(
+        "/c/r/b/ops/dist-set",
+        &[("name", "focal"), ("not_automatic", "true")],
+    );
+    let id = plan
+        .split("/c/plans/")
+        .nth(1)
+        .unwrap()
+        .split('/')
+        .next()
+        .unwrap();
+    post(&format!("/c/plans/{id}/apply"), &[]);
+    let plan = post("/c/r/b/ops/dist-set", &[("name", "focal"), ("label", "L")]);
+    assert!(!plan.contains("not_automatic"), "{plan}");
+    let plan = post(
+        "/c/r/b/ops/dist-set",
+        &[("name", "focal"), ("not_automatic", "false")],
+    );
+    assert!(plan.contains("not_automatic true -&#62; false"), "{plan}");
 }
 
 #[test]
