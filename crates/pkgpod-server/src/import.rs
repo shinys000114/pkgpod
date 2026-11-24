@@ -178,7 +178,7 @@ fn fetch_and_take_in(
                     .join(d)
                     .join(c)
                     .join(format!("binary-{a}"));
-                let Some(text) = read_packages(&dir)? else {
+                let Some(text) = crate::mirror_pkgs::read_packages(&dir)? else {
                     continue;
                 };
                 for f in pkgpod_mirror::release::packages_files(&text).map_err(|e| e.to_string())? {
@@ -278,21 +278,4 @@ fn fetch_and_take_in(
         summary,
         json!({"files": n, "changes": out.changes.len()}),
     ))
-}
-
-/// The text of a `Packages` index in `dir` (any compression), if any.
-fn read_packages(dir: &std::path::Path) -> Result<Option<String>, String> {
-    for ext in ["xz", "gz", ""] {
-        let p = if ext.is_empty() {
-            dir.join("Packages")
-        } else {
-            dir.join(format!("Packages.{ext}"))
-        };
-        if let Ok(data) = std::fs::read(&p) {
-            return pkgpod_mirror::release::decompress(ext, &data)
-                .map(Some)
-                .map_err(|e| format!("{}: {e}", p.display()));
-        }
-    }
-    Ok(None)
 }

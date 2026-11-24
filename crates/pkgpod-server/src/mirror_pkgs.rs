@@ -128,3 +128,20 @@ pub(crate) fn load(dir: &FsPath) -> Result<Arc<Vec<Pkg>>, String> {
     *cache().lock().unwrap_or_else(|e| e.into_inner()) = Some((path, mtime, v.clone()));
     Ok(v)
 }
+
+/// The text of a `Packages` index in `dir` (any compression), if any.
+pub(crate) fn read_packages(dir: &std::path::Path) -> Result<Option<String>, String> {
+    for ext in ["xz", "gz", ""] {
+        let p = if ext.is_empty() {
+            dir.join("Packages")
+        } else {
+            dir.join(format!("Packages.{ext}"))
+        };
+        if let Ok(data) = std::fs::read(&p) {
+            return pkgpod_mirror::release::decompress(ext, &data)
+                .map(Some)
+                .map_err(|e| format!("{}: {e}", p.display()));
+        }
+    }
+    Ok(None)
+}

@@ -678,10 +678,27 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String]) -> Vec<UseLine
     if r.format == "deb" && r.kind == Kind::Mirror {
         let (dists, comps, _) = crate::mirror_pkgs::tree_index(&r.tree_dir());
         let dist = dists.first().cloned().unwrap_or_else(|| "<dist>".into());
+        let key = if r.setting_bool("resign") {
+            let key = format!("/etc/apt/keyrings/{}.asc", r.name);
+            out.push(UseLine {
+                label: "Key".into(),
+                text: format!(
+                    "sudo curl -fsSL{} -o {key} {base}key.asc",
+                    if r.setting_bool("public") {
+                        ""
+                    } else {
+                        " -u token:<token>"
+                    }
+                ),
+            });
+            key
+        } else {
+            "<the upstream's key>".into()
+        };
         out.push(UseLine {
             label: "Source".into(),
             text: format!(
-                "echo 'deb [signed-by=<the upstream's key>] {base} {dist} {}' | sudo tee /etc/apt/sources.list.d/{}.list",
+                "echo 'deb [signed-by={key}] {base} {dist} {}' | sudo tee /etc/apt/sources.list.d/{}.list",
                 if comps.is_empty() { "main".into() } else { comps.join(" ") },
                 r.name
             ),
@@ -1013,6 +1030,11 @@ struct MirrorQ {
 #[template(path = "mirror_packages.html")]
 struct MirrorPackages {
     repo: String,
+    /// Hosted repositories the viewer may promote into.
+    targets: Vec<String>,
+    dist: String,
+    comp: String,
+    arch: String,
     dists: Vec<(String, bool)>,
     comps: Vec<(String, bool)>,
     archs: Vec<(String, bool)>,
@@ -1044,8 +1066,29 @@ async fn mirror_packages(app: Arc<App>, v: Viewer, repo: String, q: MirrorQ) -> 
         pick(&q.arch, &archs, "amd64"),
     );
     let mark = |list: &[String], sel: &str| list.iter().map(|x| (x.clone(), x == sel)).collect();
+    let targets = {
+        let (app2, caller) = (app.clone(), v.caller.clone());
+        tokio::task::spawn_blocking(move || -> Vec<String> {
+            app2.engine
+                .repos()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|o| o.format == "deb" && o.kind != Kind::Mirror)
+                .filter(|o| {
+                    app2.auth.role(&caller, &o.name, o.setting_bool("public")) >= Some(Role::Write)
+                })
+                .map(|o| o.name)
+                .collect()
+        })
+        .await
+        .unwrap_or_default()
+    };
     let mut out = MirrorPackages {
         repo,
+        targets,
+        dist: d.clone(),
+        comp: c.clone(),
+        arch: a.clone(),
         dists: mark(&dists, &d),
         comps: mark(&comps, &c),
         archs: mark(&archs, &a),
@@ -1434,10 +1477,25 @@ async fn promote(
         .filter(|(k, _)| k == "path")
         .map(|(_, p)| p.clone())
         .collect();
+    let opt = |k: &str| Some(form_get(&form, k).trim().to_string()).filter(|v| !v.is_empty());
+    let pick = opt("dist").map(|dist| crate::promote::MirrorPick {
+        dist,
+        components: opt("component").into_iter().collect(),
+        architectures: opt("arch").into_iter().collect(),
+        packages: form
+            .iter()
+            .filter(|(k, _)| k == "pkg")
+            .map(|(_, p)| p.clone())
+            .collect(),
+        into: opt("into"),
+        component: opt("into_component"),
+        replace: form_get(&form, "replace") == "on",
+    });
     let req = api::PromoteReq {
         from: repo,
-        version: Some(form_get(&form, "version").to_string()).filter(|v| !v.is_empty()),
+        version: opt("version"),
         paths,
+        pick,
     };
     match api::promote(
         State(app),

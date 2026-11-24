@@ -1013,7 +1013,12 @@ pub(crate) struct PromoteReq {
     pub(crate) from: String,
     #[serde(default)]
     pub(crate) version: Option<String>,
+    /// From a versioned repository: paths of its state tree.
+    #[serde(default)]
     pub(crate) paths: Vec<String>,
+    /// From a mirror: what to take (`dist`, `packages`, ...).
+    #[serde(flatten)]
+    pub(crate) pick: Option<crate::promote::MirrorPick>,
 }
 
 pub(crate) async fn promote(
@@ -1025,7 +1030,17 @@ pub(crate) async fn promote(
 ) -> Result<Json<Value>> {
     blocking(&app, move |app| {
         app.repo_for(&c, &repo, Role::Write)?;
-        app.repo_for(&c, &req.from, Role::Read)?;
+        let src = app.repo_for(&c, &req.from, Role::Read)?;
+        if src.kind == Kind::Mirror {
+            let pick = req.pick.ok_or_else(|| {
+                Error::Invalid("from a mirror: name its dist and the packages".into())
+            })?;
+            let plan = crate::promote::plan(app, &src, &repo, &pick, c.name())?;
+            return Ok(Json(app.plan_reply(&c, plan, q.yes())?));
+        }
+        if req.paths.is_empty() {
+            return Err(Error::Invalid("name the paths to promote".into()));
+        }
         let seq = match &req.version {
             Some(v) => Some(app.engine.resolve(&req.from, v)?.seq),
             None => None,

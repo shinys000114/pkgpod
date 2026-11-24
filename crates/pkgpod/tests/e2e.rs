@@ -613,6 +613,71 @@ fn deb_mirror_of_a_hosted_repository() {
     let jobs = s.json(&["jobs", "mir"]);
     assert_eq!(jobs[0]["state"], "ok");
 
+    // Promotion from the mirror into a hosted repository, as a plan.
+    s.cli(&["repo", "create", "kept"]).unwrap();
+    s.cli(&[
+        "op",
+        "kept",
+        "dist-set",
+        "name=pinned",
+        "components=main",
+        "-y",
+    ])
+    .unwrap();
+    let e = s
+        .cli(&[
+            "promote", "mir", "kept", "--dist", "stable", "nothere", "-y",
+        ])
+        .unwrap_err();
+    assert!(e.contains("nothere"), "{e}");
+    let e = s
+        .cli(&[
+            "promote", "mir", "kept", "--dist", "stable", "mirrored", "-y",
+        ])
+        .unwrap_err();
+    assert!(e.contains("no dist stable"), "{e}");
+    let plan = s
+        .cli(&[
+            "promote",
+            "mir",
+            "kept",
+            "--dist",
+            "stable",
+            "--into",
+            "pinned",
+            "mirr*=1.0",
+        ])
+        .unwrap();
+    assert!(plan.contains("not applied"), "{plan}");
+    s.cli(&[
+        "promote", "mir", "kept", "--dist", "stable", "--into", "pinned", "mirrored", "-y",
+    ])
+    .unwrap();
+    let v = s.json(&["versions", "kept"]);
+    assert!(
+        v[0]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("promoted 1 package file(s) from mir stable"),
+        "{v}"
+    );
+    let ls = s.cli(&["ls", "kept", "dists/pinned/main"]).unwrap();
+    assert!(ls.contains("mirrored_1.0_amd64.deb"), "{ls}");
+    // A file that is not what the index says is refused.
+    let pooled = s
+        .dir
+        .path()
+        .join("data/storages/main/trees/mir/pool/main/m/mirrored/mirrored_1.0_amd64.deb");
+    let good = std::fs::read(&pooled).unwrap();
+    std::fs::write(&pooled, b"not a deb").unwrap();
+    let e = s
+        .cli(&[
+            "promote", "mir", "kept", "--dist", "stable", "--into", "pinned", "mirrored", "-y",
+        ])
+        .unwrap_err();
+    assert!(e.contains("not what its index says"), "{e}");
+    std::fs::write(&pooled, good).unwrap();
+
     // A wrong keyring fails the sync and leaves the tree as it was.
     s.cli(&[
         "repo",

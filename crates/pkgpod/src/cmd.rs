@@ -533,13 +533,23 @@ pub fn run(
             to,
             paths,
             version,
+            dist,
+            components,
+            architectures,
+            into,
+            component,
+            replace,
             yes,
         } => {
-            x.plan(
-                &format!("/api/v1/repos/{}/promote", enc(&to)),
-                &json!({"from": from, "version": version, "paths": paths}),
-                &yes,
-            )?;
+            let body = match dist {
+                Some(dist) => json!({
+                    "from": from, "dist": dist, "packages": paths,
+                    "components": components, "architectures": architectures,
+                    "into": into, "component": component, "replace": replace,
+                }),
+                None => json!({"from": from, "version": version, "paths": paths}),
+            };
+            x.plan(&format!("/api/v1/repos/{}/promote", enc(&to)), &body, &yes)?;
         }
         Cmd::Rm { repo, paths, yes } => {
             x.plan(
