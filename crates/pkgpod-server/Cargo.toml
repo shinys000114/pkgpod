@@ -9,6 +9,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+rustix.workspace = true
 pkgpod-base.workspace = true
 pkgpod-engine.workspace = true
 pkgpod-deb.workspace = true

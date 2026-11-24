@@ -1,0 +1,10 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+<div class="usage">
+  <p class="muted small">Hosted repositories: {{ unique }} stored ({{ saved }} saved by keeping each file once); with mirrors' trees {{ total }}.{% if capped %} Some mirror trees were too large to count whole: their sizes are at least these.{% endif %}</p>
+  <div class="table-wrap"><table class="sortable">
+    <thead><tr><th>Repository</th><th>Format</th><th class="num">Current version</th><th class="num">All its versions</th></tr></thead>
+    <tbody>
+    {% for r in rows %}<tr><td><a href="/r/{{ r.name }}">{{ r.name }}</a></td><td><span class="fmt fmt-{{ r.format }}">{{ r.format }}</span></td><td class="num">{{ r.now }}</td><td class="num">{% if r.all.is_empty() %}<span class="muted">mirror tree</span>{% else %}{{ r.all }}{% endif %}</td></tr>{% endfor %}
+    </tbody>
+  </table></div>
+</div>

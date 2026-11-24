@@ -379,16 +379,7 @@ fn deb_repository_with_apt() {
 fn rights_and_errors() {
     let s = Server::start();
     s.cli(&["repo", "create", "a", "-s", "sign=false"]).unwrap();
-    s.cli(&[
-        "repo",
-        "create",
-        "b",
-        "-s",
-        "sign=false",
-        "-s",
-        "public=true",
-    ])
-    .unwrap();
+    s.cli(&["repo", "create", "b", "-s", "sign=false"]).unwrap();
     s.cli_in(&["user", "add", "dev", "--password-stdin"], "dev-password")
         .unwrap();
     s.cli(&["grant", "set", "a", "user:dev", "write"]).unwrap();
@@ -7599,4 +7590,97 @@ fn console_versions_labels_and_activity() {
     assert!(a.contains("upload") && a.contains("label"), "{a}");
     let shell = text("/r/f");
     assert!(shell.contains("/r/f/activity"), "{shell}");
+}
+
+#[test]
+fn console_copy_access_usage_and_glance() {
+    let s = Server::start();
+    let (c, sid, csrf) = console_session(&s, "adm", "adm-password");
+    let text = |p: &str| {
+        c.get(format!("{}{p}", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .send()
+            .unwrap()
+            .text()
+            .unwrap()
+    };
+    s.cli(&[
+        "repo",
+        "create",
+        "bsp",
+        "-s",
+        "sign=false",
+        "-s",
+        "origin=Boards",
+        "-s",
+        "urls=http://bsp.example.invalid/",
+    ])
+    .unwrap();
+    s.cli(&[
+        "op",
+        "bsp",
+        "dist-set",
+        "name=focal jammy",
+        "components=rockchip,amlogic",
+        "-y",
+    ])
+    .unwrap();
+    // Like it: settings and dists, not its address.
+    let r = c
+        .post(format!("{}/c/r/bsp/copy", s.api))
+        .header("cookie", format!("pkgpod_session={sid}"))
+        .header("x-csrf-token", &csrf)
+        .form(&[("name", "bsp2")])
+        .send()
+        .unwrap();
+    assert_eq!(
+        r.headers()
+            .get("hx-redirect")
+            .map(|h| h.to_str().unwrap().to_string()),
+        Some("/r/bsp2".into()),
+        "{}",
+        r.text().unwrap()
+    );
+    let info = s.json(&["repo", "show", "bsp2"]);
+    assert_eq!(info["settings"]["origin"], "Boards", "{info}");
+    assert_eq!(info["settings"]["urls"], serde_json::json!([]), "{info}");
+    let v = s.json(&["versions", "bsp2"]);
+    assert!(
+        v[0]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("dist jammy added (rockchip, amlogic)"),
+        "{v}"
+    );
+    // Who has access, as enforced: a team's grant.
+    s.cli_in(&["user", "add", "dev", "--password-stdin"], "dev-password")
+        .unwrap();
+    s.cli(&["team", "add", "boards"]).unwrap();
+    s.cli(&["team", "join", "boards", "dev"]).unwrap();
+    s.cli(&["grant", "set", "bsp", "team:boards", "write"])
+        .unwrap();
+    let st = text("/r/bsp/settings");
+    assert!(
+        st.contains("<td>dev</td><td><span class=\"tag\">write</span></td><td class=\"muted wrap\">write here, team boards</td>"),
+        "{st}"
+    );
+    let people = text("/admin/people");
+    assert!(
+        people.contains("<a href=\"/r/bsp\">bsp</a> <span class=\"tag\">write</span>"),
+        "{people}"
+    );
+    // The server at a glance; storage counted when asked.
+    let server = text("/admin/server");
+    assert!(
+        server.contains("Listeners")
+            && server.contains("Free in storage main")
+            && server.contains("Last garbage collection"),
+        "{server}"
+    );
+    let usage = text("/admin/usage");
+    assert!(
+        usage.contains("<a href=\"/r/bsp2\">bsp2</a>")
+            && usage.contains("saved by keeping each file once"),
+        "{usage}"
+    );
 }

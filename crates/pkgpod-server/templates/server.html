@@ -3,6 +3,7 @@
 {% block title %}Server · pkgpod{% endblock %}
 {% block main %}
 <div class="page-head"><div class="title"><h1>Server</h1><p class="sub">Data in <span class="mono">{{ data_dir }}</span>; console and API on <span class="mono">{{ management }}</span> (from the configuration file).</p></div></div>
+<div class="stats glance">{% for (label, value, state) in glance %}<div class="stat"><span class="k">{{ label }}</span><span class="v{% if !state.is_empty() %} st-{{ state }}{% endif %}">{{ value }}</span></div>{% endfor %}</div>
 <div id="server-result"></div>
 <div class="card">
   <div class="card-head"><h2>Serving listeners</h2><span class="hint">repositories are served on every listener, chosen by their addresses; a reverse proxy in front gives certificates</span></div>
@@ -56,6 +57,11 @@
   {% for (n, p) in storages %}<tr><td><b>{{ n }}</b></td><td class="mono">{{ p }}</td><td class="acts">{% if n != "main" %}<button class="link danger" hx-post="/c/storages/{{ n|urlencode }}/delete" hx-target="#server-result">remove</button>{% endif %}</td></tr>{% endfor %}
   </tbody></table></div>
   <div class="card-body"><form class="inline" hx-post="/c/storages" hx-target="#server-result"><input name="name" required placeholder="name" size="10" autocomplete="off" autocapitalize="off" spellcheck="false"> <input name="path" required placeholder="/srv/pkgpod" size="30" autocomplete="off" spellcheck="false"> <button type="submit">Save storage</button></form></div>
+</div>
+<div class="card">
+  <div class="card-head"><h2>Storage use</h2><span class="hint">what each repository's versions take, and what keeping each file once saves</span>
+    <button type="button" hx-get="/admin/usage" hx-target="#usage" hx-indicator="#usage">Count</button></div>
+  <div id="usage" class="card-body"><p class="muted small">Counted when asked: large mirrors take a while.</p></div>
 </div>
 <div class="card">
   <div class="card-head"><h2>Garbage collection</h2><span class="hint">runs daily; removes versions retention does not keep, then what no kept version uses</span></div>

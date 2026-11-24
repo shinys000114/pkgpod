@@ -6,12 +6,13 @@
 <div id="people-result"></div>
 <div class="card">
   <div class="card-head"><h2>Users</h2></div>
-  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Server admin</th><th>Disabled</th><th>Created</th><th></th></tr></thead><tbody>
+  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Server admin</th><th>Disabled</th><th>Repositories</th><th>Created</th><th></th></tr></thead><tbody>
   {% for u in users %}<tr>
     {% let me = u.name == s.user %}
     <td><b>{{ u.name }}</b>{% if me %} <span class="tag">you</span>{% endif %}</td>
     <td class="nowrap">{% if u.admin %}yes{% else %}no{% endif %}{% if !me %} <button class="link small" hx-post="/c/users/{{ u.name|urlencode }}" hx-vals='{"admin": "{% if u.admin %}false{% else %}true{% endif %}"}' hx-target="#people-result">{% if u.admin %}take away{% else %}make admin{% endif %}</button>{% endif %}</td>
     <td class="nowrap">{% if u.disabled %}yes{% else %}no{% endif %}{% if !me %} <button class="link small" hx-post="/c/users/{{ u.name|urlencode }}" hx-vals='{"disabled": "{% if u.disabled %}false{% else %}true{% endif %}"}' hx-target="#people-result">{% if u.disabled %}enable{% else %}disable{% endif %}</button>{% endif %}</td>
+    <td>{% if u.admin %}<span class="muted">all</span>{% else if u.repos.is_empty() %}<span class="muted">none (public ones to read)</span>{% else %}<details class="inline-list"><summary>{{ u.repos.len() }}</summary>{% for (r, role) in u.repos %}<div><a href="/r/{{ r }}">{{ r }}</a> <span class="tag">{{ role }}</span></div>{% endfor %}</details>{% endif %}</td>
     <td class="nowrap">{{ u.created }}</td>
     <td class="acts nowrap">
       {% if !me %}<form class="inline" hx-post="/c/users/{{ u.name|urlencode }}" hx-target="#people-result"><input type="password" name="password" placeholder="new password" minlength="8" size="14" autocomplete="new-password"><button class="link" type="submit">set</button></form>
