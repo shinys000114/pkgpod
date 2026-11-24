@@ -62,6 +62,9 @@ Formats:
 - **CRAN**: R source packages (as R CMD build makes them); PACKAGES and
   PACKAGES.gz with the newest version of each, the older ones under
   src/contrib/Archive/<package>/.
+- **Pub**: Dart and Flutter packages with the hosted pub repository API
+  (v2): package documents made per request, dart pub publish with the
+  outcome told at the finalizing URL, retract and unretract.
 
 Everywhere: versions of every hosted repository with labels
 (`@label` addresses; `-/label/<label>/` for npm), diffs, rollback and

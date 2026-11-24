@@ -23,6 +23,7 @@ pub mod nuget;
 pub mod oci;
 pub mod openapi;
 pub mod promote;
+pub mod pub_api;
 pub mod pypi;
 pub mod resign;
 pub mod routes;
@@ -161,6 +162,7 @@ pub fn formats() -> Vec<Arc<dyn pkgpod_engine::Format>> {
         Arc::new(pkgpod_composer::Composer),
         Arc::new(pkgpod_conda::Conda),
         Arc::new(pkgpod_cran::Cran),
+        Arc::new(pkgpod_pub::Pub),
     ]
 }
 

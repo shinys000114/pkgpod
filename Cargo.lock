@@ -2560,6 +2560,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pkgpod-pub"
+version = "0.0.0"
+dependencies = [
+ "flate2",
+ "jiff",
+ "pkgpod-base",
+ "pkgpod-engine",
+ "semver",
+ "serde_json",
+ "tar",
+ "yaml-rust2",
+]
+
+[[package]]
 name = "pkgpod-pypi"
 version = "0.0.0"
 dependencies = [
@@ -2612,6 +2626,7 @@ dependencies = [
  "pkgpod-npm",
  "pkgpod-nuget",
  "pkgpod-oci",
+ "pkgpod-pub",
  "pkgpod-pypi",
  "pkgpod-rpm",
  "reqwest",
