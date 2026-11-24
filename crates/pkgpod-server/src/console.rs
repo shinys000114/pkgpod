@@ -1242,8 +1242,14 @@ async fn packages_part(
     Path(repo): Path<String>,
     Query(mq): Query<MirrorQ>,
 ) -> Response {
-    if app.engine.repo(&repo).is_ok_and(|r| r.kind == Kind::Mirror) {
-        return mirror_packages(app, v, repo, mq).await;
+    match app.engine.repo(&repo) {
+        Ok(r) if r.kind == Kind::Mirror && r.format == "deb" => {
+            return mirror_packages(app, v, repo, mq).await;
+        }
+        Ok(r) if r.kind == Kind::Mirror => {
+            return msg(false, "A file tree: see Browse.".to_string());
+        }
+        _ => {}
     }
     let q = QQ { q: mq.q };
     let limit = 500;

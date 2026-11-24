@@ -14,7 +14,7 @@
 
 <nav class="tabs" hx-target="#tab" hx-swap="innerHTML">
   <a href="#" hx-get="/r/{{ name }}/tree?path=" class="tab">Browse</a>
-  <a href="#" hx-get="/r/{{ name }}/packages" class="tab">Packages</a>
+  {% if !mirror || format != "files" %}<a href="#" hx-get="/r/{{ name }}/packages" class="tab">Packages</a>{% endif %}
   {% if !mirror %}<a href="#" hx-get="/r/{{ name }}/versions" class="tab">Versions</a>{% endif %}
   <a href="#" hx-get="/r/{{ name }}/settings" class="tab">Settings &amp; rights</a>
 </nav>

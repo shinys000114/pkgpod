@@ -2512,6 +2512,16 @@ fn files_mirror_and_import_over_http_listings() {
         listing.contains("inner") && !listing.contains("leak"),
         "{listing}"
     );
+    std::os::unix::fs::symlink(s.dir.path().join("data"), tree.join("datadir")).unwrap();
+    assert!(
+        s.cli(&["ls", "m", "datadir"]).is_err(),
+        "a linked directory out of the tree"
+    );
+    let ls = s.cli(&["ls", "m", ""]).unwrap();
+    assert!(
+        ls.contains(".treeinfo") && !ls.contains("leak") && !ls.contains("datadir"),
+        "{ls}"
+    );
 
     // Import into a hosted repository: one version, under a path.
     s.cli(&["repo", "create", "copy", "-f", "files"]).unwrap();
