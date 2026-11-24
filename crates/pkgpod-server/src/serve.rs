@@ -31,7 +31,11 @@ use crate::routes::Hit;
 use crate::{App, Error};
 
 pub fn router(app: Arc<App>) -> Router {
-    Router::new().fallback(handle).with_state(app)
+    Router::new()
+        .fallback(handle)
+        // Uploads in a form (twine) as large as PUT ones.
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_UPLOAD as usize))
+        .with_state(app)
 }
 
 /// The caller from a Basic `Authorization` header (anonymous without one;
@@ -135,7 +139,12 @@ fn deny(c: &Caller) -> Response {
 async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
     let method = req.method().clone();
     let registry = req.uri().path() == "/v2" || req.uri().path().starts_with("/v2/");
-    if method != Method::GET && method != Method::HEAD && method != Method::PUT && !registry {
+    if method != Method::GET
+        && method != Method::HEAD
+        && method != Method::PUT
+        && method != Method::POST
+        && !registry
+    {
         return status(StatusCode::METHOD_NOT_ALLOWED);
     }
     let host = req
@@ -212,6 +221,20 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
             let role = app
                 .auth
                 .role(&caller, &repo, served.repo.setting_bool("public"));
+            if method == Method::POST {
+                // twine's upload: the repository's address, or legacy/.
+                if served.repo.format != "pypi" || !(rel.is_empty() || rel == ["legacy"]) {
+                    return status(StatusCode::METHOD_NOT_ALLOWED);
+                }
+                if role < Some(Role::Write) {
+                    return if role.is_some() && caller.user.is_some() {
+                        status(StatusCode::FORBIDDEN)
+                    } else {
+                        deny(&Caller::anonymous())
+                    };
+                }
+                return crate::pypi::upload(app, served.repo, caller, req).await;
+            }
             if method == Method::PUT {
                 if role < Some(Role::Write) {
                     // Clients send credentials only after a 401.
@@ -274,6 +297,11 @@ async fn get(
             None => return status(StatusCode::NOT_FOUND),
         },
     };
+    if s.repo.format == "pypi"
+        && let Some(r) = crate::pypi::redirect(&rel, raw_path)
+    {
+        return r;
+    }
     let rel_s = rel.join("/");
     let entry = match app.engine.objects().resolve(&version.served(), &rel_s) {
         Ok(Some(e)) => e,
@@ -319,6 +347,16 @@ async fn get(
                 Ok(t) => t,
                 Err(e) => return Error::from(e).into_response(),
             };
+            if s.repo.format == "pypi" {
+                let accept = req
+                    .headers()
+                    .get(header::ACCEPT)
+                    .and_then(|v| v.to_str().ok())
+                    .map(String::from);
+                if let Some(r) = crate::pypi::index_page(&s.repo, &t, accept, head).await {
+                    return r;
+                }
+            }
             let entries = t
                 .iter()
                 .filter_map(|(name, e)| match e {

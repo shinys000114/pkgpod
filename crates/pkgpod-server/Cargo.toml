@@ -14,6 +14,7 @@ pkgpod-engine.workspace = true
 pkgpod-deb.workspace = true
 pkgpod-files.workspace = true
 pkgpod-oci.workspace = true
+pkgpod-pypi.workspace = true
 pkgpod-mirror.workspace = true
 axum.workspace = true
 tokio.workspace = true
