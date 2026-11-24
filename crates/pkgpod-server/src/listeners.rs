@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Serving listeners: addresses (plain HTTP, or TLS with certificate
-//! files) on which repositories are served. They are kept in the
+//! Serving listeners: addresses (plain HTTP, TLS with certificate
+//! files, or FTP for public files repositories) on which repositories
+//! are served. They are kept in the
 //! database and started, changed and stopped while the server runs.
 
 use std::collections::HashMap;
@@ -28,6 +29,16 @@ pub struct Listener {
     pub key: String,
     #[serde(default = "yes")]
     pub enabled: bool,
+    /// `http` (with TLS when cert and key are set) or `ftp`.
+    #[serde(default = "http")]
+    pub proto: String,
+    /// FTP: passive data ports (`low-high`); empty: any.
+    #[serde(default)]
+    pub passive: String,
+}
+
+fn http() -> String {
+    "http".into()
 }
 
 fn yes() -> bool {
@@ -78,8 +89,9 @@ pub fn ensure_default(db: &Db) -> Result<()> {
 
 pub fn list(db: &Db) -> Result<Vec<Listener>> {
     Ok(db.read(|c| {
-        let mut st =
-            c.prepare("SELECT name, addr, cert, key, enabled FROM listeners ORDER BY name")?;
+        let mut st = c.prepare(
+            "SELECT name, addr, cert, key, enabled, proto, passive FROM listeners ORDER BY name",
+        )?;
         let v = st
             .query_map([], |r| {
                 Ok(Listener {
@@ -88,6 +100,8 @@ pub fn list(db: &Db) -> Result<Vec<Listener>> {
                     cert: r.get(2)?,
                     key: r.get(3)?,
                     enabled: r.get(4)?,
+                    proto: r.get(5)?,
+                    passive: r.get(6)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -108,15 +122,37 @@ pub fn set(db: &Db, l: &Listener) -> Result<()> {
             "TLS needs both a certificate and a key".into(),
         ));
     }
+    match l.proto.as_str() {
+        "http" => {
+            if !l.passive.is_empty() {
+                return Err(Error::Invalid("passive ports are for FTP listeners".into()));
+            }
+        }
+        "ftp" => {
+            if !l.cert.is_empty() {
+                return Err(Error::Invalid(
+                    "FTP listeners are plain: no TLS (FTPS is not offered)".into(),
+                ));
+            }
+            crate::ftp::parse_ports(&l.passive).map_err(Error::Invalid)?;
+        }
+        p => {
+            return Err(Error::Invalid(format!(
+                "{p:?}: a listener serves http or ftp"
+            )));
+        }
+    }
     if !l.cert.is_empty() {
         tls_acceptor(Path::new(&l.cert), Path::new(&l.key)).map_err(Error::Invalid)?;
     }
     db.write(|tx| {
         tx.execute(
-            "INSERT INTO listeners (name, addr, cert, key, enabled) VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO listeners (name, addr, cert, key, enabled, proto, passive)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(name) DO UPDATE SET addr = excluded.addr, cert = excluded.cert,
-               key = excluded.key, enabled = excluded.enabled",
-            params![l.name, l.addr, l.cert, l.key, l.enabled],
+               key = excluded.key, enabled = excluded.enabled, proto = excluded.proto,
+               passive = excluded.passive",
+            params![l.name, l.addr, l.cert, l.key, l.enabled, l.proto, l.passive],
         )
     })?;
     Ok(())
@@ -161,6 +197,18 @@ pub fn reconcile(app: &Arc<App>) {
         let app2 = app.clone();
         let h = tokio::spawn(async move {
             let name = l.name.clone();
+            if l.proto == "ftp" {
+                app2.listeners
+                    .errors
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&name);
+                let ports = crate::ftp::parse_ports(&l.passive).unwrap_or(None);
+                if let Err(e) = crate::ftp::serve(app2.clone(), &l.addr, ports, rx).await {
+                    fail(&app2, &name, e);
+                }
+                return;
+            }
             let tls = if l.cert.is_empty() {
                 None
             } else {
@@ -227,6 +275,22 @@ pub fn stop_all(app: &App) -> Vec<tokio::task::JoinHandle<()>> {
     )
 }
 
+/// Binds `addr`, waiting a little if it is in use: a listener changed
+/// in place may take a moment to close its old socket.
+pub async fn bind(addr: &str) -> Result<tokio::net::TcpListener, String> {
+    let mut tries = 0;
+    loop {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => return Ok(l),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && tries < 20 => {
+                tries += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            Err(e) => return Err(format!("listening on {addr}: {e}")),
+        }
+    }
+}
+
 /// Serves `router` on `addr` until `stop` turns true; then accepts no
 /// more connections, closes idle ones and returns once the requests in
 /// flight are answered.
@@ -236,19 +300,7 @@ pub async fn serve_router(
     router: Router,
     mut stop: watch::Receiver<bool>,
 ) -> Result<(), String> {
-    // A listener changed in place: its old socket may take a moment to
-    // close.
-    let mut tries = 0;
-    let listener = loop {
-        match tokio::net::TcpListener::bind(addr).await {
-            Ok(l) => break l,
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && tries < 20 => {
-                tries += 1;
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            }
-            Err(e) => return Err(format!("listening on {addr}: {e}")),
-        }
-    };
+    let listener = bind(addr).await?;
     tracing::info!(
         "serving on {}{}",
         listener

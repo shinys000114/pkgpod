@@ -169,6 +169,12 @@ pub enum ListenerCmd {
         key: String,
         #[arg(long)]
         disabled: bool,
+        /// Serve FTP (read-only, anonymous, public files repositories).
+        #[arg(long)]
+        ftp: bool,
+        /// FTP: passive data ports, low-high.
+        #[arg(long, default_value = "")]
+        passive: String,
     },
     Delete {
         name: String,
@@ -749,7 +755,7 @@ pub fn run(
                     let mut rows = vec![vec![
                         "NAME".into(),
                         "ADDRESS".into(),
-                        "TLS".into(),
+                        "SERVES".into(),
                         "STATE".into(),
                     ]];
                     for l in v.as_array().into_iter().flatten() {
@@ -765,10 +771,12 @@ pub fn run(
                         rows.push(vec![
                             s(&l["name"]),
                             s(&l["addr"]),
-                            if l["cert"] == json!("") {
-                                "no".into()
+                            if l["proto"] == json!("ftp") {
+                                "ftp".into()
+                            } else if l["cert"] == json!("") {
+                                "http".into()
                             } else {
-                                "yes".into()
+                                "https".into()
                             },
                             state,
                         ]);
@@ -782,11 +790,14 @@ pub fn run(
                 cert,
                 key,
                 disabled,
+                ftp,
+                passive,
             } => {
                 c.send(
                     Method::PUT,
                     &format!("/api/v1/listeners/{}", enc(&name)),
-                    &json!({"addr": addr, "cert": cert, "key": key, "enabled": !disabled}),
+                    &json!({"addr": addr, "cert": cert, "key": key, "enabled": !disabled,
+                            "proto": if ftp { "ftp" } else { "http" }, "passive": passive}),
                 )?;
             }
             ListenerCmd::Delete { name } => {

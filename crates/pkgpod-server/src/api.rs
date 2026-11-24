@@ -1301,6 +1301,7 @@ pub(crate) async fn listeners(State(app): St, Who(c): Who) -> Result<Json<Value>
         .map(|l| {
             json!({
                 "name": l.name, "addr": l.addr, "cert": l.cert, "key": l.key, "enabled": l.enabled,
+                "proto": l.proto, "passive": l.passive,
                 "running": app.listeners.is_running(&l.name),
                 "error": app.listeners.error(&l.name),
             })
@@ -1318,6 +1319,14 @@ pub(crate) struct ListenerReq {
     pub(crate) key: String,
     #[serde(default = "yes")]
     pub(crate) enabled: bool,
+    #[serde(default = "http")]
+    pub(crate) proto: String,
+    #[serde(default)]
+    pub(crate) passive: String,
+}
+
+fn http() -> String {
+    "http".into()
 }
 
 fn yes() -> bool {
@@ -1339,6 +1348,8 @@ pub(crate) async fn listener_set(
             cert: req.cert,
             key: req.key,
             enabled: req.enabled,
+            proto: req.proto,
+            passive: req.passive,
         },
     )?;
     crate::listeners::reconcile(&app);
