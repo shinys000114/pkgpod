@@ -678,6 +678,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                         ("nuget", _) => ".NET packages for dotnet and NuGet",
                         ("composer", _) => "PHP packages for Composer",
                         ("conda", _) => "conda packages for conda and mamba",
+                        ("cran", _) => "R packages for install.packages",
                         _ => "",
                     }
                     .to_string(),
@@ -894,6 +895,38 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String], host: &str) ->
         out.push(UseLine {
             label: "Note".into(),
             text: "pkgpod is no proxy: packages from npmjs need their own registry (a scope here, the rest from registry.npmjs.org). npm login is not offered; set the token in .npmrc. unpublish and deprecate are operations here.".into(),
+        });
+        return out;
+    }
+    if r.format == "cran" {
+        let repo = if r.setting_bool("public") {
+            base.clone()
+        } else {
+            let (scheme, rest) = base.split_once("://").unwrap_or(("https", &base));
+            format!("{scheme}://token:<token>@{rest}")
+        };
+        out.push(UseLine {
+            label: "Install".into(),
+            text: format!(
+                "install.packages(\"<package>\", repos = c(\"{repo}\", \"https://cloud.r-project.org\"))"
+            ),
+        });
+        out.push(UseLine {
+            label: "An older version".into(),
+            text: format!(
+                "install.packages(\"{repo}src/contrib/Archive/<package>/<package>_<version>.tar.gz\", repos = NULL, type = \"source\")"
+            ),
+        });
+        out.push(UseLine {
+            label: "Upload".into(),
+            text: format!(
+                "R CMD build <package dir>\ncurl -u token:<token> -T <package>_<version>.tar.gz {base}upload\npkgpod upload {} <package>_<version>.tar.gz",
+                r.name
+            ),
+        });
+        out.push(UseLine {
+            label: "A labelled version".into(),
+            text: format!("repos = \"{repo}@<label>/\""),
         });
         return out;
     }

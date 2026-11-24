@@ -792,7 +792,7 @@ pub fn content_type(name: &str) -> &'static str {
 /// Built-in Cache-Control rules: apt indexes are revalidated (they change
 /// in place), by-hash and pool files kept (their names change with their
 /// content), checksum files revalidated, the rest kept for an hour.
-const DEFAULT_CACHE: [(&str, &str); 24] = [
+const DEFAULT_CACHE: [(&str, &str); 25] = [
     ("**/by-hash/**", "public, max-age=31536000, immutable"),
     ("dists/**", "no-cache"),
     ("pool/**", "public, max-age=31536000"),
@@ -804,6 +804,7 @@ const DEFAULT_CACHE: [(&str, &str); 24] = [
     // cache in between never serves one an upload replaced.
     ("**/APKINDEX.tar.gz", "no-cache"),
     ("**/repodata.json", "no-cache"),
+    ("**/PACKAGES*", "no-cache"),
     ("**/repodata/repomd.xml*", "no-cache"),
     ("**/*.db", "no-cache"),
     ("**/*.db.*", "no-cache"),

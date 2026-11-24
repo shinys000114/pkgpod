@@ -45,6 +45,8 @@ Status: in development, nothing released.
   metadata), packages uploaded as zips (tried with Composer 2.11).
 - **Conda**: channels for conda, mamba and micromamba, `.conda` and
   `.tar.bz2` packages (tried with conda 26.9 and micromamba 2.3).
+- **CRAN**: repositories of R source packages for install.packages,
+  older versions in the archive (tried with R 4.6).
 - Repositories are reached by their own addresses (host name and path);
   a reverse proxy in front only provides certificates. There is no
   pull-through proxy: packages from public registries are imported or
@@ -85,7 +87,7 @@ Snapshots: `pkgpod label ppa release-1`, then
 repositories: `<address>/-/label/release-1/`).
 
 Other formats are made the same way (`pkgpod repo create <name> -f
-files|oci|pypi|npm|cargo|go|apk|rpm|helm|maven|gems|arch|nuget|composer|conda`); each repository's page in the console says how its
+files|oci|pypi|npm|cargo|go|apk|rpm|helm|maven|gems|arch|nuget|composer|conda|cran`); each repository's page in the console says how its
 clients use it.
 
 ## Backup, restore and upgrading

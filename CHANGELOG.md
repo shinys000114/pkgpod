@@ -59,6 +59,9 @@ Formats:
 - **Conda**: channels with a repodata.json per subdir (noarch and the
   usual platforms always), `.conda` and `.tar.bz2` packages read for
   their info/index.json.
+- **CRAN**: R source packages (as R CMD build makes them); PACKAGES and
+  PACKAGES.gz with the newest version of each, the older ones under
+  src/contrib/Archive/<package>/.
 
 Everywhere: versions of every hosted repository with labels
 (`@label` addresses; `-/label/<label>/` for npm), diffs, rollback and

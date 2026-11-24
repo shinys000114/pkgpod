@@ -27,6 +27,7 @@ pkgpod-arch.workspace = true
 pkgpod-nuget.workspace = true
 pkgpod-composer.workspace = true
 pkgpod-conda.workspace = true
+pkgpod-cran.workspace = true
 pkgpod-mirror.workspace = true
 axum.workspace = true
 tokio.workspace = true

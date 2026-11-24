@@ -581,7 +581,7 @@ fn console_login_pages_and_csrf() {
     // page, usage and actions open.
     let src = s.url("/web/");
     type Fields<'a> = &'a [(&'a str, &'a str)];
-    let choices: [(&str, &str, &str, Fields); 18] = [
+    let choices: [(&str, &str, &str, Fields); 19] = [
         ("deb", "hosted", "c-deb", &[("first_dist", "noble")]),
         (
             "deb",
@@ -605,6 +605,7 @@ fn console_login_pages_and_csrf() {
         ("nuget", "hosted", "c-nuget", &[]),
         ("composer", "hosted", "c-composer", &[]),
         ("conda", "hosted", "c-conda", &[]),
+        ("cran", "hosted", "c-cran", &[]),
     ];
     for (format, kind, name, extra) in choices {
         let mut form = vec![("format", format), ("kind", kind), ("name", name)];
@@ -4654,6 +4655,7 @@ fn serving_root_lists_trees_not_registries() {
         ("tree-helm", "helm"),
         ("tree-maven", "maven"),
         ("tree-conda", "conda"),
+        ("tree-cran", "cran"),
         ("tree-gems", "gems"),
         ("tree-arch", "arch"),
         ("reg-npm", "npm"),
@@ -4683,6 +4685,7 @@ fn serving_root_lists_trees_not_registries() {
         "tree-helm",
         "tree-maven",
         "tree-conda",
+        "tree-cran",
         "tree-gems",
         "tree-arch",
     ] {
@@ -6964,4 +6967,88 @@ fn conda_channel_with_conda_and_micromamba() {
             "{out}"
         );
     }
+}
+
+const R_IMAGE: &str = "r-base:latest";
+
+#[test]
+fn cran_packages_with_r() {
+    if images_here(&[R_IMAGE]).is_empty() {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&["repo", "create", "rpkgs", "-f", "cran"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "rpkgs", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    // Packages built by R CMD build.
+    let work = s.dir.path().join("rwork");
+    let mut build = String::from("set -e; cd /work\n");
+    for (name, ver, imports) in [
+        ("hellopk", "1.0", ""),
+        ("hellopk", "1.1", ""),
+        ("toolpk", "0.1", "Imports: hellopk (>= 1.0)\n"),
+    ] {
+        let d = work.join(format!("{name}-{ver}/{name}"));
+        std::fs::create_dir_all(d.join("R")).unwrap();
+        std::fs::write(
+            d.join("DESCRIPTION"),
+            format!(
+                "Package: {name}\nVersion: {ver}\nTitle: Test\nDescription: A test package.\n\
+                 Authors@R: person(\"T\", \"T\", email = \"t@example.invalid\", role = c(\"aut\", \"cre\"))\n\
+                 License: MIT + file LICENSE\n{imports}"
+            ),
+        )
+        .unwrap();
+        std::fs::write(d.join("LICENSE"), "YEAR: 2026\nCOPYRIGHT HOLDER: T\n").unwrap();
+        let fun = if name == "toolpk" { "tool" } else { "hi" };
+        std::fs::write(d.join("NAMESPACE"), format!("export({fun})\n")).unwrap();
+        std::fs::write(
+            d.join("R/f.R"),
+            format!("{fun} <- function() paste(\"{name} {ver}\")\n"),
+        )
+        .unwrap();
+        build.push_str(&format!("(cd {name}-{ver} && R CMD build --no-manual --no-build-vignettes {name} >/dev/null && mv {name}_{ver}.tar.gz ..)\n"));
+    }
+    let (ok, out) = docker_sh_in(R_IMAGE, Some(&work), &build);
+    assert!(ok, "{out}");
+    let c = reqwest::blocking::Client::new();
+    let upload = |file: &str| {
+        let r = c
+            .put(s.url("/rpkgs/upload"))
+            .basic_auth("token", Some(&tok))
+            .body(std::fs::read(work.join(file)).unwrap())
+            .send()
+            .unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    let (st, out) = upload("hellopk_1.0.tar.gz");
+    assert_eq!(st, 201, "{out}");
+    s.cli(&["label", "rpkgs", "first"]).unwrap();
+    for f in ["hellopk_1.1.tar.gz", "toolpk_0.1.tar.gz"] {
+        let (st, out) = upload(f);
+        assert_eq!(st, 201, "{out}");
+    }
+    let repo = s
+        .url("/rpkgs/")
+        .replacen("http://", &format!("http://token:{tok}@"), 1);
+    let r = |script: &str| docker_sh(R_IMAGE, &format!("Rscript -e '{script}'"));
+    // The newest, with what it imports; an older one from the archive; a label's.
+    let (ok, out) = r(&format!(
+        "install.packages(\"toolpk\", repos = \"{repo}\", quiet = TRUE); cat(toolpk::tool(), hellopk::hi(), sep = \"\\n\")"
+    ));
+    assert!(
+        ok && out.contains("toolpk 0.1") && out.contains("hellopk 1.1"),
+        "{out}"
+    );
+    let (ok, out) = r(&format!(
+        "install.packages(\"{repo}src/contrib/Archive/hellopk/hellopk_1.0.tar.gz\", repos = NULL, type = \"source\", quiet = TRUE); cat(hellopk::hi(), \"\\n\")"
+    ));
+    assert!(ok && out.contains("hellopk 1.0"), "{out}");
+    let (ok, out) = r(&format!(
+        "install.packages(\"hellopk\", repos = \"{repo}@first/\", quiet = TRUE); cat(hellopk::hi(), \"\\n\")"
+    ));
+    assert!(ok && out.contains("hellopk 1.0"), "{out}");
 }
