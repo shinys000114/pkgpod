@@ -39,11 +39,14 @@ pub enum RepoCmd {
         #[arg(long = "set", short = 's', value_name = "KEY=VALUE")]
         settings: Vec<String>,
     },
-    /// Change settings.
+    /// Change settings (`dists=a,b` or `-s dists=a,b`, as create takes
+    /// them).
     Set {
         name: String,
-        #[arg(required = true, value_name = "KEY=VALUE")]
+        #[arg(value_name = "KEY=VALUE")]
         settings: Vec<String>,
+        #[arg(long = "set", short = 's', value_name = "KEY=VALUE")]
+        set: Vec<String>,
     },
     /// Delete a repository.
     Delete {
@@ -1352,7 +1355,17 @@ fn repo(x: &Ctx, cmd: RepoCmd) -> Result<(), CliError> {
                 )
             });
         }
-        RepoCmd::Set { name, settings } => {
+        RepoCmd::Set {
+            name,
+            mut settings,
+            set,
+        } => {
+            settings.extend(set);
+            if settings.is_empty() {
+                return Err(CliError::usage(format!(
+                    "nothing to change: give settings as KEY=VALUE (see pkgpod repo show {name})"
+                )));
+            }
             let v = c.send(
                 Method::PATCH,
                 &format!("/api/v1/repos/{}", enc(&name)),

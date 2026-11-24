@@ -382,6 +382,15 @@ fn deb_repository_with_apt() {
     // Public: anyone reads.
     s.cli(&["repo", "set", "ppa", "public=true"]).unwrap();
     assert_eq!(get(&s.url("/team/ppa/dists/noble/InRelease"), None).0, 200);
+    // `-s` as create takes it, or nothing at all, which is refused.
+    s.cli(&["repo", "set", "ppa", "-s", "description=Team packages"])
+        .unwrap();
+    assert_eq!(
+        s.json(&["repo", "show", "ppa"])["settings"]["description"],
+        "Team packages"
+    );
+    let e = s.cli(&["repo", "set", "ppa"]).unwrap_err();
+    assert!(e.contains("nothing to change"), "{e}");
     // The host root lists it for anyone, now that it is public.
     let (st, body) = get(&s.url("/team/"), None);
     assert_eq!(st, 200);
