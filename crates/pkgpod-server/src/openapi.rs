@@ -1104,6 +1104,14 @@ fn ops() -> Vec<Op> {
             .query("days", integer(), "The last this many days, today included (default 30, at most 3650).")
             .query("name", string(), "One package only.")
             .reply(200, "The counts.", sref("Downloads")),
+        op("post", "/api/v1/repos/{repo}/cleanup", "cleanup", "Plan (or with ?apply=1 apply) what the repository's cleanup rules remove now (formats that have them).")
+            .apply()
+            .reply(200, "The plan or what was done, with the versions removed and why, and rules that wait.", json!({"type": "object", "properties": {
+                "removals": array(object("A package version removed.", vec![("name", string()), ("version", string()), ("place", text("Where clients pick it from (a dist's component and architecture).")), ("why", string())], &["name", "version", "place", "why"])),
+                "notes": array(string()),
+                "summary": string(),
+                "total_changes": integer(),
+            }, "required": ["removals", "notes", "summary", "total_changes"]})),
         op("get", "/api/v1/repos/{repo}/status", "repo_status", "A repository's state: version, packages, downloads, a mirror's syncs.")
             .query("package", string(), "A package's latest version and downloads too.")
             .reply(200, "The state.", sref("RepoStatus")),
@@ -1263,6 +1271,8 @@ fn ops() -> Vec<Op> {
         op("post", "/api/v1/gc", "gc", "Collect garbage {dry_run?, grace_hours?} (server admin).")
             .optional_body(sref("Gc"), "No body: collect, with 24 hours' grace.")
             .reply(200, "What was (or would be) removed.", sref("GcReport")),
+        op("post", "/api/v1/cleanup", "cleanup_all", "Runs the daily cleanup now (server admin): every repository with cleanup rules, applied unless more would go than its cleanup_max (then held).")
+            .reply(200, "What happened to each.", array(object("A repository's cleanup.", vec![("repo", string()), ("state", text("applied, held, nothing or failed")), ("detail", string())], &["repo", "state", "detail"]))),
         op("get", "/api/v1/audit", "audit", "Recent changes (server admin).")
             .reply(200, "At most 500, newest first.", array(sref("AuditEntry"))),
     ]
@@ -1500,6 +1510,8 @@ mod tests {
                                 | "sync"
                                 | "job_cancel"
                                 | "badge_token_new"
+                                | "cleanup"
+                                | "cleanup_all"
                         )
                     );
                     assert_eq!(o.get("requestBody").is_some(), wants, "{at}: request body");

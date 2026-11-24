@@ -254,6 +254,14 @@ pub(crate) enum Cmd {
         #[arg(long)]
         cancel: bool,
     },
+    /// What a repository's cleanup rules remove now (a plan; -y
+    /// applies); without one, the daily cleanup of every repository, now
+    /// (server admin).
+    Cleanup {
+        repo: Option<String>,
+        #[command(flatten)]
+        yes: cmd::Yes,
+    },
     /// Downloads of a repository, by day and by package.
     Downloads {
         repo: String,

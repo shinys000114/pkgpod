@@ -67,6 +67,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/r/{repo}/settings", get(settings_part))
         .route("/r/{repo}/badges", get(badges_part))
         .route("/c/r/{repo}/badge-token", post(badge_token_new))
+        .route("/c/r/{repo}/cleanup", post(cleanup))
         .route("/c/r/{repo}/badge-token/delete", post(badge_token_drop))
         .route("/r/{repo}/use", get(use_part))
         .route("/c/r/{repo}/copy", post(repo_copy))
@@ -3685,6 +3686,8 @@ async fn changes_part(
 #[template(path = "plan.html")]
 struct PlanPart {
     summary: String,
+    /// Why (a cleanup's versions and reasons, rules that wait).
+    notes: Vec<String>,
     lines: Vec<ChangeLine>,
     more: u64,
     id: String,
@@ -3695,14 +3698,42 @@ struct PlanPart {
 fn plan_part(v: Value) -> Response {
     let (lines, more) = change_lines(&v);
     let applied = v["applied"] == json!(true);
+    let mut notes: Vec<String> = v["removals"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|r| {
+            let place = s(&r["place"]);
+            format!(
+                "{} {}{}: {}",
+                s(&r["name"]),
+                s(&r["version"]),
+                if place.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({place})")
+                },
+                s(&r["why"])
+            )
+        })
+        .collect();
+    notes.extend(v["notes"].as_array().into_iter().flatten().map(s));
     render(&PlanPart {
         summary: s(&v["summary"]),
+        notes,
         lines,
         more,
         id: s(&v["plan"]),
         applied,
         version: s(&v["version"]),
     })
+}
+
+async fn cleanup(State(app): St, v: Viewer, Path(repo): Path<String>) -> Response {
+    match api::cleanup(State(app), v.who(), Path(repo), Query(ApplyQ::default())).await {
+        Ok(Json(p)) => plan_part(p),
+        Err(e) => err_part(e),
+    }
 }
 
 async fn op(
@@ -4024,6 +4055,8 @@ struct SettingsPart {
     /// Who may do what here, as enforced, and why.
     access: Vec<AccessRow>,
     public: bool,
+    /// Cleanup rules apply, and the viewer may preview them.
+    cleanup: bool,
 }
 
 pub struct AccessRow {
@@ -4129,7 +4162,11 @@ async fn settings_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> R
         (vec![], vec![])
     };
     let public = r.setting_bool("public");
+    let cleanup = r.kind != Kind::Mirror
+        && app.engine.format(&r.format).is_ok_and(|f| f.cleanup())
+        && app.auth.role(&v.caller, &repo, public) >= Some(Role::Write);
     render(&SettingsPart {
+        cleanup,
         access: if can_admin {
             access_rows(&app, &repo, public)
         } else {

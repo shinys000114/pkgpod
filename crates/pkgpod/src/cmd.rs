@@ -292,17 +292,33 @@ impl Ctx {
 
     /// Shows a plan, asks, applies.
     fn plan(&self, path: &str, body: &Value, yes: &Yes) -> Result<(), CliError> {
+        self.plan_with(path, body, yes, |_| {})
+    }
+
+    /// [`Ctx::plan`], `first` printing more of the reply before the plan.
+    fn plan_with(
+        &self,
+        path: &str,
+        body: &Value,
+        yes: &Yes,
+        first: impl Fn(&Value),
+    ) -> Result<(), CliError> {
         if yes.yes {
             let out = self.c.post(&format!("{path}?apply=1"), body)?;
-            self.print(&out, show_outcome);
+            self.print(&out, |v| {
+                first(v);
+                show_outcome(v)
+            });
             return Ok(());
         }
         let p = self.c.post(path, body)?;
         if self.json {
+            // The plan, for a script to apply (pkgpod apply <plan>).
             println!("{}", serde_json::to_string_pretty(&p).expect("json"));
-        } else {
-            show_plan(&p);
+            return Ok(());
         }
+        first(&p);
+        show_plan(&p);
         let id = p["plan"].as_str().unwrap_or_default();
         if p["total_changes"].as_u64() == Some(0) {
             println!("nothing to change");
@@ -1057,6 +1073,35 @@ pub fn run(
                 );
                 print!("{}", j["log"].as_str().unwrap_or(""));
             });
+        }
+        Cmd::Cleanup { repo: None, .. } => {
+            let v = c.post("/api/v1/cleanup", &Value::Null)?;
+            x.print(&v, |v| {
+                for r in v.as_array().into_iter().flatten() {
+                    println!("{}: {} {}", s(&r["repo"]), s(&r["state"]), s(&r["detail"]));
+                }
+            });
+        }
+        Cmd::Cleanup {
+            repo: Some(repo),
+            yes,
+        } => {
+            let path = format!("/api/v1/repos/{}/cleanup", enc(&repo));
+            // Why each goes, and the rules that wait, before the plan.
+            x.plan_with(&path, &Value::Null, &yes, |p| {
+                for r in p["removals"].as_array().into_iter().flatten() {
+                    println!(
+                        "{} {} ({}): {}",
+                        s(&r["name"]),
+                        s(&r["version"]),
+                        s(&r["place"]),
+                        s(&r["why"])
+                    );
+                }
+                for n in p["notes"].as_array().into_iter().flatten() {
+                    println!("note: {}", s(n));
+                }
+            })?;
         }
         Cmd::Downloads { repo, days, name } => {
             let v = c.get(&format!(

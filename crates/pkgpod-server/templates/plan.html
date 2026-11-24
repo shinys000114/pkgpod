@@ -1,6 +1,7 @@
 {# SPDX-License-Identifier: AGPL-3.0-only #}
 <div class="plan{% if applied %} done{% endif %}">
   <p><b>{% if applied %}Applied{% else %}Preview{% endif %}:</b> {{ summary }}{% if applied %}{% if version.is_empty() %} — nothing changed{% else %} — version {{ version }}{% endif %}{% endif %}</p>
+  {% if !notes.is_empty() %}<ul class="notes">{% for n in notes %}<li>{{ n }}</li>{% endfor %}</ul>{% endif %}
   {% if lines.is_empty() %}<p class="muted">No changes.</p>{% endif %}
   <ul class="changes">{% for l in lines %}<li class="mono" data-sign="{{ l.sign }}">{{ l.sign }} {{ l.path }}</li>{% endfor %}</ul>
   {% if more > 0 %}<p class="muted">… and {{ more }} more</p>{% endif %}

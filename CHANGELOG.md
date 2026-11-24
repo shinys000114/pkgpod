@@ -148,6 +148,18 @@ Operations:
   public repositories; a private one's need its badge token (`pkgpod
   badge <repo> --new`), which shows its badges and nothing else. The
   console's Settings tab has the Markdown for them.
+- Cleanup rules for Debian, npm, Cargo, Helm and Go repositories (the
+  formats whose version order pkgpod has as their clients do, and whose
+  versions leave nothing behind): keep the newest N versions of each
+  package, remove pre-releases after N days, remove versions not
+  downloaded for N days (only once downloads have been counted and kept
+  that long). Each package's newest version in each place clients pick
+  from (a Debian dist's component and architecture) always stays. A
+  cleanup is a plan, previewed with `pkgpod cleanup <repo>` or in the
+  console's Settings tab, and runs daily; a daily run that would remove
+  more than `cleanup_max` versions is held for review. Removed versions
+  come back by rollback while retention keeps the version before; the
+  space is freed when it no longer does.
 - `/metrics` on the management listener for Prometheus: repositories
   (those the caller may read), versions, packages, mirrors' syncs,
   files served and downloads since start.
