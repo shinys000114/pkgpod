@@ -4577,3 +4577,48 @@ fn httpdate_now() -> String {
         .unwrap();
     String::from_utf8_lossy(&o.stdout).trim().to_string()
 }
+
+#[test]
+fn serving_root_lists_trees_not_registries() {
+    let s = Server::start();
+    for (name, format) in [
+        ("tree-deb", "deb"),
+        ("tree-files", "files"),
+        ("tree-pypi", "pypi"),
+        ("reg-npm", "npm"),
+        ("reg-oci", "oci"),
+    ] {
+        let mut args = vec!["repo", "create", name, "-f", format, "-s", "public=true"];
+        if format == "deb" {
+            args.extend(["-s", "sign=false"]);
+        }
+        s.cli(&args).unwrap();
+    }
+    s.cli(&["repo", "create", "hidden-oci", "-f", "oci"])
+        .unwrap();
+    // The listing names what is browsed; registries answer their clients.
+    let (st, root) = get(&s.url("/"), None);
+    assert_eq!(st, 200);
+    for name in ["tree-deb", "tree-files", "tree-pypi"] {
+        assert!(root.contains(name), "{name}: {root}");
+    }
+    for name in ["reg-npm", "reg-oci", "hidden-oci"] {
+        assert!(!root.contains(name), "{name}: {root}");
+    }
+    let (st, note) = get(&s.url("/reg-oci/"), None);
+    assert_eq!(st, 200);
+    assert!(
+        note.contains("docker pull 127.0.0.1:") && note.contains("/reg-oci/<image>:<tag>"),
+        "{note}"
+    );
+    let (st, _) = get(&s.url("/reg-oci/x/_tags/"), None);
+    assert_eq!(st, 404, "the stored tree is not served");
+    let (st, note) = get(&s.url("/reg-npm/"), None);
+    assert_eq!(st, 200);
+    assert!(
+        note.contains("npm install --registry http://127.0.0.1:"),
+        "{note}"
+    );
+    let (st, _) = get(&s.url("/hidden-oci/"), None);
+    assert_eq!(st, 401, "a private registry's address says nothing");
+}
