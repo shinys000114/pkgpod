@@ -1294,7 +1294,7 @@ fn deb_mirror_of_a_hosted_repository() {
     assert_eq!(jobs[0]["state"], "ok");
     // The console streams a job's log (Server-Sent Events): its lines
     // from where the page had it, then the state, and the stream ends.
-    let (cc, sid, _) = console_session(&s, "logs", "logs-password");
+    let (cc, sid, csrf) = console_session(&s, "logs", "logs-password");
     let stream = |from: usize| {
         let r = cc
             .get(format!(
@@ -1324,6 +1324,81 @@ fn deb_mirror_of_a_hosted_repository() {
     let (st, svg) = get(&s.url("/.well-known/pkgpod/badges/mir/status.svg"), None);
     assert_eq!(st, 200);
     assert!(svg.contains(">synced<"), "{svg}");
+
+    // A file gone upstream: the job says so, its page lists it, and one
+    // button allows it to be missing and syncs again.
+    let pooled = s
+        .dir
+        .path()
+        .join("data/storages/main/trees/mir/pool/main/m/mirrored/mirrored_1.0_amd64.deb");
+    let good = std::fs::read(&pooled).unwrap();
+    std::fs::remove_file(&pooled).unwrap();
+    let source2 = format!("source={}", s.url("/mir/"));
+    s.cli(&[
+        "repo",
+        "create",
+        "mir2",
+        "-k",
+        "mirror",
+        "-s",
+        &source2,
+        "-s",
+        "dists=stable",
+        "-s",
+        "components=main",
+        "-s",
+        &keyring,
+    ])
+    .unwrap();
+    assert!(s.cli(&["sync", "mir2", "--wait"]).is_err());
+    let jobs2 = s.json(&["jobs", "mir2"]);
+    let failed = jobs2[0]["id"].as_i64().unwrap();
+    assert!(
+        jobs2[0]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("1 file(s) gone upstream"),
+        "{jobs2}"
+    );
+    let gone = "pool/main/m/mirrored/mirrored_1.0_amd64.deb";
+    let console_get = |path: &str| {
+        cc.get(format!("{}{path}", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .send()
+            .unwrap()
+            .text()
+            .unwrap()
+    };
+    let page = console_get(&format!("/jobs/{failed}"));
+    assert!(
+        page.contains("1 file(s) gone upstream</h2>") && page.contains("Allow these"),
+        "{page}"
+    );
+    let allowed = cc
+        .post(format!("{}/c/jobs/{failed}/allow-missing", s.api))
+        .header("cookie", format!("pkgpod_session={sid}"))
+        .header("x-csrf-token", &csrf)
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(allowed.contains("Allowed 1 file(s)"), "{allowed}");
+    let shown = s.json(&["repo", "show", "mir2"]);
+    assert_eq!(shown["settings"]["ignore_missing"][0], gone, "{shown}");
+    let t = Instant::now();
+    let again = loop {
+        let j = s.json(&["jobs", "mir2"]);
+        if j[0]["id"].as_i64() != Some(failed) && j[0]["state"] != "running" {
+            break j[0].clone();
+        }
+        assert!(t.elapsed() < Duration::from_secs(30), "{j}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(again["state"], "ok", "{again}");
+    // Allowed now: the page no longer offers it.
+    let page = console_get(&format!("/jobs/{failed}"));
+    assert!(!page.contains("Allow these"), "{page}");
+    std::fs::write(&pooled, &good).unwrap();
 
     // Promotion from the mirror into a hosted repository, as a plan.
     s.cli(&["repo", "create", "kept"]).unwrap();

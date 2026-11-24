@@ -114,6 +114,9 @@ pub struct SyncReport {
     /// Present files whose content did not match and were fetched again.
     pub replaced: usize,
     pub ignored_missing: Vec<String>,
+    /// Pool files upstream answered 404 or 410 for (and not on the
+    /// ignore list): the dists that need them did not switch.
+    pub missing_upstream: Vec<String>,
     pub deleted: usize,
     /// Unreferenced files left in place (prune off, or the brake).
     pub would_delete: usize,
@@ -837,6 +840,7 @@ fn fetch_pool(
         },
         Ignored,
         Failed(String),
+        Missing(String),
     }
     let items: Vec<&PoolFile> = wanted.values().collect();
     let next = AtomicUsize::new(0);
@@ -892,6 +896,7 @@ fn fetch_pool(
                             Err(FetchError::Missing(_)) if m.ignore_missing.contains(&f.path) => {
                                 Ok(Outcome::Ignored)
                             }
+                            Err(e @ FetchError::Missing(_)) => Ok(Outcome::Missing(e.to_string())),
                             Err(FetchError::Interrupted) => Err(Error::Interrupted),
                             Err(FetchError::Local(m)) => Err(Error::Io(std::io::Error::other(m))),
                             Err(e) => Ok(Outcome::Failed(e.to_string())),
@@ -944,9 +949,25 @@ fn fetch_pool(
                 (ctx.log)(&format!("{path}: {why}"));
                 failures.insert(path, why);
             }
+            Outcome::Missing(why) => {
+                report.missing_upstream.push(path.clone());
+                failures.insert(path, why);
+            }
         }
     }
     report.ignored_missing.sort();
+    report.missing_upstream.sort();
+    if !report.missing_upstream.is_empty() {
+        (ctx.log)(&format!(
+            "{} pool file(s) are gone upstream (HTTP 404 or 410). If the upstream \
+             dropped them for good, add them to Missing files allowed \
+             (ignore_missing) and sync again; they are:",
+            report.missing_upstream.len()
+        ));
+        for p in &report.missing_upstream {
+            (ctx.log)(&format!("  {p}"));
+        }
+    }
     (ctx.log)(&format!(
         "pool: {} downloaded ({} bytes), {} failed, {} missing and ignored",
         report.downloaded,

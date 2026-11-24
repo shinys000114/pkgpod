@@ -8,7 +8,7 @@
 //! need the session's CSRF token, which htmx sends from the body's
 //! `hx-headers`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use askama::Template;
@@ -106,6 +106,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/jobs/{id}/log", get(job_log))
         .route("/jobs/{id}/stream", get(job_stream))
         .route("/c/jobs/{id}/cancel", post(job_cancel))
+        .route("/c/jobs/{id}/allow-missing", post(job_allow_missing))
         .route("/search", get(search_page))
         .route("/search/rows", get(search_rows))
         .route("/account", get(account_page))
@@ -1252,7 +1253,6 @@ async fn usage_part(State(app): St, v: Viewer) -> Response {
     }
     let app2 = app.clone();
     let res = tokio::task::spawn_blocking(move || -> Result<UsagePart> {
-        use std::collections::{HashMap, HashSet};
         let objects = app2.engine.objects();
         let mut rows = Vec::new();
         let mut everyone: HashMap<pkgpod_base::Digest, u64> = HashMap::new();
@@ -5292,14 +5292,45 @@ struct JobPage {
     running: bool,
     id: i64,
     state: String,
+    /// Files upstream no longer has that the repository does not allow
+    /// to be missing yet.
+    missing: Vec<String>,
+    /// The viewer may allow them (an admin of the repository).
+    can_allow: bool,
+}
+
+/// The files a mirror sync found gone upstream and not yet allowed.
+fn still_missing(app: &App, job: &crate::jobs::Job) -> Vec<String> {
+    let allowed: HashSet<String> = app
+        .engine
+        .repo(&job.repo)
+        .map(|r| r.setting_list("ignore_missing").into_iter().collect())
+        .unwrap_or_default();
+    job.report["missing_upstream"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|p| !allowed.contains(*p))
+        .map(String::from)
+        .collect()
 }
 
 async fn job_page(State(app): St, v: Viewer, Path(id): Path<i64>) -> Result<Response> {
-    let j = json_of(api::job(State(app), v.who(), Path(id)).await)?;
+    let j = json_of(api::job(State(app.clone()), v.who(), Path(id)).await)?;
     let log = s(&j["log"]);
     let job: crate::jobs::Job =
         serde_json::from_value(j).map_err(|e| Error::Invalid(e.to_string()))?;
+    let missing = still_missing(&app, &job);
+    let can_allow = !missing.is_empty()
+        && app.engine.repo(&job.repo).is_ok_and(|r| {
+            app.auth
+                .role(&v.caller, &job.repo, r.setting_bool("public"))
+                == Some(Role::Admin)
+        });
     Ok(render(&JobPage {
+        missing,
+        can_allow,
         s: v.shell("repos"),
         id: job.id,
         state: job.state.clone(),
@@ -5309,6 +5340,56 @@ async fn job_page(State(app): St, v: Viewer, Path(id): Path<i64>) -> Result<Resp
         from: log.len(),
         log,
     }))
+}
+
+/// Adds the files a sync found gone upstream to the repository's
+/// Missing files allowed, and syncs again.
+async fn job_allow_missing(State(app): St, v: Viewer, Path(id): Path<i64>) -> Response {
+    let job = match json_of(api::job(State(app.clone()), v.who(), Path(id)).await).and_then(|j| {
+        serde_json::from_value::<crate::jobs::Job>(j).map_err(|e| Error::Invalid(e.to_string()))
+    }) {
+        Ok(j) => j,
+        Err(e) => return err_part(e),
+    };
+    let missing = still_missing(&app, &job);
+    if missing.is_empty() {
+        return msg(true, "They are all allowed already.");
+    }
+    let mut list = match app.engine.repo(&job.repo) {
+        Ok(r) => r.setting_list("ignore_missing"),
+        Err(e) => return err_part(e.into()),
+    };
+    list.extend(missing.iter().cloned());
+    let req = api::PatchReq {
+        settings: json!({ "ignore_missing": list }),
+    };
+    if let Err(e) = api::repo_patch(
+        State(app.clone()),
+        v.who(),
+        Path(job.repo.clone()),
+        Json(req),
+    )
+    .await
+    {
+        return err_part(e);
+    }
+    match api::sync(State(app), v.who(), Path(job.repo)).await {
+        Ok((_, Json(j))) => msg(
+            true,
+            format!(
+                "Allowed {} file(s) to be missing. Sync started: job {}.",
+                missing.len(),
+                s(&j["job"])
+            ),
+        ),
+        Err(e) => msg(
+            false,
+            format!(
+                "Allowed {} file(s) to be missing, but the sync did not start: {e}",
+                missing.len()
+            ),
+        ),
+    }
 }
 
 #[derive(Template)]
