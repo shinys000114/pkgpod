@@ -2397,6 +2397,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pkgpod-pypi"
+version = "0.0.0"
+dependencies = [
+ "flate2",
+ "pkgpod-base",
+ "pkgpod-engine",
+ "serde_json",
+ "tar",
+]
+
+[[package]]
 name = "pkgpod-server"
 version = "0.0.0"
 dependencies = [
@@ -2416,6 +2427,7 @@ dependencies = [
  "pkgpod-files",
  "pkgpod-mirror",
  "pkgpod-oci",
+ "pkgpod-pypi",
  "reqwest",
  "rusqlite",
  "rustls",
