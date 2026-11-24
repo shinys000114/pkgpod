@@ -1255,3 +1255,80 @@ fn source_packages_with_apt() {
         );
     }
 }
+
+#[test]
+fn stopping_answers_the_requests_in_flight() {
+    use std::io::{Read, Write};
+    let mut s = Server::start();
+    s.cli(&[
+        "repo",
+        "create",
+        "big",
+        "-k",
+        "mirror",
+        "-s",
+        "source=http://127.0.0.1:9/",
+        "-s",
+        "dists=x",
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let tree = s.dir.path().join("data/storages/main/trees/big");
+    std::fs::create_dir_all(&tree).unwrap();
+    let size = 64usize << 20;
+    std::fs::write(tree.join("big.bin"), vec![7u8; size]).unwrap();
+
+    let port = s.serve_port;
+    // A download in flight, and an idle connection.
+    let mut dl = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    dl.write_all(b"GET /big/big.bin HTTP/1.1\r\nHost: t\r\n\r\n")
+        .unwrap();
+    let mut got = vec![0u8; 64 << 10];
+    let mut n = 0;
+    while n < got.len() {
+        n += dl.read(&mut got[n..]).unwrap();
+    }
+    let head_end = got.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+    assert!(
+        got.starts_with(b"HTTP/1.1 200"),
+        "{}",
+        String::from_utf8_lossy(&got[..head_end])
+    );
+    let mut idle = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+
+    let t = Instant::now();
+    Command::new("kill")
+        .arg(s.child.id().to_string())
+        .status()
+        .unwrap();
+    // New connections are refused soon.
+    let mut refused = false;
+    while t.elapsed() < Duration::from_secs(5) {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+            refused = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(refused, "still accepting after SIGTERM");
+    // The idle connection is closed.
+    idle.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut b = [0u8; 16];
+    assert_eq!(idle.read(&mut b).unwrap_or(0), 0);
+    // The download finishes whole.
+    let mut rest = Vec::new();
+    dl.read_to_end(&mut rest).unwrap();
+    assert_eq!(n - head_end + rest.len(), size, "the whole body");
+    // And then the server is gone, well before the drain deadline.
+    let mut status = None;
+    while t.elapsed() < Duration::from_secs(20) {
+        if let Some(st) = s.child.try_wait().unwrap() {
+            status = Some(st);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let status = status.expect("the server did not exit");
+    assert!(status.success(), "{status}");
+}

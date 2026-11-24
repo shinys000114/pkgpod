@@ -292,18 +292,51 @@ pub async fn run(app: Arc<App>) -> Result<(), String> {
         _ => None,
     };
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-    tokio::spawn(async move {
-        shutdown_signal().await;
-        let _ = stop_tx.send(true);
-    });
     tracing::info!("pkgpod {}: management on {addr}", pkgpod_base::version());
-    let r = listeners::serve_router(&addr, tls, mgmt, stop_rx).await;
-    listeners::stop_all(&app);
+    let mut mgmt =
+        tokio::spawn(async move { listeners::serve_router(&addr, tls, mgmt, stop_rx).await });
+    tokio::select! {
+        r = &mut mgmt => {
+            // The management listener could not start (or failed).
+            listeners::stop_all(&app);
+            app.jobs.cancel_all();
+            return r.unwrap_or_else(|e| Err(e.to_string()));
+        }
+        _ = shutdown_signal() => {}
+    }
+    // Every listener at once: no new connections, idle ones closed, the
+    // requests in flight (a large download, say) answered, up to DRAIN.
+    tracing::info!(
+        "stopping: answering the requests in flight (at most {}s)",
+        DRAIN.as_secs()
+    );
+    let _ = stop_tx.send(true);
+    let serving = listeners::stop_all(&app);
     app.jobs.cancel_all();
     sched.abort();
     gc.abort();
-    r
+    let drained = tokio::time::timeout(DRAIN, async move {
+        let r = mgmt.await;
+        for h in serving {
+            let _ = h.await;
+        }
+        r
+    })
+    .await;
+    match drained {
+        Ok(r) => r.unwrap_or_else(|e| Err(e.to_string())),
+        Err(_) => {
+            tracing::warn!(
+                "stopping: requests still in flight after {}s are cut",
+                DRAIN.as_secs()
+            );
+            Ok(())
+        }
+    }
 }
+
+/// How long a stopping server answers the requests in flight.
+pub const DRAIN: Duration = Duration::from_secs(30);
 
 async fn shutdown_signal() {
     use tokio::signal::unix::{SignalKind, signal};
