@@ -2516,6 +2516,10 @@ async fn import(
         sources: form_get(&form, "no_sources") != "on",
         path: form_get(&form, "path").trim().to_string(),
         excludes: list("excludes"),
+        images: list("images"),
+        platforms: list("platforms"),
+        username: form_get(&form, "username").trim().to_string(),
+        password: form_get(&form, "password").to_string(),
     };
     match api::import(State(app), v.who(), Path(repo), Json(req)).await {
         Ok((_, Json(j))) => msg(

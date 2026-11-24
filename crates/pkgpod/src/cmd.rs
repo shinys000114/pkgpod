@@ -910,6 +910,9 @@ pub fn run(
             dists,
             path,
             excludes,
+            images,
+            platforms,
+            username,
             components,
             architectures,
             keyring,
@@ -917,6 +920,16 @@ pub fn run(
             no_sources,
             wait,
         } => {
+            let password = match &username {
+                Some(_) => {
+                    let mut p = String::new();
+                    std::io::stdin()
+                        .read_line(&mut p)
+                        .map_err(|e| CliError::usage(format!("reading the password: {e}")))?;
+                    p.trim_end_matches(['\r', '\n']).to_string()
+                }
+                None => String::new(),
+            };
             let keyring = match keyring {
                 Some(p) => std::fs::read_to_string(&p)
                     .map_err(|e| CliError::usage(format!("{}: {e}", p.display())))?,
@@ -927,7 +940,8 @@ pub fn run(
                 &json!({"source": source, "dists": dists, "components": components,
                         "architectures": architectures, "keyring": keyring, "replace": replace,
                         "sources": !no_sources, "path": path.unwrap_or_default(),
-                        "excludes": excludes}),
+                        "excludes": excludes, "images": images, "platforms": platforms,
+                        "username": username.clone().unwrap_or_default(), "password": password}),
             )?;
             follow(&x, &v, wait)?;
         }

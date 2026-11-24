@@ -89,6 +89,26 @@
   </div>
 </details>
 {% endif %}
+{% if format == "oci" %}
+<details class="card panel">
+  <summary>Import <span class="hint">take chosen images in from another registry as one version</span></summary>
+  <div class="panel-body">
+  <form hx-post="/c/r/{{ name }}/import" hx-target="next .result">
+    <div class="fields">
+      <label class="field"><span>registry</span><input name="source" required placeholder="docker.io · https://ghcr.io"></label>
+      <label class="field wide"><span>images</span><input name="images" required placeholder="alpine:3.20, team/app@sha256:..."></label>
+      <label class="field"><span>platforms</span><input name="platforms" placeholder="all · linux/amd64"></label>
+      <label class="field"><span>path</span><input name="path" placeholder="none"><small>Put before the image names here.</small></label>
+      <label class="field"><span>user</span><input name="username" autocomplete="off"></label>
+      <label class="field"><span>password</span><input name="password" type="password" autocomplete="off"><small>For the source registry, if it needs one; not kept.</small></label>
+    </div>
+    <div class="form-foot"><button type="submit">Import</button></div>
+  </form>
+  <div class="result"></div>
+  <div hx-get="/r/{{ name }}/jobs" hx-trigger="load, every 5s"></div>
+  </div>
+</details>
+{% endif %}
 {% if format == "files" %}
 <details class="card panel">
   <summary>Import <span class="hint">take in a tree from a file server (rsync, HTTP listings, FTP) as one version</span></summary>
