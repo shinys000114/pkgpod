@@ -6595,3 +6595,103 @@ fn helm_push_to_an_oci_repository() {
         );
     }
 }
+
+#[test]
+fn oci_at_a_host_root() {
+    let s = Server::start();
+    s.cli(&[
+        "repo",
+        "create",
+        "rootreg",
+        "-f",
+        "oci",
+        "-s",
+        "urls=http://reg.test/",
+    ])
+    .unwrap();
+    // A file tree at another host's root, with a registry under a path
+    // on that host too.
+    s.cli(&[
+        "repo",
+        "create",
+        "site",
+        "-f",
+        "files",
+        "-s",
+        "public=true",
+        "-s",
+        "urls=http://both.test/",
+    ])
+    .unwrap();
+    s.cli(&[
+        "repo",
+        "create",
+        "imgs",
+        "-f",
+        "oci",
+        "-s",
+        "urls=http://both.test/team/",
+    ])
+    .unwrap();
+    let tok = s
+        .cli(&[
+            "token",
+            "create",
+            "ci",
+            "--repos",
+            "rootreg,imgs,site",
+            "--write",
+        ])
+        .unwrap()
+        .trim()
+        .to_string();
+    for (host, name) in [("reg.test", "app"), ("both.test", "team/app")] {
+        let reg = Reg {
+            c: reqwest::blocking::Client::new(),
+            base: s.url(""),
+            tok: Some(&tok),
+            host: Some(host),
+        };
+        // The version check, before any login and with one.
+        let anon = Reg {
+            c: reqwest::blocking::Client::new(),
+            base: s.url(""),
+            tok: None,
+            host: Some(host),
+        };
+        let r = anon.req(reqwest::Method::GET, "/v2/").send().unwrap();
+        assert_eq!(r.status().as_u16(), 401, "{host}");
+        assert!(
+            r.headers()["www-authenticate"]
+                .to_str()
+                .unwrap()
+                .starts_with("Basic")
+        );
+        let r = reg.req(reqwest::Method::GET, "/v2/").send().unwrap();
+        assert_eq!(r.status().as_u16(), 200, "{host}: {}", r.text().unwrap());
+        let cfg = reg.blob(name, b"{}");
+        let layer = reg.blob(name, b"layer");
+        let (st, out) = reg.manifest(
+            name,
+            "1.0",
+            OCI_M,
+            &image_manifest(&cfg, &[(&layer, 5)], None),
+        );
+        assert_eq!(st, 201, "{host}: {out}");
+    }
+    // The file tree at both.test's root is served as before.
+    let r = reqwest::blocking::Client::new()
+        .put(s.url("/hello.txt"))
+        .header("host", "both.test")
+        .basic_auth("token", Some(&tok))
+        .body("hi")
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 201);
+    let r = reqwest::blocking::Client::new()
+        .get(s.url("/hello.txt"))
+        .header("host", "both.test")
+        .send()
+        .unwrap();
+    assert_eq!(r.text().unwrap(), "hi");
+}

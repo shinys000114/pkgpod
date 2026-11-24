@@ -163,6 +163,19 @@ impl Table {
     /// Does `/v2/` on `host` belong to the OCI registry: an OCI
     /// repository has an address on it, or one without addresses is
     /// reached on every host?
+    /// Whether an OCI repository has an address on `host` (a registry
+    /// put there on purpose).
+    pub fn has_addressed_registry(&self, host: &str) -> bool {
+        let host = host.to_ascii_lowercase();
+        self.routes
+            .iter()
+            .any(|r| self.oci.contains(&r.repo) && host_matches(&r.host, &host))
+    }
+
+    pub fn is_oci(&self, repo: &str) -> bool {
+        self.oci.contains(repo)
+    }
+
     pub fn has_registry(&self, host: &str) -> bool {
         let host = host.to_ascii_lowercase();
         self.routes

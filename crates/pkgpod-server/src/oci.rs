@@ -201,15 +201,20 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
 }
 
 /// Is `/v2/<rest>` on `host` the registry's: a name that resolves to an
-/// OCI repository, or the bare `/v2/` where an OCI repository is
-/// reachable and no other repository's address covers it? Otherwise the
-/// request is routed as any other (a file tree may have a `v2/`).
+/// OCI repository, or the bare `/v2/` (the version check clients make
+/// first)? That is the registry's where an OCI repository has an address
+/// on the host, or where one without addresses is reachable and no other
+/// repository's address covers `/v2`. Otherwise the request is routed as
+/// any other (a file tree may have a `v2/`).
 pub fn claims(table: &crate::routes::Table, host: &str, rest: &[String]) -> bool {
     if rest.is_empty() {
+        if table.has_addressed_registry(host) {
+            return true;
+        }
         return table.has_registry(host)
             && !matches!(
                 table.route(host, &["v2".to_string()]),
-                crate::routes::Hit::Repo { .. }
+                crate::routes::Hit::Repo { repo, .. } if !table.is_oci(&repo)
             );
     }
     parse_target(rest).is_some_and(|(name, _)| table.registry(host, &name).is_some())
