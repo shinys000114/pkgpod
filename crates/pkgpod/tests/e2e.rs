@@ -586,7 +586,7 @@ fn console_login_pages_and_csrf() {
     // page, usage and actions open.
     let src = s.url("/web/");
     type Fields<'a> = &'a [(&'a str, &'a str)];
-    let choices: [(&str, &str, &str, Fields); 7] = [
+    let choices: [(&str, &str, &str, Fields); 8] = [
         ("deb", "hosted", "c-deb", &[("first_dist", "noble")]),
         (
             "deb",
@@ -599,6 +599,7 @@ fn console_login_pages_and_csrf() {
         ("oci", "hosted", "c-oci", &[]),
         ("pypi", "hosted", "c-pypi", &[]),
         ("npm", "hosted", "c-npm", &[]),
+        ("cargo", "hosted", "c-cargo", &[]),
     ];
     for (format, kind, name, extra) in choices {
         let mut form = vec![("format", format), ("kind", kind), ("name", name)];
@@ -4587,6 +4588,7 @@ fn serving_root_lists_trees_not_registries() {
         ("tree-pypi", "pypi"),
         ("reg-npm", "npm"),
         ("reg-oci", "oci"),
+        ("reg-cargo", "cargo"),
     ] {
         let mut args = vec!["repo", "create", name, "-f", format, "-s", "public=true"];
         if format == "deb" {
@@ -4602,7 +4604,7 @@ fn serving_root_lists_trees_not_registries() {
     for name in ["tree-deb", "tree-files", "tree-pypi"] {
         assert!(root.contains(name), "{name}: {root}");
     }
-    for name in ["reg-npm", "reg-oci", "hidden-oci"] {
+    for name in ["reg-npm", "reg-oci", "reg-cargo", "hidden-oci"] {
         assert!(!root.contains(name), "{name}: {root}");
     }
     let (st, note) = get(&s.url("/reg-oci/"), None);
@@ -4619,6 +4621,195 @@ fn serving_root_lists_trees_not_registries() {
         note.contains("npm install --registry http://127.0.0.1:"),
         "{note}"
     );
+    let (st, note) = get(&s.url("/reg-cargo/"), None);
+    assert_eq!(st, 200);
+    assert!(
+        note.contains("index = \"sparse+http://127.0.0.1:"),
+        "{note}"
+    );
     let (st, _) = get(&s.url("/hidden-oci/"), None);
     assert_eq!(st, 401, "a private registry's address says nothing");
+}
+
+/// Runs cargo with its own home (config, credentials, caches) in `home`;
+/// nothing of the user's cargo is read or written.
+fn cargo(home: &Path, cwd: &Path, args: &[&str], token: &str) -> (bool, String) {
+    let mut c = Command::new("cargo");
+    c.env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", home)
+        .env("CARGO_HOME", home.join("cargo"))
+        .env("CARGO_TARGET_DIR", home.join("target"))
+        .env("CARGO_TERM_COLOR", "never")
+        .env("CARGO_REGISTRIES_CRATES_TOKEN", token);
+    let rustup = std::env::var_os("RUSTUP_HOME").or_else(|| {
+        std::env::var_os("HOME").map(|h| Path::new(&h).join(".rustup").into_os_string())
+    });
+    if let Some(r) = rustup {
+        c.env("RUSTUP_HOME", r);
+    }
+    if let Some(t) = std::env::var_os("RUSTUP_TOOLCHAIN") {
+        c.env("RUSTUP_TOOLCHAIN", t);
+    }
+    let o = c.args(args).current_dir(cwd).output().unwrap();
+    (
+        o.status.success(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        ),
+    )
+}
+
+fn cargo_crate(dir: &Path, name: &str, version: &str, deps: &str, src: (&str, &str)) -> PathBuf {
+    let d = dir.join(format!("{name}-{version}"));
+    std::fs::create_dir_all(d.join("src")).unwrap();
+    std::fs::write(
+        d.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"{name}\"\nversion = \"{version}\"\nedition = \"2021\"\n\
+             description = \"test\"\nlicense = \"MIT\"\npublish = [\"crates\"]\n\n\
+             [dependencies]\n{deps}"
+        ),
+    )
+    .unwrap();
+    std::fs::write(d.join("src").join(src.0), src.1).unwrap();
+    d
+}
+
+#[test]
+fn cargo_publish_build_yank() {
+    if !have("cargo") {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&["repo", "create", "crates", "-f", "cargo"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "crates", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let reg = s.url("/crates/");
+    let home = s.dir.path().join("cargohome");
+    std::fs::create_dir_all(home.join("cargo")).unwrap();
+    std::fs::write(
+        home.join("cargo").join("config.toml"),
+        format!(
+            "[registries.crates]\nindex = \"sparse+{reg}index/\"\n\n\
+             [registry]\nglobal-credential-providers = [\"cargo:token\"]\n"
+        ),
+    )
+    .unwrap();
+    let src = s.dir.path().join("cargosrc");
+    let lib = |v: &str| {
+        cargo_crate(
+            &src,
+            "hello_pod",
+            v,
+            "",
+            (
+                "lib.rs",
+                &format!("pub fn hello() -> &'static str {{ \"hello {v}\" }}\n"),
+            ),
+        )
+    };
+    let publish = |d: &Path| {
+        cargo(
+            &home,
+            d,
+            &["publish", "--registry", "crates", "--no-verify"],
+            &tok,
+        )
+    };
+    let (ok, out) = publish(&lib("0.1.0"));
+    assert!(ok, "{out}");
+    s.cli(&["label", "crates", "first"]).unwrap();
+    let (ok, out) = publish(&lib("0.2.0"));
+    assert!(ok, "{out}");
+    // A version is published once, build metadata or not (cargo checks
+    // the index itself first).
+    let (ok, out) = publish(&lib("0.1.0+again"));
+    assert!(
+        !ok && (out.contains("already uploaded") || out.contains("already exists")),
+        "{out}"
+    );
+    // The server refuses it too (a raw publish, as cargo sends one).
+    let krate = reqwest::blocking::Client::new()
+        .get(s.url("/crates/api/v1/crates/hello_pod/0.1.0/download"))
+        .header("authorization", &tok)
+        .send()
+        .unwrap()
+        .bytes()
+        .unwrap()
+        .to_vec();
+    let meta = br#"{"name":"hello_pod","vers":"0.1.0","deps":[]}"#;
+    let mut body = (meta.len() as u32).to_le_bytes().to_vec();
+    body.extend_from_slice(meta);
+    body.extend_from_slice(&(krate.len() as u32).to_le_bytes());
+    body.extend_from_slice(&krate);
+    let r = reqwest::blocking::Client::new()
+        .put(s.url("/crates/api/v1/crates/new"))
+        .header("authorization", &tok)
+        .body(body)
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 409);
+    assert!(r.text().unwrap().contains("already uploaded"));
+    // A crate built from the registry.
+    let app = cargo_crate(
+        &src,
+        "app",
+        "0.1.0",
+        "hello_pod = { version = \"0.1\", registry = \"crates\" }\n",
+        (
+            "main.rs",
+            "fn main() { println!(\"{}\", hello_pod::hello()); }\n",
+        ),
+    );
+    let (ok, out) = cargo(&home, &app, &["run", "-q"], &tok);
+    assert!(ok && out.contains("hello 0.1.0"), "{out}");
+    // Yanked: in the index, and new resolutions leave it out.
+    let (ok, out) = cargo(
+        &home,
+        &app,
+        &["yank", "--registry", "crates", "hello_pod@0.2.0"],
+        &tok,
+    );
+    assert!(ok, "{out}");
+    let c = reqwest::blocking::Client::new();
+    let index = |path: &str| {
+        let r = c
+            .get(s.url(path))
+            .header("authorization", &tok)
+            .send()
+            .unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    let (st, lines) = index("/crates/index/he/ll/hello_pod");
+    assert_eq!(st, 200);
+    let lines: Vec<Value> = lines
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[0]["vers"], "0.1.0");
+    assert_eq!(lines[1]["yanked"], true);
+    // The label is a registry of its own, read-only.
+    let (_, first) = index("/crates/@first/index/he/ll/hello_pod");
+    assert_eq!(first.lines().count(), 1, "{first}");
+    let (_, cfg) = index("/crates/@first/index/config.json");
+    let cfg: Value = serde_json::from_str(&cfg).unwrap();
+    assert_eq!(cfg["dl"], format!("{reg}@first/api/v1/crates"));
+    assert_eq!(cfg["auth-required"], true);
+    let (ok, out) = cargo(
+        &home,
+        &app,
+        &["search", "--registry", "crates", "hello"],
+        &tok,
+    );
+    assert!(ok && out.contains("hello_pod = \"0.1.0\""), "{out}");
+    // A private registry asks for the token.
+    let r = c.get(s.url("/crates/index/config.json")).send().unwrap();
+    assert_eq!(r.status().as_u16(), 401);
 }

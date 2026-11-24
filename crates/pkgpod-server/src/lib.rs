@@ -7,6 +7,7 @@
 pub mod api;
 pub mod auth;
 pub mod backup;
+pub mod cargo;
 pub mod config;
 pub mod ftp;
 pub mod import;
@@ -142,6 +143,7 @@ pub fn formats() -> Vec<Arc<dyn pkgpod_engine::Format>> {
         Arc::new(pkgpod_oci::Oci),
         Arc::new(pkgpod_pypi::Pypi),
         Arc::new(pkgpod_npm::Npm),
+        Arc::new(pkgpod_cargo::Cargo),
     ]
 }
 
