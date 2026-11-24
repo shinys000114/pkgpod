@@ -12,6 +12,7 @@ publish = false
 pkgpod-base.workspace = true
 pkgpod-engine.workspace = true
 pkgpod-deb.workspace = true
+pkgpod-files.workspace = true
 pkgpod-mirror.workspace = true
 axum.workspace = true
 tokio.workspace = true

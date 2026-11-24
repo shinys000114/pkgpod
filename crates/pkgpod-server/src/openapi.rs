@@ -993,7 +993,9 @@ fn ops() -> Vec<Op> {
             .query("filename", string(), "Raw body: the file's name.")
             .query("dists", string(), "deb: dists to add the packages to, comma-separated; none: all.")
             .query("component", string(), "deb: component; empty: main, or the dist's first.")
-            .query("replace", string(), "deb: replace a package file of the same name with other content (true, yes, 1 or on).")
+            .query("replace", string(), "deb, files: replace a file of the same name (files: path) with other content (true, yes, 1 or on).")
+            .query("path", string(), "files: where the file goes: a directory ending in / (the file keeps its name) or its whole path.")
+            .query("mtime", string(), "files: the file's modification time, unix seconds; default: now.")
             .map(|mut o| {
                 o.v["requestBody"] = json!({
                     "required": true,

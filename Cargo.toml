@@ -15,6 +15,7 @@ authors = ["shinys000114"]
 pkgpod-base = { path = "crates/pkgpod-base" }
 pkgpod-engine = { path = "crates/pkgpod-engine" }
 pkgpod-deb = { path = "crates/pkgpod-deb" }
+pkgpod-files = { path = "crates/pkgpod-files" }
 pkgpod-mirror = { path = "crates/pkgpod-mirror" }
 pkgpod-server = { path = "crates/pkgpod-server" }
 clap = { version = "4.6", features = ["derive", "env"] }

@@ -246,7 +246,8 @@ async fn get(
         {
             return r;
         }
-        return serve_mirror(s.repo.tree_dir(), &rel, raw_path, req).await;
+        let files = s.repo.format == "files";
+        return serve_mirror(s.repo.tree_dir(), &rel, raw_path, files, req).await;
     }
     let version = match rel.first().and_then(|f| f.strip_prefix('@')) {
         Some(label) => match app.labelled(&s.repo.name, label) {
@@ -328,8 +329,18 @@ async fn get(
                 .collect();
             listing(raw_path, entries, &query, head)
         }
-        Entry::Blob { sha256, .. } => {
-            serve_blob(&s.repo.store().path(&sha256), &sha256, &rel_s, req).await
+        Entry::Blob { sha256, meta, .. } => {
+            let mtime = meta.get("mtime").and_then(Value::as_i64);
+            let files = s.repo.format == "files";
+            serve_blob(
+                &s.repo.store().path(&sha256),
+                &sha256,
+                &rel_s,
+                mtime,
+                files,
+                req,
+            )
+            .await
         }
         _ => status(StatusCode::NOT_FOUND),
     }
@@ -401,18 +412,51 @@ pub fn cache_control(rel: &str) -> &'static str {
     "public, max-age=3600"
 }
 
-async fn serve_blob(file: &std::path::Path, sha: &Digest, rel: &str, req: Request) -> Response {
+/// A blob of the content store. `mtime` (the entry's, unix seconds) is
+/// its Last-Modified, not the store file's, which a re-upload touches;
+/// `files`: a files repository's, served sandboxed (anyone may have
+/// uploaded the HTML).
+async fn serve_blob(
+    file: &std::path::Path,
+    sha: &Digest,
+    rel: &str,
+    mtime: Option<i64>,
+    files: bool,
+    mut req: Request,
+) -> Response {
     let etag = format!("\"{}\"", sha.hex());
-    if req
+    let modified =
+        mtime.map(|t| std::time::UNIX_EPOCH + std::time::Duration::from_secs(t.max(0) as u64));
+    let inm = req
         .headers()
         .get(header::IF_NONE_MATCH)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.split(',').any(|t| t.trim() == etag || t.trim() == "*"))
-    {
+        .and_then(|v| v.to_str().ok());
+    let fresh = match inm {
+        Some(v) => v.split(',').any(|t| t.trim() == etag || t.trim() == "*"),
+        // If-Modified-Since only without If-None-Match, against our time.
+        None => modified.is_some_and(|m| {
+            req.headers()
+                .get(header::IF_MODIFIED_SINCE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| httpdate::parse_http_date(v).ok())
+                .is_some_and(|since| m <= since)
+        }),
+    };
+    if fresh {
         let mut r = status(StatusCode::NOT_MODIFIED);
         r.headers_mut()
             .insert(header::ETAG, HeaderValue::from_str(&etag).expect("hex"));
+        if let Some(m) = modified
+            && let Ok(v) = HeaderValue::from_str(&httpdate::fmt_http_date(m))
+        {
+            r.headers_mut().insert(header::LAST_MODIFIED, v);
+        }
         return r;
+    }
+    if modified.is_some() {
+        // ServeFile would compare against the store file's time.
+        req.headers_mut().remove(header::IF_MODIFIED_SINCE);
+        req.headers_mut().remove(header::IF_UNMODIFIED_SINCE);
     }
     let mut r = match ServeFile::new(file).oneshot(req).await {
         Ok(r) => r.map(Body::new),
@@ -428,7 +472,28 @@ async fn serve_blob(file: &std::path::Path, sha: &Digest, rel: &str, req: Reques
         HeaderValue::from_static(cache_control(rel)),
     );
     h.insert(header::ETAG, HeaderValue::from_str(&etag).expect("hex"));
+    if let Some(m) = modified
+        && let Ok(v) = HeaderValue::from_str(&httpdate::fmt_http_date(m))
+    {
+        h.insert(header::LAST_MODIFIED, v);
+    }
+    if files {
+        sandbox(h);
+    }
     r
+}
+
+/// Files anyone with write access put there: not run in the origin of
+/// the console or of other repositories.
+fn sandbox(h: &mut HeaderMap) {
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("sandbox"),
+    );
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
 }
 
 /// The files a re-signed deb mirror serves instead of its tree's: the
@@ -520,20 +585,35 @@ async fn resigned(
     Some(r)
 }
 
-async fn serve_mirror(tree: PathBuf, rel: &[String], raw_path: &str, mut req: Request) -> Response {
+/// A mirror's received tree. `files`: a file tree, whose dot-files are
+/// served (`.treeinfo`), but not what the engines keep for themselves;
+/// in other trees no dot-file is.
+async fn serve_mirror(
+    tree: PathBuf,
+    rel: &[String],
+    raw_path: &str,
+    files: bool,
+    mut req: Request,
+) -> Response {
     let rel_s = rel.join("/");
     let full = tree.join(&rel_s);
     let head = req.method() == Method::HEAD;
     let query = req.uri().query().unwrap_or("").to_string();
-    // Hidden: what the mirror engine keeps for itself.
-    if rel.iter().any(|s| s.starts_with('.')) {
+    let hidden = move |name: &str| {
+        if files {
+            pkgpod_files::engine_name(name)
+        } else {
+            name.starts_with('.')
+        }
+    };
+    if rel.iter().any(|s| hidden(s)) {
         return status(StatusCode::NOT_FOUND);
     }
     if full.is_dir() {
         if !raw_path.ends_with('/') {
             return Redirect::permanent(&format!("{raw_path}/")).into_response();
         }
-        let entries = tokio::task::spawn_blocking(move || fs_entries(&full))
+        let entries = tokio::task::spawn_blocking(move || fs_entries(&full, hidden))
             .await
             .unwrap_or_default();
         return listing(raw_path, entries, &query, head);
@@ -566,10 +646,13 @@ async fn serve_mirror(tree: PathBuf, rel: &[String], raw_path: &str, mut req: Re
             HeaderValue::from_static(cache_control(&rel_s)),
         );
     }
+    if files {
+        sandbox(r.headers_mut());
+    }
     r
 }
 
-fn fs_entries(dir: &std::path::Path) -> Vec<ListEntry> {
+fn fs_entries(dir: &std::path::Path, hidden: impl Fn(&str) -> bool) -> Vec<ListEntry> {
     let mut v = Vec::new();
     let Ok(rd) = std::fs::read_dir(dir) else {
         return v;
@@ -578,7 +661,7 @@ fn fs_entries(dir: &std::path::Path) -> Vec<ListEntry> {
         let Ok(name) = d.file_name().into_string() else {
             continue;
         };
-        if name.starts_with('.') {
+        if hidden(&name) {
             continue;
         }
         let Ok(md) = std::fs::metadata(d.path()) else {
@@ -667,8 +750,25 @@ async fn put(
         return Error::Invalid(format!("{} is a mirror: it takes no uploads", repo.name))
             .into_response();
     }
-    let params = query_params(req.uri().query().unwrap_or(""));
+    let mut params = query_params(req.uri().query().unwrap_or(""));
     let filename = rel.last().cloned();
+    if repo.format == "files" {
+        // The URL is where the file goes.
+        let path = rel.join("/");
+        if let Some(q) = params.get("path").and_then(Value::as_str)
+            && q.trim_matches('/') != path
+        {
+            return Error::Invalid(format!(
+                "the URL says {path:?} and ?path= says {q:?}: PUT to the file's own address"
+            ))
+            .into_response();
+        }
+        if path.is_empty() {
+            return Error::Invalid("PUT to the file's address: <repository>/<path>".into())
+                .into_response();
+        }
+        params["path"] = json!(path);
+    }
     let (sha256, size) = match body_to_store(repo.store(), req.into_body(), MAX_UPLOAD).await {
         Ok(x) => x,
         Err(e) => return e.into_response(),
