@@ -582,6 +582,51 @@ fn console_login_pages_and_csrf() {
         shell.contains("id=\"tab\" hx-get=\"/r/web/use\""),
         "{shell}"
     );
+    // Every choice of the new-repository form makes a repository whose
+    // page, usage and actions open.
+    let src = s.url("/web/");
+    type Fields<'a> = &'a [(&'a str, &'a str)];
+    let choices: [(&str, &str, &str, Fields); 7] = [
+        ("deb", "hosted", "c-deb", &[("first_dist", "noble")]),
+        (
+            "deb",
+            "mirror",
+            "c-debm",
+            &[("source", &src), ("dists", "noble")],
+        ),
+        ("files", "hosted", "c-files", &[]),
+        ("files", "mirror", "c-filesm", &[("source", &src)]),
+        ("oci", "hosted", "c-oci", &[]),
+        ("pypi", "hosted", "c-pypi", &[]),
+        ("npm", "hosted", "c-npm", &[]),
+    ];
+    for (format, kind, name, extra) in choices {
+        let mut form = vec![("format", format), ("kind", kind), ("name", name)];
+        form.extend_from_slice(extra);
+        let r = c
+            .post(format!("{}/c/repos", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .header("x-csrf-token", &csrf)
+            .form(&form)
+            .send()
+            .unwrap();
+        let to = r
+            .headers()
+            .get("hx-redirect")
+            .map(|h| h.to_str().unwrap().to_string());
+        let body = r.text().unwrap();
+        assert_eq!(
+            to.as_deref(),
+            Some(format!("/r/{name}").as_str()),
+            "{format} {kind}: {body}"
+        );
+        for p in ["", "/use", "/actions"] {
+            let (st, body) = page(&format!("/r/{name}{p}"));
+            assert_eq!(st, 200, "/r/{name}{p}: {body}");
+        }
+    }
+    let (_, usage) = page("/r/c-deb/use");
+    assert!(usage.contains(" noble main"), "{usage}");
     // Tokens are not for the console.
     let tok = s.cli(&["token", "create", "x", "--write"]).unwrap();
     let r = c
