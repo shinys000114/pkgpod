@@ -228,6 +228,7 @@ fn browsable(format: &str) -> bool {
             | "terraform"
             | "galaxy"
             | "conan"
+            | "swift"
     )
 }
 
@@ -535,6 +536,43 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
             }
             if served.repo.format == "gems" && crate::gems::is_api(&method, &rel) {
                 return crate::gems::handle(app, served.repo, caller, role, req).await;
+            }
+            if served.repo.format == "swift" {
+                let mut base_url = client_base(route.as_ref(), &host, &base, &req);
+                let mut rel = rel;
+                let mut version = served.current.clone();
+                let mut labelled = false;
+                if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
+                    let Ok(v) = app.labelled(&served.repo.name, label) else {
+                        return status(StatusCode::NOT_FOUND);
+                    };
+                    base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
+                    version = Some(v);
+                    labelled = true;
+                    rel.remove(0);
+                }
+                if rel.is_empty() && matches!(method, Method::GET | Method::HEAD) {
+                    if role.is_none() {
+                        return deny(&caller);
+                    }
+                    return client_note(
+                        StatusCode::OK,
+                        format!(
+                            "{}: a Swift package registry.\n\n  swift package-registry set {base_url}\n  swift package-registry login {base_url} --token <token>\n\nIts packages are listed in pkgpod's console.\n",
+                            served.repo.name
+                        ),
+                    );
+                }
+                let ask = crate::swift::Ask {
+                    repo: served.repo,
+                    version,
+                    labelled,
+                    rel,
+                    base: base_url,
+                    caller,
+                    role,
+                };
+                return crate::swift::handle(app, ask, req).await;
             }
             if served.repo.format == "conan" {
                 let mut rel = rel;

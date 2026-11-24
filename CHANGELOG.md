@@ -80,6 +80,11 @@ Formats:
   revisions and their files; a revision's files wait until its
   manifest, uploaded last, brings them in as one version; conan remove
   removes revisions as versions too.
+- **Swift**: the Swift package registry API (SE-0292, version 1):
+  releases, release metadata, source archives (with a Digest header),
+  manifests and their Swift-version variants, identifiers by repository
+  URL, publishing (unsigned releases) and logging in; scopes and names
+  case-insensitive.
 - **Pub**: Dart and Flutter packages with the hosted pub repository API
   (v2): package documents made per request, dart pub publish with the
   outcome told at the finalizing URL, retract and unretract.

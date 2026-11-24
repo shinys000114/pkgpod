@@ -1,0 +1,19 @@
+[package]
+name = "pkgpod-swift"
+description = "pkgpod Swift format: a Swift package registry (SE-0292)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+pkgpod-base.workspace = true
+pkgpod-engine.workspace = true
+serde_json.workspace = true
+semver.workspace = true
+jiff.workspace = true
+
+[dev-dependencies]
+pkgpod-base = { workspace = true, features = ["testutil"] }

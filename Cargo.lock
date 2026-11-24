@@ -2669,6 +2669,7 @@ dependencies = [
  "pkgpod-pub",
  "pkgpod-pypi",
  "pkgpod-rpm",
+ "pkgpod-swift",
  "pkgpod-terraform",
  "rand 0.8.8",
  "reqwest",
@@ -2689,6 +2690,17 @@ dependencies = [
  "tower",
  "tower-http 0.7.1",
  "tracing",
+]
+
+[[package]]
+name = "pkgpod-swift"
+version = "0.0.0"
+dependencies = [
+ "jiff",
+ "pkgpod-base",
+ "pkgpod-engine",
+ "semver",
+ "serde_json",
 ]
 
 [[package]]
