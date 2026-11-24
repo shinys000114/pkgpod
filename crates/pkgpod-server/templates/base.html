@@ -4,10 +4,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"selfRequestsOnly":true}'>
+<meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"selfRequestsOnly":true,"historyCacheSize":0,"refreshOnHistoryMiss":true}'>
 <title>{% block title %}pkgpod{% endblock %}</title>
 <link rel="stylesheet" href="{{ s.css }}">
 <script src="/ui/htmx-2.0.11.min.js"></script>
+<script src="{{ s.js }}" defer></script>
 </head>
 <body hx-headers='{"X-CSRF-Token": "{{ s.csrf }}"}'>
 {% if !s.user.is_empty() %}

@@ -103,6 +103,11 @@ fn host_matches(route_host: &str, req_host: &str) -> bool {
 }
 
 /// `host` without a `:port` (`[v6]:port` keeps the brackets).
+/// The host name of a Host header (without its port).
+pub fn host_name(h: &str) -> &str {
+    strip_port(h)
+}
+
 fn strip_port(h: &str) -> &str {
     if h.starts_with('[') {
         return match h.find(']') {

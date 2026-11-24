@@ -8,6 +8,7 @@
 //! need the session's CSRF token, which htmx sends from the body's
 //! `hx-headers`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use askama::Template;
@@ -30,6 +31,7 @@ type St = State<Arc<App>>;
 
 const HTMX: &[u8] = include_bytes!("../assets/htmx.min.js");
 const CSS: &[u8] = include_bytes!("../assets/style.css");
+const JS: &[u8] = include_bytes!("../assets/app.js");
 const LOGIN_CSRF: &str = "pkgpod_login";
 
 /// `ui/style-<hash>.css`: a new stylesheet gets a new URL.
@@ -38,6 +40,15 @@ fn css_path() -> &'static str {
     P.get_or_init(|| {
         let h = pkgpod_base::Digest::of(CSS).hex();
         format!("/ui/style-{}.css", &h[..12])
+    })
+}
+
+/// `ui/app-<hash>.js`, as the stylesheet.
+fn js_path() -> &'static str {
+    static P: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    P.get_or_init(|| {
+        let h = pkgpod_base::Digest::of(JS).hex();
+        format!("/ui/app-{}.js", &h[..12])
     })
 }
 
@@ -53,6 +64,8 @@ pub fn router() -> Router<Arc<App>> {
         .route("/r/{repo}/diff", get(diff_part))
         .route("/r/{repo}/changes", get(changes_part))
         .route("/r/{repo}/settings", get(settings_part))
+        .route("/r/{repo}/use", get(use_part))
+        .route("/r/{repo}/actions", get(actions_part))
         .route("/c/repos", post(repo_create))
         .route("/c/r/{repo}/ops/{op}", post(op))
         .route(
@@ -106,6 +119,7 @@ pub fn router() -> Router<Arc<App>> {
             get(|| asset(HTMX, "text/javascript")),
         )
         .route(css_path(), get(|| asset(CSS, "text/css")))
+        .route(js_path(), get(|| asset(JS, "text/javascript")))
         .layer(map_response(security_headers))
 }
 
@@ -164,6 +178,7 @@ pub struct Shell {
     pub admin: bool,
     pub csrf: String,
     pub css: &'static str,
+    pub js: &'static str,
     pub section: &'static str,
     pub version: &'static str,
 }
@@ -175,6 +190,7 @@ impl Shell {
             admin: false,
             csrf: String::new(),
             css: css_path(),
+            js: js_path(),
             section: "",
             version: pkgpod_base::version(),
         }
@@ -222,6 +238,7 @@ impl FromRequestParts<Arc<App>> for Viewer {
                 admin: user.admin,
                 csrf,
                 css: css_path(),
+                js: js_path(),
                 section: "",
                 version: pkgpod_base::version(),
             },
@@ -495,11 +512,17 @@ async fn logout(State(app): St, h: HeaderMap, v: Viewer) -> Response {
 pub struct RepoRow {
     pub name: String,
     pub format: String,
+    pub format_title: String,
     pub kind: String,
     pub version: String,
     pub updated: String,
     pub urls: Vec<String>,
     pub public: bool,
+    pub description: String,
+    /// "12 packages", "3 tags"; for mirrors their last sync.
+    pub content: String,
+    /// ok, bad, run: the state's colour; empty: none.
+    pub state: String,
 }
 
 /// A form to make a repository of a format and kind.
@@ -507,6 +530,8 @@ pub struct FormatChoice {
     pub id: String,
     pub title: String,
     pub kind: String,
+    /// What a repository of this format and kind is for.
+    pub blurb: String,
     pub fields: Vec<FormField>,
 }
 
@@ -517,6 +542,10 @@ struct IndexPage {
     repos: Vec<RepoRow>,
     formats: Vec<FormatChoice>,
     storages: Vec<String>,
+    /// A signing key exists (signed Debian repositories need one).
+    has_key: bool,
+    /// The user id offered for a first key.
+    key_uid: String,
 }
 
 pub(crate) fn when(t: Option<i64>) -> String {
@@ -541,27 +570,83 @@ fn strs(v: &Value) -> Vec<String> {
     v.as_array().into_iter().flatten().map(s).collect()
 }
 
-async fn index(State(app): St, v: Viewer) -> Result<Response> {
+async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response> {
     let list = json_of(api::repos(State(app.clone()), v.who()).await)?;
+    let app2 = app.clone();
+    let (counts, syncs) = api::blocking(&app, move |_| {
+        let counts = app2.engine.catalog_counts()?;
+        // The last sync of each mirror.
+        let mut syncs = HashMap::new();
+        for j in crate::jobs::list(&app2.db, None, 500)? {
+            if j.kind == "sync" {
+                syncs.entry(j.repo.clone()).or_insert(j);
+            }
+        }
+        Ok((counts, syncs))
+    })
+    .await?;
+    let titles: HashMap<String, String> = app
+        .engine
+        .formats()
+        .map(|f| (f.id().to_string(), f.title().to_string()))
+        .collect();
     let repos = list
         .as_array()
         .into_iter()
         .flatten()
-        .map(|r| RepoRow {
-            name: s(&r["name"]),
-            format: s(&r["format"]),
-            kind: s(&r["kind"]),
-            version: s(&r["version"]),
-            updated: when(r["updated"].as_i64()),
-            urls: {
-                let u = strs(&r["settings"]["urls"]);
-                if u.is_empty() {
-                    vec![format!("/{}/", s(&r["name"]))]
-                } else {
-                    u
+        .map(|r| {
+            let name = s(&r["name"]);
+            let format = s(&r["format"]);
+            let kind = s(&r["kind"]);
+            let n = counts.get(&name).copied().unwrap_or(0);
+            let noun = match format.as_str() {
+                "oci" => "tag",
+                "files" => "file",
+                "deb" => "package file",
+                _ => "version",
+            };
+            let (content, state) = if kind == "mirror" {
+                match syncs.get(&name) {
+                    Some(j) => (
+                        format!("synced {} · {}", j.state, when(j.finished.or(j.started))),
+                        match j.state.as_str() {
+                            "ok" => "ok",
+                            "running" | "queued" => "run",
+                            _ => "bad",
+                        }
+                        .to_string(),
+                    ),
+                    None => ("never synced".to_string(), String::new()),
                 }
-            },
-            public: r["settings"]["public"] == json!(true),
+            } else {
+                (
+                    format!("{n} {noun}{}", if n == 1 { "" } else { "s" }),
+                    String::new(),
+                )
+            };
+            RepoRow {
+                format_title: titles
+                    .get(&format)
+                    .cloned()
+                    .unwrap_or_else(|| format.clone()),
+                kind,
+                version: s(&r["version"]),
+                updated: when(r["updated"].as_i64()),
+                urls: {
+                    let u = strs(&r["settings"]["urls"]);
+                    if u.is_empty() {
+                        vec![format!("/{name}/")]
+                    } else {
+                        u
+                    }
+                },
+                public: r["settings"]["public"] == json!(true),
+                description: s(&r["settings"]["description"]),
+                content,
+                state,
+                format,
+                name,
+            }
         })
         .collect();
     let formats = app
@@ -574,6 +659,17 @@ async fn index(State(app): St, v: Viewer) -> Result<Response> {
                     id: f.id().to_string(),
                     title: f.title().to_string(),
                     kind: k.as_str().to_string(),
+                    blurb: match (f.id(), *k) {
+                        ("deb", Kind::Mirror) => "follow an apt archive; served as received",
+                        ("deb", _) => "apt packages you upload, signed per version",
+                        ("files", Kind::Mirror) => "follow a file server (rsync, HTTP, FTP)",
+                        ("files", _) => "any files by path: builds, images, tools",
+                        ("oci", _) => "container images for docker and podman",
+                        ("pypi", _) => "Python packages for pip, uploaded with twine",
+                        ("npm", _) => "JavaScript packages for npm",
+                        _ => "",
+                    }
+                    .to_string(),
                     fields: form_fields(
                         &app.engine.fields(f.id(), *k).unwrap_or_default(),
                         &Value::Null,
@@ -587,11 +683,18 @@ async fn index(State(app): St, v: Viewer) -> Result<Response> {
     } else {
         vec![]
     };
+    let host = host_of(&headers);
+    let host = crate::routes::host_name(&host);
     Ok(render(&IndexPage {
         s: v.shell("repos"),
         repos,
         formats,
         storages,
+        has_key: !app.keys.list()?.is_empty(),
+        key_uid: format!(
+            "pkgpod packages <packages@{}>",
+            if host.is_empty() { "localhost" } else { host }
+        ),
     }))
 }
 
@@ -618,10 +721,40 @@ async fn repo_create(
         storage,
         settings,
     };
-    match api::repo_create(State(app), v.who(), Json(req)).await {
+    let first_dist = form_get(&form, "first_dist").trim().to_string();
+    let components: Vec<String> = form_get(&form, "first_components")
+        .split([',', ' '])
+        .filter(|c| !c.is_empty())
+        .map(String::from)
+        .collect();
+    let actor = v.caller.name().to_string();
+    match api::repo_create(State(app.clone()), v.who(), Json(req)).await {
         Ok((_, Json(r))) => {
-            let mut resp = msg(true, format!("created {}", s(&r["name"])));
-            if let Ok(h) = HeaderValue::from_str(&format!("/r/{}", s(&r["name"]))) {
+            let name = s(&r["name"]);
+            // A Debian repository takes uploads once it has a dist.
+            if !first_dist.is_empty() {
+                let (app2, name2) = (app.clone(), name.clone());
+                let made = tokio::task::spawn_blocking(move || {
+                    let r = app2.engine.repo(&name2)?;
+                    let f = app2.engine.format(&r.format)?.clone();
+                    let p = json!({"name": first_dist, "components": components});
+                    app2.engine
+                        .change(&name2, &actor, |cx, e| f.op(cx, "dist-set", &p, e))
+                })
+                .await;
+                match made {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => {
+                        return msg(
+                            false,
+                            format!("created {name}, but its first dist was not: {e}"),
+                        );
+                    }
+                    Err(e) => return msg(false, e.to_string()),
+                }
+            }
+            let mut resp = msg(true, format!("created {name}"));
+            if let Ok(h) = HeaderValue::from_str(&format!("/r/{name}")) {
                 resp.headers_mut().insert("HX-Redirect", h);
             }
             resp
@@ -641,19 +774,47 @@ struct RepoPage {
     s: Shell,
     name: String,
     format: String,
-    kind: String,
-    version: String,
-    updated: String,
-    urls: Vec<String>,
+    format_title: String,
+    mirror: bool,
     public: bool,
     description: String,
-    role: String,
-    can_write: bool,
+    stats: Vec<Stat>,
+    urls: Vec<String>,
+    routed_hint: bool,
+    tabs: Vec<TabLink>,
+    active: String,
+    active_part: String,
+}
+
+pub struct Stat {
+    pub label: String,
+    pub value: String,
+    /// ok, bad, run: a state's colour; empty: none.
+    pub state: String,
+}
+
+pub struct TabLink {
+    pub id: &'static str,
+    pub label: String,
+    pub part: String,
+}
+
+#[derive(Template)]
+#[template(path = "use.html")]
+struct UsePart {
+    usage: Vec<UseLine>,
+}
+
+#[derive(Template)]
+#[template(path = "actions.html")]
+struct ActionsPart {
+    name: String,
+    format: String,
     mirror: bool,
+    can_write: bool,
     can_sync: bool,
     next_run: String,
     source: String,
-    usage: Vec<UseLine>,
     upload: Vec<FormField>,
     ops: Vec<OpForm>,
     other_repos: Vec<String>,
@@ -665,15 +826,36 @@ pub struct OpForm {
     pub fields: Vec<FormField>,
 }
 
+/// The address clients use for a repository: its own first one, else
+/// `/<name>/` on the first serving http listener, at the host name the
+/// console was reached by (a listener bound to 0.0.0.0 has no name).
+fn base_url(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String], host: &str) -> String {
+    if let Some(u) = urls.first() {
+        return u.clone();
+    }
+    let l = crate::listeners::list(&app.db)
+        .ok()
+        .and_then(|v| v.into_iter().find(|l| l.enabled && l.proto == "http"));
+    let (scheme, port) = match &l {
+        Some(l) => (
+            if l.cert.is_empty() { "http" } else { "https" },
+            l.addr.rsplit_once(':').map_or("8080", |x| x.1).to_string(),
+        ),
+        None => ("http", "8080".to_string()),
+    };
+    let name = crate::routes::host_name(host);
+    let name = if name.is_empty() { "localhost" } else { name };
+    let default = (scheme == "http" && port == "80") || (scheme == "https" && port == "443");
+    if default {
+        format!("{scheme}://{name}/{}/", r.name)
+    } else {
+        format!("{scheme}://{name}:{port}/{}/", r.name)
+    }
+}
+
 /// How clients use a repository (the format's lines).
-fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String]) -> Vec<UseLine> {
-    let base = urls.first().cloned().unwrap_or_else(|| {
-        let l = crate::listeners::list(&app.db)
-            .ok()
-            .and_then(|v| v.into_iter().find(|l| l.enabled));
-        let addr = l.map(|l| l.addr).unwrap_or_else(|| "127.0.0.1:8080".into());
-        format!("http://{addr}/{}/", r.name)
-    });
+fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String], host: &str) -> Vec<UseLine> {
+    let base = base_url(app, r, urls, host);
     let mut out = Vec::new();
     if r.format == "npm" {
         let nerf = base.split_once("://").map_or(base.as_str(), |x| x.1);
@@ -858,7 +1040,27 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String]) -> Vec<UseLine
             .and_then(|v| app.engine.objects().dir(&v.root, "dists").ok().flatten())
             .map(|t| t.keys().cloned().collect())
             .unwrap_or_default();
-        let dist = dists.first().cloned().unwrap_or_else(|| "<dist>".into());
+        // The dist people use: one with packages, else the first.
+        let has_packages = |d: &str| {
+            app.engine
+                .current(r)
+                .ok()
+                .flatten()
+                .and_then(|v| {
+                    app.engine
+                        .objects()
+                        .dir(&v.root, &format!("dists/{d}"))
+                        .ok()
+                        .flatten()
+                })
+                .is_some_and(|t| t.iter().any(|(k, e)| !k.starts_with('_') && e.is_dir()))
+        };
+        let dist = dists
+            .iter()
+            .find(|d| has_packages(d))
+            .or(dists.first())
+            .cloned()
+            .unwrap_or_else(|| "<dist>".into());
         let mut e = pkgpod_engine::Edit::new(
             app.engine.objects(),
             app.engine
@@ -967,71 +1169,242 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String]) -> Vec<UseLine
     out
 }
 
-async fn repo_page(State(app): St, v: Viewer, Path(repo): Path<String>) -> Result<Response> {
+#[derive(Deserialize, Default)]
+struct TabQ {
+    #[serde(default)]
+    tab: String,
+}
+
+fn host_of(h: &HeaderMap) -> String {
+    h.get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// The tabs of a repository's page: (id, label, fragment).
+fn repo_tabs(r: &pkgpod_engine::RepoInfo, can_write: bool) -> Vec<TabLink> {
+    let n = &r.name;
+    let mirror = r.kind == Kind::Mirror;
+    let t = |id: &'static str, label: &str, part: String| TabLink {
+        id,
+        label: label.to_string(),
+        part,
+    };
+    let mut v = Vec::new();
+    let catalog = t(
+        "packages",
+        match r.format.as_str() {
+            "oci" => "Images",
+            "files" => "Files",
+            _ => "Packages",
+        },
+        format!("/r/{n}/packages"),
+    );
+    let browse = t("browse", "Browse", format!("/r/{n}/tree?path="));
+    if r.format == "files" {
+        v.push(browse);
+        if !mirror {
+            v.push(catalog);
+        }
+    } else {
+        v.push(catalog);
+        v.push(browse);
+    }
+    if !mirror {
+        v.push(t("versions", "Versions", format!("/r/{n}/versions")));
+    }
+    v.push(t("use", "How to use", format!("/r/{n}/use")));
+    if mirror {
+        v.push(t("actions", "Sync", format!("/r/{n}/actions")));
+    } else if can_write {
+        v.push(t("actions", "Upload & change", format!("/r/{n}/actions")));
+    }
+    v.push(t(
+        "settings",
+        "Settings & rights",
+        format!("/r/{n}/settings"),
+    ));
+    v
+}
+
+async fn repo_page(
+    State(app): St,
+    v: Viewer,
+    Path(repo): Path<String>,
+    Query(q): Query<TabQ>,
+    headers: HeaderMap,
+) -> Result<Response> {
     let info = json_of(api::repo_get(State(app.clone()), v.who(), Path(repo.clone())).await)?;
     let app2 = app.clone();
-    let caller = v.caller.clone();
     let repo2 = repo.clone();
-    let (r, others) = api::blocking(&app, move |_| {
+    let (r, count, last) = api::blocking(&app, move |_| {
         let r = app2.engine.repo(&repo2)?;
-        let others: Vec<String> = app2
+        let count = app2
             .engine
-            .repos()?
+            .catalog_counts()?
+            .get(&r.name)
+            .copied()
+            .unwrap_or(0);
+        let last = crate::jobs::list(&app2.db, Some(&r.name), 10)?
             .into_iter()
-            .filter(|o| o.format == r.format && o.name != r.name && o.kind != Kind::Mirror)
+            .find(|j| j.kind == "sync");
+        Ok((r, count, last))
+    })
+    .await?;
+    let role = s(&info["role"]);
+    let mirror = r.kind == Kind::Mirror;
+    let can_write = matches!(role.as_str(), "write" | "admin") && !mirror;
+    let noun = match r.format.as_str() {
+        "oci" => "tags",
+        "files" => "files",
+        "deb" => "package files",
+        _ => "versions",
+    };
+    let stat = |label: &str, value: String, state: &str| Stat {
+        label: label.to_string(),
+        value,
+        state: state.to_string(),
+    };
+    let mut stats = Vec::new();
+    if mirror {
+        match &last {
+            Some(j) => stats.push(stat(
+                "Last sync",
+                format!("{} · {}", j.state, when(j.finished.or(j.started))),
+                match j.state.as_str() {
+                    "ok" => "ok",
+                    "running" | "queued" => "run",
+                    _ => "bad",
+                },
+            )),
+            None => stats.push(stat("Last sync", "never".into(), "")),
+        }
+        stats.push(stat(
+            "Next",
+            crate::jobs::next_run(&r).unwrap_or_else(|| "when asked".into()),
+            "",
+        ));
+        stats.push(stat("From", r.setting_str("source").to_string(), ""));
+    } else {
+        stats.push(stat(
+            "Version",
+            format!(
+                "{} · {}",
+                s(&info["version"]),
+                when(info["updated"].as_i64())
+            ),
+            "",
+        ));
+        stats.push(stat(
+            &format!("{}{}", noun[..1].to_uppercase(), &noun[1..]),
+            count.to_string(),
+            "",
+        ));
+    }
+    stats.push(stat("Your role", role.clone(), ""));
+    let urls = strs(&info["settings"]["urls"]);
+    let routed_hint = urls.is_empty();
+    let shown = vec![base_url(&app, &r, &urls, &host_of(&headers))];
+    let shown = if urls.is_empty() { shown } else { urls };
+    let tabs = repo_tabs(&r, can_write);
+    let active = tabs.iter().find(|t| t.id == q.tab).unwrap_or(&tabs[0]);
+    let (active_id, active_part) = (active.id.to_string(), active.part.clone());
+    let f = app.engine.format(&r.format)?;
+    Ok(render(&RepoPage {
+        s: v.shell("repos"),
+        name: r.name.clone(),
+        format: r.format.clone(),
+        format_title: f.title().to_string(),
+        mirror,
+        public: r.setting_bool("public"),
+        description: r.setting_str("description").to_string(),
+        stats,
+        urls: shown,
+        routed_hint,
+        tabs,
+        active: active_id,
+        active_part,
+    }))
+}
+
+async fn use_part(
+    State(app): St,
+    v: Viewer,
+    Path(repo): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let r = match app.repo_for(&v.caller, &repo, Role::Read) {
+        Ok(r) => r,
+        Err(e) => return err_part(e),
+    };
+    let urls: Vec<String> = r.setting_list("urls");
+    render(&UsePart {
+        usage: usage(&app, &r, &urls, &host_of(&headers)),
+    })
+}
+
+async fn actions_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> Response {
+    let r = match app.repo_for(&v.caller, &repo, Role::Read) {
+        Ok(r) => r,
+        Err(e) => return err_part(e),
+    };
+    let role = app.auth.role(&v.caller, &r.name, r.setting_bool("public"));
+    let mirror = r.kind == Kind::Mirror;
+    let can_write = role >= Some(Role::Write) && !mirror;
+    let (app2, caller, r2) = (app.clone(), v.caller.clone(), r.clone());
+    let others: Vec<String> = tokio::task::spawn_blocking(move || {
+        app2.engine
+            .repos()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|o| o.format == r2.format && o.name != r2.name && o.kind != Kind::Mirror)
             .filter(|o| {
                 app2.auth.role(&caller, &o.name, o.setting_bool("public")) >= Some(Role::Write)
             })
             .map(|o| o.name)
-            .collect();
-        Ok((r, others))
+            .collect()
     })
-    .await?;
-    let role = s(&info["role"]);
-    let can_write = matches!(role.as_str(), "write" | "admin") && r.kind != Kind::Mirror;
-    let f = app.engine.format(&r.format)?.clone();
+    .await
+    .unwrap_or_default();
+    let f = match app.engine.format(&r.format) {
+        Ok(f) => f.clone(),
+        Err(e) => return err_part(e.into()),
+    };
     let root = app
         .engine
-        .current(&r)?
+        .current(&r)
+        .ok()
+        .flatten()
         .map(|v| v.root)
         .unwrap_or_else(pkgpod_engine::tree::empty);
-    let upload = form_fields(&f.upload_fields(app.engine.objects(), &root), &Value::Null);
-    let ops = f
-        .ops()
-        .into_iter()
-        .map(|o| OpForm {
-            name: o.name.to_string(),
-            help: o.help.to_string(),
-            fields: form_fields(&o.params, &Value::Null),
-        })
-        .collect();
-    let urls = strs(&info["settings"]["urls"]);
-    Ok(render(&RepoPage {
-        s: v.shell("repos"),
-        usage: usage(&app, &r, &urls),
+    render(&ActionsPart {
         name: r.name.clone(),
         format: r.format.clone(),
-        kind: r.kind.as_str().to_string(),
-        version: s(&info["version"]),
-        updated: when(info["updated"].as_i64()),
-        urls: if urls.is_empty() {
-            vec![format!("/{}/ on every serving listener", r.name)]
-        } else {
-            urls
-        },
-        public: r.setting_bool("public"),
-        description: r.setting_str("description").to_string(),
-        role,
+        mirror,
         can_write,
-        mirror: r.kind == Kind::Mirror,
-        can_sync: r.kind == Kind::Mirror
-            && app.auth.role(&v.caller, &r.name, r.setting_bool("public")) >= Some(Role::Write),
+        can_sync: mirror && role >= Some(Role::Write),
         next_run: crate::jobs::next_run(&r).unwrap_or_default(),
         source: r.setting_str("source").to_string(),
-        upload,
-        ops,
-        other_repos: others,
-    }))
+        upload: if can_write {
+            form_fields(&f.upload_fields(app.engine.objects(), &root), &Value::Null)
+        } else {
+            vec![]
+        },
+        ops: if can_write {
+            f.ops()
+                .into_iter()
+                .map(|o| OpForm {
+                    name: o.name.to_string(),
+                    help: o.help.to_string(),
+                    fields: form_fields(&o.params, &Value::Null),
+                })
+                .collect()
+        } else {
+            vec![]
+        },
+        other_repos: if can_write { others } else { vec![] },
+    })
 }
 
 pub struct TreeRow {
@@ -1185,6 +1558,23 @@ struct PackagesPart {
     can_write: bool,
     repo: String,
     limit_hit: bool,
+    /// The card's title and the columns' names, by format.
+    title: &'static str,
+    cols: [&'static str; 3],
+    show_size: bool,
+}
+
+/// What a format's catalog rows are called: title, name, version,
+/// where; whether sizes mean anything.
+fn catalog_words(format: &str) -> (&'static str, [&'static str; 3], bool) {
+    match format {
+        "oci" => ("Images", ["Image", "Tag", "Digest"], false),
+        "files" => ("Files", ["Name", "Version", "Path"], true),
+        "pypi" => ("Packages", ["Project", "Version", "File"], true),
+        "npm" => ("Packages", ["Package", "Version", "Note"], true),
+        "deb" => ("Packages", ["Package", "Version", "Where"], true),
+        _ => ("Packages", ["Package", "Version", "Where"], true),
+    }
 }
 
 fn pkg_rows(v: &Value) -> Vec<PkgRow> {
@@ -1375,12 +1765,26 @@ async fn packages_part(
                 .filter(|r| r.format != "npm")
                 .and_then(|r| app.auth.role(&v.caller, &repo, r.setting_bool("public")))
                 >= Some(Role::Write);
+            let format = app.engine.repo(&repo).map(|r| r.format).unwrap_or_default();
+            let (title, cols, show_size) = catalog_words(&format);
+            let mut rows = rows;
+            if format == "oci" {
+                // A digest's first 12 hex digits tell images apart.
+                for r in &mut rows {
+                    if r.extra.len() > 19 {
+                        r.extra = format!("{}…", &r.extra[..19]);
+                    }
+                }
+            }
             render(&PackagesPart {
                 limit_hit: rows.len() >= limit,
                 rows,
                 show_repo: false,
                 can_write,
                 repo,
+                title,
+                cols,
+                show_size,
             })
         }
         Err(e) => err_part(e),
@@ -1945,6 +2349,9 @@ async fn search_rows(State(app): St, v: Viewer, Query(q): Query<QQ>) -> Response
                 show_repo: true,
                 can_write: false,
                 repo: String::new(),
+                title: "Packages",
+                cols: ["Name", "Version", "Where"],
+                show_size: true,
             })
         }
         Err(e) => err_part(e),

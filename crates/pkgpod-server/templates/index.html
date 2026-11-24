@@ -4,21 +4,27 @@
 {% block main %}
 <div class="page-head">
   <div class="title"><h1>Repositories</h1><p class="sub">Hosted repositories keep every change as a version; mirrors follow their upstream.</p></div>
+  {% if s.admin %}<div class="actions"><a class="button" href="#new">New repository</a></div>{% endif %}
 </div>
 <div class="card">
-  <div class="card-head"><h2>Repositories</h2><span class="hint">{{ repos.len() }}</span></div>
-  {% if repos.is_empty() %}<p class="empty">No repositories yet{% if s.admin %}: make one below{% endif %}.</p>{% else %}
-  <div class="table-wrap"><table>
-    <thead><tr><th>Repository</th><th>Format</th><th>Kind</th><th class="num">Version</th><th>Updated</th><th>Addresses</th></tr></thead>
+  {% if repos.is_empty() %}
+  <div class="card-body empty-state">
+    <h2>No repositories yet</h2>
+    {% if s.admin %}<p>Make the first one below: Debian packages, plain files, container images, Python or npm packages, or a mirror of an upstream archive.</p>
+    {% else %}<p>Nothing is shared with you yet.</p>{% endif %}
+  </div>
+  {% else %}
+  <div class="table-wrap"><table class="repos">
+    <thead><tr><th>Repository</th><th>Format</th><th>Contents</th><th>Updated</th><th>Address</th></tr></thead>
     <tbody>
     {% for r in repos %}
     <tr>
-      <td class="nowrap"><a href="/r/{{ r.name }}"><b>{{ r.name }}</b></a>{% if r.public %} <span class="tag">public</span>{% endif %}</td>
-      <td>{{ r.format }}</td>
-      <td><span class="tag{% if r.kind == "hosted" %} accent{% endif %}">{{ r.kind }}</span></td>
-      <td class="num">{{ r.version }}</td>
-      <td class="nowrap">{{ r.updated }}</td>
-      <td class="mono wrap">{% for u in r.urls %}{{ u }}<br>{% endfor %}</td>
+      <td><a class="repo-name" href="/r/{{ r.name }}">{{ r.name }}</a>{% if r.public %} <span class="tag">public</span>{% endif %}
+        {% if !r.description.is_empty() %}<div class="muted small">{{ r.description }}</div>{% endif %}</td>
+      <td class="nowrap"><span class="fmt fmt-{{ r.format }}">{{ r.format_title }}</span>{% if r.kind == "mirror" %} <span class="tag">mirror</span>{% endif %}</td>
+      <td class="nowrap{% if !r.state.is_empty() %} st-{{ r.state }}{% endif %}">{{ r.content }}</td>
+      <td class="nowrap muted">{% if r.kind == "mirror" %}—{% else %}v{{ r.version }} · {{ r.updated }}{% endif %}</td>
+      <td class="mono small wrap">{% for u in r.urls %}{{ u }}<br>{% endfor %}</td>
     </tr>
     {% endfor %}
     </tbody>
@@ -26,23 +32,38 @@
   {% endif %}
 </div>
 {% if s.admin %}
-{% for f in formats %}
-<details class="card panel">
-  <summary>New {{ f.title }} {% if f.kind == "mirror" %}mirror <span class="hint">follows an upstream archive; served where it is received, without versions</span>{% else %}repository <span class="hint">{{ f.kind }}: uploads and operations, every change a version</span>{% endif %}</summary>
-  <div class="panel-body">
-  <form hx-post="/c/repos" hx-target="next .result">
-    <input type="hidden" name="format" value="{{ f.id }}">
-    <input type="hidden" name="kind" value="{{ f.kind }}">
-    <div class="fields">
-      <label class="field"><span>Name</span><input name="name" placeholder="{% if f.kind == "mirror" %}e.g. debian{% else %}e.g. ppa{% endif %}" required pattern="[a-z0-9][a-z0-9._-]*"><small>Lowercase letters, digits, '.', '_', '-'.</small></label>
-      <label class="field"><span>Storage</span><select name="storage">{% for st in storages %}<option>{{ st }}</option>{% endfor %}</select></label>
-    </div>
-    {% call m::fields(f.fields) %}{% endcall %}
-    <div class="form-foot"><button type="submit">Create</button></div>
-  </form>
-  <div class="result"></div>
+<div class="card" id="new">
+  <div class="card-head"><h2>New repository</h2><span class="hint">choose what it holds</span></div>
+  <div class="card-body chooser">
+  {% for f in formats %}
+    <input type="radio" name="newrepo" id="new-{{ f.id }}-{{ f.kind }}" class="choice-input"{% if loop.first %} checked{% endif %}>
+    <label for="new-{{ f.id }}-{{ f.kind }}" class="choice"><span class="choice-title"><span class="fmt fmt-{{ f.id }}">{{ f.title }}</span>{% if f.kind == "mirror" %}<span class="tag">mirror</span>{% endif %}</span><small>{{ f.blurb }}</small></label>
+    <form class="choice-form" hx-post="/c/repos" hx-target="next .result">
+      <input type="hidden" name="format" value="{{ f.id }}">
+      <input type="hidden" name="kind" value="{{ f.kind }}">
+      {% if f.id == "deb" && f.kind == "hosted" && !has_key %}
+      <div class="notice">
+        <p><b>No signing key yet.</b> apt checks the signature of a Debian repository's indexes; pkgpod signs them with the server's key.</p>
+        <button type="button" class="primary" hx-post="/c/keys/generate" hx-vals='{"name": "main", "uid": "{{ key_uid }}"}' hx-target="next .result">Make a signing key</button>
+        <span class="muted small">or add an existing one in <a href="/admin/server">Server</a></span>
+      </div>
+      {% endif %}
+      <div class="fields">
+        <label class="field"><span>Name</span><input name="name" placeholder="{% if f.kind == "mirror" %}e.g. debian{% else %}e.g. team{% endif %}" required pattern="[a-z0-9][a-z0-9._-]*"><small>Lowercase letters, digits, '.', '_', '-'.</small></label>
+        {% if f.id == "deb" && f.kind == "hosted" %}
+        <label class="field"><span>First dist</span><input name="first_dist" placeholder="noble"><small>The codename clients put in sources.list; more can be added later.</small></label>
+        <label class="field"><span>Components</span><input name="first_components" placeholder="main"></label>
+        {% endif %}
+        {% if storages.len() > 1 %}<label class="field"><span>Storage</span><select name="storage">{% for st in storages %}<option>{{ st }}</option>{% endfor %}</select></label>{% endif %}
+      </div>
+      <details class="more"{% if f.kind == "mirror" %} open{% endif %}><summary>{% if f.kind == "mirror" %}Upstream and settings{% else %}More settings{% endif %}</summary>
+      {% call m::fields(f.fields) %}{% endcall %}
+      </details>
+      <div class="form-foot"><button type="submit">Create {{ f.title }}{% if f.kind == "mirror" %} mirror{% endif %}</button></div>
+    </form>
+    <div class="choice-result result"></div>
+  {% endfor %}
   </div>
-</details>
-{% endfor %}
+</div>
 {% endif %}
 {% endblock %}

@@ -1,0 +1,114 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+{# What can be done to a repository: sync (mirrors), upload, operations, import, promotion. #}
+{% import "macros.html" as m %}
+{% if mirror %}
+<div class="card">
+  <div class="card-head"><h2>Sync</h2><span class="hint">from <span class="mono">{{ source }}</span>{% if !next_run.is_empty() %} · next {{ next_run }}{% endif %}</span>
+    {% if can_sync %}<button hx-post="/c/r/{{ name }}/sync" hx-target="#sync-result">Sync now</button>{% endif %}</div>
+  <div id="sync-result" class="card-body results"></div>
+  <div hx-get="/r/{{ name }}/jobs" hx-trigger="load, every 5s"></div>
+</div>
+{% endif %}
+{% if can_write %}
+{% if format != "oci" && format != "npm" %}
+<details class="card panel">
+  <summary>Upload <span class="hint">files into the repository; each upload is a version</span></summary>
+  <div class="panel-body">
+  <form hx-post="/c/r/{{ name }}/upload" hx-encoding="multipart/form-data" hx-target="next .result">
+    <div class="fields"><label class="field wide"><span>Files</span><input type="file" name="file" multiple required></label></div>
+    {% call m::fields(upload) %}{% endcall %}
+    <div class="form-foot"><button type="submit">Upload</button></div>
+  </form>
+  <div class="result"></div>
+  </div>
+</details>
+{% endif %}
+{% for o in ops %}
+<details class="card panel">
+  <summary>{{ o.name }} <span class="hint">{{ o.help }}</span></summary>
+  <div class="panel-body">
+  <form hx-post="/c/r/{{ name }}/ops/{{ o.name }}" hx-target="next .result">
+    {% call m::fields(o.fields) %}{% endcall %}
+    <div class="form-foot"><button type="submit">Preview</button></div>
+  </form>
+  <div class="result"></div>
+  </div>
+</details>
+{% endfor %}
+{% if format == "deb" %}
+<details class="card panel">
+  <summary>Import <span class="hint">take in an existing apt repository (aptly, reprepro, another server) as one version</span></summary>
+  <div class="panel-body">
+  <form hx-post="/c/r/{{ name }}/import" hx-target="next .result">
+    <div class="fields">
+      <label class="field wide"><span>source</span><input name="source" required placeholder="https://apt.example.org/ppa/"><small>The archive root, where dists/ is.</small></label>
+      <label class="field"><span>dists</span><input name="dists" required placeholder="noble, jammy"></label>
+      <label class="field"><span>components</span><input name="components" placeholder="all"></label>
+      <label class="field"><span>architectures</span><input name="architectures" placeholder="all"></label>
+      <label class="field wide"><span>keyring</span><textarea name="keyring" rows="4" spellcheck="false" placeholder="-----BEGIN PGP PUBLIC KEY BLOCK-----"></textarea><small>The upstream's public key; empty: signatures not checked.</small></label>
+      <label class="check field"><input type="checkbox" name="replace"> <span>replace</span><small>Replace package files of the same name with other content.</small></label>
+      <label class="check field"><input type="checkbox" name="no_sources"> <span>no sources</span><small>Leave out the source packages the upstream lists.</small></label>
+    </div>
+    <div class="form-foot"><button type="submit">Import</button></div>
+  </form>
+  <div class="result"></div>
+  <div hx-get="/r/{{ name }}/jobs" hx-trigger="load, every 5s"></div>
+  </div>
+</details>
+{% endif %}
+{% if format == "oci" %}
+<details class="card panel">
+  <summary>Import <span class="hint">take chosen images in from another registry as one version</span></summary>
+  <div class="panel-body">
+  <form hx-post="/c/r/{{ name }}/import" hx-target="next .result">
+    <div class="fields">
+      <label class="field"><span>registry</span><input name="source" required placeholder="docker.io · https://ghcr.io"></label>
+      <label class="field wide"><span>images</span><input name="images" required placeholder="alpine:3.20, team/app@sha256:..."></label>
+      <label class="field"><span>platforms</span><input name="platforms" placeholder="all · linux/amd64"></label>
+      <label class="field"><span>path</span><input name="path" placeholder="none"><small>Put before the image names here.</small></label>
+      <label class="field"><span>user</span><input name="username" autocomplete="off"></label>
+      <label class="field"><span>password</span><input name="password" type="password" autocomplete="off"><small>For the source registry, if it needs one; not kept.</small></label>
+    </div>
+    <div class="form-foot"><button type="submit">Import</button></div>
+  </form>
+  <div class="result"></div>
+  <div hx-get="/r/{{ name }}/jobs" hx-trigger="load, every 5s"></div>
+  </div>
+</details>
+{% endif %}
+{% if format == "files" %}
+<details class="card panel">
+  <summary>Import <span class="hint">take in a tree from a file server (rsync, HTTP listings, FTP) as one version</span></summary>
+  <div class="panel-body">
+  <form hx-post="/c/r/{{ name }}/import" hx-target="next .result">
+    <div class="fields">
+      <label class="field wide"><span>source</span><input name="source" required placeholder="rsync://host/module/dir/ · https://host/dir/ · ftp://host/dir/"></label>
+      <label class="field"><span>path</span><input name="path" placeholder="the top"><small>Where the tree goes here.</small></label>
+      <label class="field"><span>excludes</span><input name="excludes" placeholder="*.tmp, /old/"></label>
+      <label class="check field"><input type="checkbox" name="replace"> <span>replace</span><small>Replace files at the same path with other content.</small></label>
+    </div>
+    <div class="form-foot"><button type="submit">Import</button></div>
+  </form>
+  <div class="result"></div>
+  <div hx-get="/r/{{ name }}/jobs" hx-trigger="load, every 5s"></div>
+  </div>
+</details>
+{% endif %}
+{% if !other_repos.is_empty() %}
+<details class="card panel">
+  <summary>Promote <span class="hint">copy paths of this repository into another of the same format</span></summary>
+  <div class="panel-body">
+  <form hx-post="/c/r/{{ name }}/promote" hx-target="next .result">
+    <div class="fields">
+      <label class="field"><span>Into</span><select name="to">{% for o in other_repos %}<option>{{ o }}</option>{% endfor %}</select></label>
+      <label class="field"><span>From version</span><input name="version" placeholder="current"><small>A number or a label; empty: the current one.</small></label>
+      <label class="field wide"><span>Path</span><input name="path" placeholder="dists/noble/main/hello_1.0_amd64.deb" required><small>A file or a whole directory (dists/noble). Pick from Browse or Packages.</small></label>
+    </div>
+    <div class="form-foot"><button type="submit">Preview</button></div>
+  </form>
+  <div class="result"></div>
+  </div>
+</details>
+{% endif %}
+{% endif %}
+{% if !mirror && !can_write %}<p class="empty">Changing this repository needs write access.</p>{% endif %}

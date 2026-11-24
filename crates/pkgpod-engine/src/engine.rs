@@ -910,6 +910,21 @@ impl Engine {
 
     // ---- catalog ----
 
+    /// Catalog rows (packages, images' tags, files) of every repository,
+    /// by name.
+    pub fn catalog_counts(&self) -> Result<std::collections::HashMap<String, i64>> {
+        Ok(self.db.read(|c| {
+            let mut st = c.prepare(
+                "SELECT r.name, COUNT(c.path) FROM repos r
+                 LEFT JOIN catalog c ON c.repo = r.id GROUP BY r.id",
+            )?;
+            let v = st
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+                .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
+            Ok::<_, rusqlite::Error>(v)
+        })?)
+    }
+
     /// Packages whose name contains `q` (all if empty), in one repository
     /// or all.
     pub fn search(&self, q: &str, repo: Option<&str>, limit: usize) -> Result<Vec<Found>> {

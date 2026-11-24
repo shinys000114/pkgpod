@@ -529,6 +529,9 @@ fn console_login_pages_and_csrf() {
         "/r/web/versions",
         "/r/web/settings",
         "/r/web/packages",
+        "/r/web/use",
+        "/r/web/actions",
+        "/r/web?tab=versions",
         "/search",
         "/account",
         "/admin/people",
@@ -571,6 +574,14 @@ fn console_login_pages_and_csrf() {
         .text()
         .unwrap();
     assert!(r.contains("Applied") && r.contains("version 2"), "{r}");
+    // How to use names the dist just made.
+    let (_, usage) = page("/r/web/use");
+    assert!(usage.contains(" noble main"), "{usage}");
+    let (_, shell) = page("/r/web?tab=use");
+    assert!(
+        shell.contains("id=\"tab\" hx-get=\"/r/web/use\""),
+        "{shell}"
+    );
     // Tokens are not for the console.
     let tok = s.cli(&["token", "create", "x", "--write"]).unwrap();
     let r = c

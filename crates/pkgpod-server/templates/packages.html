@@ -1,17 +1,17 @@
 {# SPDX-License-Identifier: AGPL-3.0-only #}
 {% if !show_repo %}
 <div class="card">
-  <div class="card-head"><h2>Packages</h2>
+  <div class="card-head"><h2>{{ title }}</h2>
     <input type="search" name="q" placeholder="filter by name" hx-get="/r/{{ repo }}/packages" hx-trigger="input changed delay:300ms" hx-target="#tab" hx-swap="innerHTML">
   </div>
 {% endif %}
-  {% if rows.is_empty() %}<p class="empty">No package matches.</p>{% else %}
+  {% if rows.is_empty() %}<p class="empty">Nothing here yet{% if !show_repo %}: see How to use for uploading{% endif %}.</p>{% else %}
   <div class="table-wrap"><table>
-    <thead><tr>{% if show_repo %}<th>Repository</th>{% endif %}<th>Package</th><th>Version</th><th>Where</th><th class="num">Size</th>{% if can_write %}<th></th>{% endif %}</tr></thead>
+    <thead><tr>{% if show_repo %}<th>Repository</th>{% endif %}<th>{{ cols[0] }}</th><th>{{ cols[1] }}</th><th>{{ cols[2] }}</th>{% if show_size %}<th class="num">Size</th>{% endif %}{% if can_write %}<th></th>{% endif %}</tr></thead>
     <tbody>
     {% for r in rows %}<tr>
       {% if show_repo %}<td><a href="/r/{{ r.repo }}">{{ r.repo }}</a></td>{% endif %}
-      <td><b>{{ r.name }}</b></td><td class="mono wrap">{{ r.version }}</td><td class="muted">{{ r.extra }}</td><td class="num">{{ r.size }}</td>
+      <td><b>{{ r.name }}</b></td><td class="mono wrap">{{ r.version }}</td><td class="muted mono-wrap">{{ r.extra }}</td>{% if show_size %}<td class="num">{{ r.size }}</td>{% endif %}
       {% if can_write %}<td class="acts"><form hx-post="/c/r/{{ repo }}/remove" hx-target="#pkg-result"><input type="hidden" name="path" value="{{ r.path }}"><button class="link danger" type="submit">remove…</button></form></td>{% endif %}
     </tr>{% endfor %}
     </tbody>
