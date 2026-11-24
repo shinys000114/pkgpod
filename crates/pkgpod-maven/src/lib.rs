@@ -306,6 +306,10 @@ impl Format for Maven {
         true
     }
 
+    fn proxy(&self) -> bool {
+        true
+    }
+
     fn id(&self) -> &'static str {
         "maven"
     }

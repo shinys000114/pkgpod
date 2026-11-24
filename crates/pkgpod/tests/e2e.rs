@@ -4304,6 +4304,194 @@ fn go_proxy_cache() {
     assert_eq!(r.status().as_u16(), 405);
 }
 
+/// A stand-in upstream: answers each path with its body, and 404.
+fn stub_upstream(files: Vec<(String, Vec<u8>)>) -> u16 {
+    use std::io::{BufRead, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut c in l.incoming().flatten() {
+            let mut r = std::io::BufReader::new(c.try_clone().unwrap());
+            let mut line = String::new();
+            if r.read_line(&mut line).is_err() {
+                continue;
+            }
+            loop {
+                let mut h = String::new();
+                if r.read_line(&mut h).is_err() || h.trim().is_empty() {
+                    break;
+                }
+            }
+            let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
+            let (st, body) = match files.iter().find(|(p, _)| *p == path) {
+                Some((_, b)) => ("200 OK", b.clone()),
+                None => ("404 Not Found", Vec::new()),
+            };
+            let _ = c.write_all(
+                format!(
+                    "HTTP/1.1 {st}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+            let _ = c.write_all(&body);
+        }
+    });
+    port
+}
+
+/// A Maven proxy of another pkgpod's repository, with mvn; a file whose
+/// SHA-1 is not the upstream's is refused and not kept.
+#[test]
+fn maven_proxy_cache() {
+    if images_here(&[MAVEN_IMAGE]).is_empty() {
+        return;
+    }
+    let up = Server::start();
+    up.cli(&["repo", "create", "up", "-f", "maven", "-s", "public=true"])
+        .unwrap();
+    let ut = up
+        .cli(&["token", "create", "w", "--repos", "up", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let s = Server::start();
+    s.cli(&[
+        "repo",
+        "create",
+        "mp",
+        "-f",
+        "maven",
+        "-k",
+        "proxy",
+        "-s",
+        &format!("upstream=http://127.0.0.1:{}/up/", up.serve_port),
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let group = format!("org.example.p{nanos}");
+    let work = s.dir.path().join("mvnwork");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(
+        work.join("settings.xml"),
+        format!("<settings><servers><server><id>up</id><username>token</username><password>{ut}</password></server></servers></settings>\n"),
+    )
+    .unwrap();
+    let mvn = |local: &str| {
+        format!(
+            "mvn -B -q -s /work/settings.xml -Dmaven.repo.local=/m2/{local} -Dmaven.test.skip=true"
+        )
+    };
+    let project = |dir: &str, artifact: &str, body: &str, extra: &str| {
+        let d = work.join(dir);
+        std::fs::create_dir_all(d.join("src/main/java/demo")).unwrap();
+        std::fs::write(
+            d.join("pom.xml"),
+            format!(
+                "<project xmlns=\"http://maven.apache.org/POM/4.0.0\">\n<modelVersion>4.0.0</modelVersion>\n\
+                 <groupId>{group}</groupId><artifactId>{artifact}</artifactId><version>1.0.0</version>\n\
+                 <properties><maven.compiler.release>17</maven.compiler.release>\
+                 <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding></properties>\n{extra}\n</project>\n"
+            ),
+        )
+        .unwrap();
+        let class = body
+            .split_whitespace()
+            .skip_while(|w| *w != "class")
+            .nth(1)
+            .unwrap();
+        std::fs::write(d.join(format!("src/main/java/demo/{class}.java")), body).unwrap();
+    };
+    project(
+        "greet",
+        "greet",
+        "package demo; public class Greet { public static String hello() { return \"hi\"; } }\n",
+        &format!(
+            "<distributionManagement><repository><id>up</id><url>{}</url></repository></distributionManagement>",
+            up.url("/up/")
+        ),
+    );
+    let (ok, out) = mvn_sh(
+        &work,
+        &format!(
+            "cd greet && {} -Dmaven.install.skip=true deploy",
+            mvn(&format!("d{nanos}"))
+        ),
+    );
+    assert!(ok, "{out}");
+    project(
+        "app",
+        "app",
+        "package demo; public class App { String s = Greet.hello(); }\n",
+        &format!(
+            "<repositories><repository><id>mp</id><url>{}</url></repository></repositories>\
+             <dependencies><dependency><groupId>{group}</groupId><artifactId>greet</artifactId><version>1.0.0</version></dependency></dependencies>",
+            s.url("/mp/")
+        ),
+    );
+    // Cold, then warm with the upstream gone (a local repository of its
+    // own each time).
+    let (ok, out) = mvn_sh(
+        &work,
+        &format!("cd app && {} compile", mvn(&format!("a{nanos}"))),
+    );
+    assert!(ok, "{out}");
+    let d = s.json(&["downloads", "mp"]);
+    assert_eq!(d["packages"][0]["name"], format!("{group}:greet"), "{d}");
+    drop(up);
+    let (ok, out) = mvn_sh(
+        &work,
+        &format!("cd app && {} compile", mvn(&format!("b{nanos}"))),
+    );
+    assert!(ok, "{out}");
+    // A SHA-1 that is not the upstream's.
+    let port = stub_upstream(vec![
+        (
+            "/m/org/x/bad/1.0/bad-1.0.jar".into(),
+            b"not what it says".to_vec(),
+        ),
+        (
+            "/m/org/x/bad/1.0/bad-1.0.jar.sha1".into(),
+            b"0123456789012345678901234567890123456789".to_vec(),
+        ),
+        ("/m/org/x/good/1.0/good-1.0.jar".into(), b"good".to_vec()),
+    ]);
+    s.cli(&[
+        "repo",
+        "create",
+        "bad",
+        "-f",
+        "maven",
+        "-k",
+        "proxy",
+        "-s",
+        &format!("upstream=http://127.0.0.1:{port}/m/"),
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let c = reqwest::blocking::Client::new();
+    let r = c
+        .get(s.url("/bad/org/x/bad/1.0/bad-1.0.jar"))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 502);
+    assert!(r.text().unwrap().contains("SHA-1"));
+    assert_eq!(s.json(&["cache", "bad"])["rows"], serde_json::json!([]));
+    // Without a checksum upstream, as it came.
+    let r = c
+        .get(s.url("/bad/org/x/good/1.0/good-1.0.jar"))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(r.text().unwrap(), "good");
+}
+
 #[test]
 fn files_hosted() {
     let s = Server::start();

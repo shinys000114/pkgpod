@@ -132,6 +132,18 @@ fn has(app: &App, m: &Served, key: &str) -> bool {
     if m.repo.kind == Kind::Mirror {
         return m.repo.tree_dir().join(key).is_dir();
     }
+    if m.repo.format == "maven" {
+        // An artifact is a directory with its metadata (com/acme/tools
+        // may be only the way to com.acme.tools:x).
+        return m.current.as_ref().is_some_and(|v| {
+            matches!(
+                app.engine
+                    .objects()
+                    .resolve(&v.served(), &format!("{key}/maven-metadata.xml")),
+                Ok(Some(pkgpod_engine::Entry::Blob { .. }))
+            )
+        });
+    }
     m.current.as_ref().is_some_and(|v| {
         matches!(
             app.engine.objects().resolve(&v.root, key),
