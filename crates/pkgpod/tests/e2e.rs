@@ -4422,6 +4422,31 @@ fn backup_while_working_then_restore() {
         .unwrap();
     s.cli(&["repo", "create", "f", "-f", "files", "-s", "public=true"])
         .unwrap();
+    // An Alpine repository: its index is signed with the server's RSA
+    // key, which must come back with the data.
+    s.cli(&["repo", "create", "alp", "-f", "apk", "-s", "public=true"])
+        .unwrap();
+    let apk_dir = s.dir.path().to_path_buf();
+    let apk_file = |name: &str| {
+        let p = apk_dir.join(format!("{name}-1.0-r0.apk"));
+        let apk = pkgpod_apk::testutil::make_apk(name, "1.0-r0", "x86_64", ("usr/bin/x", b"x"));
+        std::fs::write(&p, apk).unwrap();
+        p
+    };
+    s.cli(&["upload", "alp", apk_file("kept-apk").to_str().unwrap()])
+        .unwrap();
+    let alp = s.url("/alp/");
+    let rsa_key = || {
+        let (_, listing) = get(&alp, None);
+        let name = listing
+            .split(['"', '>', '<', '/'])
+            .find(|w| w.starts_with("pkgpod-") && w.ends_with(".rsa.pub"))
+            .unwrap_or_else(|| panic!("no key in {listing}"))
+            .to_string();
+        let (_, pem) = get(&format!("{alp}{name}"), None);
+        (name, pem)
+    };
+    let rsa_before = rsa_key();
     let debs = s.dir.path().join("debs");
     std::fs::create_dir_all(&debs).unwrap();
     let one = build_deb(&debs, "kept", "1.0", "amd64", "xz", "");
@@ -4511,6 +4536,17 @@ fn backup_while_working_then_restore() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+    // The RSA key came back: the same, and new indexes are signed with it.
+    assert_eq!(rsa_key(), rsa_before);
+    let admin_pw = std::fs::read_to_string(s.dir.path().join("data/admin-password")).unwrap();
+    let r = reqwest::blocking::Client::new()
+        .put(s.url("/alp/upload"))
+        .basic_auth("admin", Some(admin_pw.trim()))
+        .body(std::fs::read(apk_file("after-apk")).unwrap())
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 201, "{}", r.text().unwrap());
+    assert_eq!(rsa_key(), rsa_before);
     // apt reads it with the key it had.
     let (_, key) = get(&s.url("/ppa/key.asc"), None);
     let a = apt_dir(s.dir.path(), "apt-restored", &s.url("/ppa/"), &key);
@@ -5012,6 +5048,23 @@ fn go_modules_through_the_proxy() {
         &["list", "-m", "example.com/greet@latest"],
     );
     assert!(ok && out.trim() == "example.com/greet v1.1.0", "{out}");
+    // A module not here is a 404, so go moves on to the next proxy.
+    let other = src.join("otherproxy/example.org/other/@v");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("list"), "v0.3.0\n").unwrap();
+    std::fs::write(
+        other.join("v0.3.0.info"),
+        r#"{"Version":"v0.3.0","Time":"2026-01-01T00:00:00Z"}"#,
+    )
+    .unwrap();
+    std::fs::write(other.join("v0.3.0.mod"), "module example.org/other\n").unwrap();
+    let (ok, out) = go(
+        &home,
+        &app,
+        &format!("{reg},file://{}", src.join("otherproxy").display()),
+        &["list", "-m", "-versions", "example.org/other"],
+    );
+    assert!(ok && out.trim() == "example.org/other v0.3.0", "{out}");
     // A label is a proxy of its own.
     let (ok, out) = go(
         &home,

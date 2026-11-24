@@ -904,7 +904,7 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String], host: &str) ->
         };
         out.push(UseLine {
             label: "Key".into(),
-            text: format!("wget -O /etc/apk/keys/{key} {base}{key}"),
+            text: format!("wget -O /etc/apk/keys/{key} {repo_url}{key}"),
         });
         out.push(UseLine {
             label: "Repository".into(),
@@ -1870,12 +1870,13 @@ async fn packages_part(
         Ok(list) => {
             let rows = pkg_rows(&list);
             // npm versions go by the unpublish operation (a dist-tag may
-            // name one), not by path.
+            // name one), Go's by remove (a version is a .zip and a .mod),
+            // not by path.
             let can_write = app
                 .engine
                 .repo(&repo)
                 .ok()
-                .filter(|r| r.format != "npm")
+                .filter(|r| r.format != "npm" && r.format != "go")
                 .and_then(|r| app.auth.role(&v.caller, &repo, r.setting_bool("public")))
                 >= Some(Role::Write);
             let format = app.engine.repo(&repo).map(|r| r.format).unwrap_or_default();

@@ -75,6 +75,10 @@ pub async fn read(
             None => not_found(),
         };
     };
+    // A module not here: 404, so go asks the next proxy.
+    if versions.is_empty() {
+        return not_found();
+    }
     if file == "list" {
         let mut body = String::new();
         for (ver, _) in versions.iter().filter(|(x, _)| !pkgpod_go::is_pseudo(x)) {
