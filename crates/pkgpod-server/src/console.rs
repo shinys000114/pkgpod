@@ -299,14 +299,59 @@ fn json_of<T>(r: Result<Json<T>>) -> Result<T> {
 
 pub struct FormField {
     pub name: String,
+    /// What people read: the name in words.
+    pub label: String,
     pub kind: &'static str,
     pub value: String,
     pub checked: bool,
     pub choices: Vec<(String, bool)>,
     pub help: String,
+    /// The id of its datalist, when it has values to pick from.
+    pub list: String,
+    pub suggest: Vec<String>,
+    /// JSON: for a value, the values of the form's other fields.
+    pub prefill: String,
+    /// Words people write (spell-checked), not names.
+    pub natural: bool,
 }
 
-fn form_fields(fields: &[Field], values: &Value) -> Vec<FormField> {
+/// A setting's or parameter's name in words.
+fn label_of(name: &str) -> String {
+    let fixed = match name {
+        "urls" => "Addresses",
+        "by_hash" => "By-hash indexes",
+        "keep_versions" => "Versions to keep",
+        "keep_days" => "Days to keep",
+        "valid_days" => "Valid for days",
+        "not_automatic" => "NotAutomatic",
+        "but_automatic_upgrades" => "ButAutomaticUpgrades",
+        "bwlimit" => "Bandwidth limit",
+        "max_delete" => "Most deletions",
+        "udebs" => "Installer packages (udebs)",
+        "first_dist" => "First dist",
+        "first_components" => "Its components",
+        "ignore_missing" => "Missing files allowed",
+        "key" => "Signing key",
+        _ => "",
+    };
+    if !fixed.is_empty() {
+        return fixed.to_string();
+    }
+    let s = name.replace(['_', '-'], " ");
+    let mut c = s.chars();
+    c.next()
+        .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+        .unwrap_or_default()
+}
+
+/// Form fields of a schema with their values (else defaults); `form`
+/// names the form in `hints` (an operation, `upload`, `settings`).
+fn form_fields(
+    fields: &[Field],
+    values: &Value,
+    form: &str,
+    hints: &pkgpod_engine::FormHints,
+) -> Vec<FormField> {
     fields
         .iter()
         .map(|f| {
@@ -351,8 +396,23 @@ fn form_fields(fields: &[Field], values: &Value) -> Vec<FormField> {
                         .collect(),
                 ),
             };
+            let key = format!("{form}.{}", f.name);
+            let suggest = hints.suggest.get(&key).cloned().unwrap_or_default();
+            let id = |p: &str| {
+                format!("{p}-{form}-{}", f.name)
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() || c == '-' {
+                            c
+                        } else {
+                            '-'
+                        }
+                    })
+                    .collect::<String>()
+            };
             FormField {
                 name: f.name.to_string(),
+                label: label_of(f.name),
                 kind,
                 checked: v.as_bool().unwrap_or(false),
                 value: if matches!(f.kind, FieldKind::Json) {
@@ -362,9 +422,36 @@ fn form_fields(fields: &[Field], values: &Value) -> Vec<FormField> {
                 },
                 choices,
                 help: f.help.to_string(),
+                list: if suggest.is_empty() {
+                    String::new()
+                } else {
+                    id("dl")
+                },
+                suggest,
+                prefill: hints
+                    .prefill
+                    .get(&key)
+                    .map(|m| serde_json::to_string(m).expect("json"))
+                    .unwrap_or_default(),
+                natural: matches!(f.name, "description" | "note" | "uid"),
             }
         })
         .collect()
+}
+
+/// Hints for settings forms: the signing keys there are.
+fn settings_hints(app: &App) -> pkgpod_engine::FormHints {
+    let mut h = pkgpod_engine::FormHints::default();
+    h.suggest.insert(
+        "settings.key".into(),
+        app.keys
+            .list()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|k| k.name)
+            .collect(),
+    );
+    h
 }
 
 /// A submitted form as JSON by the schema: unchecked boxes are false,
@@ -412,6 +499,25 @@ struct LoginPage {
     s: Shell,
     error: Option<String>,
     csrf: String,
+    /// The first admin's password file is still there.
+    first: bool,
+}
+
+#[derive(Template)]
+#[template(path = "notfound.html")]
+struct NotFoundPage {
+    s: Shell,
+}
+
+/// What the management listener answers for a path it has nothing at: a
+/// page for people, JSON under /api/.
+pub async fn not_found(uri: axum::http::Uri) -> Response {
+    if uri.path().starts_with("/api/") {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response();
+    }
+    let mut r = render(&NotFoundPage { s: Shell::anon() });
+    *r.status_mut() = StatusCode::NOT_FOUND;
+    r
 }
 
 fn cookie_header(name: &str, value: &str, max_age: i64, secure: bool) -> HeaderValue {
@@ -433,6 +539,7 @@ async fn login_page(State(app): St, h: HeaderMap) -> Response {
         s: Shell::anon(),
         error: None,
         csrf: csrf.clone(),
+        first: app.cfg.data_dir.join("admin-password").exists(),
     });
     r.headers_mut().append(
         header::SET_COOKIE,
@@ -455,6 +562,7 @@ async fn login(State(app): St, h: HeaderMap, Form(f): Form<LoginForm>) -> Respon
             s: Shell::anon(),
             error: Some(e.to_string()),
             csrf: csrf.clone(),
+            first: app.cfg.data_dir.join("admin-password").exists(),
         });
         r.headers_mut().append(
             header::SET_COOKIE,
@@ -585,6 +693,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
         Ok((counts, syncs))
     })
     .await?;
+    let host = host_of(&headers);
     let titles: HashMap<String, String> = app
         .engine
         .formats()
@@ -599,12 +708,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
             let format = s(&r["format"]);
             let kind = s(&r["kind"]);
             let n = counts.get(&name).copied().unwrap_or(0);
-            let noun = match format.as_str() {
-                "oci" => "tag",
-                "files" => "file",
-                "deb" => "package file",
-                _ => "version",
-            };
+
             let (content, state) = if kind == "mirror" {
                 match syncs.get(&name) {
                     Some(j) => (
@@ -619,10 +723,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                     None => ("never synced".to_string(), String::new()),
                 }
             } else {
-                (
-                    format!("{n} {noun}{}", if n == 1 { "" } else { "s" }),
-                    String::new(),
-                )
+                (count_words(&format, n), String::new())
             };
             RepoRow {
                 format_title: titles
@@ -635,7 +736,11 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                 urls: {
                     let u = strs(&r["settings"]["urls"]);
                     if u.is_empty() {
-                        vec![format!("/{name}/")]
+                        // As its page shows it: on the first listener.
+                        match app.engine.repo(&name) {
+                            Ok(info) => vec![base_url(&app, &info, &[], &host)],
+                            Err(_) => vec![format!("/{name}/")],
+                        }
                     } else {
                         u
                     }
@@ -649,7 +754,8 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
             }
         })
         .collect();
-    let formats = app
+    let hints = settings_hints(&app);
+    let formats: Vec<FormatChoice> = app
         .engine
         .formats()
         .flat_map(|f| {
@@ -686,17 +792,22 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                     fields: form_fields(
                         &app.engine.fields(f.id(), *k).unwrap_or_default(),
                         &Value::Null,
+                        "settings",
+                        &hints,
                     ),
                 })
                 .collect::<Vec<_>>()
         })
         .collect();
+    // By the names people read; hosted Debian first chosen.
+    let mut formats: Vec<FormatChoice> = formats;
+    formats
+        .sort_by(|a, b| (a.title.to_lowercase(), &a.kind).cmp(&(b.title.to_lowercase(), &b.kind)));
     let storages = if v.caller.is_admin() {
         app.engine.storages()?.into_iter().map(|(n, _)| n).collect()
     } else {
         vec![]
     };
-    let host = host_of(&headers);
     let host = crate::routes::host_name(&host);
     Ok(render(&IndexPage {
         s: v.shell("repos"),
@@ -815,6 +926,9 @@ pub struct TabLink {
 #[derive(Template)]
 #[template(path = "use.html")]
 struct UsePart {
+    repo: String,
+    /// Dists to show the usage for, the one shown marked.
+    dists: Vec<(String, bool)>,
     usage: Vec<UseLine>,
 }
 
@@ -835,8 +949,21 @@ struct ActionsPart {
 
 pub struct OpForm {
     pub name: String,
+    /// What it does, in words (the help's first sentence).
+    pub title: String,
     pub help: String,
     pub fields: Vec<FormField>,
+}
+
+/// An operation's title, from its help: the first sentence (to a `.`,
+/// `:`, `;` or `(`), and the rest.
+fn op_title(help: &str) -> (String, String) {
+    let cut = help.find(['.', ':', ';', '(']).unwrap_or(help.len());
+    let rest = help[cut..]
+        .trim_start_matches(['.', ':', ';'])
+        .trim()
+        .to_string();
+    (help[..cut].trim().to_string(), rest)
 }
 
 /// The address clients use for a repository: its own first one, else
@@ -867,7 +994,31 @@ fn base_url(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String], host: &str)
 }
 
 /// How clients use a repository (the format's lines).
-fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String], host: &str) -> Vec<UseLine> {
+/// The dists a deb repository's usage can be shown for.
+fn usage_dists(app: &App, r: &pkgpod_engine::RepoInfo) -> Vec<String> {
+    if r.format != "deb" {
+        return Vec::new();
+    }
+    if r.kind == Kind::Mirror {
+        return crate::mirror_pkgs::tree_index(&r.tree_dir()).0;
+    }
+    app.engine
+        .current(r)
+        .ok()
+        .flatten()
+        .and_then(|v| app.engine.objects().dir(&v.root, "dists").ok().flatten())
+        .map(|t| t.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// How clients use a repository; `want`: the dist to show it for (deb).
+fn usage(
+    app: &App,
+    r: &pkgpod_engine::RepoInfo,
+    urls: &[String],
+    host: &str,
+    want: &str,
+) -> Vec<UseLine> {
     let base = base_url(app, r, urls, host);
     let mut out = Vec::new();
     if r.format == "npm" {
@@ -1439,7 +1590,12 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String], host: &str) ->
     }
     if r.format == "deb" && r.kind == Kind::Mirror {
         let (dists, comps, _) = crate::mirror_pkgs::tree_index(&r.tree_dir());
-        let dist = dists.first().cloned().unwrap_or_else(|| "<dist>".into());
+        let dist = dists
+            .iter()
+            .find(|d| *d == want)
+            .or(dists.first())
+            .cloned()
+            .unwrap_or_else(|| "<dist>".into());
         let key = if r.setting_bool("resign") {
             let key = format!("/etc/apt/keyrings/{}.asc", r.name);
             out.push(UseLine {
@@ -1499,7 +1655,8 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String], host: &str) ->
         };
         let dist = dists
             .iter()
-            .find(|d| has_packages(d))
+            .find(|d| *d == want)
+            .or_else(|| dists.iter().find(|d| has_packages(d)))
             .or(dists.first())
             .cloned()
             .unwrap_or_else(|| "<dist>".into());
@@ -1638,7 +1795,7 @@ fn repo_tabs(r: &pkgpod_engine::RepoInfo, can_write: bool) -> Vec<TabLink> {
         "packages",
         match r.format.as_str() {
             "oci" => "Images",
-            "files" => "Files",
+            "files" => "All files",
             _ => "Packages",
         },
         format!("/r/{n}/packages"),
@@ -1697,12 +1854,7 @@ async fn repo_page(
     let role = s(&info["role"]);
     let mirror = r.kind == Kind::Mirror;
     let can_write = matches!(role.as_str(), "write" | "admin") && !mirror;
-    let noun = match r.format.as_str() {
-        "oci" => "tags",
-        "files" => "files",
-        "deb" => "package files",
-        _ => "versions",
-    };
+    let noun = count_noun(&r.format);
     let stat = |label: &str, value: String, state: &str| Stat {
         label: label.to_string(),
         value,
@@ -1770,10 +1922,17 @@ async fn repo_page(
     }))
 }
 
+#[derive(Deserialize, Default)]
+struct UseQ {
+    #[serde(default)]
+    dist: String,
+}
+
 async fn use_part(
     State(app): St,
     v: Viewer,
     Path(repo): Path<String>,
+    Query(q): Query<UseQ>,
     headers: HeaderMap,
 ) -> Response {
     let r = match app.repo_for(&v.caller, &repo, Role::Read) {
@@ -1781,8 +1940,24 @@ async fn use_part(
         Err(e) => return err_part(e),
     };
     let urls: Vec<String> = r.setting_list("urls");
+    let usage = usage(&app, &r, &urls, &host_of(&headers), &q.dist);
+    // The dist the commands name (the Source line's).
+    let shown = usage
+        .iter()
+        .find(|u| u.label == "Source")
+        .map(|u| u.text.clone())
+        .unwrap_or_default();
+    let dists = usage_dists(&app, &r)
+        .into_iter()
+        .map(|d| {
+            let on = shown.contains(&format!(" {d} "));
+            (d, on)
+        })
+        .collect();
     render(&UsePart {
-        usage: usage(&app, &r, &urls, &host_of(&headers)),
+        repo: r.name.clone(),
+        dists,
+        usage,
     })
 }
 
@@ -1820,6 +1995,11 @@ async fn actions_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> Re
         .flatten()
         .map(|v| v.root)
         .unwrap_or_else(pkgpod_engine::tree::empty);
+    let hints = if can_write {
+        f.form_hints(app.engine.objects(), &root)
+    } else {
+        pkgpod_engine::FormHints::default()
+    };
     render(&ActionsPart {
         name: r.name.clone(),
         format: r.format.clone(),
@@ -1829,17 +2009,26 @@ async fn actions_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> Re
         next_run: crate::jobs::next_run(&r).unwrap_or_default(),
         source: r.setting_str("source").to_string(),
         upload: if can_write {
-            form_fields(&f.upload_fields(app.engine.objects(), &root), &Value::Null)
+            form_fields(
+                &f.upload_fields(app.engine.objects(), &root),
+                &Value::Null,
+                "upload",
+                &hints,
+            )
         } else {
             vec![]
         },
         ops: if can_write {
             f.ops()
                 .into_iter()
-                .map(|o| OpForm {
-                    name: o.name.to_string(),
-                    help: o.help.to_string(),
-                    fields: form_fields(&o.params, &Value::Null),
+                .map(|o| {
+                    let (title, rest) = op_title(o.help);
+                    OpForm {
+                        name: o.name.to_string(),
+                        title,
+                        help: rest,
+                        fields: form_fields(&o.params, &Value::Null, o.name, &hints),
+                    }
                 })
                 .collect()
         } else {
@@ -1860,6 +2049,8 @@ pub struct TreeRow {
 #[derive(Template)]
 #[template(path = "tree.html")]
 struct TreePart {
+    /// The stored and served trees differ.
+    both: bool,
     repo: String,
     path: String,
     crumbs: Vec<(String, String)>,
@@ -1885,10 +2076,13 @@ async fn tree_part(
     Path(repo): Path<String>,
     Query(q): Query<TreeQ>,
 ) -> Response {
-    let served = q
-        .served
-        .as_deref()
-        .is_some_and(|x| !x.is_empty() && x != "0");
+    // What clients get, unless the stored tree is asked for (a files
+    // repository's are the same).
+    let format = app.engine.repo(&repo).map(|r| r.format).unwrap_or_default();
+    let served = match q.served.as_deref() {
+        Some(x) => !x.is_empty() && x != "0",
+        None => format != "files",
+    };
     let res = api::tree(
         State(app.clone()),
         v.who(),
@@ -1952,6 +2146,7 @@ async fn tree_part(
             .flatten()
     }) >= Some(Role::Write);
     render(&TreePart {
+        both: format != "files",
         repo,
         path,
         crumbs,
@@ -2006,12 +2201,41 @@ struct PackagesPart {
     show_size: bool,
 }
 
+/// What a repository's catalog count counts (a deb package is counted
+/// in each dist it is in).
+fn count_noun(format: &str) -> &'static str {
+    match format {
+        "oci" => "tags",
+        "files" => "files",
+        "deb" => "packages in dists",
+        _ => "package versions",
+    }
+}
+
+/// A catalog count in words: `3 package versions`, `empty`.
+fn count_words(format: &str, n: i64) -> String {
+    if n == 0 {
+        return "empty".into();
+    }
+    let noun = count_noun(format);
+    if n == 1 {
+        let one = match format {
+            "oci" => "tag",
+            "files" => "file",
+            "deb" => "package in dists",
+            _ => "package version",
+        };
+        return format!("1 {one}");
+    }
+    format!("{n} {noun}")
+}
+
 /// What a format's catalog rows are called: title, name, version,
 /// where; whether sizes mean anything.
 fn catalog_words(format: &str) -> (&'static str, [&'static str; 3], bool) {
     match format {
         "oci" => ("Images", ["Image", "Tag", "Digest"], false),
-        "files" => ("Files", ["Name", "Version", "Path"], true),
+        "files" => ("All files", ["File", "Version", "Path"], true),
         "pypi" => ("Packages", ["Project", "Version", "File"], true),
         "npm" => ("Packages", ["Package", "Version", "Note"], true),
         "cargo" => ("Crates", ["Crate", "Version", "Note"], true),
@@ -2630,6 +2854,8 @@ async fn settings_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> R
     let fields = form_fields(
         &app.engine.fields(&r.format, r.kind).unwrap_or_default(),
         &r.settings,
+        "settings",
+        &settings_hints(&app),
     );
     let grants = if can_admin {
         app.auth
@@ -2646,10 +2872,12 @@ async fn settings_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> R
     };
     let (users, teams) = if can_admin {
         (
+            // Server admins may do everything: no grant for them.
             app.auth
                 .users()
                 .unwrap_or_default()
                 .into_iter()
+                .filter(|u| !u.admin)
                 .map(|u| u.name)
                 .collect(),
             app.auth
@@ -2823,6 +3051,8 @@ pub struct TokenRow {
 struct AccountPage {
     s: Shell,
     tokens: Vec<TokenRow>,
+    /// Repositories a token can be limited to.
+    repos: Vec<String>,
 }
 
 fn token_rows(v: &Value) -> Vec<TokenRow> {
@@ -2848,10 +3078,17 @@ fn token_rows(v: &Value) -> Vec<TokenRow> {
 }
 
 async fn account_page(State(app): St, v: Viewer) -> Result<Response> {
-    let t = json_of(api::tokens(State(app), v.who(), Query(api::AllQ::default())).await)?;
+    let t = json_of(api::tokens(State(app.clone()), v.who(), Query(api::AllQ::default())).await)?;
+    let list = json_of(api::repos(State(app), v.who()).await)?;
     Ok(render(&AccountPage {
         s: v.shell("account"),
         tokens: token_rows(&t),
+        repos: list
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|r| s(&r["name"]))
+            .collect(),
     }))
 }
 
@@ -2879,8 +3116,11 @@ async fn token_create(
     v: Viewer,
     Form(form): Form<Vec<(String, String)>>,
 ) -> Response {
-    let repos: Vec<String> = form_get(&form, "repos")
-        .split([',', ' '])
+    // Ticked boxes, or names written out.
+    let repos: Vec<String> = form
+        .iter()
+        .filter(|(k, _)| k == "repos")
+        .flat_map(|(_, v)| v.split([',', ' ']))
         .filter(|x| !x.is_empty())
         .map(String::from)
         .collect();
@@ -2927,6 +3167,8 @@ pub struct TeamRow {
 #[template(path = "people.html")]
 struct PeoplePage {
     s: Shell,
+    /// Someone to grant rights on * to: a user not a server admin, a team.
+    grantable: bool,
     users: Vec<UserRow>,
     teams: Vec<TeamRow>,
     global: Vec<GrantRow>,
@@ -2934,7 +3176,7 @@ struct PeoplePage {
 
 async fn people_page(State(app): St, v: Viewer) -> Result<Response> {
     app.require_admin(&v.caller)?;
-    let users = app
+    let users: Vec<UserRow> = app
         .auth
         .users()?
         .into_iter()
@@ -2945,7 +3187,7 @@ async fn people_page(State(app): St, v: Viewer) -> Result<Response> {
             created: when(Some(u.created)),
         })
         .collect();
-    let teams = app
+    let teams: Vec<TeamRow> = app
         .auth
         .teams()?
         .into_iter()
@@ -2965,6 +3207,7 @@ async fn people_page(State(app): St, v: Viewer) -> Result<Response> {
         .collect();
     Ok(render(&PeoplePage {
         s: v.shell("people"),
+        grantable: users.iter().any(|u: &UserRow| !u.admin) || !teams.is_empty(),
         users,
         teams,
         global,
@@ -3093,6 +3336,7 @@ pub struct AuditRow {
 #[template(path = "server.html")]
 struct ServerPage {
     s: Shell,
+    listener_prefill: String,
     listeners: Vec<ListenerRow>,
     keys: Vec<KeyRow>,
     storages: Vec<(String, String)>,
@@ -3103,7 +3347,21 @@ struct ServerPage {
 
 async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
     app.require_admin(&v.caller)?;
-    let listeners = crate::listeners::list(&app.db)?
+    let all = crate::listeners::list(&app.db)?;
+    // Picking a listener's name in the form fills in its settings.
+    let listener_prefill = serde_json::to_string(
+        &all.iter()
+            .map(|l| {
+                (
+                    l.name.clone(),
+                    json!({"addr": l.addr, "cert": l.cert, "key": l.key, "proto": l.proto,
+                           "passive": l.passive, "disabled": !l.enabled}),
+                )
+            })
+            .collect::<serde_json::Map<String, Value>>(),
+    )
+    .expect("json");
+    let listeners = all
         .into_iter()
         .map(|l| {
             let running = app.listeners.is_running(&l.name);
@@ -3162,6 +3420,7 @@ async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
         .collect();
     Ok(render(&ServerPage {
         s: v.shell("server"),
+        listener_prefill,
         listeners,
         keys,
         storages,

@@ -8,19 +8,20 @@
   <div class="card-head"><h2>Users</h2></div>
   <div class="table-wrap"><table><thead><tr><th>Name</th><th>Server admin</th><th>Disabled</th><th>Created</th><th></th></tr></thead><tbody>
   {% for u in users %}<tr>
-    <td><b>{{ u.name }}</b></td>
-    <td><button class="link" hx-post="/c/users/{{ u.name|urlencode }}" hx-vals='{"admin": "{% if u.admin %}false{% else %}true{% endif %}"}' hx-target="#people-result">{% if u.admin %}yes{% else %}no{% endif %}</button></td>
-    <td><button class="link" hx-post="/c/users/{{ u.name|urlencode }}" hx-vals='{"disabled": "{% if u.disabled %}false{% else %}true{% endif %}"}' hx-target="#people-result">{% if u.disabled %}yes{% else %}no{% endif %}</button></td>
-    <td>{{ u.created }}</td>
+    {% let me = u.name == s.user %}
+    <td><b>{{ u.name }}</b>{% if me %} <span class="tag">you</span>{% endif %}</td>
+    <td class="nowrap">{% if u.admin %}yes{% else %}no{% endif %}{% if !me %} <button class="link small" hx-post="/c/users/{{ u.name|urlencode }}" hx-vals='{"admin": "{% if u.admin %}false{% else %}true{% endif %}"}' hx-target="#people-result">{% if u.admin %}take away{% else %}make admin{% endif %}</button>{% endif %}</td>
+    <td class="nowrap">{% if u.disabled %}yes{% else %}no{% endif %}{% if !me %} <button class="link small" hx-post="/c/users/{{ u.name|urlencode }}" hx-vals='{"disabled": "{% if u.disabled %}false{% else %}true{% endif %}"}' hx-target="#people-result">{% if u.disabled %}enable{% else %}disable{% endif %}</button>{% endif %}</td>
+    <td class="nowrap">{{ u.created }}</td>
     <td class="acts nowrap">
-      <form class="inline" hx-post="/c/users/{{ u.name|urlencode }}" hx-target="#people-result"><input type="password" name="password" placeholder="new password" minlength="8" size="14"><button class="link" type="submit">set</button></form>
-      <button class="link danger" hx-post="/c/users/{{ u.name|urlencode }}/delete" hx-target="#people-result" hx-confirm="Delete user {{ u.name }} and their tokens?">delete</button>
+      {% if !me %}<form class="inline" hx-post="/c/users/{{ u.name|urlencode }}" hx-target="#people-result"><input type="password" name="password" placeholder="new password" minlength="8" size="14" autocomplete="new-password"><button class="link" type="submit">set</button></form>
+      <button class="link danger" hx-post="/c/users/{{ u.name|urlencode }}/delete" hx-target="#people-result" hx-confirm="Delete user {{ u.name }} and their tokens?">delete</button>{% else %}<a class="small" href="/account">your password</a>{% endif %}
     </td>
   </tr>{% endfor %}
   </tbody></table></div>
   <div class="card-body">
   <form class="inline" hx-post="/c/users" hx-target="#people-result">
-    <input name="name" placeholder="name" required> <input type="password" name="password" placeholder="password" required minlength="8">
+    <input name="name" placeholder="name" required autocomplete="off" autocapitalize="off" spellcheck="false"> <input type="password" name="password" placeholder="their password" required minlength="8" autocomplete="new-password">
     <label class="check"><input type="checkbox" name="admin"> server admin</label> <button type="submit">Add user</button>
   </form>
   </div>
@@ -37,7 +38,7 @@
   </tr>{% endfor %}
   </tbody></table></div>
   {% endif %}
-  <div class="card-body"><form class="inline" hx-post="/c/teams" hx-target="#people-result"><input name="name" placeholder="team name" required> <button type="submit">Add team</button></form></div>
+  <div class="card-body"><form class="inline" hx-post="/c/teams" hx-target="#people-result"><input name="name" placeholder="team name" required autocomplete="off" autocapitalize="off" spellcheck="false"> <button type="submit">Add team</button></form></div>
 </div>
 <div class="card">
   <div class="card-head"><h2>Rights on every repository (*)</h2></div>
@@ -47,11 +48,12 @@
   </tbody></table></div>
   {% endif %}
   <div class="card-body">
+  {% if !grantable %}<p class="muted small">Server admins may do everything already; add a user or a team to grant rights to.</p>{% else %}
   <form class="inline" hx-post="/c/r/*/grants" hx-target="#people-result">
-    <select name="subject">{% for u in users %}<option value="user:{{ u.name }}">user {{ u.name }}</option>{% endfor %}{% for t in teams %}<option value="team:{{ t.name }}">team {{ t.name }}</option>{% endfor %}</select>
+    <select name="subject">{% for u in users %}{% if !u.admin %}<option value="user:{{ u.name }}">user {{ u.name }}</option>{% endif %}{% endfor %}{% for t in teams %}<option value="team:{{ t.name }}">team {{ t.name }}</option>{% endfor %}</select>
     <select name="role"><option>read</option><option>write</option><option>admin</option></select>
     <button type="submit">Grant on *</button>
-  </form>
+  </form>{% endif %}
   </div>
 </div>
 {% endblock %}

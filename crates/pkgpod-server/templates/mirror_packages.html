@@ -1,14 +1,14 @@
 {# SPDX-License-Identifier: AGPL-3.0-only #}
 <div class="card" id="mpk">
   <div class="card-head"><h2>Packages</h2><span class="hint">from the mirror's own indexes</span></div>
-  <div class="card-body">
+  {% if !dists.is_empty() %}<div class="card-body">
   <form class="inline" hx-get="/r/{{ repo }}/packages" hx-target="#tab" hx-trigger="change, input from:find input[name=q] delay:300ms">
     <select name="dist">{% for (d, on) in dists %}<option{% if on %} selected{% endif %}>{{ d }}</option>{% endfor %}</select>
     <select name="component">{% for (c, on) in comps %}<option{% if on %} selected{% endif %}>{{ c }}</option>{% endfor %}</select>
     <select name="arch">{% for (a, on) in archs %}<option{% if on %} selected{% endif %}>{{ a }}</option>{% endfor %}</select>
     <input type="search" name="q" value="{{ q }}" placeholder="filter by name">
   </form>
-  </div>
+  </div>{% endif %}
   {% if !note.is_empty() %}<p class="empty">{{ note }}</p>
   {% else if rows.is_empty() %}<p class="empty">No package matches.</p>
   {% else %}
@@ -27,9 +27,9 @@
     <p class="muted">Promote the checked packages into a hosted repository: their files are stored there and kept, whatever the mirror does later.</p>
     <div class="fields">
       <label class="field"><span>Into</span><select name="to">{% for t in targets %}<option>{{ t }}</option>{% endfor %}</select></label>
-      <label class="field"><span>Dist</span><input name="into" placeholder="{{ dist }}"><small>The target's dist; empty: {{ dist }}.</small></label>
-      <label class="field"><span>Component</span><input name="into_component" placeholder="{{ comp }}"></label>
-      <label class="check field"><input type="checkbox" name="replace"> <span>replace</span><small>Replace package files of the same name with other content.</small></label>
+      <label class="field"><span>Dist</span><input name="into" placeholder="{{ dist }}" autocomplete="off" autocapitalize="off" spellcheck="false"><small>The target's dist; empty: {{ dist }}.</small></label>
+      <label class="field"><span>Component</span><input name="into_component" placeholder="{{ comp }}" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+      <label class="check field"><span class="check-line"><input type="checkbox" name="replace"> <span>Replace</span></span><small>Replace package files of the same name with other content.</small></label>
     </div>
     <div class="form-foot"><button type="submit">Preview</button></div>
   </div>

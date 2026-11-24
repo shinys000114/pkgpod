@@ -9,18 +9,18 @@
   <div class="table-wrap"><table><thead><tr><th>Name</th><th>Address</th><th>Serves</th><th>State</th><th></th></tr></thead><tbody>
   {% for l in listeners %}<tr><td><b>{{ l.name }}</b></td><td class="mono">{{ l.addr }}</td><td>{{ l.serves }}</td>
     <td><span class="badge {% if l.ok %}ok{% else %}bad{% endif %}">{{ l.state }}</span></td>
-    <td class="acts"><button class="link danger" hx-post="/c/listeners/{{ l.name|urlencode }}/delete" hx-target="#server-result" hx-confirm="Stop and remove listener {{ l.name }}?">remove</button></td></tr>{% endfor %}
+    <td class="acts nowrap"><button class="link fill" type="button" data-for="listener-name" data-value="{{ l.name }}">change…</button> <button class="link danger" hx-post="/c/listeners/{{ l.name|urlencode }}/delete" hx-target="#server-result" hx-confirm="Stop and remove listener {{ l.name }}?">remove</button></td></tr>{% endfor %}
   </tbody></table></div>
   <div class="card-body">
   <form hx-post="/c/listeners" hx-target="#server-result">
     <div class="fields">
-      <label class="field"><span>Name</span><input name="name" required placeholder="default"><small>An existing name changes that listener.</small></label>
-      <label class="field"><span>Address</span><input name="addr" required placeholder="127.0.0.1:8080"></label>
-      <label class="field"><span>Certificate</span><input name="cert" placeholder="/etc/ssl/pkgpod.pem"><small>PEM chain; with a key: TLS.</small></label>
-      <label class="field"><span>Key</span><input name="key" placeholder="/etc/ssl/private/pkgpod.key"></label>
-      <label class="field"><span>Protocol</span><select name="proto"><option value="http">http (TLS with a certificate)</option><option value="ftp">ftp</option></select><small>FTP: read-only, anonymous, public files repositories only.</small></label>
-      <label class="field"><span>Passive ports</span><input name="passive" placeholder="30000-30100"><small>FTP data ports for a firewall; empty: any.</small></label>
-      <label class="check field"><input type="checkbox" name="disabled"> <span>disabled</span></label>
+      <label class="field"><span>Name</span><input id="listener-name" name="name" required placeholder="default" list="dl-listeners" autocomplete="off" autocapitalize="off" spellcheck="false" data-prefill="{{ listener_prefill }}"><datalist id="dl-listeners">{% for l in listeners %}<option value="{{ l.name }}">{% endfor %}</datalist><small>A new name adds a listener; an existing one (or "change…") shows its settings to change.</small></label>
+      <label class="field"><span>Address</span><input name="addr" required placeholder="127.0.0.1:8080" autocomplete="off" spellcheck="false"></label>
+      <label class="field"><span>Protocol</span><select name="proto"><option value="http">http (TLS with a certificate)</option><option value="ftp">ftp</option></select><small class="only-ftp">Read-only, anonymous, public files repositories only.</small></label>
+      <label class="field only-http"><span>Certificate</span><input name="cert" placeholder="/etc/ssl/pkgpod.pem" autocomplete="off" spellcheck="false"><small>PEM chain; with a key: TLS.</small></label>
+      <label class="field only-http"><span>Key</span><input name="key" placeholder="/etc/ssl/private/pkgpod.key" autocomplete="off" spellcheck="false"></label>
+      <label class="field only-ftp"><span>Passive ports</span><input name="passive" placeholder="30000-30100" autocomplete="off" spellcheck="false"><small>Data ports for a firewall; empty: any.</small></label>
+      <label class="check field"><span class="check-line"><input type="checkbox" name="disabled"> <span>Disabled</span></span><small>Kept, but not listening.</small></label>
     </div>
     <div class="form-foot"><button type="submit">Save listener</button></div>
   </form>
@@ -38,12 +38,12 @@
   {% endif %}
   <div class="card-body">
   <form class="inline" hx-post="/c/keys/generate" hx-target="#server-result">
-    New key <input name="name" required placeholder="main" size="10"> for <input name="uid" required placeholder="Team packages &lt;packages@example.org&gt;" size="36"> <button type="submit">Generate</button>
+    New key <input name="name" required placeholder="main" size="10" autocomplete="off" autocapitalize="off" spellcheck="false"> for <input name="uid" required placeholder="Team packages &lt;packages@example.org&gt;" size="36" autocomplete="off"> <button type="submit">Generate</button>
   </form>
   <form class="mt" hx-post="/c/keys" hx-target="#server-result">
     <div class="fields">
-      <label class="field"><span>Import a key as</span><input name="name" required placeholder="name"></label>
-      <label class="field"><span>Its passphrase</span><input name="passphrase" type="password" autocomplete="off" placeholder="if it has one"></label>
+      <label class="field"><span>Import a key as</span><input name="name" required placeholder="name" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+      <label class="field"><span>Its passphrase</span><input name="passphrase" type="password" autocomplete="new-password" placeholder="if it has one"></label>
       <label class="field wide"><span>Secret key</span><textarea name="secret_key" rows="4" required spellcheck="false" placeholder="gpg --export-secret-keys --armor &lt;fingerprint&gt;"></textarea><small>Kept by pkgpod in its data directory (mode 0600) and in backups.</small></label>
     </div>
     <div class="form-foot"><button type="submit">Import</button></div>
@@ -55,14 +55,14 @@
   <div class="table-wrap"><table><thead><tr><th>Name</th><th>Path</th><th></th></tr></thead><tbody>
   {% for (n, p) in storages %}<tr><td><b>{{ n }}</b></td><td class="mono">{{ p }}</td><td class="acts">{% if n != "main" %}<button class="link danger" hx-post="/c/storages/{{ n|urlencode }}/delete" hx-target="#server-result">remove</button>{% endif %}</td></tr>{% endfor %}
   </tbody></table></div>
-  <div class="card-body"><form class="inline" hx-post="/c/storages" hx-target="#server-result"><input name="name" required placeholder="name" size="10"> <input name="path" required placeholder="/srv/pkgpod" size="30"> <button type="submit">Save storage</button></form></div>
+  <div class="card-body"><form class="inline" hx-post="/c/storages" hx-target="#server-result"><input name="name" required placeholder="name" size="10" autocomplete="off" autocapitalize="off" spellcheck="false"> <input name="path" required placeholder="/srv/pkgpod" size="30" autocomplete="off" spellcheck="false"> <button type="submit">Save storage</button></form></div>
 </div>
 <div class="card">
   <div class="card-head"><h2>Garbage collection</h2><span class="hint">runs daily; removes versions retention does not keep, then what no kept version uses</span></div>
   <div class="card-body">
   <form class="inline" hx-post="/c/gc" hx-target="next .result">
     Keep what is younger than <input type="number" name="grace_hours" value="24" size="4"> hours
-    <button type="submit" name="dry_run" value="1">Count</button> <button type="submit" class="danger" name="dry_run" value="0">Collect</button>
+    <button type="submit" name="dry_run" value="1" title="Only count what would go">Count</button> <button type="submit" class="danger" name="dry_run" value="0">Collect</button>
   </form>
   <div class="result"></div>
   </div>

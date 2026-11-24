@@ -1,6 +1,7 @@
 {# SPDX-License-Identifier: AGPL-3.0-only #}
 <div class="card">
   <div class="card-head"><h2>How to use</h2><span class="hint">commands for this repository's clients, with its address</span></div>
+  {% if dists.len() > 1 %}<div class="card-body dist-switch"><span class="muted small">For the dist</span>{% for (d, on) in dists %} <button type="button" class="link{% if on %} on{% endif %}" hx-get="/r/{{ repo }}/use?dist={{ d|urlencode }}" hx-target="#tab"{% if on %} aria-pressed="true"{% endif %}>{{ d }}</button>{% endfor %}</div>{% endif %}
   <div class="card-body use">
   {% for u in usage %}<div class="use-step">
     <p class="use-label">{{ u.label }}</p>

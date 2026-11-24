@@ -12,5 +12,6 @@ pub fn router(app: Arc<App>) -> Router {
     Router::new()
         .merge(crate::api::router())
         .merge(crate::console::router())
+        .fallback(crate::console::not_found)
         .with_state(app)
 }

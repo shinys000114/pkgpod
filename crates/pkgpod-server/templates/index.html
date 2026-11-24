@@ -19,12 +19,12 @@
     <tbody>
     {% for r in repos %}
     <tr>
-      <td><a class="repo-name" href="/r/{{ r.name }}">{{ r.name }}</a>{% if r.public %} <span class="tag">public</span>{% endif %}
-        {% if !r.description.is_empty() %}<div class="muted small">{{ r.description }}</div>{% endif %}</td>
+      <td class="nowrap"><a class="repo-name" href="/r/{{ r.name }}">{{ r.name }}</a>{% if r.public %} <span class="tag">public</span>{% endif %}
+        {% if !r.description.is_empty() %}<div class="muted small desc">{{ r.description }}</div>{% endif %}</td>
       <td class="nowrap"><span class="fmt fmt-{{ r.format }}">{{ r.format_title }}</span>{% if r.kind == "mirror" %} <span class="tag">mirror</span>{% endif %}</td>
       <td class="nowrap{% if !r.state.is_empty() %} st-{{ r.state }}{% endif %}">{{ r.content }}</td>
       <td class="nowrap muted">{% if r.kind == "mirror" %}—{% else %}v{{ r.version }} · {{ r.updated }}{% endif %}</td>
-      <td class="mono small wrap">{% for u in r.urls %}{{ u }}<br>{% endfor %}</td>
+      <td class="mono small nowrap">{% for u in r.urls %}{{ u }}<br>{% endfor %}</td>
     </tr>
     {% endfor %}
     </tbody>
@@ -32,11 +32,12 @@
   {% endif %}
 </div>
 {% if s.admin %}
+<datalist id="dl-dists">{% for d in ["trixie", "bookworm", "bullseye", "noble", "jammy", "focal", "stable", "testing", "unstable"] %}<option value="{{ d }}">{% endfor %}</datalist>
 <div class="card" id="new">
   <div class="card-head"><h2>New repository</h2><span class="hint">choose what it holds</span></div>
   <div class="card-body chooser">
   {% for f in formats %}
-    <input type="radio" name="newrepo" id="new-{{ f.id }}-{{ f.kind }}" class="choice-input"{% if loop.first %} checked{% endif %}>
+    <input type="radio" name="newrepo" id="new-{{ f.id }}-{{ f.kind }}" class="choice-input"{% if f.id == "deb" && f.kind == "hosted" %} checked{% endif %}>
     <label for="new-{{ f.id }}-{{ f.kind }}" class="choice"><span class="choice-title"><span class="fmt fmt-{{ f.id }}">{{ f.title }}</span>{% if f.kind == "mirror" %}<span class="tag">mirror</span>{% endif %}</span><small>{{ f.blurb }}</small></label>
     <form class="choice-form" hx-post="/c/repos" hx-target="next .result">
       <input type="hidden" name="format" value="{{ f.id }}">
@@ -49,10 +50,10 @@
       </div>
       {% endif %}
       <div class="fields">
-        <label class="field"><span>Name</span><input name="name" placeholder="{% if f.kind == "mirror" %}e.g. debian{% else %}e.g. team{% endif %}" required pattern="[a-z0-9][a-z0-9._-]*"><small>Lowercase letters, digits, '.', '_', '-'.</small></label>
+        <label class="field"><span>Name</span><input name="name" placeholder="{% if f.kind == "mirror" %}e.g. debian{% else %}e.g. team{% endif %}" required pattern="[a-z0-9][a-z0-9._-]*" autocomplete="off" autocapitalize="off" spellcheck="false"><small>Lowercase letters, digits, '.', '_', '-'.</small></label>
         {% if f.id == "deb" && f.kind == "hosted" %}
-        <label class="field"><span>First dist</span><input name="first_dist" placeholder="noble"><small>The codename clients put in sources.list; more can be added later.</small></label>
-        <label class="field"><span>Components</span><input name="first_components" placeholder="main"></label>
+        <label class="field"><span>First dist</span><input name="first_dist" placeholder="noble" list="dl-dists" autocomplete="off" autocapitalize="off" spellcheck="false"><small>The codename clients put in sources.list; more can be added later.</small></label>
+        <label class="field"><span>Components</span><input name="first_components" placeholder="main" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
         {% endif %}
         {% if storages.len() > 1 %}<label class="field"><span>Storage</span><select name="storage">{% for st in storages %}<option>{{ st }}</option>{% endfor %}</select></label>{% endif %}
       </div>

@@ -6,6 +6,7 @@
   --surface: #ffffff;
   --surface-2: #f0f2f5;
   --fg: #1c2128;
+  --fmt-k: 50%;
   --muted: #5f6873;
   --line: #e2e5ea;
   --line-strong: #cfd4db;
@@ -33,6 +34,7 @@
     --surface: #151b23;
     --surface-2: #1b222c;
     --fg: #e4e9ef;
+    --fmt-k: 40%;
     --muted: #8d97a3;
     --line: #283039;
     --line-strong: #353f4a;
@@ -256,6 +258,14 @@ button.link.danger:hover { background: var(--bad-soft); }
 .form-foot { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; margin-top: .9rem; }
 .form-foot .spacer { flex: 1; }
 label.check { display: inline-flex; gap: .4rem; align-items: center; font-size: 13.5px; color: var(--fg); cursor: pointer; }
+/* A yes/no setting in a grid of fields: the box and its name on one line,
+   at the top of the cell like the other fields' names, the help below. */
+label.check.field { display: flex; flex-direction: column; align-items: stretch; gap: .3rem; padding-top: 1.45rem; }
+label.check.field .check-line { display: inline-flex; gap: .45rem; align-items: center; color: var(--fg); font-weight: 500; }
+.dist-pick { border: 0; padding: 0; margin: 0; min-width: 0; display: flex; flex-direction: column; align-items: stretch; gap: .3rem; }
+.dist-pick legend { padding: 0; margin-bottom: .3rem; color: var(--muted); font-size: 13px; font-weight: 500; }
+.dist-pick .check-row { display: flex; flex-wrap: wrap; gap: .35rem 1.1rem; }
+code.op-id { font: 11.5px var(--mono); color: var(--muted); background: var(--surface-2); padding: .05rem .35rem; border-radius: 4px; font-weight: 400; }
 .toolbar { display: flex; gap: .6rem; flex-wrap: wrap; padding: .8rem 1.1rem; border-bottom: 1px solid var(--line); }
 .toolbar input { flex: 1 1 220px; width: auto; }
 .toolbar select { flex: 0 1 180px; width: auto; }
@@ -312,12 +322,12 @@ pre.log {
 
 /* ---- login ------------------------------------------------------------ */
 .login-wrap { min-height: 100vh; display: grid; place-items: center; padding: 1rem; }
-form.login {
+.login {
   width: min(380px, 100%); background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
   padding: 1.8rem 1.7rem; display: flex; flex-direction: column; gap: .9rem; box-shadow: 0 10px 30px rgba(16, 24, 40, .08);
 }
-form.login .brand { color: var(--fg); padding: 0 0 .3rem; font-size: 1.2rem; }
-form.login h1 { font-size: 1.1rem; font-weight: 600; color: var(--muted); }
+.login .brand { color: var(--fg); padding: 0 0 .3rem; font-size: 1.2rem; }
+.login h1 { font-size: 1.1rem; font-weight: 600; color: var(--muted); }
 form.login button { width: 100%; padding: .6rem; margin-top: .3rem; }
 
 /* In-flight requests (htmx adds .htmx-request; its own injected styles are
@@ -356,8 +366,6 @@ details.toml-help h4 { margin: .7rem 0 .35rem; font-size: 13.5px; }
 table.help td { padding: .25rem .5rem; border-bottom: 1px solid var(--line); vertical-align: top; font-size: 13px; }
 table.help td:first-child { white-space: nowrap; }
 
-fieldset.dist-pick { border: 0; padding: .6rem 0 0; margin: 0; display: flex; flex-wrap: wrap; gap: .35rem 1rem; align-items: center; }
-fieldset.dist-pick legend { font-size: 13px; color: var(--muted); padding: 0; margin-bottom: .2rem; }
 
 /* ---- pkgpod additions ---------------------------------------------------- */
 .side .ver { font-size: 11.5px; padding: 0 .6rem; opacity: .7; }
@@ -376,24 +384,27 @@ form.inline + form.inline { margin-top: .5rem; }
 /* A format's label, coloured by format. */
 .fmt { display: inline-block; font-size: 12px; font-weight: 600; padding: .1rem .5rem; border-radius: 999px;
   border: 1px solid transparent; background: var(--surface-2); color: var(--fg); vertical-align: middle; white-space: nowrap; }
-.fmt-deb { background: color-mix(in srgb, #d6336c 14%, var(--surface)); color: color-mix(in srgb, #d6336c 80%, var(--fg)); }
-.fmt-files { background: color-mix(in srgb, #868e96 18%, var(--surface)); color: var(--fg); }
-.fmt-oci { background: color-mix(in srgb, #1c7ed6 15%, var(--surface)); color: color-mix(in srgb, #1c7ed6 80%, var(--fg)); }
-.fmt-pypi { background: color-mix(in srgb, #f59f00 18%, var(--surface)); color: color-mix(in srgb, #b46900 85%, var(--fg)); }
-.fmt-cargo { background: color-mix(in srgb, #b7410e 18%, var(--surface)); color: color-mix(in srgb, #a33a0c 85%, var(--fg)); }
-.fmt-go { background: color-mix(in srgb, #00add8 16%, var(--surface)); color: color-mix(in srgb, #007d9c 85%, var(--fg)); }
-.fmt-apk { background: color-mix(in srgb, #0d597f 16%, var(--surface)); color: color-mix(in srgb, #0d597f 85%, var(--fg)); }
-.fmt-rpm { background: color-mix(in srgb, #ee0000 12%, var(--surface)); color: color-mix(in srgb, #b30000 85%, var(--fg)); }
-.fmt-helm { background: color-mix(in srgb, #0f1689 14%, var(--surface)); color: color-mix(in srgb, #277a9f 85%, var(--fg)); }
-.fmt-maven { background: color-mix(in srgb, #c71a36 12%, var(--surface)); color: color-mix(in srgb, #a3162d 85%, var(--fg)); }
-.fmt-gems { background: color-mix(in srgb, #cc342d 12%, var(--surface)); color: color-mix(in srgb, #b02a24 85%, var(--fg)); }
-.fmt-arch { background: color-mix(in srgb, #1793d1 14%, var(--surface)); color: color-mix(in srgb, #1478aa 85%, var(--fg)); }
-.fmt-nuget { background: color-mix(in srgb, #004880 14%, var(--surface)); color: color-mix(in srgb, #2f6fa3 85%, var(--fg)); }
-.fmt-composer { background: color-mix(in srgb, #885630 14%, var(--surface)); color: color-mix(in srgb, #6c4423 85%, var(--fg)); }
-.fmt-conda { background: color-mix(in srgb, #43b02a 14%, var(--surface)); color: color-mix(in srgb, #2f7d1e 85%, var(--fg)); }
-.fmt-cran { background: color-mix(in srgb, #276dc3 14%, var(--surface)); color: color-mix(in srgb, #1f5aa3 85%, var(--fg)); }
-.fmt-pub { background: color-mix(in srgb, #0175c2 14%, var(--surface)); color: color-mix(in srgb, #015d9a 85%, var(--fg)); }
-.fmt-npm { background: color-mix(in srgb, #c92a2a 14%, var(--surface)); color: color-mix(in srgb, #c92a2a 80%, var(--fg)); }
+.fmt-deb { --c: #d6336c; }
+/* A format's colour, toned towards the text colour enough to be read on
+   its own tint in either scheme (4.5:1 at least). */
+.fmt[class*="fmt-"] { background: color-mix(in srgb, var(--c, #868e96) 16%, var(--surface)); color: color-mix(in srgb, var(--c, #868e96) var(--fmt-k), var(--fg)); }
+.fmt.fmt-files { background: color-mix(in srgb, #868e96 18%, var(--surface)); color: var(--fg); }
+.fmt-oci { --c: #1c7ed6; }
+.fmt-pypi { --c: #f59f00; }
+.fmt-cargo { --c: #b7410e; }
+.fmt-go { --c: #00add8; }
+.fmt-apk { --c: #0d597f; }
+.fmt-rpm { --c: #ee0000; }
+.fmt-helm { --c: #0f1689; }
+.fmt-maven { --c: #c71a36; }
+.fmt-gems { --c: #cc342d; }
+.fmt-arch { --c: #1793d1; }
+.fmt-nuget { --c: #004880; }
+.fmt-composer { --c: #885630; }
+.fmt-conda { --c: #43b02a; }
+.fmt-cran { --c: #276dc3; }
+.fmt-pub { --c: #0175c2; }
+.fmt-npm { --c: #c92a2a; }
 .page-head h1 .fmt, .page-head h1 .tag { font-size: 12px; }
 
 /* States in text. */
@@ -439,7 +450,7 @@ button.copy.done { color: var(--ok); border-color: var(--ok); }
 
 /* The new repository chooser: radio choices, the chosen one's form. */
 .chooser { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(210px, 100%), 1fr)); gap: .6rem; }
-.chooser .choice-input { position: absolute; opacity: 0; pointer-events: none; }
+.chooser .choice-input { position: absolute; opacity: 0; pointer-events: none; width: 1px; height: 1px; margin: 0; }
 .chooser .choice { display: flex; flex-direction: column; gap: .35rem; padding: .7rem .8rem; border: 1px solid var(--line);
   border-radius: var(--radius); cursor: pointer; background: var(--surface); }
 .chooser .choice-title { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap; }
@@ -465,3 +476,15 @@ details.more[open] > summary { margin-bottom: .5rem; }
 .notice { border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line)); background: var(--warn-soft); border-radius: var(--radius);
   padding: .7rem .9rem; margin-bottom: .9rem; display: flex; flex-wrap: wrap; gap: .5rem .8rem; align-items: center; }
 .notice p { margin: 0; flex: 1 1 100%; }
+
+/* ---- small pieces ------------------------------------------------------ */
+.card.narrow { max-width: 560px; }
+.pick-box { max-height: 9.5rem; overflow-y: auto; padding: .35rem .1rem; }
+button.link.small, a.small { font-size: 12px; }
+/* Listener form: what only one protocol uses. */
+form:has(select[name="proto"] option[value="ftp"]:checked) .only-http { display: none; }
+form:not(:has(select[name="proto"] option[value="ftp"]:checked)) .only-ftp { display: none; }
+.dist-switch { display: flex; gap: .25rem; align-items: center; flex-wrap: wrap; padding-bottom: 0; }
+.dist-switch button.link.on { background: var(--accent-soft); color: var(--fg); }
+.login .first-login { margin: .6rem 0 0; line-height: 1.45; }
+.repos .desc { white-space: normal; max-width: 26rem; }
