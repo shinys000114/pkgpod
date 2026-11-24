@@ -26,6 +26,7 @@ pkgpod-rpm = { path = "crates/pkgpod-rpm" }
 pkgpod-helm = { path = "crates/pkgpod-helm" }
 pkgpod-maven = { path = "crates/pkgpod-maven" }
 pkgpod-gems = { path = "crates/pkgpod-gems" }
+pkgpod-arch = { path = "crates/pkgpod-arch" }
 pkgpod-mirror = { path = "crates/pkgpod-mirror" }
 pkgpod-server = { path = "crates/pkgpod-server" }
 clap = { version = "4.6", features = ["derive", "env"] }

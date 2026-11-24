@@ -2327,6 +2327,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pkgpod-arch"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "flate2",
+ "liblzma",
+ "pkgpod-base",
+ "pkgpod-engine",
+ "serde_json",
+ "tar",
+ "zstd",
+]
+
+[[package]]
 name = "pkgpod-base"
 version = "0.0.0"
 dependencies = [
@@ -2533,6 +2547,7 @@ dependencies = [
  "hyper-util",
  "jiff",
  "pkgpod-apk",
+ "pkgpod-arch",
  "pkgpod-base",
  "pkgpod-cargo",
  "pkgpod-deb",

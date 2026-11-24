@@ -23,6 +23,7 @@ pkgpod-rpm.workspace = true
 pkgpod-helm.workspace = true
 pkgpod-maven.workspace = true
 pkgpod-gems.workspace = true
+pkgpod-arch.workspace = true
 pkgpod-mirror.workspace = true
 axum.workspace = true
 tokio.workspace = true

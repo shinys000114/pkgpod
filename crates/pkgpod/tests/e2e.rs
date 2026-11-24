@@ -586,7 +586,7 @@ fn console_login_pages_and_csrf() {
     // page, usage and actions open.
     let src = s.url("/web/");
     type Fields<'a> = &'a [(&'a str, &'a str)];
-    let choices: [(&str, &str, &str, Fields); 14] = [
+    let choices: [(&str, &str, &str, Fields); 15] = [
         ("deb", "hosted", "c-deb", &[("first_dist", "noble")]),
         (
             "deb",
@@ -606,6 +606,7 @@ fn console_login_pages_and_csrf() {
         ("helm", "hosted", "c-helm", &[]),
         ("maven", "hosted", "c-maven", &[]),
         ("gems", "hosted", "c-gems", &[]),
+        ("arch", "hosted", "c-arch", &[]),
     ];
     for (format, kind, name, extra) in choices {
         let mut form = vec![("format", format), ("kind", kind), ("name", name)];
@@ -4633,6 +4634,7 @@ fn serving_root_lists_trees_not_registries() {
         ("tree-helm", "helm"),
         ("tree-maven", "maven"),
         ("tree-gems", "gems"),
+        ("tree-arch", "arch"),
         ("reg-npm", "npm"),
         ("reg-oci", "oci"),
         ("reg-cargo", "cargo"),
@@ -4658,6 +4660,7 @@ fn serving_root_lists_trees_not_registries() {
         "tree-helm",
         "tree-maven",
         "tree-gems",
+        "tree-arch",
     ] {
         assert!(root.contains(name), "{name}: {root}");
     }
@@ -5734,4 +5737,121 @@ fn gems_with_gem_and_bundler() {
     assert!(ok && out.contains("Successfully yanked"), "{out}");
     let (ok, out) = bundle("", "hello-pk");
     assert!(ok && out.contains("hello-pk 1.0.0"), "{out}");
+}
+
+const ARCH_IMAGE: &str = "archlinux:latest";
+
+#[test]
+fn arch_packages_with_pacman() {
+    if images_here(&[ARCH_IMAGE]).is_empty() || !have("gpg") {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&[
+        "key",
+        "generate",
+        "main",
+        "pkgpod e2e <e2e@example.invalid>",
+    ])
+    .unwrap();
+    s.cli(&["repo", "create", "archrepo", "-f", "arch"])
+        .unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "archrepo", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    // Packages packed as makepkg packs them: .PKGINFO and the files, a
+    // tar compressed with zstd.
+    let work = s.dir.path().join("archwork");
+    let mut script = String::from("set -e\n");
+    for (name, ver, arch, dep) in [
+        ("hello-pk", "1.0-1", "x86_64", ""),
+        ("hello-pk", "1.1-1", "x86_64", ""),
+        ("tool-pk", "0.1-1", "any", "depend = hello-pk>=1.0\n"),
+    ] {
+        let d = work.join(format!("{name}-{ver}"));
+        std::fs::create_dir_all(d.join("usr/bin")).unwrap();
+        std::fs::write(
+            d.join(".PKGINFO"),
+            format!(
+                "pkgname = {name}\npkgbase = {name}\npkgver = {ver}\npkgdesc = test\n\
+                 builddate = 1700000000\npackager = t\nsize = 30\narch = {arch}\nlicense = MIT\n{dep}"
+            ),
+        )
+        .unwrap();
+        let bin = d.join("usr/bin").join(name);
+        std::fs::write(&bin, format!("#!/bin/sh\necho {name} {ver}\n")).unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        script.push_str(&format!(
+            "cd /work/{name}-{ver} && bsdtar -cf - .PKGINFO usr | zstd -q -o /work/{name}-{ver}-{arch}.pkg.tar.zst\n"
+        ));
+    }
+    let (ok, out) = docker_sh_in(ARCH_IMAGE, Some(&work), &script);
+    assert!(ok, "{out}");
+    let c = reqwest::blocking::Client::new();
+    let upload = |file: &str| {
+        let r = c
+            .put(s.url("/archrepo/upload?repository=pk"))
+            .basic_auth("token", Some(&tok))
+            .body(std::fs::read(work.join(file)).unwrap())
+            .send()
+            .unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    let (st, out) = upload("hello-pk-1.0-1-x86_64.pkg.tar.zst");
+    assert_eq!(st, 201, "{out}");
+    s.cli(&["label", "archrepo", "first"]).unwrap();
+    for f in [
+        "hello-pk-1.1-1-x86_64.pkg.tar.zst",
+        "tool-pk-0.1-1-any.pkg.tar.zst",
+    ] {
+        let (st, out) = upload(f);
+        assert_eq!(st, 201, "{out}");
+    }
+    let base = s
+        .url("/archrepo/")
+        .replacen("http://", &format!("http://token:{tok}@"), 1);
+    // pacman with only this repository, packages and databases signed.
+    let setup = |at: &str, trust: bool| {
+        let mut s = String::from("set -e\npacman-key --init >/dev/null 2>&1\n");
+        if trust {
+            s.push_str(&format!("curl -fsS {base}key.asc -o /tmp/k.asc\n"));
+            s.push_str("pacman-key --add /tmp/k.asc >/dev/null 2>&1\n");
+            s.push_str("fpr=$(gpg --show-keys --with-colons /tmp/k.asc | awk -F: '/^fpr/{print $10; exit}')\n");
+            s.push_str("pacman-key --lsign-key \"$fpr\" >/dev/null 2>&1\n");
+        }
+        s.push_str(&format!(
+            "cat > /tmp/pacman.conf <<'EOF'\n[options]\nArchitecture = auto\n\
+             SigLevel = Required DatabaseRequired\n\n[pk]\nServer = {base}{at}$repo/$arch\nEOF\n"
+        ));
+        s.push_str("P='pacman --config /tmp/pacman.conf --noconfirm'\n");
+        s
+    };
+    let (ok, out) = docker_sh(
+        ARCH_IMAGE,
+        &format!(
+            "{}$P -Sy tool-pk >/dev/null\nhello-pk; tool-pk\n$P -Fy >/dev/null; $P -F usr/bin/tool-pk",
+            setup("", true)
+        ),
+    );
+    assert!(
+        ok && out.contains("hello-pk 1.1-1")
+            && out.contains("tool-pk 0.1-1")
+            && out.contains("pk/tool-pk"),
+        "{out}"
+    );
+    // A labelled version, as it was.
+    let (ok, out) = docker_sh(
+        ARCH_IMAGE,
+        &format!(
+            "{}$P -Sy hello-pk >/dev/null\nhello-pk",
+            setup("@first/", true)
+        ),
+    );
+    assert!(ok && out.contains("hello-pk 1.0-1"), "{out}");
+    // Without the key, nothing is trusted.
+    let (ok, out) = docker_sh(ARCH_IMAGE, &format!("{}$P -Sy hello-pk", setup("", false)));
+    assert!(!ok && out.to_lowercase().contains("signature"), "{out}");
 }
