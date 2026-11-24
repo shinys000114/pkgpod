@@ -20,7 +20,8 @@ use crate::{App, Error, Result};
 #[derive(Debug, Clone, Deserialize)]
 pub struct ImportReq {
     /// deb: the archive root (`http(s)://host/debian/`); files: the
-    /// directory (rsync or http(s) listings).
+    /// directory (rsync or http(s) listings). Both: a directory on the
+    /// server (`/srv/apt/`, `file:///srv/apt/`), for server admins.
     pub source: String,
     /// deb: the dists to import.
     #[serde(default)]
@@ -66,9 +67,42 @@ fn yes() -> bool {
     true
 }
 
+/// The directory on the server a source names (`/dir`, `file:///dir`),
+/// if it names one.
+pub fn local_source(source: &str) -> Option<std::path::PathBuf> {
+    let s = source.trim();
+    if s.starts_with("file://") {
+        pkgpod_mirror::fetch::file_path(s)
+    } else if s.starts_with('/') {
+        Some(s.into())
+    } else {
+        None
+    }
+}
+
+/// A local source as a directory that is there.
+fn local_dir(p: &std::path::Path) -> Result<std::path::PathBuf> {
+    let d = p
+        .canonicalize()
+        .map_err(|e| Error::Invalid(format!("{}: {e}", p.display())))?;
+    if !d.is_dir() {
+        return Err(Error::Invalid(format!(
+            "{} is not a directory",
+            d.display()
+        )));
+    }
+    Ok(d)
+}
+
 /// Starts an import job into a hosted deb repository.
-pub fn start(app: &Arc<App>, repo: &str, req: ImportReq, actor: &str) -> Result<i64> {
+pub fn start(app: &Arc<App>, repo: &str, mut req: ImportReq, actor: &str) -> Result<i64> {
     let r = app.engine.repo(repo)?;
+    let local = local_source(&req.source)
+        .map(|p| local_dir(&p))
+        .transpose()?;
+    if local.is_some() && r.format == "oci" {
+        return Err(Error::Invalid("an OCI import reads a registry".into()));
+    }
     if r.format == "oci" {
         if req.images.is_empty() {
             return Err(Error::Invalid("name the images to import".into()));
@@ -91,6 +125,18 @@ pub fn start(app: &Arc<App>, repo: &str, req: ImportReq, actor: &str) -> Result<
         if !prefix.is_empty() {
             pkgpod_files::check_path(&prefix)?;
         }
+        let actor2 = actor.to_string();
+        if let Some(dir) = local {
+            return crate::jobs::start(
+                app,
+                r,
+                "import",
+                actor,
+                Box::new(move |app, r, cancel, log| {
+                    run_files_local(app, r, &req, &dir, &prefix, &actor2, cancel, log)
+                }),
+            );
+        }
         let s = req.source.trim();
         if !(["rsync://", "http://", "https://"]
             .iter()
@@ -98,10 +144,9 @@ pub fn start(app: &Arc<App>, repo: &str, req: ImportReq, actor: &str) -> Result<
             || s.contains("::"))
         {
             return Err(Error::Invalid(format!(
-                "{s:?}: a source is rsync://, host::module or http(s)://"
+                "{s:?}: a source is rsync://, host::module, http(s):// or a directory on the server"
             )));
         }
-        let actor2 = actor.to_string();
         return crate::jobs::start(
             app,
             r,
@@ -120,9 +165,18 @@ pub fn start(app: &Arc<App>, repo: &str, req: ImportReq, actor: &str) -> Result<
     if req.dists.is_empty() {
         return Err(Error::Invalid("name the dists to import".into()));
     }
-    if !(req.source.starts_with("http://") || req.source.starts_with("https://")) {
+    if let Some(dir) = local {
+        // Read through the mirror engine, which checks the signature and
+        // every file against its index.
+        req.source = format!(
+            "file://{}/",
+            dir.to_string_lossy()
+                .trim_end_matches('/')
+                .replace('%', "%25")
+        );
+    } else if !(req.source.starts_with("http://") || req.source.starts_with("https://")) {
         return Err(Error::Invalid(format!(
-            "{:?}: imports read http(s) archives",
+            "{:?}: imports read http(s) archives or a directory on the server",
             req.source
         )));
     }
@@ -303,8 +357,21 @@ fn fetch_and_take_in(
         });
     }
 
-    // Into the store first (no lock held), then one change.
+    // Into the store first (no lock held), then one change. Staged files
+    // are moved in; one several dists list is taken once.
     let store = r.store();
+    let mut taken: std::collections::HashMap<String, (pkgpod_base::Digest, u64)> =
+        Default::default();
+    let mut take = |path: &str| -> Result<(pkgpod_base::Digest, u64), String> {
+        if let Some(t) = taken.get(path) {
+            return Ok(*t);
+        }
+        let t = store
+            .put_owned(&staging.join(path))
+            .map_err(|e| e.to_string())?;
+        taken.insert(path.to_string(), t);
+        Ok(t)
+    };
     let mut uploads: Vec<(String, String, Upload)> = Vec::new();
     for d in &plan {
         for (c, path) in &d.files {
@@ -312,7 +379,7 @@ fn fetch_and_take_in(
                 return Err("interrupted".into());
             }
             let p = staging.join(path);
-            let (sha256, size) = store.put_file(&p).map_err(|e| e.to_string())?;
+            let (sha256, size) = take(path)?;
             uploads.push((
                 d.name.clone(),
                 c.clone(),
@@ -333,7 +400,7 @@ fn fetch_and_take_in(
                     return Err("interrupted".into());
                 }
                 let p = staging.join(path);
-                let (sha256, size) = store.put_file(&p).map_err(|e| e.to_string())?;
+                let (sha256, size) = take(path)?;
                 ups.push(Upload {
                     sha256,
                     size,
@@ -448,102 +515,161 @@ fn run_files(
             return Err(format!("fetching failed: {summary}"));
         }
         log(&format!("fetched: {summary}; taking the files in"));
-        // Every regular file, by its path under the staging directory.
-        let mut files = Vec::new();
-        let mut todo = vec![staging.clone()];
-        while let Some(dir) = todo.pop() {
-            let rd = std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-            for d in rd.flatten() {
-                let name = d.file_name().to_string_lossy().into_owned();
-                if pkgpod_files::engine_name(&name) {
-                    continue;
-                }
-                let ft = d.file_type().map_err(|e| e.to_string())?;
-                if ft.is_dir() {
-                    todo.push(d.path());
-                } else if ft.is_file() {
-                    files.push(d.path());
-                }
-            }
-        }
-        files.sort();
-        let store = r.store();
-        let mut ups = Vec::new();
-        for p in &files {
-            if cancel.load(Ordering::Relaxed) {
-                return Err("interrupted".to_string());
-            }
-            let rel = p
-                .strip_prefix(&staging)
-                .map_err(|e| e.to_string())?
-                .to_string_lossy()
-                .into_owned();
-            let path = if prefix.is_empty() {
-                rel
-            } else {
-                format!("{prefix}/{rel}")
-            };
-            if let Err(e) = pkgpod_files::check_path(&path) {
-                log(&format!("left out: {e}"));
-                continue;
-            }
-            let mtime = std::fs::metadata(p)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(0, |d| d.as_secs() as i64);
-            let (sha256, size) = store.put_file(p).map_err(|e| e.to_string())?;
-            ups.push((
-                path,
-                mtime,
-                Upload {
-                    sha256,
-                    size,
-                    filename: None,
-                },
-            ));
-        }
-        let f = app
-            .engine
-            .format(&r.format)
-            .map_err(|e| e.to_string())?
-            .clone();
-        let n = ups.len();
-        let source = req.source.trim().to_string();
-        let out = app
-            .engine
-            .change(&r.name, actor, |cx, e| {
-                for (path, mtime, up) in &ups {
-                    f.ingest(
-                        cx,
-                        up,
-                        &json!({"path": path, "mtime": mtime, "replace": req.replace}),
-                        e,
-                    )?;
-                }
-                Ok(format!(
-                    "imported {n} file(s) from {source}{}",
-                    if prefix.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" into {prefix}/")
-                    }
-                ))
-            })
-            .map_err(|e| e.to_string())?;
-        let summary = match &out.version {
-            Some(v) => format!("{}: version {}", out.summary, v.seq),
-            None => format!("{}: nothing changed", out.summary),
-        };
-        Ok((
-            true,
-            summary,
-            json!({"files": n, "changes": out.changes.len()}),
-        ))
+        take_in_tree(app, r, req, &staging, None, prefix, actor, cancel, log)
     })();
     let _ = std::fs::remove_dir_all(&staging);
     let _ = std::fs::remove_dir_all(&state);
     res
+}
+
+/// Imports a directory on the server into a files repository: its files
+/// are read where they are (copied into the store, never moved or
+/// linked), as one version.
+#[allow(clippy::too_many_arguments)]
+fn run_files_local(
+    app: &App,
+    r: &RepoInfo,
+    req: &ImportReq,
+    dir: &std::path::Path,
+    prefix: &str,
+    actor: &str,
+    cancel: &AtomicBool,
+    log: &(dyn Fn(&str) + Sync),
+) -> Result<(bool, String, Value), String> {
+    let ex = pkgpod_mirror::files::Excludes::new(&req.excludes).map_err(|e| e.to_string())?;
+    log(&format!("reading {} on the server", dir.display()));
+    take_in_tree(app, r, req, dir, Some(&ex), prefix, actor, cancel, log)
+}
+
+/// Takes every regular file under `root` into a files repository under
+/// `prefix`, with its time, as one version. A staging directory's files
+/// (`excludes` None: already applied) are moved in; a directory on the
+/// server is read and left as it is.
+#[allow(clippy::too_many_arguments)]
+fn take_in_tree(
+    app: &App,
+    r: &RepoInfo,
+    req: &ImportReq,
+    root: &std::path::Path,
+    excludes: Option<&pkgpod_mirror::files::Excludes>,
+    prefix: &str,
+    actor: &str,
+    cancel: &AtomicBool,
+    log: &(dyn Fn(&str) + Sync),
+) -> Result<(bool, String, Value), String> {
+    let staged = excludes.is_none();
+    // Every regular file, by its path under the root.
+    let rel_of = |p: &std::path::Path| -> Result<String, String> {
+        Ok(p.strip_prefix(root)
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .into_owned())
+    };
+    let mut files = Vec::new();
+    let mut links = 0usize;
+    let mut todo = vec![root.to_path_buf()];
+    while let Some(dir) = todo.pop() {
+        let rd = std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        for d in rd {
+            let d = d.map_err(|e| format!("{}: {e}", dir.display()))?;
+            let name = d.file_name().to_string_lossy().into_owned();
+            if staged && pkgpod_files::engine_name(&name) {
+                continue;
+            }
+            let ft = d.file_type().map_err(|e| e.to_string())?;
+            if let Some(ex) = excludes
+                && ex.matches(&rel_of(&d.path())?, ft.is_dir())
+            {
+                continue;
+            }
+            if ft.is_dir() {
+                todo.push(d.path());
+            } else if ft.is_file() {
+                files.push(d.path());
+            } else if ft.is_symlink() {
+                links += 1;
+            }
+        }
+    }
+    if links > 0 {
+        log(&format!("left out {links} symbolic link(s)"));
+    }
+    files.sort();
+    log(&format!("{} file(s) to take in", files.len()));
+    let store = r.store();
+    let mut ups = Vec::new();
+    for p in &files {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("interrupted".to_string());
+        }
+        let rel = rel_of(p)?;
+        let path = if prefix.is_empty() {
+            rel
+        } else {
+            format!("{prefix}/{rel}")
+        };
+        if let Err(e) = pkgpod_files::check_path(&path) {
+            log(&format!("left out: {e}"));
+            continue;
+        }
+        let mtime = std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs() as i64);
+        let (sha256, size) = if staged {
+            store.put_owned(p)
+        } else {
+            store.put_file(p)
+        }
+        .map_err(|e| e.to_string())?;
+        ups.push((
+            path,
+            mtime,
+            Upload {
+                sha256,
+                size,
+                filename: None,
+            },
+        ));
+    }
+    let f = app
+        .engine
+        .format(&r.format)
+        .map_err(|e| e.to_string())?
+        .clone();
+    let n = ups.len();
+    let source = req.source.trim().to_string();
+    let out = app
+        .engine
+        .change(&r.name, actor, |cx, e| {
+            for (path, mtime, up) in &ups {
+                f.ingest(
+                    cx,
+                    up,
+                    &json!({"path": path, "mtime": mtime, "replace": req.replace}),
+                    e,
+                )?;
+            }
+            Ok(format!(
+                "imported {n} file(s) from {source}{}",
+                if prefix.is_empty() {
+                    String::new()
+                } else {
+                    format!(" into {prefix}/")
+                }
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let summary = match &out.version {
+        Some(v) => format!("{}: version {}", out.summary, v.seq),
+        None => format!("{}: nothing changed", out.summary),
+    };
+    Ok((
+        true,
+        summary,
+        json!({"files": n, "changes": out.changes.len()}),
+    ))
 }
 
 /// Does a descriptor's platform match `os/arch[/variant]`?

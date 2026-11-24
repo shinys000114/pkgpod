@@ -134,6 +134,48 @@ impl Store {
         self.put_reader(f)
     }
 
+    /// Takes in a file nothing else uses (a staged download): moved into
+    /// place when the store is on the same file system, copied otherwise;
+    /// `src` is gone either way.
+    pub fn put_owned(&self, src: &Path) -> Result<(Digest, u64)> {
+        use sha2::Digest as _;
+        let mut f = fs::File::open(src).map_err(|e| Error::io(src, e))?;
+        let mut h = sha2::Sha256::new();
+        let mut buf = vec![0u8; 256 * 1024];
+        let mut len = 0u64;
+        loop {
+            let n = f.read(&mut buf).map_err(|e| Error::io(src, e))?;
+            if n == 0 {
+                break;
+            }
+            h.update(&buf[..n]);
+            len += n as u64;
+        }
+        drop(f);
+        let d = Digest(h.finalize().into());
+        let to = self.path(&d);
+        if to.is_file() {
+            touch(&to);
+            let _ = fs::remove_file(src);
+            return Ok((d, len));
+        }
+        let dir = to.parent().expect("blob path has a parent");
+        fs::create_dir_all(dir).map_err(|e| Error::io(dir, e))?;
+        set_mode(src, 0o644)?;
+        if fs::rename(src, &to).is_err() {
+            let (d2, n) = self.put_file(src)?;
+            if d2 != d {
+                return Err(Error::Invalid(format!(
+                    "{} changed while it was taken in",
+                    src.display()
+                )));
+            }
+            let _ = fs::remove_file(src);
+            return Ok((d2, n));
+        }
+        Ok((d, len))
+    }
+
     pub fn read(&self, d: &Digest) -> Result<Vec<u8>> {
         let p = self.path(d);
         fs::read(&p).map_err(|e| Error::io(&p, e))
@@ -208,6 +250,22 @@ mod tests {
         assert_eq!(s.list().unwrap().len(), 1);
         s.remove(&d).unwrap();
         assert!(!s.has(&d));
+    }
+
+    #[test]
+    fn owned_files_are_moved_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::new(dir.path().join("store"));
+        let src = dir.path().join("staged");
+        fs::write(&src, b"moved").unwrap();
+        let (d, n) = s.put_owned(&src).unwrap();
+        assert_eq!((d, n), (Digest::of(b"moved"), 5));
+        assert!(!src.exists());
+        assert_eq!(s.read(&d).unwrap(), b"moved");
+        // Already there: the staged copy just goes.
+        fs::write(&src, b"moved").unwrap();
+        assert_eq!(s.put_owned(&src).unwrap().0, d);
+        assert!(!src.exists());
     }
 
     #[test]

@@ -202,11 +202,13 @@ pub(crate) enum Cmd {
         #[arg(long, short)]
         wait: bool,
     },
-    /// Import an apt repository into a hosted one, as one version.
+    /// Import into a hosted repository, as one version: an apt archive
+    /// (deb), a tree (files) or images (oci).
     Import {
         repo: String,
         /// deb: the archive root (http(s)://host/debian/); files: the
-        /// directory (rsync://, http(s):// listings).
+        /// directory (rsync://, http(s):// listings). Both: a directory
+        /// on the server (/srv/apt/), read where it is; server admins only.
         source: String,
         /// deb: the dists to import.
         #[arg(long, value_delimiter = ',')]

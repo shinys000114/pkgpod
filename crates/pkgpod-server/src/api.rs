@@ -688,6 +688,14 @@ pub(crate) async fn repo_patch(
     blocking(&app, move |app| {
         let r0 = app.repo_for(&c, &repo, Role::Admin)?;
         app.check_urls(&repo, &req.settings)?;
+        if let Some(src) = req.settings.get("source").and_then(Value::as_str)
+            && crate::import::local_source(src).is_some()
+            && !c.is_admin()
+        {
+            return Err(Error::Forbidden(
+                "a source on the server's own disk is for server admins".into(),
+            ));
+        }
         if r0.kind == Kind::Group {
             crate::group::check_members(app, &c, &repo, &r0.format, &req.settings)?;
         }
@@ -1939,6 +1947,11 @@ pub(crate) async fn import(
         Ok(())
     })
     .await?;
+    if crate::import::local_source(&req.source).is_some() && !c.is_admin() {
+        return Err(Error::Forbidden(
+            "reading a directory on the server is for server admins".into(),
+        ));
+    }
     let id = crate::import::start(&app, &repo, req, c.name())?;
     app.auth
         .audit(c.name(), "import start", &repo, &id.to_string());
