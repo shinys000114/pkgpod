@@ -261,6 +261,8 @@ pub fn router() -> Router<Arc<App>> {
         .route("/api/v1/repos/{repo}/packages", get(packages))
         .route("/api/v1/repos/{repo}/downloads", get(downloads))
         .route("/api/v1/repos/{repo}/status", get(repo_status))
+        .route("/api/v1/repos/{repo}/cache", get(cache_list))
+        .route("/api/v1/repos/{repo}/cache/{action}", post(cache_change))
         .route(
             "/api/v1/repos/{repo}/badge-token",
             get(badge_token)
@@ -399,6 +401,9 @@ pub(crate) async fn repo_create(
         if req.kind == "group" {
             crate::group::check_members(app, &c, &req.name, &req.format, &req.settings)?;
         }
+        if req.kind == "proxy" {
+            crate::proxy::check_settings(&req.format, &req.settings)?;
+        }
         let r = app.engine.create_repo(
             NewRepo {
                 name: req.name,
@@ -524,6 +529,88 @@ pub(crate) async fn badge_token_drop(
     .await
 }
 
+#[derive(Deserialize)]
+pub(crate) struct CacheQ {
+    #[serde(default)]
+    prefix: String,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+fn proxy_for(app: &App, c: &Caller, repo: &str, role: Role) -> Result<RepoInfo> {
+    let r = app.repo_for(c, repo, role)?;
+    if r.kind != Kind::Proxy {
+        return Err(Error::Invalid(format!(
+            "{repo} is not a proxy: it has no cache"
+        )));
+    }
+    Ok(r)
+}
+
+/// A proxy's cache: its size, and its rows (most recently used first).
+pub(crate) async fn cache_list(
+    State(app): St,
+    Who(c): Who,
+    Path(repo): Path<String>,
+    Query(q): Query<CacheQ>,
+) -> Result<Json<Value>> {
+    blocking(&app, move |app| {
+        proxy_for(app, &c, &repo, Role::Read)?;
+        let (files, all) = app.engine.cache_size(&repo)?;
+        let rows = app
+            .engine
+            .cache_list(&repo, &q.prefix, q.limit.unwrap_or(500).min(5000))?;
+        Ok(Json(json!({
+            "files_bytes": files, "bytes": all,
+            "rows": rows.iter().map(crate::proxy::row_json).collect::<Vec<_>>(),
+        })))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+pub(crate) struct CacheReq {
+    pub(crate) paths: Vec<String>,
+}
+
+/// pin, unpin, evict or prefetch cache paths.
+pub(crate) async fn cache_change(
+    State(app): St,
+    Who(c): Who,
+    Path((repo, action)): Path<(String, String)>,
+    Json(req): Json<CacheReq>,
+) -> Result<Json<Value>> {
+    let (app2, c2, repo2) = (app.clone(), c.clone(), repo.clone());
+    let r = blocking(&app, move |_| proxy_for(&app2, &c2, &repo2, Role::Write)).await?;
+    let out = match action.as_str() {
+        "prefetch" => json!(crate::proxy::prefetch(&app, &r, &req.paths).await?),
+        "pin" | "unpin" | "evict" => {
+            let (paths, a) = (req.paths.clone(), action.clone());
+            let n = blocking(&app, move |app| {
+                Ok(match a.as_str() {
+                    "pin" => app.engine.cache_pin(&repo, &paths, true)?,
+                    "unpin" => app.engine.cache_pin(&repo, &paths, false)?,
+                    _ => app.engine.cache_evict(&repo, &paths)?,
+                })
+            })
+            .await?;
+            json!({"changed": n})
+        }
+        _ => {
+            return Err(Error::NotFound(format!(
+                "no cache action {action}: pin, unpin, evict or prefetch"
+            )));
+        }
+    };
+    app.auth.audit(
+        c.name(),
+        &format!("cache {action}"),
+        &r.name,
+        &req.paths.join(" "),
+    );
+    Ok(Json(out))
+}
+
 fn settings_json(app: &App) -> Value {
     json!({"downloads_days": crate::stats::days_kept(app)})
 }
@@ -577,6 +664,9 @@ pub(crate) async fn repo_patch(
         app.check_urls(&repo, &req.settings)?;
         if r0.kind == Kind::Group {
             crate::group::check_members(app, &c, &repo, &r0.format, &req.settings)?;
+        }
+        if r0.kind == Kind::Proxy {
+            crate::proxy::check_settings(&r0.format, &req.settings)?;
         }
         let r = app.engine.update_settings(&repo, &req.settings)?;
         app.auth

@@ -2555,6 +2555,43 @@ fn openapi_describes_what_the_api_sends() {
     assert_eq!(cl["notes"][0], "no cleanup rules are set", "{cl}");
     let all = a.ok("post", "/api/v1/cleanup", "/api/v1/cleanup", None, 200);
     assert!(all.is_array(), "{all}");
+    s.cli(&[
+        "repo",
+        "create",
+        "gp",
+        "-f",
+        "go",
+        "-k",
+        "proxy",
+        "-s",
+        "upstream=http://127.0.0.1:9/",
+    ])
+    .unwrap();
+    let cl = a.ok(
+        "get",
+        "/api/v1/repos/{repo}/cache",
+        "/api/v1/repos/gp/cache",
+        None,
+        200,
+    );
+    assert_eq!(cl["rows"], serde_json::json!([]), "{cl}");
+    let ca = "/api/v1/repos/{repo}/cache/{action}";
+    let p = a.ok(
+        "post",
+        ca,
+        "/api/v1/repos/gp/cache/pin",
+        Some(serde_json::json!({"paths": ["x"]})),
+        200,
+    );
+    assert_eq!(p["changed"], 0, "{p}");
+    let p = a.ok(
+        "post",
+        ca,
+        "/api/v1/repos/gp/cache/prefetch",
+        Some(serde_json::json!({"paths": ["example.com/x/@v/list"]})),
+        200,
+    );
+    assert!(p[0]["state"].as_str().unwrap().starts_with("failed"), "{p}");
     let st = a.ok("get", "/api/v1/settings", "/api/v1/settings", None, 200);
     assert_eq!(st["downloads_days"], 365, "{st}");
     let st = a.ok(
@@ -3957,6 +3994,314 @@ fn group_of_maven_repositories() {
         meta.contains("<release>1.0.0</release>") && !meta.contains("2.0.0"),
         "{meta}"
     );
+}
+
+/// A Go proxy of another pkgpod's module proxy, with go: cold and warm
+/// with the upstream gone, metadata asked for again after its time,
+/// eviction, pins over the size limit, garbage collection, and groups.
+#[test]
+fn go_proxy_cache() {
+    if !have("go") {
+        return;
+    }
+    let mut up = Server::start();
+    up.cli(&["repo", "create", "mods", "-f", "go", "-s", "public=true"])
+        .unwrap();
+    let ut = up
+        .cli(&["token", "create", "w", "--repos", "mods", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let src = up.dir.path().join("src");
+    let c = reqwest::blocking::Client::new();
+    let upload = |s: &Server, repo: &str, tok: &str, m: &str, v: &str, body: &str| {
+        let zip = go_module_zip(&src.join(repo), m, v, body);
+        let r = c
+            .put(s.url(&format!("/{repo}/upload")))
+            .basic_auth("token", Some(tok))
+            .body(zip)
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 201, "{}", r.text().unwrap());
+    };
+    // Big even zipped: hex from a xorshift, 1.2 MB (about 0.6 zipped).
+    let mut x = 0x9e37_79b9_7f4a_7c15u64;
+    let big: String = (0..(1200 << 10) / 16)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            format!("{x:016x}")
+        })
+        .collect();
+    upload(
+        &up,
+        "mods",
+        &ut,
+        "example.com/greet",
+        "v1.0.0",
+        "greet v1.0.0",
+    );
+    upload(
+        &up,
+        "mods",
+        &ut,
+        "example.com/big",
+        "v1.0.0",
+        &format!("big one {big}"),
+    );
+    upload(
+        &up,
+        "mods",
+        &ut,
+        "example.com/big2",
+        "v1.0.0",
+        &format!("big two {big}"),
+    );
+    let s = Server::start();
+    let upstream = format!("http://127.0.0.1:{}/mods/", up.serve_port);
+    s.cli(&[
+        "repo",
+        "create",
+        "gp",
+        "-f",
+        "go",
+        "-k",
+        "proxy",
+        "-s",
+        &format!("upstream={upstream}"),
+        "-s",
+        "public=true",
+        "-s",
+        "exclude=example.com/internal/*",
+    ])
+    .unwrap();
+    let e = s
+        .cli(&[
+            "repo",
+            "create",
+            "np",
+            "-f",
+            "deb",
+            "-k",
+            "proxy",
+            "-s",
+            "upstream=http://x/",
+        ])
+        .unwrap_err();
+    assert!(e.contains("have no proxies"), "{e}");
+    let goenv = |name: &str| {
+        let home = s.dir.path().join(name);
+        let app = home.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("go.mod"), "module app\n\ngo 1.21\n").unwrap();
+        (home, app)
+    };
+    let reg = s.url("/gp/");
+    // Cold: fetched from the upstream, and counted.
+    let (home, app) = goenv("h1");
+    let (ok, out) = go(
+        &home,
+        &app,
+        &reg,
+        &["mod", "download", "-json", "example.com/greet@v1.0.0"],
+    );
+    assert!(ok, "{out}");
+    let (ok, out) = go(
+        &home,
+        &app,
+        &reg,
+        &["list", "-m", "-versions", "example.com/greet"],
+    );
+    assert!(ok && out.trim() == "example.com/greet v1.0.0", "{out}");
+    assert_eq!(
+        s.json(&["downloads", "gp"])["packages"][0]["name"],
+        "example.com/greet"
+    );
+    let cache = s.json(&["cache", "gp"]);
+    let paths: Vec<&str> = cache["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["path"].as_str().unwrap())
+        .collect();
+    for p in [
+        "example.com/greet/@v/v1.0.0.zip",
+        "example.com/greet/@v/v1.0.0.mod",
+        "example.com/greet/@v/list",
+    ] {
+        assert!(paths.contains(&p), "{p}: {cache}");
+    }
+    // A new version upstream: seen once the list is older than its time.
+    upload(
+        &up,
+        "mods",
+        &ut,
+        "example.com/greet",
+        "v1.1.0",
+        "greet v1.1.0",
+    );
+    let (ok, out) = go(
+        &home,
+        &app,
+        &reg,
+        &["list", "-m", "-versions", "example.com/greet"],
+    );
+    assert!(
+        ok && out.trim() == "example.com/greet v1.0.0",
+        "still the cached list: {out}"
+    );
+    s.cli(&["repo", "set", "gp", "metadata_minutes=0"]).unwrap();
+    let (ok, out) = go(
+        &home,
+        &app,
+        &reg,
+        &["list", "-m", "-versions", "example.com/greet"],
+    );
+    assert!(
+        ok && out.trim() == "example.com/greet v1.0.0 v1.1.0",
+        "{out}"
+    );
+    // An excluded name is not asked for upstream.
+    let r = c
+        .get(s.url("/gp/example.com/internal/tool/@v/list"))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 404);
+    assert!(
+        !s.json(&["cache", "gp", "list", "example.com/internal"])
+            .to_string()
+            .contains("internal")
+    );
+    // Pinned, and the size limit: the least recently used unpinned go.
+    let (ok, out) = go(
+        &home,
+        &app,
+        &reg,
+        &["mod", "download", "example.com/big@v1.0.0"],
+    );
+    assert!(ok, "{out}");
+    let out = s
+        .cli(&[
+            "cache",
+            "gp",
+            "pin",
+            "example.com/big/@v/v1.0.0.zip",
+            "example.com/greet/@v/v1.0.0.zip",
+        ])
+        .unwrap();
+    assert!(
+        out.contains("6 changed"),
+        "the zips with their .info and .mod: {out}"
+    );
+    s.cli(&["repo", "set", "gp", "max_mib=1"]).unwrap();
+    let (ok, out) = go(
+        &home,
+        &app,
+        &reg,
+        &["mod", "download", "example.com/big2@v1.0.0"],
+    );
+    assert!(ok, "{out}");
+    let cache = s.json(&["cache", "gp"]).to_string();
+    assert!(cache.contains("example.com/big/@v/v1.0.0.zip"), "{cache}");
+    assert!(!cache.contains("example.com/big2/@v/v1.0.0.zip"), "{cache}");
+    s.cli(&["repo", "set", "gp", "max_mib=0"]).unwrap();
+    // Garbage collection keeps what the cache names; with the upstream
+    // gone, what is cached still installs (metadata as it was).
+    s.cli(&["gc", "--grace-hours", "0"]).unwrap();
+    Command::new("kill")
+        .arg(up.child.id().to_string())
+        .status()
+        .unwrap();
+    let _ = up.child.wait();
+    let (home2, app2) = goenv("h2");
+    let (ok, out) = go(
+        &home2,
+        &app2,
+        &reg,
+        &["mod", "download", "-json", "example.com/greet@v1.0.0"],
+    );
+    assert!(ok, "{out}");
+    let (ok, out) = go(
+        &home2,
+        &app2,
+        &reg,
+        &["mod", "download", "example.com/big@v1.0.0"],
+    );
+    assert!(ok, "{out}");
+    let (ok, out) = go(
+        &home2,
+        &app2,
+        &reg,
+        &["list", "-m", "-versions", "example.com/greet"],
+    );
+    assert!(
+        ok && out.trim() == "example.com/greet v1.0.0 v1.1.0",
+        "{out}"
+    );
+    // Evicted: gone until the upstream is back.
+    let out = s
+        .cli(&["cache", "gp", "evict", "example.com/greet/@v/v1.0.0.zip"])
+        .unwrap();
+    assert!(out.contains("1 changed"), "{out}");
+    let r = c
+        .get(s.url("/gp/example.com/greet/@v/v1.0.0.zip"))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 502);
+    up.restart();
+    let r = c
+        .get(s.url("/gp/example.com/greet/@v/v1.0.0.zip"))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    let out = s
+        .cli(&["cache", "gp", "prefetch", "example.com/greet/@v/v1.1.0.zip"])
+        .unwrap();
+    assert!(out.contains("cached"), "{out}");
+    // In a group after a hosted repository: its own module wins; the
+    // others come through the proxy.
+    s.cli(&["repo", "create", "own", "-f", "go", "-s", "public=true"])
+        .unwrap();
+    let ot = s
+        .cli(&["token", "create", "o", "--repos", "own", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    upload(&s, "own", &ot, "example.com/greet", "v1.9.0", "ours");
+    s.cli(&[
+        "repo",
+        "create",
+        "all",
+        "-f",
+        "go",
+        "-k",
+        "group",
+        "-s",
+        "members=own,gp",
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let (home3, app3) = goenv("h3");
+    let greg = s.url("/all/");
+    let (ok, out) = go(
+        &home3,
+        &app3,
+        &greg,
+        &["list", "-m", "-versions", "example.com/greet"],
+    );
+    assert!(ok && out.trim() == "example.com/greet v1.9.0", "{out}");
+    let (ok, out) = go(
+        &home3,
+        &app3,
+        &greg,
+        &["mod", "download", "example.com/big2@v1.0.0"],
+    );
+    assert!(ok, "{out}");
+    // Writes are refused.
+    let r = c.put(s.url("/gp/upload")).body("x").send().unwrap();
+    assert_eq!(r.status().as_u16(), 405);
 }
 
 #[test]

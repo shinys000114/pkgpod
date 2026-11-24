@@ -67,6 +67,8 @@ pub fn router() -> Router<Arc<App>> {
         .route("/r/{repo}/settings", get(settings_part))
         .route("/r/{repo}/badges", get(badges_part))
         .route("/r/{repo}/members", get(members_part))
+        .route("/r/{repo}/cache", get(cache_part))
+        .route("/c/r/{repo}/cache/{action}", post(cache_change))
         .route("/c/r/{repo}/badge-token", post(badge_token_new))
         .route("/c/r/{repo}/cleanup", post(cleanup))
         .route("/c/r/{repo}/badge-token/delete", post(badge_token_drop))
@@ -824,6 +826,9 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
             if f.groups() {
                 kinds.push(Kind::Group);
             }
+            if f.proxy() {
+                kinds.push(Kind::Proxy);
+            }
             kinds
                 .into_iter()
                 .map(|k| FormatChoice {
@@ -834,6 +839,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                         (_, Kind::Group) => {
                             "read other repositories of this format through one address"
                         }
+                        (_, Kind::Proxy) => "fetch from a registry when asked, and keep it",
                         ("deb", Kind::Mirror) => "follow an apt archive; served as received",
                         ("deb", _) => "apt packages you upload, signed per version",
                         ("files", Kind::Mirror) => "follow a file server (rsync, HTTP)",
@@ -2450,6 +2456,16 @@ fn repo_tabs(r: &pkgpod_engine::RepoInfo, can_write: bool) -> Vec<TabLink> {
         part,
     };
     let mut v = Vec::new();
+    if r.kind == Kind::Proxy {
+        v.push(t("cache", "Cache", format!("/r/{n}/cache")));
+        v.push(t("use", "How to use", format!("/r/{n}/use")));
+        v.push(t(
+            "settings",
+            "Settings & rights",
+            format!("/r/{n}/settings"),
+        ));
+        return v;
+    }
     if r.kind == Kind::Group {
         // A group holds nothing: what it reads, and how.
         v.push(t("members", "Members", format!("/r/{n}/members")));
@@ -2555,6 +2571,10 @@ async fn repo_page(
         stats.push(stat("From", r.setting_str("source").to_string(), ""));
     } else if r.kind == Kind::Group {
         stats.push(stat("Members", r.setting_list("members").join(", "), ""));
+    } else if r.kind == Kind::Proxy {
+        stats.push(stat("Of", r.setting_str("upstream").to_string(), ""));
+        let (files, _) = app.engine.cache_size(&r.name).unwrap_or_default();
+        stats.push(stat("Cached", crate::serve::human(files), ""));
     } else {
         stats.push(stat(
             "Version",
@@ -3955,6 +3975,102 @@ async fn unlabel(
 pub struct GrantRow {
     pub subject: String,
     pub role: String,
+}
+
+#[derive(Template)]
+#[template(path = "cache.html")]
+struct CachePart {
+    repo: String,
+    q: String,
+    can_write: bool,
+    total: String,
+    rows: Vec<CacheLine>,
+    note: String,
+}
+
+struct CacheLine {
+    path: String,
+    kind: String,
+    size: String,
+    used: String,
+    pinned: bool,
+}
+
+#[derive(Deserialize, Default)]
+struct CacheQ {
+    #[serde(default)]
+    q: String,
+}
+
+async fn cache_part(
+    State(app): St,
+    v: Viewer,
+    Path(repo): Path<String>,
+    Query(q): Query<CacheQ>,
+) -> Response {
+    cache_view(&app, &v, repo, q.q, String::new())
+}
+
+fn cache_view(app: &App, v: &Viewer, repo: String, q: String, note: String) -> Response {
+    let r = match app.repo_for(&v.caller, &repo, Role::Read) {
+        Ok(r) => r,
+        Err(e) => return err_part(e),
+    };
+    let (files, _) = app.engine.cache_size(&repo).unwrap_or_default();
+    let rows = app
+        .engine
+        .cache_list(&repo, &q, 500)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|c| CacheLine {
+            kind: format!("{:?}", c.kind).to_lowercase(),
+            size: crate::serve::human(c.size),
+            used: when(Some(c.used)),
+            pinned: c.pinned,
+            path: c.path,
+        })
+        .collect();
+    render(&CachePart {
+        can_write: app.auth.role(&v.caller, &repo, r.setting_bool("public")) >= Some(Role::Write),
+        total: crate::serve::human(files),
+        repo,
+        q,
+        rows,
+        note,
+    })
+}
+
+async fn cache_change(
+    State(app): St,
+    v: Viewer,
+    Path((repo, action)): Path<(String, String)>,
+    Form(form): Form<Vec<(String, String)>>,
+) -> Response {
+    let paths: Vec<String> = form
+        .iter()
+        .filter(|(k, _)| k == "path")
+        .flat_map(|(_, p)| p.lines().map(|l| l.trim().to_string()).collect::<Vec<_>>())
+        .filter(|p| !p.is_empty())
+        .collect();
+    let res = api::cache_change(
+        State(app.clone()),
+        v.who(),
+        Path((repo.clone(), action.clone())),
+        Json(api::CacheReq { paths }),
+    )
+    .await;
+    let note = match res {
+        Ok(Json(r)) => match r.as_array() {
+            Some(a) => a
+                .iter()
+                .map(|x| format!("{}: {}", s(&x["path"]), s(&x["state"])))
+                .collect::<Vec<_>>()
+                .join("; "),
+            None => format!("{action}: {} changed", s(&r["changed"])),
+        },
+        Err(e) => return err_part(e),
+    };
+    cache_view(&app, &v, repo, String::new(), note)
 }
 
 #[derive(Template)]

@@ -170,6 +170,15 @@ Operations:
   a public group only its public members); only who may read a
   repository makes it a member; a deleted member leaves its groups.
   Publishing goes to a member.
+- Proxy repositories (`-k proxy -s upstream=<registry>`), Go's first:
+  a registry's files fetched when asked for and kept (garbage
+  collection keeps them), its metadata asked for again after
+  `metadata_minutes` and served as it was while the upstream is not
+  there; names in `exclude` are never asked upstream. The cache is
+  managed by hand (`pkgpod cache <repo> list|pin|unpin|evict|prefetch`,
+  the console's Cache tab), with a size limit (`max_mib`) that evicts
+  the least recently used unpinned files. In a group after hosted
+  repositories, a proxy answers for what they do not have.
 - `/metrics` on the management listener for Prometheus: repositories
   (those the caller may read), versions, packages, mirrors' syncs,
   files served and downloads since start.

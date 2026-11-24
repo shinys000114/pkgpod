@@ -262,6 +262,16 @@ pub(crate) enum Cmd {
         #[command(flatten)]
         yes: cmd::Yes,
     },
+    /// A proxy's cache: list it (by path prefix), or pin, unpin, evict or
+    /// prefetch paths.
+    Cache {
+        repo: String,
+        /// list, pin, unpin, evict or prefetch.
+        #[arg(default_value = "list")]
+        action: String,
+        /// Paths (list: a prefix).
+        paths: Vec<String>,
+    },
     /// Downloads of a repository, by day and by package.
     Downloads {
         repo: String,

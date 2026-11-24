@@ -238,16 +238,22 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
     match a {
         Ask::Nothing => crate::serve::status(StatusCode::NOT_FOUND),
         Ask::Name(key) => {
-            let (app2, key2) = (app.clone(), key.clone());
-            let first =
-                tokio::task::spawn_blocking(move || ms.into_iter().find(|m| has(&app2, m, &key2)))
-                    .await
-                    .ok()
-                    .flatten();
-            match first {
-                Some(m) => from(&app, &at, m, &again).await,
-                None => crate::serve::status(StatusCode::NOT_FOUND),
+            for m in ms {
+                let found = if m.repo.kind == Kind::Proxy {
+                    // A proxy has what its upstream has (and is not
+                    // asked for an excluded name).
+                    crate::proxy::has_name(&app, &m, &key).await
+                } else {
+                    let (app2, m2, key2) = (app.clone(), m.clone(), key.clone());
+                    tokio::task::spawn_blocking(move || has(&app2, &m2, &key2))
+                        .await
+                        .unwrap_or(false)
+                };
+                if found {
+                    return from(&app, &at, m, &again).await;
+                }
             }
+            crate::serve::status(StatusCode::NOT_FOUND)
         }
         Ask::First => {
             let config = g.format == "cargo" && at.rel == ["index", "config.json"];
