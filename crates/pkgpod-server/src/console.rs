@@ -66,6 +66,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/r/{repo}/changes", get(changes_part))
         .route("/r/{repo}/settings", get(settings_part))
         .route("/r/{repo}/use", get(use_part))
+        .route("/r/{repo}/activity", get(activity_part))
         .route("/r/{repo}/file", get(file_download))
         .route("/r/{repo}/pkg", get(pkg_detail))
         .route("/c/r/{repo}/use-token", post(use_token))
@@ -2001,6 +2002,9 @@ fn repo_tabs(r: &pkgpod_engine::RepoInfo, can_write: bool) -> Vec<TabLink> {
         v.push(t("versions", "Versions", format!("/r/{n}/versions")));
     }
     v.push(t("use", "How to use", format!("/r/{n}/use")));
+    if can_write {
+        v.push(t("activity", "Activity", format!("/r/{n}/activity")));
+    }
     if mirror {
         v.push(t("actions", "Sync", format!("/r/{n}/actions")));
     } else if can_write {
@@ -2993,9 +2997,16 @@ struct VersionsPart {
     repo: String,
     rows: Vec<VersionRow>,
     can_write: bool,
+    /// Labels: name, version, the address clients use for it.
+    labels: Vec<(String, i64, String)>,
 }
 
-async fn versions_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> Response {
+async fn versions_part(
+    State(app): St,
+    v: Viewer,
+    Path(repo): Path<String>,
+    headers: HeaderMap,
+) -> Response {
     let res = api::versions(State(app.clone()), v.who(), Path(repo.clone())).await;
     let list = match json_of(res) {
         Ok(l) => l,
@@ -3021,11 +3032,49 @@ async fn versions_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> R
         .ok()
         .and_then(|r| app.auth.role(&v.caller, &repo, r.setting_bool("public")))
         >= Some(Role::Write);
+    let base = app
+        .engine
+        .repo(&repo)
+        .map(|r| base_url(&app, &r, &r.setting_list("urls"), &host_of(&headers)))
+        .unwrap_or_default();
+    let mut labels: Vec<(String, i64, String)> = rows
+        .iter()
+        .flat_map(|r| {
+            r.labels
+                .iter()
+                .map(|l| (l.clone(), r.seq, format!("{base}@{l}/")))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    labels.sort();
     render(&VersionsPart {
         repo,
         rows,
         can_write,
+        labels,
     })
+}
+
+#[derive(Template)]
+#[template(path = "activity.html")]
+struct ActivityPart {
+    rows: Vec<AuditRow>,
+}
+
+/// What was done to a repository (uploads, changes, settings, labels,
+/// rights), for those who may change it.
+async fn activity_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> Response {
+    if let Err(e) = app.repo_for(&v.caller, &repo, Role::Write) {
+        return err_part(e);
+    }
+    let rows = app
+        .auth
+        .audit_for(&repo, 300)
+        .unwrap_or_default()
+        .iter()
+        .map(audit_row)
+        .collect();
+    render(&ActivityPart { rows })
 }
 
 pub struct ChangeLine {
@@ -3320,6 +3369,7 @@ async fn label(
     State(app): St,
     v: Viewer,
     Path(repo): Path<String>,
+    headers: HeaderMap,
     Form(form): Form<Vec<(String, String)>>,
 ) -> Response {
     let req = api::LabelReq {
@@ -3329,14 +3379,19 @@ async fn label(
         force: form_get(&form, "force") == "on",
     };
     match api::label(State(app.clone()), v.who(), Path(repo.clone()), Json(req)).await {
-        Ok(_) => versions_part(State(app), v, Path(repo)).await,
+        Ok(_) => versions_part(State(app), v, Path(repo), headers).await,
         Err(e) => err_part(e),
     }
 }
 
-async fn unlabel(State(app): St, v: Viewer, Path((repo, l)): Path<(String, String)>) -> Response {
+async fn unlabel(
+    State(app): St,
+    v: Viewer,
+    Path((repo, l)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
     match api::unlabel(State(app.clone()), v.who(), Path((repo.clone(), l))).await {
-        Ok(_) => versions_part(State(app), v, Path(repo)).await,
+        Ok(_) => versions_part(State(app), v, Path(repo), headers).await,
         Err(e) => err_part(e),
     }
 }
@@ -3851,6 +3906,16 @@ pub struct AuditRow {
     pub detail: String,
 }
 
+fn audit_row(a: &Value) -> AuditRow {
+    AuditRow {
+        when: when(a["time"].as_i64()),
+        actor: s(&a["actor"]),
+        action: s(&a["action"]),
+        target: s(&a["target"]),
+        detail: s(&a["detail"]),
+    }
+}
+
 #[derive(Template)]
 #[template(path = "server.html")]
 struct ServerPage {
@@ -3925,18 +3990,7 @@ async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
         .into_iter()
         .map(|(n, p)| (n, p.display().to_string()))
         .collect();
-    let audit = app
-        .auth
-        .audit_log(100)?
-        .into_iter()
-        .map(|a| AuditRow {
-            when: when(a["time"].as_i64()),
-            actor: s(&a["actor"]),
-            action: s(&a["action"]),
-            target: s(&a["target"]),
-            detail: s(&a["detail"]),
-        })
-        .collect();
+    let audit = app.auth.audit_log(100)?.iter().map(audit_row).collect();
     Ok(render(&ServerPage {
         s: v.shell("server"),
         listener_prefill,
@@ -4123,14 +4177,60 @@ fn job_row(j: &crate::jobs::Job) -> JobRow {
 #[template(path = "jobs.html")]
 struct JobsPart {
     rows: Vec<JobRow>,
+    /// The job running, its last log lines and how far it got.
+    live: Option<LiveJob>,
+}
+
+pub struct LiveJob {
+    pub id: i64,
+    pub tail: String,
+    /// Percent, when its log says (a mirror's pool: n/total).
+    pub pct: Option<u32>,
+    pub at: String,
+}
+
+/// How far a log says a job got: a mirror's last `pool: n/total`.
+fn log_progress(log: &str) -> (Option<u32>, String) {
+    for l in log.lines().rev() {
+        if let Some(p) = l.split("pool: ").nth(1)
+            && let Some((n, total)) = p.trim().split_once('/')
+            && let (Ok(n), Ok(total)) = (n.parse::<u64>(), total.parse::<u64>())
+            && total > 0
+        {
+            return (
+                Some((n * 100 / total) as u32),
+                format!("{n} of {total} pool files"),
+            );
+        }
+    }
+    (None, String::new())
+}
+
+/// How far a running job's log says it got.
+fn live_job(app: &App, j: &crate::jobs::Job) -> LiveJob {
+    let log = crate::jobs::log(app, j.id);
+    let lines: Vec<&str> = log.lines().collect();
+    let tail = lines[lines.len().saturating_sub(12)..].join("\n");
+    let (pct, at) = log_progress(&log);
+    LiveJob {
+        id: j.id,
+        tail,
+        pct,
+        at,
+    }
 }
 
 async fn jobs_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> Response {
-    match api::repo_jobs(State(app), v.who(), Path(repo)).await {
+    match api::repo_jobs(State(app.clone()), v.who(), Path(repo)).await {
         Ok(Json(list)) => {
             let jobs: Vec<crate::jobs::Job> = serde_json::from_value(list).unwrap_or_default();
+            let live = jobs
+                .iter()
+                .find(|j| j.state == "running")
+                .map(|j| live_job(&app, j));
             render(&JobsPart {
                 rows: jobs.iter().map(job_row).collect(),
+                live,
             })
         }
         Err(e) => err_part(e),
@@ -4233,5 +4333,26 @@ async fn import(
             ),
         ),
         Err(e) => err_part(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_from_a_log() {
+        let log = "t sync started\nt pool: 10/400\nt noble: fetched\nt pool: 200/400\nt got x\n";
+        assert_eq!(
+            log_progress(log),
+            (Some(50), "200 of 400 pool files".into())
+        );
+        assert_eq!(log_progress("t listing\n").0, None);
+        assert_eq!(
+            op_title("Remove a version (or every version) of a crate; lockfiles break.").0,
+            "Remove a version (or every version) of a crate"
+        );
+        assert_eq!(op_title("Remove manifests no tag reaches (through indexes, or as their subject's referrers).").0,
+            "Remove manifests no tag reaches");
     }
 }

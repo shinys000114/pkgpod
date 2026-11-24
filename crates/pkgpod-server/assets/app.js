@@ -118,6 +118,14 @@
       body.appendChild(r);
     });
   }
+  document.addEventListener("change", function (ev) {
+    if (!ev.target.classList || !ev.target.classList.contains("ver-pick")) return;
+    var picked = document.querySelectorAll("input.ver-pick:checked");
+    if (picked.length > 2) ev.target.checked = false;
+    var b = document.querySelector("button.ver-compare");
+    var n = document.querySelectorAll("input.ver-pick:checked").length;
+    if (b) b.disabled = n === 0;
+  });
   // Rows chosen for a bulk action: the count, and choosing all.
   document.addEventListener("change", function (ev) {
     var form = ev.target.closest && ev.target.closest("#pkg-pick");
@@ -221,6 +229,19 @@
           b.textContent = label;
         }, 1400);
       });
+      return;
+    }
+    // Compare the versions ticked (one: against the current).
+    var cmp = ev.target.closest("button.ver-compare");
+    if (cmp) {
+      var seqs = Array.prototype.map.call(
+        document.querySelectorAll("input.ver-pick:checked"),
+        function (c) { return parseInt(c.value, 10); }
+      ).sort(function (a, b) { return a - b; });
+      if (!seqs.length || !window.htmx) return;
+      var url = "/r/" + encodeURIComponent(cmp.getAttribute("data-repo")) + "/diff?from=" + seqs[0] +
+        (seqs.length > 1 ? "&to=" + seqs[seqs.length - 1] : "");
+      window.htmx.ajax("GET", url, "#ver-result");
       return;
     }
     var close = ev.target.closest(".close-detail");

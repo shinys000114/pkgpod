@@ -517,3 +517,7 @@ pre.meta { max-height: 18rem; overflow: auto; }
 /* Repositories: finding one. */
 .repo-filter input[type="search"] { flex: 1 1 220px; }
 .repo-filter select { flex: 0 1 200px; }
+.ver-tools { display: flex; gap: .6rem 1rem; align-items: center; flex-wrap: wrap; }
+.live-job .live-head { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-bottom: .4rem; }
+.live-job progress { width: 14rem; height: .55rem; accent-color: var(--accent); }
+pre.live-tail { max-height: 13rem; overflow: auto; font-size: 12px; }
