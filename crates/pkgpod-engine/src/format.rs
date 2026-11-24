@@ -172,6 +172,12 @@ pub trait Format: Send + Sync {
         let _ = kind;
         vec![]
     }
+    /// Rules across settings (checked after their fields are), for a
+    /// repository of `kind` being made or changed.
+    fn check_settings(&self, kind: Kind, settings: &Value) -> Result<()> {
+        let _ = (kind, settings);
+        Ok(())
+    }
     /// Operations on its repositories' trees.
     fn ops(&self) -> Vec<OpSpec> {
         vec![]

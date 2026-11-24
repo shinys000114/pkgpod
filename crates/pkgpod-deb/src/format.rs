@@ -74,6 +74,16 @@ pub fn mirror_settings() -> Vec<Field> {
             "keyring",
             "The upstream's public key(s), armored; the Release signature is checked against them. Empty: not checked.",
         ),
+        Field::bool(
+            "resign",
+            false,
+            "Serve the Release files signed with our key instead of the upstream's (http sources with a keyring); clients then trust only our key.asc.",
+        ),
+        Field::text(
+            "key",
+            "",
+            "Signing key when re-signing; empty: the server's default key.",
+        ),
         Field::text(
             "schedule",
             "",
@@ -394,6 +404,24 @@ impl Format for Deb {
 
     fn kinds(&self) -> &'static [Kind] {
         &[Kind::Hosted, Kind::Mirror]
+    }
+
+    fn check_settings(&self, kind: Kind, settings: &Value) -> Result<()> {
+        if kind != Kind::Mirror || settings["resign"] != Value::Bool(true) {
+            return Ok(());
+        }
+        let source = settings["source"].as_str().unwrap_or("").trim();
+        if !(source.starts_with("http://") || source.starts_with("https://")) {
+            return Err(Error::Invalid(
+                "resign needs an http(s) source: an rsync tree is copied as it is, without its signature checked".into(),
+            ));
+        }
+        if settings["keyring"].as_str().unwrap_or("").trim().is_empty() {
+            return Err(Error::Invalid(
+                "resign needs the upstream's keyring: what is signed with our key must be checked first".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn settings(&self, kind: Kind) -> Vec<Field> {

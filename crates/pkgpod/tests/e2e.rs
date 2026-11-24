@@ -778,3 +778,149 @@ fn import_an_apt_repository_as_one_version() {
     );
     assert_eq!(s.json(&["versions", "new"]).as_array().unwrap().len(), 2);
 }
+
+/// An apt state directory whose sources.list reads `base` (dist `stable`)
+/// trusting only `key`.
+fn apt_dir(root: &Path, name: &str, base: &str, key: &str) -> PathBuf {
+    let a = root.join(name);
+    for d in [
+        "etc/keyrings",
+        "state/lists/partial",
+        "cache/archives/partial",
+    ] {
+        std::fs::create_dir_all(a.join(d)).unwrap();
+    }
+    std::fs::write(a.join("status"), "").unwrap();
+    let kr = a.join("etc/keyrings/k.asc");
+    std::fs::write(&kr, key).unwrap();
+    std::fs::write(
+        a.join("etc/sources.list"),
+        format!("deb [signed-by={}] {base} stable main\n", kr.display()),
+    )
+    .unwrap();
+    a
+}
+
+#[test]
+fn resigned_deb_mirror_with_apt() {
+    if !have("dpkg-deb") || !have("gpg") || !have("apt-get") {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&["key", "generate", "main", "upstream <up@example.invalid>"])
+        .unwrap();
+    s.cli(&["key", "generate", "ours", "mirror <mir@example.invalid>"])
+        .unwrap();
+    s.cli(&["repo", "create", "up", "-s", "public=true"])
+        .unwrap();
+    s.cli(&[
+        "op",
+        "up",
+        "dist-set",
+        "name=stable",
+        "components=main",
+        "-y",
+    ])
+    .unwrap();
+    let debs = s.dir.path().join("debs");
+    std::fs::create_dir_all(&debs).unwrap();
+    let one = build_deb(&debs, "resigned", "1.0", "amd64", "xz", "");
+    s.cli(&["upload", "up", one.to_str().unwrap()]).unwrap();
+    let (_, up_key) = get(&s.url("/up/key.asc"), None);
+
+    // Re-signing needs a checked source: a keyring, over http.
+    let source = format!("source={}", s.url("/up/"));
+    let keyring = format!("keyring={up_key}");
+    let base = [
+        "repo",
+        "create",
+        "mir",
+        "-k",
+        "mirror",
+        "-s",
+        "dists=stable",
+        "-s",
+        "public=true",
+        "-s",
+        "resign=true",
+        "-s",
+        "key=ours",
+    ];
+    let with = |extra: &[&str]| {
+        let mut a = base.to_vec();
+        for e in extra {
+            a.extend_from_slice(&["-s", e]);
+        }
+        s.cli(&a)
+    };
+    let e = with(&[&source]).unwrap_err();
+    assert!(e.contains("keyring"), "{e}");
+    let e = with(&["source=rsync://127.0.0.1/x/", &keyring]).unwrap_err();
+    assert!(e.contains("http"), "{e}");
+    with(&[&source, &keyring]).unwrap();
+    let out = s.cli(&["sync", "mir", "--wait"]).unwrap();
+    assert!(out.contains("ok:"), "{out}");
+
+    // Our key is served, the tree keeps the upstream's files.
+    let (st, our_key) = get(&s.url("/mir/key.asc"), None);
+    assert_eq!(st, 200);
+    assert!(our_key.contains("BEGIN PGP PUBLIC KEY BLOCK"));
+    assert_ne!(our_key, up_key);
+    let tree_inrel = std::fs::read_to_string(
+        s.dir
+            .path()
+            .join("data/storages/main/trees/mir/dists/stable/InRelease"),
+    )
+    .unwrap();
+    let (_, served) = get(&s.url("/mir/dists/stable/InRelease"), None);
+    assert!(served.contains("BEGIN PGP SIGNED MESSAGE"));
+    assert_ne!(tree_inrel, served, "the served InRelease is ours");
+    let (st, rel) = get(&s.url("/mir/dists/stable/Release"), None);
+    assert_eq!(st, 200);
+    assert!(rel.contains("main/binary-amd64/Packages"), "{rel}");
+    assert_eq!(get(&s.url("/mir/dists/stable/Release.gpg"), None).0, 200);
+
+    let root = s.dir.path();
+    let mir = s.url("/mir/");
+    // Trusting our key: apt reads the mirror.
+    let a = apt_dir(root, "apt-ours", &mir, &our_key);
+    let out = apt(&a, &["update"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = apt(&a, &["download", "resigned"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Trusting only the upstream's: refused.
+    let b = apt_dir(root, "apt-up", &mir, &up_key);
+    let out = apt(&b, &["update"]);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        !out.status.success() || err.contains("NO_PUBKEY") || err.contains("not signed"),
+        "{err}"
+    );
+    let out = apt(&b, &["download", "resigned"]);
+    assert!(!out.status.success());
+
+    // A change of key is followed without a sync.
+    s.cli(&["repo", "set", "mir", "key=main"]).unwrap();
+    assert_eq!(get(&s.url("/mir/key.asc"), None).1, up_key);
+    let out = apt(&b, &["update"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Off: the upstream's files as received.
+    s.cli(&["repo", "set", "mir", "resign=false"]).unwrap();
+    assert_eq!(get(&s.url("/mir/key.asc"), None).0, 404);
+    assert_eq!(
+        get(&s.url("/mir/dists/stable/InRelease"), None).1,
+        tree_inrel
+    );
+}
