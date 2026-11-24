@@ -323,12 +323,16 @@ impl Format for Files {
         if !matches!(entry, Entry::Blob { .. }) {
             return None;
         }
+        // The file's name; its version, the nearest directory that looks
+        // like one (tool/1.2/tool.tar.gz, images/2026-11/board.img).
         let segs: Vec<&str> = path.split('/').collect();
-        let (name, version) = if segs.len() >= 3 {
-            (segs[0], segs[1])
-        } else {
-            (*segs.last()?, "")
+        let (name, dirs) = segs.split_last()?;
+        let looks = |s: &&&str| {
+            let s: &str = s;
+            let s = s.strip_prefix(['v', 'V']).unwrap_or(s);
+            s.as_bytes().first().is_some_and(u8::is_ascii_digit)
         };
+        let version = dirs.iter().rev().find(looks).copied().unwrap_or("");
         Some(Item {
             name: name.to_string(),
             version: version.to_string(),
