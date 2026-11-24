@@ -114,6 +114,16 @@ impl Field {
     }
 }
 
+/// The signing key setting, for formats that sign with the server's
+/// OpenPGP keys (others have none to choose).
+pub fn key_field() -> Field {
+    Field::text(
+        "key",
+        "",
+        "Signing key for generated indexes; empty: the server's default key.",
+    )
+}
+
 /// Settings every repository of a kind has, whatever its format.
 pub fn common(kind: crate::Kind) -> Vec<Field> {
     let mut v = vec![
@@ -123,11 +133,6 @@ pub fn common(kind: crate::Kind) -> Vec<Field> {
             "Addresses the repository is served at (https://host/path/). Without one it is served at /<name>/ on every serving listener.",
         ),
         Field::bool("public", false, "Anyone may read without logging in."),
-        Field::text(
-            "key",
-            "",
-            "Signing key for generated indexes; empty: the server's default key.",
-        ),
         Field::int(
             "keep_versions",
             50,
@@ -141,7 +146,7 @@ pub fn common(kind: crate::Kind) -> Vec<Field> {
     ];
     if !kind.versioned() {
         // Mirrors have no versions to keep and sign nothing.
-        v.retain(|f| !matches!(f.name, "keep_versions" | "keep_days" | "key"));
+        v.retain(|f| !matches!(f.name, "keep_versions" | "keep_days"));
     }
     v
 }

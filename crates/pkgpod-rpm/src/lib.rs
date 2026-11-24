@@ -582,11 +582,14 @@ impl Format for Rpm {
     }
 
     fn settings(&self, _kind: Kind) -> Vec<Field> {
-        vec![Field::bool(
-            "sign",
-            true,
-            "Sign each group's repomd.xml (repomd.xml.asc) with the repository's key, for dnf's repo_gpgcheck.",
-        )]
+        vec![
+            pkgpod_engine::settings::key_field(),
+            Field::bool(
+                "sign",
+                true,
+                "Sign each group's repomd.xml (repomd.xml.asc) with the repository's key, for dnf's repo_gpgcheck.",
+            ),
+        ]
     }
 
     fn ops(&self) -> Vec<OpSpec> {

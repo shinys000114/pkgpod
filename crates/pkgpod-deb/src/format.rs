@@ -874,6 +874,7 @@ impl Format for Deb {
             return mirror_settings();
         }
         vec![
+            pkgpod_engine::settings::key_field(),
             Field::text("origin", "", "Origin: field of the Release files."),
             Field::text("label", "", "Label: field of the Release files."),
             Field::bool(
