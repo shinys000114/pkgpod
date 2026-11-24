@@ -844,6 +844,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                         ("ipk", _) => "opkg feeds for OpenWrt and Yocto, signed",
                         ("terraform", _) => "providers and modules for Terraform and OpenTofu",
                         ("galaxy", _) => "Ansible collections for ansible-galaxy",
+                        ("conan", _) => "C and C++ packages for Conan 2",
                         _ => "",
                     }
                     .to_string(),
@@ -1483,6 +1484,28 @@ fn usage(
         out.push(UseLine {
             label: "Note".into(),
             text: "pkgpod is no proxy: packages from npmjs need their own registry (a scope here, the rest from registry.npmjs.org). npm login is not offered; set the token in .npmrc. unpublish and deprecate are operations here.".into(),
+        });
+        return out;
+    }
+    if r.format == "conan" {
+        let remote = r.name.replace('.', "-");
+        out.push(UseLine {
+            label: "Add the remote and log in".into(),
+            text: format!(
+                "conan remote add {remote} {base}\nconan remote login {remote} <user> -p <token>   # the password: a pkgpod token"
+            ),
+        });
+        out.push(UseLine {
+            label: "Upload".into(),
+            text: format!("conan create .\nconan upload \"<package>/<version>\" -r {remote} -c"),
+        });
+        out.push(UseLine {
+            label: "Install".into(),
+            text: format!("conan install --requires <package>/<version> -r {remote}"),
+        });
+        out.push(UseLine {
+            label: "A labelled version".into(),
+            text: format!("conan remote add {remote}-<label> {base}@<label>/"),
         });
         return out;
     }
@@ -3129,6 +3152,11 @@ fn catalog_words(format: &str) -> (&'static str, [&'static str; 3], bool) {
         "pub" | "composer" | "cran" => ("Packages", ["Package", "Version", "Note"], true),
         "terraform" => ("Providers and modules", ["Name", "Version", "Kind"], true),
         "galaxy" => ("Collections", ["Collection", "Version", "Note"], true),
+        "conan" => (
+            "Recipes and packages",
+            ["Reference", "Revision", "Kind"],
+            true,
+        ),
         "deb" => ("Packages", ["Package", "Version", "Where"], true),
         _ => ("Packages", ["Package", "Version", "Where"], true),
     }

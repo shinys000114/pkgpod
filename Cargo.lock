@@ -2381,6 +2381,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pkgpod-conan"
+version = "0.0.0"
+dependencies = [
+ "jiff",
+ "pkgpod-base",
+ "pkgpod-engine",
+ "serde_json",
+]
+
+[[package]]
 name = "pkgpod-conda"
 version = "0.0.0"
 dependencies = [
@@ -2640,6 +2650,7 @@ dependencies = [
  "pkgpod-base",
  "pkgpod-cargo",
  "pkgpod-composer",
+ "pkgpod-conan",
  "pkgpod-conda",
  "pkgpod-cran",
  "pkgpod-deb",

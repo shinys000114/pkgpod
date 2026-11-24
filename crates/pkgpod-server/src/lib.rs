@@ -9,6 +9,7 @@ pub mod auth;
 pub mod backup;
 pub mod cargo;
 pub mod composer;
+pub mod conan;
 pub mod config;
 pub mod ftp;
 pub mod galaxy;
@@ -133,6 +134,8 @@ pub struct App {
     pub listeners: listeners::Running,
     pub jobs: jobs::Jobs,
     pub plans: Mutex<HashMap<String, Kept>>,
+    /// Conan revisions being uploaded: their files before the manifest.
+    pub conan_staged: conan::Staged,
     pub resigner: resign::Resigner,
     cache: Mutex<Cache>,
 }
@@ -169,6 +172,7 @@ pub fn formats() -> Vec<Arc<dyn pkgpod_engine::Format>> {
         Arc::new(pkgpod_ipk::Ipk),
         Arc::new(pkgpod_terraform::Terraform),
         Arc::new(pkgpod_galaxy::Galaxy),
+        Arc::new(pkgpod_conan::Conan),
     ]
 }
 
@@ -215,6 +219,7 @@ impl App {
             listeners: listeners::Running::default(),
             jobs: jobs::Jobs::default(),
             plans: Mutex::new(HashMap::new()),
+            conan_staged: conan::Staged::default(),
             resigner: resign::Resigner::default(),
             cache: Mutex::new(Cache::default()),
         }))

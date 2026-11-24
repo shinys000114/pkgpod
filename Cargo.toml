@@ -35,6 +35,7 @@ pkgpod-pub = { path = "crates/pkgpod-pub" }
 pkgpod-ipk = { path = "crates/pkgpod-ipk" }
 pkgpod-terraform = { path = "crates/pkgpod-terraform" }
 pkgpod-galaxy = { path = "crates/pkgpod-galaxy" }
+pkgpod-conan = { path = "crates/pkgpod-conan" }
 pkgpod-mirror = { path = "crates/pkgpod-mirror" }
 pkgpod-server = { path = "crates/pkgpod-server" }
 clap = { version = "4.6", features = ["derive", "env"] }

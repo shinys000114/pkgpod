@@ -736,7 +736,7 @@ fn console_login_pages_and_csrf() {
     // page, usage and actions open.
     let src = s.url("/web/");
     type Fields<'a> = &'a [(&'a str, &'a str)];
-    let choices: [(&str, &str, &str, Fields); 23] = [
+    let choices: [(&str, &str, &str, Fields); 24] = [
         (
             "deb",
             "hosted",
@@ -773,6 +773,7 @@ fn console_login_pages_and_csrf() {
         ("ipk", "hosted", "c-ipk", &[]),
         ("terraform", "hosted", "c-terraform", &[]),
         ("galaxy", "hosted", "c-galaxy", &[]),
+        ("conan", "hosted", "c-conan", &[]),
     ];
     for (format, kind, name, extra) in choices {
         let mut form = vec![("format", format), ("kind", kind), ("name", name)];
@@ -4876,6 +4877,7 @@ fn serving_root_lists_trees_not_registries() {
         ("reg-composer", "composer"),
         ("reg-terraform", "terraform"),
         ("reg-galaxy", "galaxy"),
+        ("reg-conan", "conan"),
         ("reg-pub", "pub"),
         ("reg-go", "go"),
     ] {
@@ -4916,6 +4918,7 @@ fn serving_root_lists_trees_not_registries() {
         "reg-pub",
         "reg-terraform",
         "reg-galaxy",
+        "reg-conan",
         "hidden-oci",
     ] {
         assert!(!root.contains(name), "{name}: {root}");
@@ -8130,4 +8133,127 @@ fn galaxy_collections_with_ansible_galaxy() {
     s.restart();
     let (ok, out) = install(&url, &tok_arg);
     assert!(ok && out.contains("\"msg\": \"hello 1.0.0\""), "{out}");
+}
+
+const CONAN_NEW: &str = "pkgpod-e2e/conan:2.34.0";
+const CONAN_OLD: &str = "pkgpod-e2e/conan:2.0.17";
+
+/// The Conan images (python with conan from PyPI), built when missing.
+fn conan_images() -> Vec<&'static str> {
+    if !have("docker") || images_here(&["python:3.12-slim"]).is_empty() {
+        return Vec::new();
+    }
+    for (image, ver) in [(CONAN_NEW, "2.34.0"), (CONAN_OLD, "2.0.17")] {
+        if images_here(&[image]).is_empty() {
+            let mut c = Command::new("docker")
+                .args(["build", "-q", "-t", image, "-"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap();
+            use std::io::Write;
+            c.stdin
+                .take()
+                .unwrap()
+                .write_all(
+                    format!("FROM python:3.12-slim\nRUN pip install --no-cache-dir conan=={ver}\n")
+                        .as_bytes(),
+                )
+                .unwrap();
+            assert!(c.wait().unwrap().success(), "building {image}");
+        }
+    }
+    images_here(&[CONAN_NEW, CONAN_OLD])
+}
+
+#[test]
+fn conan_remote_with_conan_2() {
+    if conan_images().len() < 2 {
+        return;
+    }
+    let mut s = Server::start();
+    s.cli(&["repo", "create", "cpp", "-f", "conan"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "cpp", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let work = s.dir.path().join("conan");
+    std::fs::create_dir_all(&work).unwrap();
+    let url = s.url("/cpp/");
+    // A conan home in /work for each client, a profile without a compiler
+    // (the package is header-only), the remote and its login.
+    let setup_at = |home: &str, remote: &str| {
+        format!(
+            "set -e; export CONAN_HOME=/work/{home}; mkdir -p $CONAN_HOME/profiles; \
+             printf '[settings]\\nos=Linux\\narch=x86_64\\n' > $CONAN_HOME/profiles/default; \
+             conan remote remove conancenter >/dev/null 2>&1 || true; conan remote remove pk >/dev/null 2>&1 || true; \
+             conan remote add pk {remote} >/dev/null; conan remote login pk token -p {tok} >/dev/null\n"
+        )
+    };
+    let setup = |home: &str| setup_at(home, &url);
+    let create = |ver_text: &str| {
+        let script = format!(
+            "{}mkdir -p /work/src && cd /work/src && \
+             printf 'from conan import ConanFile\\nfrom conan.tools.files import copy\\nclass H(ConanFile):\\n    name = \"hello\"\\n    version = \"1.0\"\\n    package_type = \"header-library\"\\n    exports_sources = \"hello.h\"\\n    no_copy_source = True\\n    def package(self):\\n        copy(self, \"hello.h\", self.source_folder, self.package_folder + \"/include\")\\n    def package_info(self):\\n        self.cpp_info.bindirs = []\\n        self.cpp_info.libdirs = []\\n' > conanfile.py && \
+             echo '#define HELLO \"{ver_text}\"' > hello.h && conan create . >/dev/null && conan upload 'hello/1.0' -r pk -c",
+            setup("new")
+        );
+        docker_sh_in(CONAN_NEW, Some(&work), &script)
+    };
+    let (ok, out) = create("one");
+    assert!(ok, "{out}");
+    s.cli(&["label", "cpp", "first"]).unwrap();
+    // A new recipe revision (other sources).
+    let (ok, out) = create("two");
+    assert!(ok, "{out}");
+    // Installed by the older conan, from a clean cache: the latest
+    // revision's header.
+    let install = |remote_url: &str| {
+        let script = format!(
+            "{}rm -rf /work/old/p; \
+             conan install --requires hello/1.0 -r pk >/dev/null && \
+             cat $(conan cache path hello/1.0:da39a3ee5e6b4b0d3255bfef95601890afd80709)/include/hello.h; \
+             conan remove 'hello/*' -c >/dev/null",
+            setup_at("old", remote_url)
+        );
+        docker_sh_in(CONAN_OLD, Some(&work), &script)
+    };
+    let (ok, out) = install(&url);
+    assert!(ok && out.contains("#define HELLO \"two\""), "{out}");
+    // A label's remote: the revision it had.
+    let (ok, out) = install(&format!("{url}@first/"));
+    assert!(ok && out.contains("#define HELLO \"one\""), "{out}");
+    // Listed, with both revisions.
+    let (ok, out) = docker_sh_in(
+        CONAN_NEW,
+        Some(&work),
+        &format!("{}conan list 'hello/1.0#*' -r pk", setup("new")),
+    );
+    assert!(ok && out.matches(" UTC)").count() == 2, "{out}");
+    // Without a token: refused.
+    let (ok, out) = docker_sh_in(
+        CONAN_OLD,
+        Some(&work),
+        &format!(
+            "export CONAN_HOME=/work/anon; mkdir -p $CONAN_HOME/profiles; printf '[settings]\\nos=Linux\\narch=x86_64\\n' > $CONAN_HOME/profiles/default; \
+             conan remote remove conancenter >/dev/null 2>&1; conan remote add pk {url} >/dev/null; conan install --requires hello/1.0 -r pk"
+        ),
+    );
+    assert!(!ok, "{out}");
+    // The latest revision removed with conan: the first again; after a
+    // restart, the same.
+    let (ok, out) = docker_sh_in(
+        CONAN_NEW,
+        Some(&work),
+        &format!(
+            "{}rrev=$(conan list 'hello/1.0#latest' -r pk --format=json | python3 -c 'import sys,json; d=json.load(sys.stdin)[\"pk\"][\"hello/1.0\"][\"revisions\"]; print(list(d)[0])'); \
+             conan remove \"hello/1.0#$rrev\" -r pk -c",
+            setup("new")
+        ),
+    );
+    assert!(ok, "{out}");
+    s.restart();
+    let (ok, out) = install(&url);
+    assert!(ok && out.contains("#define HELLO \"one\""), "{out}");
 }

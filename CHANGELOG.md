@@ -75,6 +75,11 @@ Formats:
 - **Ansible Galaxy**: Galaxy's API v3 for collections: publishing (the
   multipart upload ansible-galaxy sends, its file base64-encoded, and
   the import task it polls) and installing, `Token` authorization.
+- **Conan**: a Conan 2 remote (REST API v2, revisions): logging in
+  with a pkgpod token as the password, search, recipe and package
+  revisions and their files; a revision's files wait until its
+  manifest, uploaded last, brings them in as one version; conan remove
+  removes revisions as versions too.
 - **Pub**: Dart and Flutter packages with the hosted pub repository API
   (v2): package documents made per request, dart pub publish with the
   outcome told at the finalizing URL, retract and unretract.

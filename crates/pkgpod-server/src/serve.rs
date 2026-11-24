@@ -218,7 +218,16 @@ password=<token>
 fn browsable(format: &str) -> bool {
     !matches!(
         format,
-        "npm" | "oci" | "cargo" | "go" | "nuget" | "composer" | "pub" | "terraform" | "galaxy"
+        "npm"
+            | "oci"
+            | "cargo"
+            | "go"
+            | "nuget"
+            | "composer"
+            | "pub"
+            | "terraform"
+            | "galaxy"
+            | "conan"
     )
 }
 
@@ -526,6 +535,56 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
             }
             if served.repo.format == "gems" && crate::gems::is_api(&method, &rel) {
                 return crate::gems::handle(app, served.repo, caller, role, req).await;
+            }
+            if served.repo.format == "conan" {
+                let mut rel = rel;
+                let mut version = served.current.clone();
+                let mut labelled = false;
+                if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
+                    let Ok(v) = app.labelled(&served.repo.name, label) else {
+                        return status(StatusCode::NOT_FOUND);
+                    };
+                    version = Some(v);
+                    labelled = true;
+                    rel.remove(0);
+                }
+                if rel.is_empty() && matches!(method, Method::GET | Method::HEAD) {
+                    return client_note(
+                        StatusCode::OK,
+                        format!(
+                            "{}: a Conan remote.\n\n  conan remote add {} {}\n  conan remote login {} <user> -p <token>\n\nIts recipes and packages are listed in pkgpod's console.\n",
+                            served.repo.name,
+                            served.repo.name,
+                            client_base(route.as_ref(), &host, &base, &req),
+                            served.repo.name
+                        ),
+                    );
+                }
+                // A token given as a Basic password: what logging in gives back.
+                let token = req
+                    .headers()
+                    .get(header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.strip_prefix("Basic "))
+                    .and_then(|b| {
+                        use base64::Engine;
+                        base64::engine::general_purpose::STANDARD
+                            .decode(b.trim())
+                            .ok()
+                    })
+                    .and_then(|b| String::from_utf8(b).ok())
+                    .and_then(|s| s.split_once(':').map(|(_, p)| p.to_string()))
+                    .filter(|p| p.starts_with(crate::auth::TOKEN_PREFIX));
+                let ask = crate::conan::Ask {
+                    repo: served.repo,
+                    version,
+                    labelled,
+                    rel,
+                    caller,
+                    role,
+                    token,
+                };
+                return crate::conan::handle(app, ask, req).await;
             }
             if served.repo.format == "galaxy" {
                 let mut base_url = client_base(route.as_ref(), &host, &base, &req);
