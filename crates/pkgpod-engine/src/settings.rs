@@ -145,8 +145,14 @@ pub fn common(kind: crate::Kind) -> Vec<Field> {
         ),
     ];
     if !kind.versioned() {
-        // Mirrors have no versions to keep and sign nothing.
+        // Mirrors and groups have no versions to keep.
         v.retain(|f| !matches!(f.name, "keep_versions" | "keep_days"));
+    }
+    if kind == crate::Kind::Group {
+        v.push(Field::list(
+            "members",
+            "Repositories of the same format it reads, in this order: for each package, the first that has it answers alone.",
+        ));
     }
     v
 }

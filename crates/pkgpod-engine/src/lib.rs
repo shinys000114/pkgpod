@@ -59,6 +59,9 @@ pub enum Kind {
     /// Follows an upstream; its received tree is served in place, with
     /// no versions.
     Mirror,
+    /// Reads other repositories of its format (its members) in order;
+    /// holds nothing itself.
+    Group,
 }
 
 impl Kind {
@@ -67,6 +70,7 @@ impl Kind {
             Kind::Hosted => "hosted",
             Kind::Import => "import",
             Kind::Mirror => "mirror",
+            Kind::Group => "group",
         }
     }
 
@@ -75,12 +79,13 @@ impl Kind {
             "hosted" => Kind::Hosted,
             "import" => Kind::Import,
             "mirror" => Kind::Mirror,
+            "group" => Kind::Group,
             _ => return Err(Error::Invalid(format!("unknown repository kind {s:?}"))),
         })
     }
 
     pub fn versioned(&self) -> bool {
-        !matches!(self, Kind::Mirror)
+        !matches!(self, Kind::Mirror | Kind::Group)
     }
 }
 
