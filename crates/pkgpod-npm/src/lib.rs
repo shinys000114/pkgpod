@@ -377,6 +377,25 @@ impl Packages {
     }
 }
 
+/// The revision of `pkg`'s packument: of its versions (as kept, with
+/// their deprecation) and tags, so any change makes another, whatever
+/// address it is read at.
+pub fn rev(pkg: &str, p: &Packages) -> String {
+    let versions = p.versions.get(pkg);
+    let mut text = String::new();
+    for (v, (m, sha, _)) in versions.into_iter().flatten() {
+        text.push_str(&format!("{v} {} {}\n", sha.hex(), m.manifest));
+    }
+    for (t, v) in p.tags.get(pkg).into_iter().flatten() {
+        text.push_str(&format!("tag {t} {v}\n"));
+    }
+    format!(
+        "{}-{}",
+        versions.map_or(0, |v| v.len()),
+        &Digest::of(text.as_bytes()).hex()[..16]
+    )
+}
+
 /// The packument of `pkg`, its tarballs under `base` (an absolute URL
 /// ending in `/`).
 pub fn packument(pkg: &str, p: &Packages, base: &str) -> Option<Value> {
@@ -408,11 +427,10 @@ pub fn packument(pkg: &str, p: &Packages, base: &str) -> Option<Value> {
         .and_then(|l| vs.get(&l).cloned())
         .or_else(|| vs.values().next_back().cloned())
         .unwrap_or(Value::Null);
-    // npm puts the revision in the URLs of unpublish; any one is taken.
-    let rev = format!("{}-{last:x}", vs.len());
+    // npm puts the revision in the URLs of unpublish.
     let mut out = json!({
         "_id": pkg,
-        "_rev": rev,
+        "_rev": rev(pkg, p),
         "name": pkg,
         "dist-tags": tags,
         "versions": vs,
