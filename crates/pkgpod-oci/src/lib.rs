@@ -390,6 +390,14 @@ impl Images {
 }
 
 impl Format for Oci {
+    fn groups(&self) -> bool {
+        true
+    }
+
+    fn proxy(&self) -> bool {
+        true
+    }
+
     fn id(&self) -> &'static str {
         "oci"
     }

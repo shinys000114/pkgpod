@@ -63,7 +63,7 @@ Status: in development, nothing released.
   Dart 3.14).
 - Repositories are reached by their own addresses (host name and path);
   a reverse proxy in front only provides certificates.
-- Proxy repositories (Go, Maven, npm, PyPI, Cargo): a public registry's packages fetched
+- Proxy repositories (Go, Maven, npm, PyPI, Cargo, OCI): a public registry's packages fetched
   when asked for and kept, managed by hand (pin, evict, prefetch, a size
   limit), usable as the last member of a group.
 - Management: a web console, a JSON API (`/api/v1`, described at
@@ -73,7 +73,7 @@ Status: in development, nothing released.
   <repo>`), kept a year unless set otherwise; a status API, SVG badges
   for READMEs (`/.well-known/pkgpod/badges/<repo>/status.svg`; private
   repositories with a badge-only token) and `/metrics` for Prometheus.
-- Group repositories (files, npm, PyPI, Maven, Go, Cargo): one address
+- Group repositories (files, npm, PyPI, Maven, Go, Cargo, OCI): one address
   reading other repositories in order, the first that has a package
   answering for it.
 - Cleanup rules (keep the newest N, pre-releases after N days, not
