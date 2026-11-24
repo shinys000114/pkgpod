@@ -122,6 +122,15 @@
   document.addEventListener("htmx:afterSettle", function (ev) {
     labelTables(ev.detail.elt.closest ? ev.detail.elt.closest("main") || ev.detail.elt : document);
   });
+  // A badge that does not load: its address does not reach the serving
+  // listener from here (a console-only host, a proxy); the card says so.
+  document.addEventListener("error", function (ev) {
+    var img = ev.target;
+    if (!img || img.tagName !== "IMG") return;
+    var card = img.closest("#badges");
+    var note = card && card.querySelector(".badge-broken");
+    if (note) note.hidden = false;
+  }, true);
   // A running job's log: its new lines come as a stream (Server-Sent
   // Events) and are added to what is shown, which is never replaced, so
   // a selection or the place read stay; followed at the bottom only when
