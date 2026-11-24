@@ -757,6 +757,17 @@ fn import_an_apt_repository_as_one_version() {
         "component=extra",
     ])
     .unwrap();
+    // A source package, which comes along.
+    let dsc = write_source(
+        &s.dir.path().join("src"),
+        "1.0-1",
+        &[
+            ("hello_1.0.orig.tar.gz", b"upstream\n"),
+            ("hello_1.0-1.debian.tar.xz", b"packaging\n"),
+        ],
+    );
+    s.cli(&["upload", "old", dsc.to_str().unwrap(), "-s", "dists=focal"])
+        .unwrap();
     let (_, key) = get(&s.url("/old/key.asc"), None);
     let kf = s.dir.path().join("old.asc");
     std::fs::write(&kf, key).unwrap();
@@ -774,7 +785,10 @@ fn import_an_apt_repository_as_one_version() {
             "--wait",
         ])
         .unwrap();
-    assert!(out.contains("imported 3 package file(s)"), "{out}");
+    assert!(
+        out.contains("imported 3 package file(s) and 1 source package(s)"),
+        "{out}"
+    );
     let v = s.json(&["versions", "new"]);
     assert_eq!(
         v.as_array().unwrap().len(),
@@ -799,10 +813,18 @@ fn import_an_apt_repository_as_one_version() {
         names,
         [
             "extra-tool focal/extra all",
+            "hello focal/main source",
             "one focal/main amd64",
             "two focal/main amd64"
         ]
     );
+    let (_, srcs) = get(&s.url("/old/dists/focal/main/source/Sources"), None);
+    let pw = std::fs::read_to_string(s.dir.path().join("data/admin-password")).unwrap();
+    let (_, imported) = get(
+        &s.url("/new/dists/focal/main/source/Sources"),
+        Some(("admin", pw.trim())),
+    );
+    assert_eq!(srcs, imported, "the same source stanza");
     // The dist as upstream had it.
     let dist = s.json(&["ls", "new", "dists/focal"]);
     let def = dist["entries"]

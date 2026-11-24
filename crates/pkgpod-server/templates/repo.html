@@ -78,6 +78,7 @@
       <label class="field"><span>architectures</span><input name="architectures" placeholder="all"></label>
       <label class="field wide"><span>keyring</span><textarea name="keyring" rows="4" spellcheck="false" placeholder="-----BEGIN PGP PUBLIC KEY BLOCK-----"></textarea><small>The upstream's public key; empty: signatures not checked.</small></label>
       <label class="check field"><input type="checkbox" name="replace"> <span>replace</span><small>Replace package files of the same name with other content.</small></label>
+      <label class="check field"><input type="checkbox" name="no_sources"> <span>no sources</span><small>Leave out the source packages the upstream lists.</small></label>
     </div>
     <div class="form-foot"><button type="submit">Import</button></div>
   </form>
