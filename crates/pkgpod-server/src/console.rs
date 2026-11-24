@@ -1009,6 +1009,27 @@ async fn tree_part(
     })
 }
 
+/// What a package row removes: the file, or a source package's whole
+/// directory (its .dsc alone would leave half a source).
+fn package_path(p: &str) -> String {
+    match pkgpod_deb::source::split_path(p) {
+        Some((d, c, dir, _)) => format!("dists/{d}/{c}/{dir}"),
+        None => p.to_string(),
+    }
+}
+
+#[test]
+fn source_rows_remove_the_directory() {
+    assert_eq!(
+        package_path("dists/noble/main/hello_1.0-1_source/hello_1.0-1.dsc"),
+        "dists/noble/main/hello_1.0-1_source"
+    );
+    assert_eq!(
+        package_path("dists/noble/main/hello_1.0-1_amd64.deb"),
+        "dists/noble/main/hello_1.0-1_amd64.deb"
+    );
+}
+
 pub struct PkgRow {
     pub repo: String,
     pub name: String,
@@ -1041,7 +1062,7 @@ fn pkg_rows(v: &Value) -> Vec<PkgRow> {
                 .as_u64()
                 .map(crate::serve::human)
                 .unwrap_or_default(),
-            path: s(&h["path"]),
+            path: package_path(&s(&h["path"])),
         })
         .collect()
 }

@@ -1114,8 +1114,38 @@ fn source_packages_with_apt() {
             ("hello_1.0-1.debian.tar.xz", b"packaging, revision 1\n"),
         ],
     );
+    // Signed, as debsign leaves it: kept byte for byte.
+    let signed = Command::new("gpg")
+        .arg("--homedir")
+        .arg(s.dir.path().join("data/gnupg"))
+        .args(["--batch", "--yes", "--clearsign", "--output", "-"])
+        .arg(&one)
+        .output()
+        .unwrap();
+    assert!(
+        signed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&signed.stderr)
+    );
+    std::fs::write(&one, &signed.stdout).unwrap();
     let out = s.cli(&["upload", "src", one.to_str().unwrap()]).unwrap();
     assert!(out.contains("added source hello 1.0-1"), "{out}");
+    let pooled = reqwest::blocking::get(s.url("/src/pool/main/h/hello/hello_1.0-1.dsc"))
+        .unwrap()
+        .bytes()
+        .unwrap();
+    assert_eq!(pooled.as_ref(), signed.stdout.as_slice());
+    let (_, sources) = get(&s.url("/src/dists/noble/main/source/Sources"), None);
+    let h = pkgpod_deb::hash::hash_bytes(&signed.stdout);
+    assert!(sources.starts_with("Package: hello\n"), "{sources}");
+    assert!(
+        sources.contains(&format!(
+            " {} {} hello_1.0-1.dsc",
+            h.sha256,
+            signed.stdout.len()
+        )),
+        "{sources}"
+    );
 
     // The next revision shares the orig tarball, which the repository has.
     let two_dir = root.join("two");
