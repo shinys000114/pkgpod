@@ -6,19 +6,27 @@ version, labels make snapshots that stay reachable at their own address,
 any two versions can be compared, and an old version can be made current
 again.
 
-Status: in development, nothing released. Debian repositories and
-Debian mirrors work; plain file trees, OCI images, PyPI and npm follow.
+Status: in development, nothing released.
 
 - One binary (`pkgpod`), one SQLite database, local disks.
-- Debian repositories publish signed indexes for every version; uploads
-  by the console, the CLI, the API or a plain `curl -T`.
-- Debian mirrors follow an upstream archive (HTTP, checking its
-  signature, or rsync) on a schedule and are served where they lie.
+- **Debian**: repositories with signed indexes for every version, source
+  packages, uploads by the console, the CLI, the API or `curl -T`;
+  mirrors of an upstream archive (HTTP checking its signature, or
+  rsync), re-signed with your key if you like, packages promoted from
+  them; imports of existing apt repositories.
+- **Files**: plain trees uploaded by path, or mirrored from a file server
+  (rsync, HTTP listings, FTP); public ones also served over FTP.
+- **OCI images**: a registry for docker, podman and oras (push, pull,
+  referrers), images imported from other registries.
+- **PyPI**: an index for pip and uv, uploads with twine; yanking.
+- **npm**: a registry for npm, yarn and pnpm; dist-tags, deprecation.
 - Repositories are reached by their own addresses (host name and path);
-  a reverse proxy in front only provides certificates.
-- Management: a web console, a JSON API (`/api/v1`) and the `pkgpod`
-  command, with one rights model (users, teams, roles per repository,
-  scoped tokens).
+  a reverse proxy in front only provides certificates. There is no
+  pull-through proxy: packages from public registries are imported or
+  fetched from those registries alongside.
+- Management: a web console, a JSON API (`/api/v1`, described at
+  `/api/v1/openapi.json`) and the `pkgpod` command, with one rights
+  model (users, teams, roles per repository, scoped tokens).
 
 ## Quick start
 
@@ -48,7 +56,12 @@ echo 'deb [signed-by=/etc/apt/keyrings/ppa.asc] https://ppa.example.org/ noble m
 ```
 
 Snapshots: `pkgpod label ppa release-1`, then
-`https://ppa.example.org/@release-1/` serves that version.
+`https://ppa.example.org/@release-1/` serves that version (npm
+repositories: `<address>/-/label/release-1/`).
+
+Other formats are made the same way (`pkgpod repo create <name> -f
+files|oci|pypi|npm`); each repository's page in the console says how its
+clients use it.
 
 ## Licence
 
