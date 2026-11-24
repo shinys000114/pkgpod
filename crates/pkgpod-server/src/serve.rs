@@ -408,11 +408,20 @@ async fn resigned(
 ) -> Option<Response> {
     let name = rel.last()?.clone();
     let key = Some(repo.setting_str("key").to_string()).filter(|k| !k.is_empty());
+    let keyring = repo.setting_str("keyring").to_string();
     let is_key = rel.len() == 1 && name == "key.asc";
+    // Only the Release files of the dists followed (dists/<dist>/, where
+    // a dist may have a slash), not a component's.
     let in_dist = rel.len() >= 3
         && rel[0] == "dists"
         && crate::resign::replaced(&name)
-        && !rel.iter().any(|s| s.starts_with('.') || s == "by-hash");
+        && !rel.iter().any(|s| s.starts_with('.'))
+        && {
+            let dist = rel[1..rel.len() - 1].join("/");
+            repo.settings["dists"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|d| d.as_str() == Some(dist.as_str())))
+        };
     if !is_key && !in_dist {
         return None;
     }
@@ -429,7 +438,7 @@ async fn resigned(
         }
         Ok(app2
             .resigner
-            .dist(&app2.keys, key.as_deref(), &dir)?
+            .dist(&app2.keys, key.as_deref(), &keyring, &dir)?
             .map(|s| match name.as_str() {
                 "InRelease" => s.inrelease.clone(),
                 "Release.gpg" => s.gpg.clone(),

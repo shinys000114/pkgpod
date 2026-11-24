@@ -40,36 +40,73 @@ pub fn replaced(name: &str) -> bool {
 }
 
 impl Resigner {
-    /// The Release files of the dist in `dir`, signed with `key`; `None`
-    /// when the dist has none.
-    pub fn dist(&self, keys: &Keys, key: Option<&str>, dir: &Path) -> Result<Option<Arc<Signed>>> {
-        let release = match std::fs::read(dir.join("Release")) {
-            Ok(r) => r,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                match std::fs::read(dir.join("InRelease")) {
-                    // Checked when it was received.
-                    Ok(ir) => pkgpod_deb::verify::inrelease_text_unverified(&ir)
-                        .map_err(|e| Error::Invalid(format!("{}: {e}", dir.display())))?
-                        .into_bytes(),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                    Err(e) => return Err(Error::Invalid(format!("{}: {e}", dir.display()))),
-                }
-            }
-            Err(e) => return Err(Error::Invalid(format!("{}: {e}", dir.display()))),
+    /// The Release files of the dist in `dir`, checked against `keyring`
+    /// (the upstream's, armored) and signed with `key`; `None` when the
+    /// dist has none. What lies in the tree is checked again here, not
+    /// trusted: it may have been received before the keyring was set.
+    pub fn dist(
+        &self,
+        keys: &Keys,
+        key: Option<&str>,
+        keyring: &str,
+        dir: &Path,
+    ) -> Result<Option<Arc<Signed>>> {
+        let read = |name: &str| match std::fs::read(dir.join(name)) {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(Error::Invalid(format!("{}/{name}: {e}", dir.display()))),
         };
+        let (inrelease, release, gpg) =
+            (read("InRelease")?, read("Release")?, read("Release.gpg")?);
+        if inrelease.is_none() && release.is_none() {
+            return Ok(None);
+        }
         let fpr = keys
             .key_id(key)
             .ok_or_else(|| Error::Invalid("no signing key: add one, or turn resign off".into()))?;
-        let k = (dir.to_path_buf(), Digest::of(&release).hex(), fpr);
-        // Held while signing, so parallel clients after a sync sign once.
+        let mut h = Digest::of(keyring.as_bytes()).hex();
+        for b in [&inrelease, &release, &gpg] {
+            h.push(':');
+            h.push_str(
+                &b.as_deref()
+                    .map(|b| Digest::of(b).hex())
+                    .unwrap_or_default(),
+            );
+        }
+        let k = (dir.to_path_buf(), h, fpr);
+        // Held while checking and signing, so parallel clients after a
+        // sync do it once.
         let mut m = self.signed.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = m.get(&k) {
             return Ok(Some(s.clone()));
         }
-        let inrelease = keys.clearsign(key, &release)?;
-        let gpg = keys.detach_sign(key, &release)?;
+        let kr = pkgpod_deb::verify::Keyring::from_bytes(keyring.trim().as_bytes())
+            .map_err(|e| Error::Invalid(format!("keyring: {e}")))?;
+        let bad = |e: pkgpod_deb::Error| {
+            Error::Invalid(format!(
+                "{}: the upstream's signature does not check: {e}",
+                dir.display()
+            ))
+        };
+        let text = match (&inrelease, &release, &gpg) {
+            (Some(ir), _, _) => pkgpod_deb::verify::verify_inrelease(&kr, ir)
+                .map_err(bad)?
+                .into_bytes(),
+            (None, Some(r), Some(g)) => {
+                pkgpod_deb::verify::verify_detached(&kr, r, g).map_err(bad)?;
+                r.clone()
+            }
+            _ => {
+                return Err(Error::Invalid(format!(
+                    "{}: Release without a signature",
+                    dir.display()
+                )));
+            }
+        };
+        let inrelease = keys.clearsign(key, &text)?;
+        let gpg = keys.detach_sign(key, &text)?;
         let s = Arc::new(Signed {
-            release,
+            release: text,
             inrelease,
             gpg,
         });

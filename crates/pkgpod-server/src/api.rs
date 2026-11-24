@@ -120,9 +120,16 @@ impl App {
         c.user.as_ref().ok_or(Error::Unauthorized)
     }
 
-    /// Checks addresses against the other repositories', and a
-    /// schedule's syntax.
+    /// Checks addresses against the other repositories', a schedule's
+    /// syntax and that a named signing key exists.
     pub fn check_urls(&self, repo: &str, settings: &Value) -> Result<()> {
+        if let Some(k) = settings.get("key").and_then(Value::as_str)
+            && !k.trim().is_empty()
+        {
+            self.keys.get(k.trim()).map_err(|_| {
+                Error::Invalid(format!("no signing key {k:?}: add it first (pkgpod key)"))
+            })?;
+        }
         if let Some(c) = settings.get("schedule").and_then(Value::as_str)
             && !c.trim().is_empty()
         {
