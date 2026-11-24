@@ -154,7 +154,8 @@ pub async fn handle(app: Arc<App>, mut a: Ask, req: Request) -> Response {
             reply(StatusCode::OK, registration(&base, id, &vs))
         }
         (["query"], _) if reading => search(&app, &a, req.uri().query().unwrap_or("")).await,
-        (["api", "v2", "package"], &Method::PUT) => push(&app, &a, req).await,
+        (["api", "v2", "package"], &Method::PUT) => push(&app, &a, req, false).await,
+        (["api", "v2", "symbolpackage"], &Method::PUT) => push(&app, &a, req, true).await,
         (["api", "v2", "package", id, ver], &Method::DELETE) => {
             let (app2, name, actor) = (
                 app.clone(),
@@ -196,6 +197,10 @@ fn service_index(base: &str) -> Value {
     r.extend(res(
         format!("{base}api/v2/package"),
         &["PackagePublish/2.0.0"],
+    ));
+    r.extend(res(
+        format!("{base}api/v2/symbolpackage"),
+        &["SymbolPackagePublish/4.9.0"],
     ));
     r.extend(res(
         format!("{base}registration/"),
@@ -349,7 +354,7 @@ async fn search(app: &Arc<App>, a: &Ask, query: &str) -> Response {
     reply(StatusCode::OK, json!({"totalHits": total, "data": data}))
 }
 
-async fn push(app: &Arc<App>, a: &Ask, req: Request) -> Response {
+async fn push(app: &Arc<App>, a: &Ask, req: Request, symbols: bool) -> Response {
     let mut m = match Multipart::from_request(req, &()).await {
         Ok(m) => m,
         Err(e) => {
@@ -381,7 +386,7 @@ async fn push(app: &Arc<App>, a: &Ask, req: Request) -> Response {
     );
     let res = tokio::task::spawn_blocking(move || {
         app2.engine
-            .upload(&name, &up, &json!({}), &actor)
+            .upload(&name, &up, &json!({"symbols": symbols}), &actor)
             .inspect(|o| app2.auth.audit(&actor, "push", &name, &o.summary))
     })
     .await;
