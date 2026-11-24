@@ -4308,3 +4308,179 @@ fn killed_and_restarted_the_data_holds() {
         "{jobs}"
     );
 }
+
+#[test]
+fn backup_while_working_then_restore() {
+    if !have("dpkg-deb") || !have("gpg") || !have("apt-get") {
+        return;
+    }
+    let mut s = Server::start();
+    s.cli(&[
+        "key",
+        "generate",
+        "main",
+        "pkgpod e2e <e2e@example.invalid>",
+    ])
+    .unwrap();
+    s.cli(&["repo", "create", "ppa", "-s", "public=true"])
+        .unwrap();
+    s.cli(&["op", "ppa", "dist-set", "name=stable", "-y"])
+        .unwrap();
+    s.cli(&["repo", "create", "f", "-f", "files", "-s", "public=true"])
+        .unwrap();
+    let debs = s.dir.path().join("debs");
+    std::fs::create_dir_all(&debs).unwrap();
+    let one = build_deb(&debs, "kept", "1.0", "amd64", "xz", "");
+    s.cli(&["upload", "ppa", one.to_str().unwrap()]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "f", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    // Uploads go on during the backup.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer = {
+        let (stop, url, tok) = (stop.clone(), s.url("/f/"), tok.clone());
+        std::thread::spawn(move || {
+            let c = reqwest::blocking::Client::new();
+            let mut n = 0;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = c
+                    .put(format!("{url}b{n}.bin"))
+                    .basic_auth("token", Some(&tok))
+                    .body(vec![n as u8; 30_000])
+                    .send();
+                n += 1;
+            }
+            n
+        })
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    let backup = s.dir.path().join("backup");
+    let (ok, out) = s.admin(&["backup", backup.to_str().unwrap()]);
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(writer.join().unwrap() > 0);
+    assert!(ok, "{out}");
+    assert!(!out.contains("missing"), "{out}");
+    assert!(
+        !backup.join("admin-password").exists(),
+        "no secrets but the keys"
+    );
+
+    // The machine is lost: restore elsewhere and serve from there.
+    let _ = s.child.kill();
+    let _ = s.child.wait();
+    let d2 = s.dir.path().join("restored");
+    let cfg2 = s.dir.path().join("restored.toml");
+    let mport = free_port();
+    std::fs::write(
+        &cfg2,
+        format!(
+            "data_dir = \"{}\"\nlisten = \"127.0.0.1:{mport}\"\nlog = \"warn\"\n",
+            d2.display()
+        ),
+    )
+    .unwrap();
+    let admin2 = |args: &[&str]| {
+        let o = Command::new(env!("CARGO_BIN_EXE_pkgpod"))
+            .arg("admin")
+            .arg("-c")
+            .arg(&cfg2)
+            .args(args)
+            .output()
+            .unwrap();
+        (
+            o.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            ),
+        )
+    };
+    let (ok, out) = admin2(&["restore", backup.to_str().unwrap()]);
+    assert!(ok, "{out}");
+    let (ok, out) = admin2(&["check", "--deep"]);
+    assert!(ok, "{out}");
+    s.child = Command::new(env!("CARGO_BIN_EXE_pkgpod"))
+        .args(["serve", "-c"])
+        .arg(&cfg2)
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let t = Instant::now();
+    while std::net::TcpStream::connect(("127.0.0.1", s.serve_port)).is_err() {
+        assert!(
+            t.elapsed() < Duration::from_secs(20),
+            "restored server did not start"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // apt reads it with the key it had.
+    let (_, key) = get(&s.url("/ppa/key.asc"), None);
+    let a = apt_dir(s.dir.path(), "apt-restored", &s.url("/ppa/"), &key);
+    let out = apt(&a, &["update"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = apt(&a, &["download", "kept"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // An index changed within the second a client last fetched it is not
+    // "not modified" to that client.
+    let c = reqwest::blocking::Client::new();
+    let r = c.get(s.url("/ppa/dists/stable/InRelease")).send().unwrap();
+    let ims = r
+        .headers()
+        .get("last-modified")
+        .map(|v| v.to_str().unwrap().to_string())
+        .unwrap_or_else(httpdate_now);
+    let before = r.text().unwrap();
+    // And takes uploads, signed with that key.
+    let two = build_deb(&debs, "after", "1.0", "amd64", "xz", "");
+    let pw = std::fs::read_to_string(s.dir.path().join("data/admin-password")).unwrap();
+    let r = reqwest::blocking::Client::new()
+        .put(s.url("/ppa/after_1.0_amd64.deb"))
+        .basic_auth("admin", Some(pw.trim()))
+        .body(std::fs::read(&two).unwrap())
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 201, "{}", r.text().unwrap());
+    let r = c
+        .get(s.url("/ppa/dists/stable/InRelease"))
+        .header("if-modified-since", &ims)
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200, "If-Modified-Since {ims}");
+    assert_ne!(r.text().unwrap(), before);
+    let out = apt(&a, &["update"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = apt(&a, &["download", "after"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // A restore never goes over data.
+    assert!(!admin2(&["restore", backup.to_str().unwrap()]).0);
+}
+
+/// The current time as an HTTP date (a client's If-Modified-Since).
+fn httpdate_now() -> String {
+    let o = Command::new("date")
+        .args(["-u", "+%a, %d %b %Y %H:%M:%S GMT"])
+        .env("LC_ALL", "C")
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&o.stdout).trim().to_string()
+}

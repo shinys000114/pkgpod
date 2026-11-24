@@ -267,8 +267,18 @@ enum AdminCmd {
         #[arg(long)]
         password_stdin: bool,
     },
-    /// Write a consistent copy of the database.
-    Backup { to: PathBuf },
+    /// Back up the data into an empty directory: the database, the
+    /// signing keys, the content stores (hard links on the same
+    /// filesystem), with --mirrors the mirrors' trees. Safe while the
+    /// server runs.
+    Backup {
+        to: PathBuf,
+        #[arg(long)]
+        mirrors: bool,
+    },
+    /// Restore a backup into the configured data directory, which must
+    /// be empty (the server not running on it).
+    Restore { from: PathBuf },
     /// Check that every version can be read whole and every blob it
     /// names is in the store (with --deep, with its sha256); exits 1 on
     /// problems. Safe while the server runs.
@@ -339,6 +349,23 @@ fn serve(a: &ServerArgs) -> Result<(), client::CliError> {
 fn admin(a: &ServerArgs, cmd: AdminCmd) -> Result<(), client::CliError> {
     let cfg = load(a)?;
     let err = |e: pkgpod_server::Error| client::CliError::other(e.to_string());
+    let show = |rep: &pkgpod_server::backup::Report| {
+        println!(
+            "{} file(s) ({} linked, {} bytes copied)",
+            rep.files, rep.linked, rep.bytes
+        );
+        for w in &rep.warnings {
+            println!("warning: {w}");
+        }
+    };
+    if let AdminCmd::Restore { from } = &cmd {
+        // Before the server's data is opened, which would make it.
+        let rep = pkgpod_server::backup::restore(from, &cfg.data_dir, &mut |m| println!("{m}"))
+            .map_err(err)?;
+        show(&rep);
+        println!("restored into {}", cfg.data_dir.display());
+        return Ok(());
+    }
     let app = pkgpod_server::App::open(cfg).map_err(err)?;
     match cmd {
         AdminCmd::Password {
@@ -359,12 +386,13 @@ fn admin(a: &ServerArgs, cmd: AdminCmd) -> Result<(), client::CliError> {
                 println!("admin {user} created");
             }
         }
-        AdminCmd::Backup { to } => {
-            app.db
-                .backup(&to)
-                .map_err(|e| client::CliError::other(e.to_string()))?;
-            println!("database copied to {}", to.display());
+        AdminCmd::Backup { to, mirrors } => {
+            let rep = pkgpod_server::backup::backup(&app, &to, mirrors, &mut |m| println!("{m}"))
+                .map_err(err)?;
+            show(&rep);
+            println!("backed up into {}", to.display());
         }
+        AdminCmd::Restore { .. } => unreachable!("handled above"),
         AdminCmd::Check { deep } => {
             let rep = app
                 .engine
