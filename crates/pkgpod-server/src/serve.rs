@@ -675,7 +675,7 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
             return client_note(
                 StatusCode::OK,
                 format!(
-                    "{}: a Conan remote.\n\n  conan remote add {} {}\n  conan remote login {} <user> -p <token>\n\nIts recipes and packages are listed in pkgpod's console.\n",
+                    "{}: a Conan remote.\n\n  conan remote add {} {}\n  conan remote login {} token -p <token>\n\nIts recipes and packages are listed in pkgpod's console.\n",
                     served.repo.name,
                     served.repo.name,
                     client_base(route.as_ref(), &host, &base, &req),

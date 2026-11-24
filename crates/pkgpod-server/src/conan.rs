@@ -194,7 +194,7 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
         return if a.caller.user.is_none() {
             text(
                 StatusCode::UNAUTHORIZED,
-                "log in: conan remote login <remote> <user> -p <token>",
+                "log in: conan remote login <remote> token -p <token>",
             )
         } else {
             text(StatusCode::FORBIDDEN, "no access")

@@ -1600,7 +1600,7 @@ fn usage(
         });
         out.push(UseLine {
             label: "Note".into(),
-            text: "pkgpod is no proxy: packages from npmjs need their own registry (a scope here, the rest from registry.npmjs.org). npm login is not offered; set the token in .npmrc. unpublish and deprecate are operations here.".into(),
+            text: "This repository has only what is published here. For npmjs packages too, install from a group of it and an npm proxy cache (New repository), or use a scope here and registry.npmjs.org for the rest. npm login is not offered; set the token in .npmrc. npm deprecate and npm unpublish work, and are operations here too.".into(),
         });
         return out;
     }
@@ -1638,7 +1638,7 @@ fn usage(
         out.push(UseLine {
             label: "Add the remote and log in".into(),
             text: format!(
-                "conan remote add {remote} {base}\nconan remote login {remote} <user> -p <token>   # the password: a pkgpod token"
+                "conan remote add {remote} {base}\nconan remote login {remote} token -p <token>   # the password: a pkgpod token"
             ),
         });
         out.push(UseLine {
@@ -2250,7 +2250,7 @@ fn usage(
         out.push(UseLine {
             label: "Install".into(),
             text: format!(
-                "pip install --index-url {index} <project>\n# packages from PyPI as well (pkgpod is no proxy): add --extra-index-url https://pypi.org/simple/"
+                "pip install --index-url {index} <project>\n# packages from PyPI as well: install from a group of this repository and a PyPI proxy cache,\n# or add --extra-index-url https://pypi.org/simple/"
             ),
         });
         out.push(UseLine {
