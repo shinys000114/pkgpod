@@ -11,6 +11,7 @@ pub mod import;
 pub mod jobs;
 pub mod keys;
 pub mod listeners;
+pub mod resign;
 pub mod routes;
 pub mod schema;
 pub mod serve;
@@ -114,6 +115,7 @@ pub struct App {
     pub listeners: listeners::Running,
     pub jobs: jobs::Jobs,
     pub plans: Mutex<HashMap<String, Kept>>,
+    pub resigner: resign::Resigner,
     cache: Mutex<Cache>,
 }
 
@@ -169,6 +171,7 @@ impl App {
             listeners: listeners::Running::default(),
             jobs: jobs::Jobs::default(),
             plans: Mutex::new(HashMap::new()),
+            resigner: resign::Resigner::default(),
             cache: Mutex::new(Cache::default()),
         }))
     }

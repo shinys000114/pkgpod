@@ -300,6 +300,7 @@ impl Engine {
             )));
         }
         let settings = settings::check(&self.fields(&n.format, n.kind)?, &n.settings)?;
+        f.check_settings(n.kind, &settings)?;
         let storage = n.storage.unwrap_or_else(|| "main".into());
         let exists = self.db.read(|c| {
             c.query_row("SELECT 1 FROM storages WHERE name = ?1", [&storage], |_| {
@@ -355,6 +356,7 @@ impl Engine {
         let r = self.repo(name)?;
         let merged = settings::merge(&r.settings, patch);
         let s = settings::check(&self.fields(&r.format, r.kind)?, &merged)?;
+        self.format(&r.format)?.check_settings(r.kind, &s)?;
         self.db.write(|tx| {
             tx.execute(
                 "UPDATE repos SET settings = ?1 WHERE id = ?2",
