@@ -20,7 +20,7 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{HeaderValue, Method, StatusCode, header};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use pkgpod_base::Digest;
 use pkgpod_engine::RepoInfo;
 use pkgpod_engine::cache::{CacheKind, CacheRow};
@@ -30,7 +30,7 @@ use crate::serve::{At, percent_encode, status};
 use crate::{App, Error, Result, Served};
 
 /// Formats whose proxies are served.
-pub const FORMATS: &[&str] = &["go", "maven", "npm", "pypi"];
+pub const FORMATS: &[&str] = &["go", "maven", "npm", "pypi", "cargo"];
 
 /// Largest file fetched.
 pub const MAX_FILE: u64 = 4 << 30;
@@ -296,6 +296,49 @@ fn pypi(rel: &[String]) -> Option<Asked> {
     }
 }
 
+/// Cargo's sparse index: a crate's index file (metadata, at the
+/// upstream index's path) and its .crate (a file, from where the
+/// upstream's config.json says, checked against the index's cksum).
+fn cargo(rel: &[String]) -> Option<Asked> {
+    let a = |path: String, kind, name: String, version: String, count| Asked {
+        path,
+        kind,
+        name,
+        version,
+        count,
+        url: None,
+        expect: None,
+    };
+    match rel {
+        [i, path @ ..] if i == "index" && !path.is_empty() => {
+            let name = path.last()?.to_ascii_lowercase();
+            if path.join("/") != pkgpod_cargo::index_file(&name) {
+                return None;
+            }
+            Some(a(
+                format!("index/{}", path.join("/")),
+                CacheKind::Meta,
+                name,
+                String::new(),
+                false,
+            ))
+        }
+        [x, v1, c, name, ver, d]
+            if x == "api" && v1 == "v1" && c == "crates" && d == "download" =>
+        {
+            let name = name.to_ascii_lowercase();
+            Some(a(
+                format!("api/v1/crates/{name}/{}/download", percent_encode(ver)),
+                CacheKind::File,
+                name,
+                ver.clone(),
+                true,
+            ))
+        }
+        _ => None,
+    }
+}
+
 /// What a request is, for a format.
 pub fn classify(format: &str, rel: &[String]) -> Option<Asked> {
     match format {
@@ -303,6 +346,7 @@ pub fn classify(format: &str, rel: &[String]) -> Option<Asked> {
         "maven" => maven(rel),
         "npm" => npm(rel),
         "pypi" => pypi(rel),
+        "cargo" => cargo(rel),
         _ => None,
     }
 }
@@ -315,6 +359,15 @@ async fn prepare(app: &Arc<App>, r: &RepoInfo, up: &Upstream, a: &mut Asked) -> 
     if r.format == "pypi" && a.kind == CacheKind::Meta {
         // The upstream is an index (…/simple/): its project page.
         a.url = Some(format!("{}{}/", up.base, a.name));
+        return Ok(true);
+    }
+    if r.format == "cargo" && a.kind == CacheKind::Meta {
+        // The upstream is a sparse index: the file under it.
+        a.url = Some(format!(
+            "{}{}",
+            up.base,
+            a.path.trim_start_matches("index/")
+        ));
         return Ok(true);
     }
     if a.kind != CacheKind::File {
@@ -392,6 +445,90 @@ async fn prepare(app: &Arc<App>, r: &RepoInfo, up: &Upstream, a: &mut Asked) -> 
                 return Ok(true);
             }
             Ok(false)
+        }
+        "cargo" => {
+            let have = {
+                let (app2, name, path) = (app.clone(), r.name.clone(), a.path.clone());
+                tokio::task::spawn_blocking(move || app2.engine.cache_get(&name, &path))
+                    .await
+                    .map_err(|e| Error::Invalid(e.to_string()))??
+            };
+            if have.is_some_and(|h| h.kind == CacheKind::File) {
+                return Ok(true);
+            }
+            let meta = |path: String, url: String| Asked {
+                path,
+                kind: CacheKind::Meta,
+                name: a.name.clone(),
+                version: String::new(),
+                count: false,
+                url: Some(url),
+                expect: None,
+            };
+            // Where the upstream's crates are.
+            let cfg = meta(
+                "upstream/config.json".into(),
+                format!("{}config.json", up.base),
+            );
+            let Got::Row(row) = get(app, r, up, &cfg).await? else {
+                return Err(Error::Invalid(
+                    "the upstream index has no config.json".into(),
+                ));
+            };
+            let dl = read_json(r, &row)
+                .await
+                .and_then(|v| v["dl"].as_str().map(String::from))
+                .ok_or_else(|| Error::Invalid("the upstream's config.json has no dl".into()))?;
+            let file = pkgpod_cargo::index_file(&a.name);
+            let idx = meta(format!("index/{file}"), format!("{}{file}", up.base));
+            let Got::Row(row) = get(app, r, up, &idx).await? else {
+                return Ok(false);
+            };
+            let Some(sha) = row.sha256 else {
+                return Ok(false);
+            };
+            let text = tokio::fs::read_to_string(r.store().path(&sha))
+                .await
+                .unwrap_or_default();
+            let line = text
+                .lines()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .find(|l| l["vers"].as_str() == Some(a.version.as_str()));
+            let Some(line) = line else {
+                return Ok(false);
+            };
+            a.expect = line["cksum"]
+                .as_str()
+                .map(|h| Expect::Sha256(h.to_ascii_lowercase()));
+            let markers = [
+                "{crate}",
+                "{version}",
+                "{prefix}",
+                "{lowerprefix}",
+                "{sha256-checksum}",
+            ];
+            let url = if markers.iter().any(|m| dl.contains(m)) {
+                let prefix = file.rsplit_once('/').map_or("", |x| x.0).to_string();
+                dl.replace("{crate}", &a.name)
+                    .replace("{version}", &a.version)
+                    .replace("{lowerprefix}", &prefix.to_ascii_lowercase())
+                    .replace("{prefix}", &prefix)
+                    .replace("{sha256-checksum}", line["cksum"].as_str().unwrap_or(""))
+            } else {
+                format!(
+                    "{}/{}/{}/download",
+                    dl.trim_end_matches('/'),
+                    a.name,
+                    a.version
+                )
+            };
+            if !(url.starts_with("https://") || url.starts_with("http://")) {
+                return Err(Error::Invalid(format!(
+                    "the upstream's dl is not http(s): {dl}"
+                )));
+            }
+            a.url = Some(url);
+            Ok(true)
         }
         "pypi" => {
             let have = {
@@ -518,6 +655,7 @@ fn name_doc(format: &str, name: &str) -> Option<String> {
         "maven" => Some(format!("{name}/maven-metadata.xml")),
         "npm" => Some(npm_path(name)),
         "pypi" => Some(format!("simple/{name}/")),
+        "cargo" => Some(format!("index/{}", pkgpod_cargo::index_file(name))),
         _ => None,
     }
 }
@@ -792,6 +930,16 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
                 r.setting_str("upstream")
             ),
         );
+    }
+    if r.format == "cargo" && at.rel == ["index", "config.json"] {
+        // Its own: crates through here.
+        let base = crate::serve::client_base(at.route.as_ref(), &at.host, &at.base, &req);
+        return axum::Json(json!({
+            "dl": format!("{base}api/v1/crates"),
+            "api": base.trim_end_matches('/'),
+            "auth-required": !r.setting_bool("public"),
+        }))
+        .into_response();
     }
     let Some(mut a) = classify(&r.format, &at.rel) else {
         return status(StatusCode::NOT_FOUND);

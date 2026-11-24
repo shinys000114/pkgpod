@@ -439,6 +439,10 @@ impl Format for Cargo {
         true
     }
 
+    fn proxy(&self) -> bool {
+        true
+    }
+
     fn id(&self) -> &'static str {
         "cargo"
     }
