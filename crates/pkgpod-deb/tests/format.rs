@@ -190,8 +190,13 @@ fn conflicts_operations_and_rollback() {
     // With replace it replaces everywhere.
     f.upload(&two, json!({"dists": ["b"], "replace": true}))
         .unwrap();
-    let pa = String::from_utf8(f.served("dists/a/main/binary-amd64/Packages").unwrap()).unwrap();
+    let pa = String::from_utf8(f.served("dists/a/main/binary-all/Packages").unwrap()).unwrap();
     assert!(pa.contains("Depends: libc6"), "{pa}");
+    // Only arch:all packages: an index for "all", listed in the Release,
+    // and none made up for amd64.
+    let rel = String::from_utf8(f.served("dists/a/Release").unwrap()).unwrap();
+    assert!(rel.contains("Architectures: all\n"), "{rel}");
+    assert!(f.served("dists/a/main/binary-amd64/Packages").is_none());
 
     // Copy b -> new dist c, remove from a.
     f.op("dist-set", json!({"name": "c"})).unwrap();
@@ -200,18 +205,13 @@ fn conflicts_operations_and_rollback() {
         json!({"from": "b", "to": "c", "packages": ["tool"]}),
     )
     .unwrap();
-    assert!(
-        f.served("dists/c/main/binary-amd64/Packages")
-            .unwrap()
-            .len()
-            > 10
-    );
+    assert!(f.served("dists/c/main/binary-all/Packages").unwrap().len() > 10);
     let before = f
         .op("remove", json!({"packages": ["tool_1.0"], "dists": ["a"]}))
         .unwrap()
         .unwrap();
     assert!(
-        f.served("dists/a/main/binary-amd64/Packages")
+        f.served("dists/a/main/binary-all/Packages")
             .unwrap()
             .is_empty()
     );
@@ -231,7 +231,7 @@ fn conflicts_operations_and_rollback() {
         "a rollback publishes with a new date"
     );
     assert!(
-        String::from_utf8(f.served("dists/a/main/binary-amd64/Packages").unwrap())
+        String::from_utf8(f.served("dists/a/main/binary-all/Packages").unwrap())
             .unwrap()
             .contains("tool")
     );
@@ -239,7 +239,7 @@ fn conflicts_operations_and_rollback() {
     // Components dropped from a dist go with their packages.
     f.op("dist-set", json!({"name": "a", "components": ["other"]}))
         .unwrap();
-    assert!(f.served("dists/a/main/binary-amd64/Packages").is_none());
+    assert!(f.served("dists/a/main/binary-all/Packages").is_none());
     assert!(f.op("dist-set", json!({"name": "bad/name"})).is_err());
     assert!(f.op("dist-remove", json!({"name": "zzz"})).is_err());
 }

@@ -43,7 +43,7 @@ use crate::version;
 
 /// Bumped when the published layout changes, so no dist is reused from a
 /// version published by an older pkgpod.
-const GENERATOR: u32 = 2;
+const GENERATOR: u32 = 3;
 
 pub struct Deb;
 
@@ -1244,10 +1244,12 @@ fn generate_dist(
             .filter(|a| *a != "all")
             .collect();
         archs = set.into_iter().map(String::from).collect();
-        if archs.is_empty() {
-            archs.push("amd64".into());
-        }
     }
+    // Architecture-independent packages also get an index of their own,
+    // listed as "all" (as Debian does): apt reads it on any architecture,
+    // so a dist of arch:all packages serves arm64 as well as amd64.
+    archs.retain(|a| a != "all");
+    archs.push("all".into());
     let mut out: Vec<(String, Vec<u8>)> = Vec::new();
     let mut files = Vec::new();
     let mut add = |out: &mut Vec<(String, Vec<u8>)>,
