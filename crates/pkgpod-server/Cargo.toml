@@ -21,6 +21,7 @@ pkgpod-go.workspace = true
 pkgpod-apk.workspace = true
 pkgpod-rpm.workspace = true
 pkgpod-helm.workspace = true
+pkgpod-maven.workspace = true
 pkgpod-mirror.workspace = true
 axum.workspace = true
 tokio.workspace = true

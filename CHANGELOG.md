@@ -34,6 +34,9 @@ Formats:
   createrepo_c makes it, repomd.xml signed for `repo_gpgcheck`.
 - **Helm**: chart repositories: packaged charts uploaded, `index.yaml`
   made per version with relative URLs, so a label is a repository too.
+- **Maven**: files deployed at their Maven paths; maven-metadata.xml
+  (artifact and SNAPSHOT version) and md5/sha1/sha256/sha512 made here,
+  uploaded checksums checked; releases deployed once unless `redeploy`.
 
 Everywhere: versions of every hosted repository with labels
 (`@label` addresses; `-/label/<label>/` for npm), diffs, rollback and

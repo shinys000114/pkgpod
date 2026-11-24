@@ -672,6 +672,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                         ("apk", _) => "Alpine packages for apk, signed per version",
                         ("rpm", _) => "RPM packages for dnf and yum, signed repodata",
                         ("helm", _) => "Helm charts for helm (index.yaml)",
+                        ("maven", _) => "Java artifacts for Maven and Gradle",
                         _ => "",
                     }
                     .to_string(),
@@ -888,6 +889,38 @@ fn usage(app: &App, r: &pkgpod_engine::RepoInfo, urls: &[String], host: &str) ->
         out.push(UseLine {
             label: "Note".into(),
             text: "pkgpod is no proxy: packages from npmjs need their own registry (a scope here, the rest from registry.npmjs.org). npm login is not offered; set the token in .npmrc. unpublish and deprecate are operations here.".into(),
+        });
+        return out;
+    }
+    if r.format == "maven" {
+        let id = r.name.replace('.', "-");
+        out.push(UseLine {
+            label: "~/.m2/settings.xml".into(),
+            text: format!(
+                "<settings>\n  <servers>\n    <server>\n      <id>{id}</id>\n      <username>token</username>\n      <password>&lt;token&gt;</password>\n    </server>\n  </servers>\n</settings>"
+            ),
+        });
+        out.push(UseLine {
+            label: "pom.xml: deploy".into(),
+            text: format!(
+                "<distributionManagement>\n  <repository><id>{id}</id><url>{base}</url></repository>\n  <snapshotRepository><id>{id}</id><url>{base}</url></snapshotRepository>\n</distributionManagement>\n<!-- then: mvn deploy -->"
+            ),
+        });
+        out.push(UseLine {
+            label: "pom.xml: depend".into(),
+            text: format!(
+                "<repositories>\n  <repository>\n    <id>{id}</id>\n    <url>{base}</url>\n    <snapshots><enabled>true</enabled></snapshots>\n  </repository>\n</repositories>"
+            ),
+        });
+        out.push(UseLine {
+            label: "Gradle".into(),
+            text: format!(
+                "repositories {{\n    maven {{\n        url = uri(\"{base}\")\n        credentials {{ username = \"token\"; password = \"<token>\" }}\n    }}\n}}"
+            ),
+        });
+        out.push(UseLine {
+            label: "A labelled version".into(),
+            text: format!("<url>{base}@<label>/</url>   <!-- read-only -->"),
         });
         return out;
     }
@@ -1760,6 +1793,7 @@ fn catalog_words(format: &str) -> (&'static str, [&'static str; 3], bool) {
         "cargo" => ("Crates", ["Crate", "Version", "Note"], true),
         "go" => ("Modules", ["Module", "Version", "Note"], true),
         "helm" => ("Charts", ["Chart", "Version", "Note"], true),
+        "maven" => ("Artifacts", ["Group:artifact", "Version", "Note"], true),
         "deb" => ("Packages", ["Package", "Version", "Where"], true),
         _ => ("Packages", ["Package", "Version", "Where"], true),
     }
