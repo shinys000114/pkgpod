@@ -10337,9 +10337,9 @@ fn groups_with_a_private_member_are_kept_by_clients_only() {
     for (auth, body) in [(false, "PUBLIC-SQUAT"), (true, "PRIVATE-BUILD")] {
         let r = fetch(&jar, auth);
         assert_eq!((r.status, r.body.as_str()), (200, body), "{auth}");
-        // Asked again each time (a rollback may change it), and kept
-        // apart by Authorization.
-        assert_eq!(r.cache, "no-cache", "{auth}");
+        // Asked again each time (a rollback may change it), kept from
+        // shared caches and apart by Authorization.
+        assert_eq!(r.cache, "private, no-cache", "{auth}");
         assert!(r.vary.contains("Authorization"), "{auth}: {}", r.vary);
     }
     let r = fetch(&format!("/mall/{dir}/x-1.0.jar"), false);
@@ -10798,7 +10798,7 @@ fn oci_tags_are_revalidated() {
     for path in ["/v2/img/app/manifests/1.0", "/v2/img/app/tags/list"] {
         let r = seen(reg.req(reqwest::Method::GET, path).send().unwrap());
         assert_eq!(r.status, 200, "{path}");
-        assert_eq!(r.cache, "no-cache", "{path}");
+        assert_eq!(r.cache, "private, no-cache", "{path}");
         assert!(r.vary.contains("Authorization"), "{path}: {}", r.vary);
     }
     let r = seen(
@@ -15011,7 +15011,7 @@ fn pypi_with_pip() {
         .header("accept", "text/html")
         .send()
         .unwrap();
-    assert_eq!(r.headers()["cache-control"], "no-cache");
+    assert_eq!(r.headers()["cache-control"], "private, no-cache");
     let html = r.text().unwrap();
     assert!(html.contains("data-yanked=\"broken &lt;b&gt;\""), "{html}");
     assert!(html.contains("data-requires-python=\"&gt;=99\""), "{html}");

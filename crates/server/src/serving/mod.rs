@@ -532,9 +532,16 @@ pub(crate) fn private(r: &mut Response) {
     let ok = r.status().is_success();
     let h = r.headers_mut();
     let cc = match h.get(header::CACHE_CONTROL).and_then(|v| v.to_str().ok()) {
-        Some(v) => v
-            .strip_prefix("public")
-            .map(|rest| format!("private{rest}")),
+        Some(v) => match v.strip_prefix("public") {
+            Some(rest) => Some(format!("private{rest}")),
+            // no-cache alone lets a shared cache keep the answer and
+            // ask again with whoever comes next (a CDN with a rule to
+            // cache everything does); no-store keeps nothing anyway.
+            None if !v.contains("private") && !v.contains("no-store") => {
+                Some(format!("private, {v}"))
+            }
+            None => None,
+        },
         None => ok.then(|| "private".to_string()),
     };
     if let Some(v) = cc.and_then(|v| HeaderValue::from_str(&v).ok()) {
@@ -2301,8 +2308,11 @@ mod tests {
         );
         assert_eq!(
             answer(Some("no-cache"), StatusCode::OK).0.as_deref(),
-            Some("no-cache")
+            Some("private, no-cache")
         );
+        for kept in ["no-store", "private, max-age=60"] {
+            assert_eq!(answer(Some(kept), StatusCode::OK).0.as_deref(), Some(kept));
+        }
         assert_eq!(answer(None, StatusCode::OK).0.as_deref(), Some("private"));
         // A 304 says nothing that would replace what the client keeps.
         assert_eq!(answer(None, StatusCode::NOT_MODIFIED).0, None);

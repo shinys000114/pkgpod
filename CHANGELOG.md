@@ -243,9 +243,9 @@ The API and the CLI:
 
 Caching: answers of a repository that is not public (or of a public
 group with a member that is not public: its answers depend on who
-asks), and answers to a request with credentials, have `Vary:
-Authorization`, and are `Cache-Control: private` where they are not
-`no-cache` (serving listeners, registry protocols and the console's
+asks), and answers to a request with credentials, are `Cache-Control:
+private` (`private, no-cache` where they are revalidated) with `Vary:
+Authorization` (serving listeners, registry protocols and the console's
 download). What changes under one name is `no-cache`, revalidated by
 its ETag: indexes, every file of a hosted repository but what is named
 by its content (`by-hash`, rpm's `repodata/<sha256>-*`), a mirror's
