@@ -1,0 +1,12 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+{# The Server pages' head and sections; `tab` names the one shown. #}
+<div class="page-head"><div class="title"><h1>Server</h1><p class="sub">Data in <span class="mono">{{ data_dir }}</span>; console and API on <span class="mono">{{ management }}</span> (from the configuration file).</p></div></div>
+<nav class="tabs" aria-label="Server">
+  <a class="tab" href="/admin/server"{% if tab == "overview" %} aria-selected="true"{% endif %}>Overview</a>
+  <a class="tab" href="/admin/server/jobs"{% if tab == "jobs" %} aria-selected="true"{% endif %}>Jobs</a>
+  <a class="tab" href="/admin/server/logs"{% if tab == "logs" %} aria-selected="true"{% endif %}>Logs</a>
+  <a class="tab" href="/admin/server/serving"{% if tab == "serving" %} aria-selected="true"{% endif %}>Listeners &amp; hosts</a>
+  <a class="tab" href="/admin/server/storage"{% if tab == "storage" %} aria-selected="true"{% endif %}>Storage</a>
+  <a class="tab" href="/admin/server/keys"{% if tab == "keys" %} aria-selected="true"{% endif %}>Signing keys</a>
+  <a class="tab" href="/admin/server/publishing"{% if tab == "publishing" %} aria-selected="true"{% endif %}>CI &amp; webhooks</a>
+</nav>

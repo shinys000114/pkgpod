@@ -2,9 +2,17 @@
 {% extends "base.html" %}
 {% block title %}Server · pkgpod{% endblock %}
 {% block main %}
-<div class="page-head"><div class="title"><h1>Server</h1><p class="sub">Data in <span class="mono">{{ data_dir }}</span>; console and API on <span class="mono">{{ management }}</span> (from the configuration file).</p></div></div>
-<div class="stats glance">{% for (label, value, state) in glance %}<div class="stat"><span class="k">{{ label }}</span><span class="v{% if !state.is_empty() %} st-{{ state }}{% endif %}">{{ value }}</span></div>{% endfor %}</div>
+{% include "server_tabs.html" %}
 <div id="server-result"></div>
+{% if tab == "overview" %}
+<div class="stats glance">{% for (label, value, state) in glance %}<div class="stat"><span class="k">{{ label }}</span><span class="v{% if !state.is_empty() %} st-{{ state }}{% endif %}">{{ value }}</span></div>{% endfor %}</div>
+<div class="card">
+  <div class="card-head"><h2>Recent changes</h2><span class="hint">who changed what, newest first</span></div>
+  <div class="table-wrap"><table><thead><tr><th>When</th><th>Who</th><th>What</th><th>On</th><th>Details</th></tr></thead><tbody>
+  {% for a in audit %}<tr><td class="nowrap">{{ a.when }}</td><td>{{ a.actor }}</td><td>{{ a.action }}</td><td>{{ a.target }}</td><td class="wrap muted">{{ a.detail }}</td></tr>{% endfor %}
+  </tbody></table></div>
+</div>
+{% else if tab == "serving" %}
 <div class="card">
   <div class="card-head"><h2>Serving listeners</h2><span class="hint">repositories are served on every listener, chosen by their addresses; a reverse proxy in front gives certificates</span></div>
   <div class="table-wrap"><table><thead><tr><th>Name</th><th>Address</th><th>Serves</th><th>State</th><th></th></tr></thead><tbody>
@@ -12,7 +20,7 @@
     <td><span class="badge {% if l.ok %}ok{% else %}bad{% endif %}">{{ l.state }}</span></td>
     <td class="acts nowrap"><button class="link fill" type="button" data-for="listener-name" data-value="{{ l.name }}">change…</button> <button class="link danger" hx-post="/c/listeners/{{ l.name|urlencode }}/delete" hx-target="#server-result" hx-confirm="Stop and remove listener {{ l.name }}?">remove</button></td></tr>{% endfor %}
   </tbody></table></div>
-  <div class="card-body">
+  <details class="card-body more"{% if listeners.is_empty() %} open{% endif %}><summary>Add a listener, or change one</summary>
   <form hx-post="/c/listeners" hx-target="#server-result">
     <div class="fields">
       <label class="field"><span>Name</span><input id="listener-name" name="name" required placeholder="default" list="dl-listeners" autocomplete="off" autocapitalize="off" spellcheck="false" data-prefill="{{ listener_prefill }}"><datalist id="dl-listeners">{% for l in listeners %}<option value="{{ l.name }}">{% endfor %}</datalist><small>A new name adds a listener; an existing one (or "change…") shows its settings to change.</small></label>
@@ -23,57 +31,7 @@
     </div>
     <div class="form-foot"><button type="submit">Save listener</button></div>
   </form>
-  </div>
-</div>
-<div class="card" id="trust">
-  <div class="card-head"><h2>Trusted publishing</h2><span class="hint">CI jobs that log in with their OIDC token (GitHub Actions, …) and get a short-lived token, instead of a stored secret</span></div>
-  {% if trust.is_empty() %}<p class="empty">No trust rules: CI jobs need a token kept as a secret.</p>{% else %}
-  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Trusts</th><th>As user</th><th>For</th><th>Token</th><th>Used</th><th></th></tr></thead><tbody>
-  {% for r in trust %}<tr><td><b>{{ r.name }}</b></td><td class="mono small claims">{% for c in r.trusts %}<div>{{ c }}</div>{% endfor %}</td><td>{{ r.user }}</td><td>{{ r.repos }}</td><td class="nowrap">{{ r.token }}</td><td class="nowrap muted">{{ r.used }}</td>
-    <td class="acts nowrap"><button class="link danger" hx-post="/c/trust/{{ r.name|urlencode }}/delete" hx-target="#server-result" hx-confirm="Remove trust rule {{ r.name }}? Jobs it trusts cannot log in any more.">remove</button></td></tr>{% endfor %}
-  </tbody></table></div>
-  {% endif %}
-  <div class="card-body">
-  <form hx-post="/c/trust" hx-target="#server-result">
-    <div class="fields">
-      <label class="field"><span>Name</span><input name="name" required placeholder="release" autocomplete="off" autocapitalize="off" spellcheck="false"><small>The same name replaces a rule.</small></label>
-      <label class="field"><span>GitHub repository</span><input name="github" placeholder="owner/name" autocomplete="off" autocapitalize="off" spellcheck="false"><small>The repository whose Actions jobs are trusted.</small></label>
-      <label class="field"><span>Ref</span><input name="ref" placeholder="refs/tags/v*" autocomplete="off" spellcheck="false"><small>Branch or tag the job runs for; * matches the rest. Empty: any.</small></label>
-      <label class="field"><span>Workflow</span><input name="workflow" placeholder="release.yml" autocomplete="off" spellcheck="false"><small>Its file in .github/workflows. Empty: any.</small></label>
-      <label class="field"><span>Environment</span><input name="environment" placeholder="production" autocomplete="off" spellcheck="false"><small>A deployment environment the job must run in (its reviewers then guard publishing).</small></label>
-      <label class="field"><span>As user</span><select name="user" required>{% for u in users %}<option>{{ u }}</option>{% endfor %}</select><small>Whose rights the token has, at most: a user for CI, with grants on the repositories.</small></label>
-      <label class="field"><span>Repositories</span><input name="repos" required placeholder="ppa, tools" list="dl-trust-repos" autocomplete="off" spellcheck="false"><datalist id="dl-trust-repos">{% for r in repo_names %}<option value="{{ r }}">{% endfor %}</datalist><small>The token is for these only.</small></label>
-      <label class="field"><span>Minutes</span><input name="minutes" type="number" min="1" max="60" value="15"><small>How long a token lasts.</small></label>
-      <label class="check field"><span class="check-line"><input type="checkbox" name="read_only"> <span>Read only</span></span><small>A token that reads (a private repository in a build).</small></label>
-    </div>
-    <details class="more"><summary>Another CI (any OIDC issuer)</summary>
-    <div class="fields">
-      <label class="field"><span>Issuer</span><input name="issuer" placeholder="https://gitlab.example.org" autocomplete="off" spellcheck="false"><small>Empty: GitHub Actions'.</small></label>
-      <label class="field"><span>Audience</span><input name="audience" placeholder="pkgpod" autocomplete="off" spellcheck="false"><small>What the job asks its token for.</small></label>
-      <label class="field wide"><span>Claims</span><textarea name="claims" rows="3" spellcheck="false" placeholder="project_path=team/app&#10;ref_protected=true"></textarea><small>A claim=pattern a line; all must match.</small></label>
-    </div>
-    </details>
-    <div class="form-foot"><button type="submit">Save rule</button></div>
-  </form>
-  <details class="more"><summary>In a GitHub Actions workflow</summary>
-<pre class="code">permissions:
-  id-token: write   # the job may ask GitHub for its OIDC token
-  contents: read
-steps:
-  - uses: actions/checkout@v4
-  - uses: &lt;owner&gt;/pkgpod@master          # the pkgpod action
-    with:
-      url: &lt;this server&gt;
-      repository: ppa
-      files: dist/*.deb
-      params: dists=noble
-# or by hand:
-  - run: |
-      curl -fsSL &lt;this server&gt;/cli/install.sh | sh
-      pkgpod --url &lt;this server&gt; login --oidc
-      pkgpod upload ppa dist/*.deb -s dists=noble</pre>
   </details>
-  </div>
 </div>
 <div class="card" id="hosts">
   <div class="card-head"><h2>Host pages</h2><span class="hint">what a host's root shows when no repository has it: its repositories, how they stand and how to use them, with a title and Markdown above and below</span></div>
@@ -96,61 +54,7 @@ steps:
   </div>
   {% endif %}
 </div>
-<div class="card" id="webhooks">
-  <div class="card-head"><h2>Webhooks</h2><span class="hint">new versions, labels and ended jobs sent to other services: a deploy after a publish (GitHub repository_dispatch), a chat line when a sync fails</span></div>
-  {% if hooks.is_empty() %}<p class="empty">No webhooks.</p>{% else %}
-  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Sends</th><th>To</th><th>Last deliveries</th><th></th></tr></thead><tbody>
-  {% for h in hooks %}<tr><td><b>{{ h.name }}</b>{% if !h.active %} <span class="tag">off</span>{% endif %}<div class="muted small">{{ h.kind }}{% if h.has_secret %}, with a secret{% endif %}</div></td>
-    <td>{{ h.events }}<div class="muted small">of {{ h.repos }}</div></td>
-    <td class="mono small claims"><div>{{ h.url }}</div></td>
-    <td class="small">{% if h.deliveries.is_empty() %}<span class="muted">none yet</span>{% endif %}{% for (id, ev, st, info, at) in h.deliveries %}<div><span class="{% if st == "ok" %}st-ok{% else if st == "failed" %}st-bad{% else %}st-run{% endif %}">{{ st }}</span> {{ ev }} <span class="muted">{{ at }}{% if !info.is_empty() %} · {{ info }}{% endif %}</span>{% if st != "ok" %} <button class="link" hx-post="/c/webhooks/{{ h.name|urlencode }}/retry/{{ id }}" hx-target="#server-result">again</button>{% endif %}</div>{% endfor %}</td>
-    <td class="acts nowrap"><button class="link" hx-post="/c/webhooks/{{ h.name|urlencode }}/ping" hx-target="#server-result">ping</button> <button class="link danger" hx-post="/c/webhooks/{{ h.name|urlencode }}/delete" hx-target="#server-result" hx-confirm="Remove webhook {{ h.name }} and its deliveries?">remove</button></td></tr>{% endfor %}
-  </tbody></table></div>
-  {% endif %}
-  <div class="card-body">
-  <form hx-post="/c/webhooks" hx-target="#server-result">
-    <div class="fields">
-      <label class="field"><span>Name</span><input name="name" required placeholder="deploy" autocomplete="off" autocapitalize="off" spellcheck="false"><small>The same name changes a webhook.</small></label>
-      <label class="field wide"><span>URL</span><input name="url" required placeholder="https://api.github.com/repos/owner/name/dispatches" autocomplete="off" spellcheck="false"></label>
-      <label class="field"><span>Kind</span><select name="kind"><option value="json">JSON, signed</option><option value="github">GitHub repository_dispatch</option><option value="slack">Slack (a line of text)</option></select><small>github: the URL above; the secret a token that may dispatch.</small></label>
-      <label class="field"><span>Secret</span><input name="secret" type="password" autocomplete="new-password" placeholder="kept if left empty"><small>JSON: signs each delivery (X-Pkgpod-Signature-256). GitHub: the token.</small></label>
-      <fieldset class="field"><span>Events</span>
-        <label class="check-line"><input type="checkbox" name="events" value="version" checked> <span>version: a new version (upload, change, promotion, rollback)</span></label>
-        <label class="check-line"><input type="checkbox" name="events" value="label"> <span>label</span></label>
-        <label class="check-line"><input type="checkbox" name="events" value="job"> <span>job: a sync or import that ended</span></label>
-        <label class="check-line"><input type="checkbox" name="events" value="job-failed"> <span>job-failed: only those that did not end well</span></label>
-      </fieldset>
-      <label class="field"><span>Repositories</span><input name="repos" placeholder="all" list="dl-trust-repos" autocomplete="off" spellcheck="false"><small>Empty: every repository.</small></label>
-      <label class="check field"><span class="check-line"><input type="checkbox" name="disabled"> <span>Disabled</span></span><small>Kept, but nothing sent.</small></label>
-    </div>
-    <div class="form-foot"><button type="submit">Save webhook</button></div>
-  </form>
-  </div>
-</div>
-<div class="card">
-  <div class="card-head"><h2>Signing keys</h2><span class="hint">repositories are signed with the default key unless their key setting names another</span></div>
-  {% if keys.is_empty() %}<p class="empty">No keys: signed repositories cannot publish until one is added.</p>{% else %}
-  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Key</th><th></th></tr></thead><tbody>
-  {% for k in keys %}<tr><td><b>{{ k.name }}</b>{% if k.default %} <span class="tag accent">default</span>{% endif %}{% if k.missing %} <span class="tag st-bad">no secret key: import it again</span>{% endif %}</td><td>{{ k.uid }}<div class="mono small">{{ k.fingerprint }}</div></td>
-    <td class="acts nowrap"><a href="/api/v1/keys/{{ k.name|urlencode }}/public">public key</a>
-    {% if !k.default %}<button class="link" hx-post="/c/keys/{{ k.name|urlencode }}/default" hx-target="#server-result">make default</button>{% endif %}
-    <button class="link danger" hx-post="/c/keys/{{ k.name|urlencode }}/delete" hx-target="#server-result" hx-confirm="Delete key {{ k.name }}? Its secret key is deleted; repositories signed with it cannot be signed again with it.">remove</button></td></tr>{% endfor %}
-  </tbody></table></div>
-  {% endif %}
-  <div class="card-body">
-  <form class="inline" hx-post="/c/keys/generate" hx-target="#server-result">
-    New key <input name="name" required placeholder="main" size="10" autocomplete="off" autocapitalize="off" spellcheck="false"> for <input name="uid" required placeholder="Team packages &lt;packages@example.org&gt;" size="36" autocomplete="off"> <button type="submit">Generate</button>
-  </form>
-  <form class="mt" hx-post="/c/keys" hx-target="#server-result">
-    <div class="fields">
-      <label class="field"><span>Import a key as</span><input name="name" required placeholder="name" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
-      <label class="field"><span>Its passphrase</span><input name="passphrase" type="password" autocomplete="new-password" placeholder="if it has one"></label>
-      <label class="field wide"><span>Secret key</span><textarea name="secret_key" rows="4" required spellcheck="false" placeholder="gpg --export-secret-keys --armor &lt;fingerprint&gt;"></textarea><small>Kept by pkgpod in its data directory (mode 0600) and in backups.</small></label>
-    </div>
-    <div class="form-foot"><button type="submit">Import</button></div>
-  </form>
-  </div>
-</div>
+{% else if tab == "storage" %}
 <div class="card" id="storages">
   <div class="card-head"><h2>Storages</h2><span class="hint">where blobs and mirror trees are kept; repositories choose one when made</span></div>
   <div class="table-wrap"><table><thead><tr><th>Name</th><th>Path</th><th></th></tr></thead><tbody>
@@ -176,11 +80,6 @@ steps:
     <button type="submit" name="dry_run" value="1" title="Only count what would go">Count</button> <button type="submit" class="danger" name="dry_run" value="0">Collect</button>
   </form>
   <div class="result"></div>
-  <form class="inline mt" hx-post="/c/settings" hx-target="next .result">
-    Keep ended jobs and their logs <input type="number" name="jobs_days" value="{{ jobs_days }}" min="0" max="3650" size="5"> days <span class="muted small">(each repository's newest ten stay; 0 keeps all; pruned daily)</span>
-    <button type="submit">Save</button>
-  </form>
-  <div class="result"></div>
   </div>
 </div>
 <div class="card">
@@ -193,10 +92,116 @@ steps:
   <div class="result"></div>
   </div>
 </div>
+{% else if tab == "keys" %}
 <div class="card">
-  <div class="card-head"><h2>Recent changes</h2></div>
-  <div class="table-wrap"><table><thead><tr><th>When</th><th>Who</th><th>What</th><th>On</th><th>Details</th></tr></thead><tbody>
-  {% for a in audit %}<tr><td class="nowrap">{{ a.when }}</td><td>{{ a.actor }}</td><td>{{ a.action }}</td><td>{{ a.target }}</td><td class="wrap muted">{{ a.detail }}</td></tr>{% endfor %}
+  <div class="card-head"><h2>Signing keys</h2><span class="hint">repositories are signed with the default key unless their key setting names another</span></div>
+  {% if keys.is_empty() %}<p class="empty">No keys: signed repositories cannot publish until one is added.</p>{% else %}
+  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Key</th><th></th></tr></thead><tbody>
+  {% for k in keys %}<tr><td><b>{{ k.name }}</b>{% if k.default %} <span class="tag accent">default</span>{% endif %}{% if k.missing %} <span class="tag st-bad">no secret key: import it again</span>{% endif %}</td><td>{{ k.uid }}<div class="mono small">{{ k.fingerprint }}</div></td>
+    <td class="acts nowrap"><a href="/api/v1/keys/{{ k.name|urlencode }}/public">public key</a>
+    {% if !k.default %}<button class="link" hx-post="/c/keys/{{ k.name|urlencode }}/default" hx-target="#server-result">make default</button>{% endif %}
+    <button class="link danger" hx-post="/c/keys/{{ k.name|urlencode }}/delete" hx-target="#server-result" hx-confirm="Delete key {{ k.name }}? Its secret key is deleted; repositories signed with it cannot be signed again with it.">remove</button></td></tr>{% endfor %}
   </tbody></table></div>
+  {% endif %}
+  <div class="card-body">
+  <form class="inline" hx-post="/c/keys/generate" hx-target="#server-result">
+    New key <input name="name" required placeholder="main" size="10" autocomplete="off" autocapitalize="off" spellcheck="false"> for <input name="uid" required placeholder="Team packages &lt;packages@example.org&gt;" size="36" autocomplete="off"> <button type="submit">Generate</button>
+  </form>
+  <details class="more"><summary>Import a key</summary>
+  <form hx-post="/c/keys" hx-target="#server-result">
+    <div class="fields">
+      <label class="field"><span>Import a key as</span><input name="name" required placeholder="name" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+      <label class="field"><span>Its passphrase</span><input name="passphrase" type="password" autocomplete="new-password" placeholder="if it has one"></label>
+      <label class="field wide"><span>Secret key</span><textarea name="secret_key" rows="4" required spellcheck="false" placeholder="gpg --export-secret-keys --armor &lt;fingerprint&gt;"></textarea><small>Kept by pkgpod in its data directory (mode 0600) and in backups.</small></label>
+    </div>
+    <div class="form-foot"><button type="submit">Import</button></div>
+  </form>
+  </details>
+  </div>
 </div>
+{% else if tab == "publishing" %}
+<div class="card" id="trust">
+  <div class="card-head"><h2>Trusted publishing</h2><span class="hint">CI jobs that log in with their OIDC token (GitHub Actions, …) and get a short-lived token, instead of a stored secret</span></div>
+  {% if trust.is_empty() %}<p class="empty">No trust rules: CI jobs need a token kept as a secret.</p>{% else %}
+  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Trusts</th><th>As user</th><th>For</th><th>Token</th><th>Used</th><th></th></tr></thead><tbody>
+  {% for r in trust %}<tr><td><b>{{ r.name }}</b></td><td class="mono small claims">{% for c in r.trusts %}<div>{{ c }}</div>{% endfor %}</td><td>{{ r.user }}</td><td>{{ r.repos }}</td><td class="nowrap">{{ r.token }}</td><td class="nowrap muted">{{ r.used }}</td>
+    <td class="acts nowrap"><button class="link danger" hx-post="/c/trust/{{ r.name|urlencode }}/delete" hx-target="#server-result" hx-confirm="Remove trust rule {{ r.name }}? Jobs it trusts cannot log in any more.">remove</button></td></tr>{% endfor %}
+  </tbody></table></div>
+  {% endif %}
+  <div class="card-body">
+  <details class="more"{% if trust.is_empty() %} open{% endif %}><summary>Add a rule, or replace one</summary>
+  <form hx-post="/c/trust" hx-target="#server-result">
+    <div class="fields">
+      <label class="field"><span>Name</span><input name="name" required placeholder="release" autocomplete="off" autocapitalize="off" spellcheck="false"><small>The same name replaces a rule.</small></label>
+      <label class="field"><span>GitHub repository</span><input name="github" placeholder="owner/name" autocomplete="off" autocapitalize="off" spellcheck="false"><small>The repository whose Actions jobs are trusted.</small></label>
+      <label class="field"><span>Ref</span><input name="ref" placeholder="refs/tags/v*" autocomplete="off" spellcheck="false"><small>Branch or tag the job runs for; * matches the rest. Empty: any.</small></label>
+      <label class="field"><span>Workflow</span><input name="workflow" placeholder="release.yml" autocomplete="off" spellcheck="false"><small>Its file in .github/workflows. Empty: any.</small></label>
+      <label class="field"><span>Environment</span><input name="environment" placeholder="production" autocomplete="off" spellcheck="false"><small>A deployment environment the job must run in (its reviewers then guard publishing).</small></label>
+      <label class="field"><span>As user</span><select name="user" required>{% for u in users %}<option>{{ u }}</option>{% endfor %}</select><small>Whose rights the token has, at most: a user for CI, with grants on the repositories.</small></label>
+      <label class="field"><span>Repositories</span><input name="repos" required placeholder="ppa, tools" list="dl-trust-repos" autocomplete="off" spellcheck="false"><datalist id="dl-trust-repos">{% for r in repo_names %}<option value="{{ r }}">{% endfor %}</datalist><small>The token is for these only.</small></label>
+      <label class="field"><span>Minutes</span><input name="minutes" type="number" min="1" max="60" value="15"><small>How long a token lasts.</small></label>
+      <label class="check field"><span class="check-line"><input type="checkbox" name="read_only"> <span>Read only</span></span><small>A token that reads (a private repository in a build).</small></label>
+    </div>
+    <details class="more"><summary>Another CI (any OIDC issuer)</summary>
+    <div class="fields">
+      <label class="field"><span>Issuer</span><input name="issuer" placeholder="https://gitlab.example.org" autocomplete="off" spellcheck="false"><small>Empty: GitHub Actions'.</small></label>
+      <label class="field"><span>Audience</span><input name="audience" placeholder="pkgpod" autocomplete="off" spellcheck="false"><small>What the job asks its token for.</small></label>
+      <label class="field wide"><span>Claims</span><textarea name="claims" rows="3" spellcheck="false" placeholder="project_path=team/app&#10;ref_protected=true"></textarea><small>A claim=pattern a line; all must match.</small></label>
+    </div>
+    </details>
+    <div class="form-foot"><button type="submit">Save rule</button></div>
+  </form>
+  </details>
+  <details class="more"><summary>In a GitHub Actions workflow</summary>
+<pre class="code">permissions:
+  id-token: write   # the job may ask GitHub for its OIDC token
+  contents: read
+steps:
+  - uses: actions/checkout@v4
+  - uses: &lt;owner&gt;/pkgpod@master          # the pkgpod action
+    with:
+      url: &lt;this server&gt;
+      repository: ppa
+      files: dist/*.deb
+      params: dists=noble
+# or by hand:
+  - run: |
+      curl -fsSL &lt;this server&gt;/cli/install.sh | sh
+      pkgpod --url &lt;this server&gt; login --oidc
+      pkgpod upload ppa dist/*.deb -s dists=noble</pre>
+  </details>
+  </div>
+</div>
+<div class="card" id="webhooks">
+  <div class="card-head"><h2>Webhooks</h2><span class="hint">new versions, labels and ended jobs sent to other services: a deploy after a publish (GitHub repository_dispatch), a chat line when a sync fails</span></div>
+  {% if hooks.is_empty() %}<p class="empty">No webhooks.</p>{% else %}
+  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Sends</th><th>To</th><th>Last deliveries</th><th></th></tr></thead><tbody>
+  {% for h in hooks %}<tr><td><b>{{ h.name }}</b>{% if !h.active %} <span class="tag">off</span>{% endif %}<div class="muted small">{{ h.kind }}{% if h.has_secret %}, with a secret{% endif %}</div></td>
+    <td>{{ h.events }}<div class="muted small">of {{ h.repos }}</div></td>
+    <td class="mono small claims"><div>{{ h.url }}</div></td>
+    <td class="small">{% if h.deliveries.is_empty() %}<span class="muted">none yet</span>{% endif %}{% for (id, ev, st, info, at) in h.deliveries %}<div><span class="{% if st == "ok" %}st-ok{% else if st == "failed" %}st-bad{% else %}st-run{% endif %}">{{ st }}</span> {{ ev }} <span class="muted">{{ at }}{% if !info.is_empty() %} · {{ info }}{% endif %}</span>{% if st != "ok" %} <button class="link" hx-post="/c/webhooks/{{ h.name|urlencode }}/retry/{{ id }}" hx-target="#server-result">again</button>{% endif %}</div>{% endfor %}</td>
+    <td class="acts nowrap"><button class="link" hx-post="/c/webhooks/{{ h.name|urlencode }}/ping" hx-target="#server-result">ping</button> <button class="link danger" hx-post="/c/webhooks/{{ h.name|urlencode }}/delete" hx-target="#server-result" hx-confirm="Remove webhook {{ h.name }} and its deliveries?">remove</button></td></tr>{% endfor %}
+  </tbody></table></div>
+  {% endif %}
+  <details class="card-body more"{% if hooks.is_empty() %} open{% endif %}><summary>Add a webhook, or change one</summary>
+  <form hx-post="/c/webhooks" hx-target="#server-result">
+    <div class="fields">
+      <label class="field"><span>Name</span><input name="name" required placeholder="deploy" autocomplete="off" autocapitalize="off" spellcheck="false"><small>The same name changes a webhook.</small></label>
+      <label class="field wide"><span>URL</span><input name="url" required placeholder="https://api.github.com/repos/owner/name/dispatches" autocomplete="off" spellcheck="false"></label>
+      <label class="field"><span>Kind</span><select name="kind"><option value="json">JSON, signed</option><option value="github">GitHub repository_dispatch</option><option value="slack">Slack (a line of text)</option></select><small>github: the URL above; the secret a token that may dispatch.</small></label>
+      <label class="field"><span>Secret</span><input name="secret" type="password" autocomplete="new-password" placeholder="kept if left empty"><small>JSON: signs each delivery (X-Pkgpod-Signature-256). GitHub: the token.</small></label>
+      <fieldset class="field"><span>Events</span>
+        <label class="check-line"><input type="checkbox" name="events" value="version" checked> <span>version: a new version (upload, change, promotion, rollback)</span></label>
+        <label class="check-line"><input type="checkbox" name="events" value="label"> <span>label</span></label>
+        <label class="check-line"><input type="checkbox" name="events" value="job"> <span>job: a sync or import that ended</span></label>
+        <label class="check-line"><input type="checkbox" name="events" value="job-failed"> <span>job-failed: only those that did not end well</span></label>
+      </fieldset>
+      <label class="field"><span>Repositories</span><input name="repos" placeholder="all" list="dl-trust-repos" autocomplete="off" spellcheck="false"><small>Empty: every repository.</small></label>
+      <label class="check field"><span class="check-line"><input type="checkbox" name="disabled"> <span>Disabled</span></span><small>Kept, but nothing sent.</small></label>
+    </div>
+    <div class="form-foot"><button type="submit">Save webhook</button></div>
+  </form>
+  </details>
+</div>
+{% endif %}
 {% endblock %}

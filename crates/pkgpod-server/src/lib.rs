@@ -24,6 +24,7 @@ pub mod import;
 pub mod jobs;
 pub mod keys;
 pub mod listeners;
+pub mod logs;
 pub mod metrics;
 pub mod notes;
 pub mod npm;

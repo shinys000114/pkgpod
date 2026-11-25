@@ -281,6 +281,7 @@ tests with its real client. See [format-plugins.md](format-plugins.md).
 | Which repository a request is for | `crates/pkgpod-server/src/routes.rs`, `serve.rs` |
 | The API and its description | `crates/pkgpod-server/src/api.rs`, `openapi.rs` |
 | The console | `crates/pkgpod-server/src/console.rs`, `templates/`, `assets/` |
+| The server's recent log (for the console and API) | `crates/pkgpod-server/src/logs.rs` |
 | Users, teams, rights, tokens, sessions | `crates/pkgpod-server/src/auth.rs` |
 | Signing keys, server settings | `crates/pkgpod-server/src/keys.rs`, `rsa_key.rs`, `usign_key.rs` |
 | Jobs, mirror syncs, schedules | `crates/pkgpod-server/src/jobs.rs`, `cron.rs`, `schedules.rs` |

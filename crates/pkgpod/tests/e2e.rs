@@ -819,6 +819,15 @@ fn console_session(
         password,
     )
     .unwrap();
+    console_login(s, user, password)
+}
+
+/// A console session of a user there is.
+fn console_login(
+    s: &Server,
+    user: &str,
+    password: &str,
+) -> (reqwest::blocking::Client, String, String) {
     let c = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -940,6 +949,111 @@ fn console_operations_change_only_what_is_sent() {
         &[("name", "focal"), ("not_automatic", "false")],
     );
     assert!(plan.contains("not_automatic true -&#62; false"), "{plan}");
+}
+
+/// The Server page in sections; every repository's jobs, filtered; the
+/// server's recent log, for server admins only.
+#[test]
+fn server_sections_jobs_and_logs() {
+    let s = Server::start();
+    s.cli(&[
+        "repo",
+        "create",
+        "mir",
+        "-k",
+        "mirror",
+        "-s",
+        "source=http://127.0.0.1:9/",
+        "-s",
+        "dists=<b>x</b>",
+    ])
+    .unwrap();
+    assert!(s.cli(&["sync", "mir", "--wait"]).is_err());
+    let (c, sid, _) = console_session(&s, "ops", "ops-password");
+    let page = |p: &str| {
+        let r = c
+            .get(format!("{}{p}", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .send()
+            .unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    for (p, has) in [
+        ("/admin/server", "Recent changes"),
+        ("/admin/server/serving", "Serving listeners"),
+        ("/admin/server/storage", "Garbage collection"),
+        ("/admin/server/keys", "Signing keys"),
+        ("/admin/server/publishing", "Trusted publishing"),
+        ("/admin/server/jobs", "Keep ended jobs"),
+        ("/admin/server/logs", "journalctl"),
+    ] {
+        let (st, body) = page(p);
+        assert_eq!(st, 200, "{p}: {body}");
+        assert!(body.contains(has), "{p}: {body}");
+    }
+    let (_, storage) = page("/admin/server/storage");
+    assert!(
+        !storage.contains("Trusted publishing"),
+        "one section: {storage}"
+    );
+    assert_eq!(page("/admin/server/nothing").0, 404);
+    // Jobs: filtered in the query.
+    let (_, failed) = page("/admin/server/jobs?state=failed");
+    assert!(
+        failed.contains(r#"<a href="/jobs/1">1</a>"#) && failed.contains(r#"href="/r/mir""#),
+        "{failed}"
+    );
+    let (_, ok) = page("/admin/server/jobs?state=ok&repo=mir");
+    assert!(ok.contains("No job like that"), "{ok}");
+    let v = s.json(&["jobs", "--state", "failed"]);
+    assert_eq!(v.as_array().unwrap().len(), 1, "{v}");
+    let v = s.json(&["jobs", "--kind", "import"]);
+    assert!(v.as_array().unwrap().is_empty(), "{v}");
+    // The log: the failed sync, its outside text shown as text.
+    let (_, logs) = page("/admin/server/logs?level=warn");
+    assert!(logs.contains("sync of mir failed"), "{logs}");
+    assert!(
+        logs.contains("&#60;b&#62;x&#60;/b&#62;") && !logs.contains("<b>x</b>"),
+        "{logs}"
+    );
+    let (_, errors) = page("/admin/server/logs?level=error");
+    assert!(!errors.contains("sync of mir failed"), "{errors}");
+    let l = s
+        .cli(&["logs", "--level", "warn", "--grep", "mir"])
+        .unwrap();
+    assert!(
+        l.contains("WARN") && l.contains("sync of mir failed"),
+        "{l}"
+    );
+    let v = s.json(&["logs", "-n", "1"]);
+    assert_eq!(v["entries"].as_array().unwrap().len(), 1, "{v}");
+    // Not for others.
+    s.cli_in(&["user", "add", "dev", "--password-stdin"], "dev-password")
+        .unwrap();
+    let api = reqwest::blocking::Client::new();
+    for p in ["/api/v1/logs", "/api/v1/jobs"] {
+        let r = api.get(format!("{}{p}", s.api)).send().unwrap();
+        assert_eq!(r.status().as_u16(), 401, "{p}");
+        let r = api
+            .get(format!("{}{p}", s.api))
+            .basic_auth("dev", Some("dev-password"))
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 403, "{p}");
+    }
+    let (c2, sid2, _) = console_login(&s, "dev", "dev-password");
+    for p in [
+        "/admin/server/logs",
+        "/admin/server/jobs",
+        "/admin/server/storage",
+    ] {
+        let r = c2
+            .get(format!("{}{p}", s.api))
+            .header("cookie", format!("pkgpod_session={sid2}"))
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 403, "{p}");
+    }
 }
 
 #[test]
@@ -3140,6 +3254,14 @@ fn openapi_describes_what_the_api_sends() {
         Some(json!({"settings": {"schedule": "0 */6 * * *"}})),
         200,
     );
+    let v = a.ok(
+        "get",
+        "/api/v1/logs",
+        "/api/v1/logs?level=info&limit=5",
+        None,
+        200,
+    );
+    assert!(v["entries"].as_array().unwrap().len() <= 5, "{v}");
     let v = a.ok("get", "/api/v1/schedules", "/api/v1/schedules", None, 200);
     let m = &v["mirrors"].as_array().unwrap()[0];
     assert_eq!(
@@ -13245,6 +13367,11 @@ fn mirror_schedules_on_one_page() {
     };
     assert!(pv("@hourly").contains("next: "), "{}", pv("@hourly"));
     assert!(pv("0 25 * * *").contains("not valid"));
+    let anon = reqwest::blocking::get(format!("{}/c/schedules/preview?schedule=@hourly", s.api))
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(!anon.contains("next: "), "{anon}");
 
     // Readers see what they may read, and change nothing.
     s.cli_in(&["user", "add", "dev", "--password-stdin"], "dev-password")

@@ -613,6 +613,43 @@ fn schemas() -> Value {
             ),
         ),
         (
+            "Logs",
+            object(
+                "Recent events of the server.",
+                vec![
+                    (
+                        "started",
+                        text_int(
+                            "When it started keeping them (milliseconds since 1970): a follower that sees it change missed a restart.",
+                        ),
+                    ),
+                    (
+                        "oldest",
+                        text_int(
+                            "The oldest event still kept (0: none); older ones are only in the journal.",
+                        ),
+                    ),
+                    (
+                        "entries",
+                        array(object(
+                            "",
+                            vec![
+                                ("id", text_int("Rising: follow with after=.")),
+                                ("time", text_int("Milliseconds since 1970.")),
+                                (
+                                    "level",
+                                    json!({"type": "string", "enum": ["error", "warn", "info", "debug", "trace"]}),
+                                ),
+                                ("message", string()),
+                            ],
+                            &["id", "time", "level", "message"],
+                        )),
+                    ),
+                ],
+                &["started", "oldest", "entries"],
+            ),
+        ),
+        (
             "Schedules",
             object(
                 "The mirrors' schedules (cron, in the server's time zone) and the syncs they start in the next day.",
@@ -1645,8 +1682,19 @@ fn ops() -> Vec<Op> {
             .reply(202, "Started.", sref("JobStarted")),
         op("get", "/api/v1/repos/{repo}/jobs", "repo_jobs", "Recent jobs of a repository.")
             .reply(200, "At most 50, newest first.", array(sref("Job"))),
-        op("get", "/api/v1/jobs", "all_jobs", "Recent jobs (server admin).")
-            .reply(200, "At most 200, newest first.", array(sref("Job"))),
+        op("get", "/api/v1/jobs", "all_jobs", "Every repository's jobs, filtered (server admin).")
+            .query("repo", string(), "Only this repository's.")
+            .query("kind", json!({"type": "string", "enum": ["sync", "import"]}), "Only syncs or imports.")
+            .query("state", json!({"type": "string", "enum": ["queued", "running", "ok", "failed", "cancelled", "active"]}), "Only in this state; active: queued or running.")
+            .query("before", integer(), "Only jobs older than this one (the next page).")
+            .query("limit", integer(), "At most this many (1 to 500, default 200).")
+            .reply(200, "Newest first.", array(sref("Job"))),
+        op("get", "/api/v1/logs", "logs", "The server's recent log, kept in memory since it started (server admin); the system journal has all of it.")
+            .query("after", integer(), "Only events after this id (to follow).")
+            .query("level", json!({"type": "string", "enum": ["error", "warn", "info", "debug", "trace"]}), "This level or more severe (default info).")
+            .query("q", string(), "Only events with this text (any case).")
+            .query("limit", integer(), "The newest this many (1 to 5000, default 500).")
+            .reply(200, "The events, newest last.", sref("Logs")),
         op("get", "/api/v1/jobs/{id}", "job", "A job with its log.")
             .reply(200, "The job.", sref("JobDetail")),
         op("post", "/api/v1/jobs/{id}/cancel", "job_cancel", "Stop a running job (write).")

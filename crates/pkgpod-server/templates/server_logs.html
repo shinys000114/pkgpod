@@ -1,0 +1,24 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+{% extends "base.html" %}
+{% block title %}Logs · Server · pkgpod{% endblock %}
+{% block main %}
+{% include "server_tabs.html" %}
+<div class="card">
+  <div class="card-head"><h2>Logs</h2><span class="hint">what the server logged since it started ({{ started }}), newest first{% if dropped %}; older events no longer fit here{% endif %}: the system journal (<code>journalctl -u pkgpod</code>) keeps them all. Syncs and imports write their own logs, on their jobs' pages.</span></div>
+  <form class="toolbar logs-filter" method="get" action="/admin/server/logs">
+    <select name="level" aria-label="Level">{% for (v, l) in [("error", "errors"), ("warn", "warnings and errors"), ("info", "info and more"), ("debug", "debug and more")] %}<option value="{{ v }}"{% if *v == level %} selected{% endif %}>{{ l }}</option>{% endfor %}</select>
+    <input type="search" name="q" value="{{ q }}" placeholder="with this text" autocomplete="off" spellcheck="false" aria-label="Text">
+    <label class="check"><input type="checkbox" name="follow" value="1"{% if follow %} checked{% endif %}> follow</label>
+    <button type="submit">Show</button>
+  </form>
+  <div id="log-rows"{% if follow %} hx-get="/admin/server/logs?{{ query }}" hx-trigger="every 5s" hx-select="#log-rows" hx-swap="outerHTML"{% endif %}>
+  {% if rows.is_empty() %}<p class="empty">Nothing{% if !q.is_empty() || level != "info" %} like that{% endif %} since the server started.</p>{% else %}
+  <div class="table-wrap"><table class="log-table">
+    <tbody>
+    {% for e in rows %}<tr class="lv-{{ e.level }}"><td class="nowrap mono small muted">{{ e.time }}</td><td class="nowrap"><span class="lv">{{ e.level }}</span></td><td class="mono small wrap">{{ e.message }}</td></tr>{% endfor %}
+    </tbody>
+  </table></div>
+  {% endif %}
+  </div>
+</div>
+{% endblock %}

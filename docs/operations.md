@@ -265,8 +265,8 @@ pkgpod repo create debian -k mirror --storage big ...
 `storage set` checks that the server can write there (`<path>: the
 server cannot write there: ...` when it cannot), making the directory
 when the server's user may. The path must be absolute. `storage delete` refuses a storage that holds
-repositories; `main` cannot be removed. The console's Server page
-counts what each repository takes (Storage use).
+repositories; `main` cannot be removed. The console's Server page,
+Storage, counts what each repository takes (Storage use).
 
 Changing a storage's path does not move its files. To move one: stop the
 server, move the directory, start the server and run `pkgpod storage set
@@ -362,8 +362,8 @@ sudo -u pkgpod pkgpod admin check --deep   # and every file's sha256
 ```
 
 `admin check` is safe while the server runs and exits 1 when it finds
-problems. `pkgpod gc` is for server admins; the console's Server page has
-it too.
+problems. `pkgpod gc` is for server admins; the console's Server page
+has it too (Storage).
 
 A proxy's cache is kept until it is evicted, by hand or for its size
 limit (`max_mib`): `pkgpod cache <repo>` lists it; `pin`, `unpin`,
@@ -451,13 +451,18 @@ log.
 ```sh
 pkgpod jobs                      # recent jobs of every repository
 pkgpod jobs debian
+pkgpod jobs --state failed       # server admins: by state (active: queued
+pkgpod jobs --kind import        #   or running) or kind, any repository
 pkgpod job 42                    # its state, summary and log
 pkgpod job 42 --cancel
 ```
 
 A job ends `ok`, `failed` or `cancelled` (a sync waiting for a slot on
 its storage is `queued`). The console's job page streams its log while
-it runs. Logs are kept in `<data_dir>/jobs/<id>.log`, and are in
+it runs. Server admins have every repository's jobs on the Server
+page, Jobs: filtered by repository, kind and state, a hundred a page,
+following those that run; the setting below is there too. A job's start
+and end are also in the server's log. Logs are kept in `<data_dir>/jobs/<id>.log`, and are in
 backups.
 
 Ended jobs older than `jobs_days` (default 90) go with their logs in
@@ -520,8 +525,19 @@ stops working), `--remove` removes it. A repository's Badges card in the
 console gives each badge's Markdown.
 
 The server logs to standard error (the journal: `journalctl -u
-pkgpod`). The console's Server page lists recent changes (who did what);
-`GET /api/v1/audit` gives the last 500 (server admins).
+pkgpod`), at the configuration's `log` level (`PKGPOD_LOG` overrides
+it). It also keeps its newest events since it started in memory (5000
+at most) for server admins: the console's Server page, Logs (by level
+and text, following new ones), `pkgpod logs` (`--level warn`, `--grep
+debian`, `-f` to follow) and `GET /api/v1/logs`. A restart empties it;
+the journal keeps everything. It has the server's own events (listeners,
+jobs started and ended, cleanups, garbage collection, errors), not a
+line per request: the reverse proxy in front keeps an access log.
+
+The Server page's Overview lists recent changes (who did what), with
+counts at a glance (jobs running and failed, errors and warnings logged
+since the start); `GET /api/v1/audit` gives the last 500 changes
+(server admins).
 
 ## Download statistics
 
