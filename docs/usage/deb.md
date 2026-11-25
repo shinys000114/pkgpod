@@ -43,6 +43,12 @@ pkgpod key default main
 pkgpod key public main > main.asc
 ```
 
+A key name is made or imported once: for one that exists, `key
+generate` and `key import` answer 409 unless `--replace` is given (the
+repositories the old key signed for are then signed with the new one
+from their next publish on). `key delete` answers 409 for a key
+repositories sign with, unless `--force` is given.
+
 `key.asc` at the repository's address is the public key its Release
 files are signed with (also `GET /api/v1/repos/<repo>/key`). With
 `sign=false` nothing is signed and clients use `[trusted=yes]`.
@@ -399,7 +405,7 @@ nothing. In the console: Upload & change, Import.
 
 ```sh
 pkgpod login --url https://pkg.example.org:8090 -u admin
-pkgpod key generate main "Team packages <packages@example.invalid>"
+pkgpod key generate main "Team packages <packages@example.invalid>"   # once per server (then 409; --replace)
 pkgpod repo create ppa -s urls=https://pkg.example.org/ppa/
 pkgpod op ppa dist-set name=noble components=main -y
 pkgpod upload ppa hello_1.0_amd64.deb

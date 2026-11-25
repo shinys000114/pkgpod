@@ -85,18 +85,19 @@ a list replaces it whole. `repo set` changes only the keys it names.
 | Setting | Console | Default | Kinds | Meaning |
 | --- | --- | --- | --- | --- |
 | `description` | Description | empty | all | What the repository is for. |
-| `urls` | Addresses | none | all | Addresses it is served at (`https://host/path/`); without one, `/<name>/` on every serving listener. |
+| `urls` | Addresses | none | all | Addresses it is served at (`https://host/path/`); without one, `/<name>/` on every serving listener. Set by server admins, since an address takes the paths under it. |
 | `public` | Public | false | all | Anyone may read without logging in. |
 | `keep_versions` | Versions to keep | 50 | hosted | Versions kept besides labelled ones and the current one. |
 | `keep_days` | Days to keep | 30 | hosted | Versions younger than this many days are kept too. |
 | `members` | Members | none | group | The repositories it reads, in order. |
-| `upstream` | Upstream | the format's public registry | proxy | Where it fetches from (its base URL, as clients would use it). |
+| `upstream` | Upstream | the format's public registry | proxy | Where it fetches from (its base URL, as clients would use it; no user or password in it). |
 | `metadata_minutes` | Metadata kept (minutes) | 30 | proxy | How long a changing document is used before it is asked for again. |
 | `max_mib` | Size limit (MiB) | 0 (none) | proxy | Files kept at most; the least recently used unpinned ones go first. |
 | `exclude` | Never asked upstream | none | proxy | Names never asked for upstream (a `*` at the end matches the rest). |
 
 Formats with cleanup rules (deb, helm, npm, cargo, go) add, for hosted
-repositories:
+repositories (files repositories remove old build directories instead:
+see [files](files.md#cleanup)):
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -278,7 +279,7 @@ permissions:
   id-token: write    # the job may ask for its OIDC token
   contents: read
 steps:
-  - uses: actions/checkout@v4
+  - uses: actions/checkout@v7
   - uses: <owner>/pkgpod@master
     with:
       url: https://pkg.example.org
@@ -440,14 +441,17 @@ your role):
 | Sync | Mirrors: the source, the next scheduled run, Sync now, recent jobs and their logs. A job that found files gone upstream lists them and can allow them to be missing. |
 | Members | Groups: the repositories it reads, in order. |
 | Cache | Proxies: what is kept, with pin, unpin, evict, and fetching paths now. |
-| Settings | The settings in one form, by what they are about (the repository, versions and cleanup, a proxy's cache, the format's own; changed by repository admins), Republish (indexes made and signed again, contents as they are), Cleanup preview, Badges, Make a repository like this one, Delete. |
+| Settings | The settings in one form, by what they are about (the repository, versions and cleanup, a proxy's cache, the format's own; changed by repository admins, the addresses by server admins), Republish (indexes made and signed again, contents as they are), Cleanup preview, Badges, Make a repository like this one, Delete. |
 | Access | Repository admins: Rights (grants), Who has access (as the server decides it), Trusted publishing (rules for CI jobs that publish here); server admins also Webhooks. |
 
 ## The API
 
-The JSON API is under `/api/v1` on the management listener; the
-console and the CLI use nothing else. `GET /api/v1/openapi.json`
-describes every route, its parameters and its replies (OpenAPI 3.1).
+The JSON API is under `/api/v1` on the management listener. The CLI
+uses nothing else, and every change the console makes goes through the
+same handlers, with the same rights and plans; a few of the console's
+views (a repository's Activity for its writers, storage use) are its
+own. `GET /api/v1/openapi.json` describes every route, its parameters
+and its replies (OpenAPI 3.1).
 
 Authentication: `Authorization: Bearer <token>`, or Basic with a user
 name and its password or a token. Without either, a request is
@@ -482,7 +486,7 @@ The main routes:
 | `POST /api/v1/repos/<repo>/labels`, `DELETE .../labels/<label>` | Label a version (`{name, version, note, force}`); remove a label. |
 | `POST /api/v1/repos/<repo>/republish` | Publish the current state again. |
 | `POST /api/v1/repos/<repo>/sync`, `POST .../import` | Start a job; the reply names it (`{job}`). |
-| `GET /api/v1/jobs`, `.../repos/<repo>/jobs`, `.../jobs/<id>`, `POST .../jobs/<id>/cancel` | Jobs. |
+| `GET /api/v1/jobs`, `.../repos/<repo>/jobs`, `.../jobs/<id>`, `.../jobs/<id>/log`, `POST .../jobs/<id>/cancel` | Jobs (a job with its log's end; `/log` the whole log). |
 | `GET, PUT /api/v1/repos/<repo>/grants`, `DELETE .../grants/<subject>` | Rights. |
 | `GET, POST /api/v1/tokens`, `DELETE /api/v1/tokens/<id>` | Tokens. |
 | `GET /api/v1/repos/<repo>/key` | The public key the repository signs with. |
@@ -544,11 +548,11 @@ pkgpod login --url https://pkg.example.org:8090 -u admin   # asks for the passwo
 | Format | Id | Kinds | Page |
 | --- | --- | --- | --- |
 | Debian (apt) | `deb` | hosted, mirror | [deb](deb.md) |
-| RPM (dnf, yum) | `rpm` | hosted | [rpm](rpm.md) |
-| Alpine (apk) | `apk` | hosted | [apk](apk.md) |
-| Arch (pacman) | `arch` | hosted | [arch](arch.md) |
+| RPM (dnf, yum) | `rpm` | hosted, mirror | [rpm](rpm.md) |
+| Alpine (apk) | `apk` | hosted, mirror | [apk](apk.md) |
+| Arch (pacman) | `arch` | hosted, mirror | [arch](arch.md) |
 | ipk (opkg) | `ipk` | hosted | [ipk](ipk.md) |
-| Files | `files` | hosted, mirror, group | [files](files.md) |
+| Files | `files` | hosted, mirror, group, proxy | [files](files.md) |
 | OCI images | `oci` | hosted, group, proxy | [oci](oci.md) |
 | Helm | `helm` | hosted | [helm](helm.md) |
 | Conda | `conda` | hosted | [conda](conda.md) |

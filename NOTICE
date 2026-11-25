@@ -39,6 +39,6 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 IN THE SOFTWARE.
 ------------------------------------------------------------------------------
 
-The web UI ships htmx 2.0.11 (crates/pkgpod-server/assets/htmx.min.js,
+The web UI ships htmx 2.0.11 (crates/server/assets/htmx.min.js,
 unchanged from the npm package htmx.org, integrity verified), Copyright
 (c) 2020, Big Sky Software, under the Zero-Clause BSD license.

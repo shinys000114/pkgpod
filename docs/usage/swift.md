@@ -110,8 +110,8 @@ curl -H "Authorization: Bearer <token>" --data-binary @Greeting.zip \
 ## Operations
 
 Swift repositories have no operations. Remove a release by its path,
-`<scope>/<name>/<version>.zip` in lowercase
-(`pkgpod ls sw team/greeting/` shows them):
+`<scope>/<name>/<version>.zip`, scope and name in lowercase and the
+version as published (`pkgpod ls sw team/greeting/` shows them):
 
 ```sh
 pkgpod rm sw team/greeting/1.1.0.zip

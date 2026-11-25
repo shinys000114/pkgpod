@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Mirror engines: apt archives over HTTP (following their Release
-//! files, checking signatures, verbatim) and rsync. A mirror's received
-//! tree is served where it lies; indexes are switched in only after the
-//! files they name are in place, so a failed run leaves the old state.
+//! Mirror engines: apt archives and dnf, Arch and Alpine repositories
+//! over HTTP (following their Release files or indexes, verbatim, apt's
+//! and dnf's signatures checked), plain trees from HTTP directory
+//! listings, and rsync for any of them; also the registry client that
+//! imports OCI images. A mirror's received tree is served where it
+//! lies; indexes are switched in only after the files they name are in
+//! place, so a failed run leaves the old state.
 
 pub mod apk;
 pub mod arch;

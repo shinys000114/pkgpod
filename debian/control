@@ -21,12 +21,18 @@ Architecture: amd64 arm64
 Depends: ${misc:Depends}, adduser, ca-certificates
 Recommends: rsync
 Description: package server for a team
- pkgpod hosts, mirrors and serves packages. Every hosted repository keeps
+ pkgpod hosts, mirrors and serves packages of 23 formats: Debian, RPM,
+ Alpine, Arch and opkg repositories, OCI images, PyPI, npm, Cargo, Go,
+ Maven, RubyGems, NuGet, Helm and more. Every hosted repository keeps
  its history: each change is a version, labels make snapshots that stay
  reachable at their own address, and any version can be compared with
- another or made current again. Debian repositories publish signed
- indexes for every version; Debian mirrors follow their upstream on a
- schedule.
+ another or made current again. Debian, RPM, Alpine, Arch and opkg
+ repositories publish signed indexes for every version.
+ .
+ Mirrors of Debian, RPM, Alpine and Arch repositories and of file trees
+ follow their upstream on a schedule; proxies keep what clients fetch
+ from public registries. Repositories are reached by their own host
+ names and paths, and a host's root lists the repositories there.
  .
  One binary is the server (with a web console and a JSON API) and its
  command line client.

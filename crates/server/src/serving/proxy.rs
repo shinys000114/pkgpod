@@ -8,11 +8,13 @@
 //! limit, unless pinned) or metadata (what changes upstream, as a
 //! module's version list: asked for again when older than
 //! `metadata_minutes`, with the validators it came with, and served as
-//! it was while the upstream is not there). Only the upstream is asked,
-//! at paths under its base; names in `exclude` are never asked for, so
-//! the names of your own packages are not looked up in a public
-//! registry. Downloads count by package and version, as for hosted
-//! repositories.
+//! it was while the upstream is not there). Metadata is asked of the
+//! upstream, at paths under its base; a file may come from where that
+//! metadata says (npm's tarball URLs, cargo's `dl`, pypi's file links,
+//! on any http(s) host), checked against the digest it gives. Names in
+//! `exclude` are never asked for, so the names of your own packages are
+//! not looked up in a public registry. Downloads count by package and
+//! version, as for hosted repositories.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};

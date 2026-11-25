@@ -107,7 +107,7 @@ default. Types are in `pkgpod_engine` (`Cx`, `Upload`, `PublishCx`,
 |---|---|---|
 | `id()` | required | Short name (`deb`), the `-f` of `pkgpod repo create`. |
 | `title()` | required | Name for people (`Debian`). |
-| `kinds()` | required | `Kind::Hosted`, and `Kind::Mirror` if the format has mirrors (deb and files do). Groups and proxies are not listed here. |
+| `kinds()` | required | `Kind::Hosted`, and `Kind::Mirror` if the format has mirrors (deb, rpm, arch, apk and files do). Groups and proxies are not listed here. |
 | `settings(kind)` | none | The format's settings of repositories of `kind`, besides the common ones. Not asked for groups and proxies. |
 | `check_settings(kind, settings)` | `Ok` | Rules across settings, after each field is checked. Not called for groups and proxies. |
 | `ops()` | none | Operations (`OpSpec`: name, help, parameters as `Field`s); the console makes a form of each, `pkgpod op` and `POST /api/v1/repos/<repo>/ops/<op>` run them. |
@@ -229,9 +229,9 @@ implement `publish` for that, and return `Ok(None)`.
    in `crates/server/src/lib.rs`. From then on the engine
    accepts `-f <id>`, the API lists it at `GET /api/v1/formats`, and
    the console offers its settings, operations and upload form.
-4. In `crates/server/src/console/`: the line describing the
-   format when a repository is made (the `blurb` in `index`), the words
-   for its catalog (`catalog_words`), and its "How to use" lines
+4. In `crates/server/src/console/`: the line describing the format
+   when a repository is made (the `blurb` in `new_repo_page`), the
+   words for its catalog (`catalog_words`), and its "How to use" lines
    (`usage`, below).
 5. If its clients need more than files (below): a protocol module.
 6. If it has groups, proxies, mirrors or imports: see
@@ -264,28 +264,28 @@ only add a client's write API beside a static served tree: `helm.rs`
 `pub_api.rs`, `terraform.rs`, `oci.rs`) answer every request of their
 repositories, and share a shape:
 
-- `serve::serve_repo` hands the request over when
+- `serving::serve_repo` hands the request over when
   `served.repo.format == "<id>"`, usually after taking a leading
   `@<label>` off `rel` and resolving it with `app.labelled` (a label's
   version is read-only). Most pass an `Ask` (repository, version,
   `labelled`, `rel`, `base`, caller, role) to
   `pub async fn handle(app, ask, req)`.
-- `serve::client_base` gives the repository's URL as the request
+- `serving::client_base` gives the repository's URL as the request
   reached it, for absolute URLs in answers.
-- Reads need `role.is_some()`, writes `Role::Write`; `serve::deny`
+- Reads need `role.is_some()`, writes `Role::Write`; `serving::deny`
   answers 401 to anonymous callers (so clients send credentials) and
   404 to others.
-- Uploads go to the store with `serve::body_to_store` or
-  `serve::stream_to_store` (with a size limit), then into a version
+- Uploads go to the store with `serving::body_to_store` or
+  `serving::stream_to_store` (with a size limit), then into a version
   with `app.engine.upload`, `upload_batch` or `change`, inside
   `tokio::task::spawn_blocking`, and are recorded with
   `app.auth.audit`. Keep the parsing and the tree changes in the format
   crate (as `pkgpod_cargo::Cargo::add`) and only the protocol in the
   server.
 - The repository's bare address, opened in a browser, answers a short
-  text saying how clients use it (`serve::client_note`).
+  text saying how clients use it (`serving::client_note`).
 - A format whose address is an API rather than a tree to browse is
-  added to `serve::browsable`'s list, so it is left out of host
+  added to `serving::browsable`'s list, so it is left out of host
   listings.
 
 ## The console's "How to use"
@@ -325,12 +325,13 @@ of those kinds; serving them is the server's:
 ## Mirrors and imports
 
 Listing `Kind::Mirror` in `kinds()` is not enough either. A mirror's
-sync (`jobs::sync` in `crates/server/src/jobs/mod.rs`) runs the
-plain-tree engines for files and treats every other format as an apt
-archive, and imports (`import::start`) take deb, files and OCI only. A
+sync (`jobs::sync` in `crates/server/src/jobs/mod.rs`) has a branch per
+format: the plain-tree engines for files, the rsync modes and HTTP
+engines of rpm, arch and apk, and the apt engines for deb; imports
+(`import::start` in `jobs/import.rs`) take deb, files and OCI only. A
 new format with mirrors or imports needs its own branch there (and an
-engine in `pkgpod-mirror` if neither a tree copy nor an apt archive
-fits); a received tree is then served as it lies, by `serve_mirror`.
+engine in `pkgpod-mirror` if no existing one fits); a received tree is
+then served as it lies, by `serving::serve_mirror`.
 
 ## Tests
 

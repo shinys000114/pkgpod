@@ -9,54 +9,81 @@ meaning.
 Formats:
 
 - **Debian**: hosted repositories with signed indexes for every version
-  (including `binary-all` for architecture-independent packages), source
-  packages, imports of existing apt repositories (binaries and sources);
-  mirrors over HTTP (the dists named, signature checked) or rsync, optionally re-signed
-  with your key, packages promoted from them.
-- **Files**: trees uploaded by path; mirrors and imports over rsync and
-  HTTP listings. FTP is neither served nor followed: the clients that
-  still speak it reach the same trees over HTTP.
+  (including `binary-all` for architecture-independent packages, and
+  `by-hash` by SHA256 and SHA512), source packages, other files beside
+  the archive (a README, a keyring), imports of existing apt
+  repositories (binaries and sources, from a URL or a directory on the
+  server); mirrors over HTTP (the dists named, signature checked) or
+  rsync, optionally re-signed with your key, packages promoted from
+  them. Uploads are held to dpkg's rules for `Package`, `Version` and
+  `Architecture` (a refusal names the field and the rule); copy, move
+  and promote check the target dist's architectures as uploads do; the
+  text that goes into a signed Release (`dist-set`'s suite, codename,
+  origin, label and description, the origin and label settings) may
+  hold no control characters. An HTTP mirror refuses an upstream
+  Release older by its `Date` than the one it serves unless
+  `allow_older` is set, and accepts pool files upstream does not serve
+  as missing only when `ignore_missing` names them.
+- **Files**: trees uploaded by path; links (`master/latest`) that serve
+  another path of the tree; a directory's `.HEADER.md` and `.FOOTER.md`
+  shown above and below its listing; cleanup of old build
+  directories; mirrors and imports over rsync and HTTP listings
+  (imports also from a directory on the server); proxies of a file
+  server. FTP is neither served nor followed: the clients that still
+  speak it reach the same trees over HTTP.
 - **OCI images**: a registry (distribution spec: uploads, mounts,
-  manifests and indexes, tags, referrers); imports of chosen images from
-  other registries.
+  manifests and indexes, tags, referrers with their annotations);
+  imports of chosen images from other registries. A manifest an index
+  lists is not deleted (409 `MANIFEST_INVALID`, naming the index), and
+  an upload session is cancelled only through its own repository (404
+  `BLOB_UPLOAD_UNKNOWN` otherwise).
 - **PyPI**: a simple index (PEP 503, 691, 592, 658/714) for pip; twine's
   upload; yanking.
 - **npm**: a registry for publish and install, dist-tags, deprecation
   and unpublish (from npm itself too), npm search.
 - **Cargo**: a registry with the sparse index protocol: `cargo publish`,
-  yank and unyank, search, `cargo owner --list` (who may write);
-  labelled versions as read-only registries.
+  yank and unyank, search, `cargo owner --list` (who may write, shown
+  to writers; a reader gets a placeholder); labelled versions as
+  read-only registries.
 - **Go**: a module proxy (`GOPROXY`): list, info, go.mod, zip, latest;
   modules uploaded as their zip; private ones over https.
 - **Alpine**: apk packages by branch, repository and architecture, an
   APKINDEX per architecture signed with the server's RSA key (made on
   first use, kept in `<data_dir>/rsa` and backed up); noarch packages in
-  every architecture.
+  every architecture; mirrors of an Alpine mirror over HTTP or rsync.
 - **RPM**: packages by group, repodata (primary, filelists, other) as
   createrepo_c makes it, repomd.xml signed for `repo_gpgcheck`; a dnf
-  repository file per group at `<address><group>.repo`.
+  repository file per group at `<address><group>.repo`; mirrors of dnf
+  repositories over HTTP (repomd.xml's signature checked against the
+  `keyring`, an older one refused unless `allow_older`) or rsync.
 - **Helm**: chart repositories: packaged charts uploaded (also through
   ChartMuseum's API, `api/charts`, as `helm cm-push` uses it),
   `index.yaml` made per version with relative URLs, so a label is a
-  repository too.
+  repository too; the fields helm reads as strings (`appVersion`,
+  `version`, ...) kept as written, so `1.10` stays `1.10`.
 - **Maven**: files deployed at their Maven paths; maven-metadata.xml
   (artifact and SNAPSHOT version) and md5/sha1/sha256/sha512 made here,
   uploaded checksums checked; releases deployed once unless `redeploy`;
   the group metadata of Maven plugins, for `mvn <prefix>:<goal>`.
 - **RubyGems**: `gem push` and `gem yank`; the compact index (versions,
-  names, info), the full index (specs.4.8.gz and its latest and
-  prerelease kin, for `gem search -r`) and marshalled gemspecs
-  (quick/Marshal.4.8) made from each gem's metadata.
+  names, info, served with their MD5 as ETag, which bundler before 2.5
+  checks), the full index (specs.4.8.gz and its latest and prerelease
+  kin, for `gem search -r`) and marshalled gemspecs (quick/Marshal.4.8)
+  made from each gem's metadata.
 - **Arch**: pacman repositories by name and architecture: the .db and
-  .files databases with the newest version of each package, packages
+  .files databases with the newest version of each package (in
+  pacman's own version order: `1.0rc1` comes before `1.0`), packages
   and databases signed with the repository's key, `any` packages in
-  every architecture.
+  every architecture; mirrors of an Arch Linux mirror over HTTP or
+  rsync.
 - **NuGet**: the V3 API (service index, flat container, registrations,
   search) made per request; `dotnet nuget push` with the token as API
-  key, symbol packages (.snupkg) beside their package; delete unlists.
+  key, symbol packages (.snupkg) kept beside their package, each pushed
+  once (no symbol server serves them); delete unlists.
 - **Composer**: packages.json and p2 metadata made per request; packages
   uploaded as zips (composer.json at their top or in one directory), the
-  version from the upload or composer.json.
+  version from the upload or composer.json, found by its normalized
+  form (`v1.0.0` and `1.0.0` are one version).
 - **Conda**: channels with a repodata.json per subdir (noarch and the
   usual platforms always), `.conda` and `.tar.bz2` packages read for
   their info/index.json.
@@ -85,7 +112,7 @@ Formats:
   releases, release metadata, source archives (with a Digest header),
   manifests and their Swift-version variants, identifiers by repository
   URL, publishing (unsigned releases) and logging in; scopes and names
-  case-insensitive.
+  case-insensitive, versions as they are spelt (`1.0.0-RC1`).
 - **Pub**: Dart and Flutter packages with the hosted pub repository API
   (v2): package documents made per request, dart pub publish with the
   outcome told at the finalizing URL, retract and unretract.
@@ -96,6 +123,101 @@ promotion as previewed plans; repositories reached by their own host
 names and paths; users, teams, roles per repository and scoped tokens;
 a web console, the `/api/v1` API (described at `/api/v1/openapi.json`)
 and the `pkgpod` command.
+
+Host pages: a host's root that no repository has lists the
+repositories there that the reader may read, how each stands and how to
+use it, under a title and Markdown a server admin gives it (`pkgpod
+host`, the console's Server page).
+
+Trusted publishing: a CI job (GitHub Actions, or any OIDC issuer)
+logs in with its OIDC token, as a trust rule allows, for a token that
+lasts minutes; no secret is kept in the CI. Server admins make rules
+for any user and issuer; a repository's admins make rules for it that
+trust GitHub Actions and give a publisher token, which may do no more
+than write there. Each OIDC token is taken once (by its `jti` and by
+what is signed), an issuer is https (http only on a loopback address),
+and changing or removing a rule deletes the tokens it gave. The server
+hands out the `pkgpod` command (`/cli/pkgpod`, `/cli/install.sh`, `GET
+/api/v1/cli`), and `action.yml` makes publishing one step of a
+workflow.
+
+Webhooks: new versions, labels and ended jobs (or only failed ones)
+sent as signed JSON, a GitHub `repository_dispatch` or a Slack line,
+retried after 1, 5 and 30 minutes and 2 hours, with a delivery log kept
+30 days.
+
+Rights: a token does at most what its user may, and a token it makes
+neither more nor for longer (one a trust rule gave makes none); only a
+token without limits manages its user's tokens; a repository's
+addresses (`urls`) are set by server admins, as an address takes the
+paths under it. A caller without a right to a repository gets 404, an
+anonymous one 401, from every protocol and whatever the request names
+(an `@label` too); 403 is for a reader who may not write. A password
+beginning with `pkgpod_`, as tokens do, is refused. Failed logins are
+logged as warnings and counted in the audit log. The API refuses writes
+a browser sends from another site (by `Origin` and `Sec-Fetch-Site`),
+as the serving listeners do.
+
+The API and the CLI:
+
+- A list cut at its limit says so: `x-pkgpod-more: true` on a
+  repository's packages and on search, `more` in a proxy's cache list;
+  the CLI's `--limit` sets the limit, and the CLI says when a list was
+  cut. `GET /api/v1/jobs` takes `limit` and `before` (the CLI's `jobs
+  -n` and `--before`), `/repos/<repo>/jobs` too, and refuses an
+  unknown state or kind.
+- Operation and upload parameters an operation or format does not take
+  are refused with 400, naming those it takes; yes/no and number values
+  must read as such. Integer settings are never negative and are
+  bounded where they count days, minutes, bytes or downloads. A change
+  of the server settings is checked whole and written in one
+  transaction.
+- `GET /api/v1/jobs/<id>` returns at most 256 KiB of the log, its end
+  or from `?from=` (with `?max=`), with `log_from`, `log_next` and
+  `log_size`; `GET /api/v1/jobs/<id>/log` streams the whole log. A
+  mirror status's `sync.next` is unix seconds, like the schedules'.
+- `key generate` and `key import` answer 409 for a name that is taken,
+  unless `--replace` (`?replace=1`); `key delete` answers 409, naming
+  the repositories that sign with the key, unless `--force`. `listener
+  set` refuses (409) the management listener's address or another
+  listener's. `grant list '*'` lists the grants on every repository
+  (server admins).
+- A mirror's http(s) source or a proxy's upstream that holds a user or
+  password is refused, without echoing it. An rsync source is
+  `rsync://[user@]host[:port]/...` or `[user@]host::module`, the host a
+  name of letters, digits, `.` and `-`, or a bracketed IPv6 address.
+- The CLI sends the saved login's token only to the server it was
+  saved for (the same scheme, host and port); to another it sends none
+  and says so (`--token` and `PKGPOD_TOKEN` are sent as given). Before
+  an upload it asks for the repository, so a refusal is the server's
+  own answer, and it tells a proxy's answers from pkgpod's: an HTML 413
+  is the proxy's size limit, and after a 504 or 524 the server may
+  still finish the call. It sends `User-Agent: pkgpod/<version>`.
+  `pkgpod --version`, `/api/v1/cli` and `install.sh` give the version
+  with its commit.
+- `user set` and `passwd` take `--password-stdin`; `logs -f` ends when
+  the server refuses it; every command and option has its help.
+
+Caching: answers of a repository that is not public, and answers to a
+request with credentials, are `Cache-Control: private` with `Vary:
+Authorization` (serving listeners, registry protocols and the console's
+download). What changes under one name is `no-cache`, revalidated by
+its ETag: indexes, a hosted Debian repository's pool files outside
+`by-hash`, an ipk feed's Packages, Packages.gz, Packages.sig and
+key.pub, OCI manifests by tag, the tag and referrer lists and the
+catalog. `If-None-Match` matches weak validators too, as a CDN sends
+them. A file a version names that the store has lost is a 500 with
+`no-store`, and logged.
+
+Input is bounded: a .deb's control file is read up to 1 MiB and its
+control.tar up to 64 MiB; a zip member stops at the size it claims
+(conda's info member at 64 MiB); YAML (Chart.yaml, pubspec.yaml, gem
+metadata) whose aliases stand for more than the file may hold, or that
+nests deeper than 128 levels, is refused; the text fields of the API's,
+twine's and SwiftPM's upload forms are read up to 64 KiB, and galaxy's
+form only for its file and sha256. A backslash in a files path or a
+Debian upload's `path`, and an `@` first segment of the latter, are
+refused.
 
 The console gives each repository one page: its address, state at a
 glance and tabs for its contents, versions, how its clients use it
@@ -113,9 +235,12 @@ group or branch, with a package the repository has and, on request, a
 token made for it; downloads, filters, sorts and looks into packages,
 and removes or promotes several at once; finds repositories; takes
 dropped files to upload, with progress; compares ticked versions and
-lists labels' addresses; has an Activity tab, a live sync view, who
-has access and why, storage use, the server at a glance, a light/dark
-switch and keyboard tabs.
+lists labels' addresses; has an Activity tab, a live sync view, a
+Schedules page, who has access and why, storage use (proxies' caches
+counted), the server at a glance with its jobs and recent log, a
+light/dark switch and keyboard tabs. A page it cannot show is an error
+page in its frame, with the error's status. A private repository's
+badge token is shown to its admins only.
 
 Signing keys are kept by pkgpod itself: OpenPGP keys are generated
 (Ed25519) or imported (`pkgpod key import`, as `gpg
@@ -127,12 +252,44 @@ in process, without gpg.
 Operations:
 
 - `pkgpod admin check [--deep]` checks that every version reads whole
-  and every blob it names is stored (and, deep, has its hash).
+  and every blob it names is stored (and, deep, has its hash); it
+  gives the total when there are more problems than it lists.
 - `pkgpod admin backup <dir>` and `pkgpod admin restore <dir>`: the
-  database, signing keys and content stores (mirrors' trees with
-  `--mirrors`), while the server runs.
-- Stopping answers the requests in flight (30 s); the data survives the
-  server being killed.
+  database, signing keys, job logs and content stores (mirrors' trees
+  with `--mirrors`), while the server runs.
+- `pkgpod serve` holds a lock on `<data_dir>/pkgpod.lock` (its pid in
+  it): a second server on the same data directory is refused. At start
+  it removes what a stopped or killed server left half done (import
+  staging, partial uploads).
+- Stopping answers the requests in flight (30 s) and gives the jobs it
+  cancels 10 s to end; they are recorded cancelled, "the server
+  stopped". The data survives the server being killed. The Debian
+  package's unit sends SIGTERM to the server alone, kills what is left
+  once it is gone (`KillMode=mixed`), waits 60 s and allows 65536 open
+  files.
+- Connections: an idle kept-alive HTTP/1 connection is closed after 3
+  minutes (keep a reverse proxy's idle connections to it shorter); a
+  connection's first bytes must come within 30 s and a TLS handshake
+  within 10 s; an HTTP/2 connection that does not answer a ping within
+  30 s is closed.
+- Mirrors sync when asked or on their `schedule` (cron; a step larger
+  than its field's range is refused). The console's Schedules page and
+  `pkgpod schedule` show every mirror's schedule, next and last sync,
+  and the syncs of the next 24 hours with what each will wait for;
+  `pkgpod schedule pause` stops scheduled syncs until resumed. At most
+  `syncs_per_storage` syncs (2) run at once on one storage; the others
+  queue. A failed rsync pass reports rsync's first error line.
+- Jobs: syncs and imports, one at a time per repository, each with a
+  log (streamed live in the console, in backups). Ended jobs older than
+  `jobs_days` (90) go with their logs in the daily run, each
+  repository's newest ten kept.
+- The public address of the console (`console_url`) and the GitHub
+  action's place (`ci_action`) are server settings, which the install
+  script and the console's CI examples name; without `console_url` a
+  request's `Host` is used only when it is a plain host and port.
+- The server logs to standard output, coloured only on a terminal and
+  without time stamps of its own when that is the journal; its newest
+  events are kept for the console's Logs and `pkgpod logs`.
 - Download statistics: packages served whole to a GET are counted by
   repository, day, package and version (indexes, HEAD, 304 and resumed
   ranges are not; an image pull is a GET of the manifest its tag
@@ -154,34 +311,40 @@ Operations:
   package, remove pre-releases after N days, remove versions not
   downloaded for N days (only once downloads have been counted and kept
   that long). Each package's newest version in each place clients pick
-  from (a Debian dist's component and architecture) always stays. A
-  cleanup is a plan, previewed with `pkgpod cleanup <repo>` or in the
-  console's Settings tab, and runs daily; a daily run that would remove
-  more than `cleanup_max` versions is held for review. Removed versions
-  come back by rollback while retention keeps the version before; the
-  space is freed when it no longer does.
+  from (a Debian dist's component and architecture) always stays. Files
+  repositories remove old build directories (`cleanup_dirs`) the same
+  way, keeping the newest and those a link points at. A cleanup is a
+  plan, previewed with `pkgpod cleanup <repo>` or in the console's
+  Settings tab, and runs daily; a daily run that would remove more than
+  `cleanup_max` versions is held for review. Removed versions come back
+  by rollback while retention keeps the version before; the space is
+  freed when it no longer does.
 - Group repositories for files, npm, PyPI, Maven, Go, Cargo and OCI
   (`pkgpod repo create <name> -f <format> -k group -s members=a,b`): one
   address that reads its members in order. For each package the first
   member that has it answers alone (versions are not merged, so a
-  package further down never adds to or outranks it); listings, pypi's
-  project list and npm's and cargo's search show every member's.
-  Readers of a group read its members through it (anonymous readers of
-  a public group only its public members); only who may read a
-  repository makes it a member; a deleted member leaves its groups.
-  Publishing goes to a member.
+  package further down never adds to or outranks it); a proxy member
+  whose upstream fails, keeping nothing for the name, ends the search
+  with a 502. Listings, pypi's project list and npm's and cargo's search
+  show every member's. Readers of a group read its members through it
+  (anonymous readers of a public group only its public members); only
+  who may read a repository makes it a member; a deleted member leaves
+  its groups. Publishing goes to a member.
 - Proxy repositories (`-k proxy -s upstream=<registry>`): a registry's
   files fetched when asked for and kept (garbage collection keeps them),
   its metadata asked for again after `metadata_minutes` and served as it
-  was while the upstream is not there; names in `exclude` are never
-  asked upstream; only the upstream and URLs its own metadata named are
+  was while the upstream is not there (after waiting 5 s for it, then
+  without asking it for a minute); names in `exclude` are never asked
+  upstream; only the upstream and URLs its own metadata named are
   fetched, and a file whose digest is not the one its metadata gives is
   refused and not kept. The cache is managed by hand (`pkgpod cache
   <repo> list|pin|unpin|evict|prefetch`, the console's Cache tab), with
   a size limit (`max_mib`) that evicts the least recently used unpinned
-  files. In a group after hosted repositories, a proxy answers for what
-  they do not have. Upstreams without credentials for now. Per format:
-  - Go: a module's list and @latest are metadata; .info, .mod, .zip files.
+  files, and is forgotten when the upstream changes. In a group after
+  hosted repositories, a proxy answers for what they do not have.
+  Upstreams take no credentials yet. Per format:
+  - Go: a module's list and @latest are metadata; .info, .mod, .zip
+    files.
   - Maven: maven-metadata.xml and a SNAPSHOT's files are metadata; a
     release's files are checked against the upstream's `.sha1`.
   - npm: the package document is kept as sent and served with its
@@ -197,9 +360,19 @@ Operations:
     prefix; manifests by tag are metadata, by digest and blobs are
     files, each checked against its digest; pinning a tag pins what it
     names.
+  - Files: a file server's directories are read from its listings;
+    files are asked for again after `metadata_minutes`, as a file
+    server replaces files under the same name; a file not kept yet is
+    passed to the client while it is stored.
 - `/metrics` on the management listener for Prometheus: repositories
   (those the caller may read), versions, packages, mirrors' syncs,
   files served and downloads since start.
+- A release has the .deb files, the source package, static binaries
+  for x86_64 and aarch64, `checksums.txt` and `THIRD-PARTY-NOTICES`
+  (the licences of the crates the binary links, also in
+  `/usr/share/doc/pkgpod`), all from the CI run that tested them;
+  `cargo deny` checks the dependencies' advisories and licences first.
+  `SECURITY.md` says how to report a vulnerability.
 
 Before 0.1.0 is tagged, to decide: whether `/api/v1` is under the same
 promise as the data, or may still change.

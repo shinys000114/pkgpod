@@ -13,15 +13,18 @@ One binary, `pkgpod`, built from a Rust workspace (`crates/`: `core/` the base a
   except `pkgpod admin ...`, which works on the database directly
   (password, backup, restore, check).
 - **`pkgpod-server`**: everything that answers a request. The serving
-  listeners (`serve.rs`, `routes.rs`, `listeners.rs`), the client
-  protocols that are more than static files (`npm.rs`, `cargo.rs`,
-  `oci.rs`, `nuget.rs`, ...), proxy repositories (`proxy.rs`), group
-  repositories (`group.rs`), the management listener with the API
-  (`api.rs`, `openapi.rs`) and the console (`console.rs`, askama
-  templates, htmx), rights (`auth.rs`), signing keys (`keys.rs`,
-  `rsa_key.rs`, `usign_key.rs`), jobs (`jobs.rs`, `import.rs`,
-  `cron.rs`), cleanup rules (`cleanup.rs`), download counts
-  (`stats.rs`), status, badges and metrics, backup and restore.
+  listeners (`serving/mod.rs`, `routes.rs`, `ops/listeners.rs`), the
+  client protocols that are more than static files (`protocols/`:
+  `npm.rs`, `cargo.rs`, `oci.rs`, `nuget.rs`, ...), proxy and group
+  repositories and host pages (`serving/proxy.rs`, `group.rs`,
+  `hosts.rs`), the management listener with the API (`api/mod.rs`,
+  `openapi.rs`) and the console (`console/`, askama templates, htmx),
+  rights, trusted publishing and signing keys (`auth/`: `mod.rs`,
+  `oidc.rs`, `keys.rs`, `rsa_key.rs`, `usign_key.rs`), jobs (`jobs/`:
+  `mod.rs`, `import.rs`, `cron.rs`, `schedules.rs`), cleanup rules,
+  backup and restore (`jobs/cleanup.rs`, `backup.rs`), download counts,
+  status and badges (`serving/stats.rs`, `status.rs`, `badge.rs`),
+  metrics, webhooks and the CLI it hands out (`ops/`).
 - **`pkgpod-engine`**: repositories of any format, their versions as
   state trees, labels, rollback, promotion, retention, the catalog,
   the proxy cache table, garbage collection and the consistency check.
@@ -32,9 +35,12 @@ One binary, `pkgpod`, built from a Rust workspace (`crates/`: `core/` the base a
   bounds what aliases expand to (`yaml.rs`).
 - **`pkgpod-mirror`**: the engines that fetch from elsewhere: apt
   archives over HTTP following their Release files (`http.rs`,
-  `release.rs`, `fetch.rs`), rsync (`rsync.rs`, which runs the rsync
-  program), plain trees from HTTP directory listings (`files.rs`), and
-  a registry client for importing OCI images (`oci.rs`).
+  `release.rs`, `fetch.rs`), dnf, Arch and Alpine repositories over
+  HTTP following their indexes (`rpm.rs`, `arch.rs`, `apk.rs`, with
+  what they share in `pkgs.rs`), rsync (`rsync.rs`, which runs the
+  rsync program), plain trees from HTTP directory listings
+  (`files.rs`), the known hashes of received files (`cache.rs`), and a
+  registry client for importing OCI images (`oci.rs`).
 - **One crate per format**: `pkgpod-deb`, `pkgpod-files`, `pkgpod-oci`,
   `pkgpod-pypi`, `pkgpod-npm`, `pkgpod-cargo`, `pkgpod-go`,
   `pkgpod-apk`, `pkgpod-rpm`, `pkgpod-helm`, `pkgpod-maven`,
@@ -46,7 +52,7 @@ One binary, `pkgpod`, built from a Rust workspace (`crates/`: `core/` the base a
 Dependencies (normal ones; tests add a few):
 
 ```text
-pkgpod ─────────────┬──> pkgpod-server ─┬──> pkgpod-mirror ──> pkgpod-deb
+pkgpod ─────────────┬──> pkgpod-server ─┬──> pkgpod-mirror ──> pkgpod-deb, pkgpod-apk
                     │                   ├──> pkgpod-<format> (all 23)
                     │                   ├──> pkgpod-engine
                     │                   └──> pkgpod-base
@@ -54,7 +60,7 @@ pkgpod ─────────────┬──> pkgpod-server ─┬─
 
 pkgpod-<format> ──> pkgpod-engine ──> pkgpod-base
 pkgpod-ipk ──> pkgpod-deb            (control files, package reading, version order)
-pkgpod-mirror ──> pkgpod-base, pkgpod-deb   (not the engine)
+pkgpod-mirror ──> pkgpod-base, pkgpod-deb, pkgpod-apk   (and through them the engine)
 ```
 
 The formats compiled in are listed in `pkgpod_server::formats()`; the
@@ -71,6 +77,7 @@ changed through the console, the API or the CLI.
 ```text
 <data_dir>/
   pkgpod.db                 the database (SQLite, WAL)
+  pkgpod.lock               held by the running server, its pid in it
   admin-password            the first admin's password, on a new database
   keys/<name>.asc, .pass    OpenPGP secret keys (kept by pkgpod, no gpg)
   rsa/                      the RSA key (apk) and the usign key (opkg)
@@ -121,10 +128,10 @@ Kinds (`pkgpod_engine::Kind`):
 | `proxy`  | what it fetched from `upstream` (cache) | no       |
 
 A format says which kinds it has: `hosted` and `mirror` through
-`Format::kinds()` (only deb and files have mirrors), `group` and
-`proxy` through `Format::groups()` and `Format::proxy()`. No format
-lists `import`: imports are jobs that fill a hosted repository (see
-[Jobs](#jobs)).
+`Format::kinds()` (deb, rpm, arch, apk and files have mirrors),
+`group` and `proxy` through `Format::groups()` and `Format::proxy()`.
+No format lists `import`: imports are jobs that fill a hosted
+repository (see [Jobs](#jobs)).
 
 ## Blobs, state trees and served trees
 
@@ -214,13 +221,13 @@ lists, download counts and cleanup rules read it.
 Repositories are served on **serving listeners**, kept in the
 `listeners` table (name, `host:port`, optional PEM certificate and key)
 and started, changed and stopped while the server runs
-(`listeners::reconcile`). A new database has one, `default`, on
+(`ops::listeners::reconcile`). A new database has one, `default`, on
 127.0.0.1:8080, for a reverse proxy in front. The **management
 listener** (`listen` in the configuration, 127.0.0.1:8090 by default)
 serves the API at `/api/v1`, the console and `/metrics`, and no
 repository.
 
-A request on a serving listener (`serve::handle`):
+A request on a serving listener (`serving::handle`):
 
 ```text
 request (Host, path)
@@ -230,7 +237,7 @@ request (Host, path)
   ├─ at any host's root:
   │     /.well-known/terraform.json      Terraform service discovery
   │     /.well-known/pkgpod/badges/...   badges
-  │     /v2/...                          the OCI registry (oci.rs), when
+  │     /v2/...                          the OCI registry (protocols/oci.rs), when
   │                                      an OCI repository is reachable there
   ├─ routes::Table::route(host, path)
   │     repository whose url has this host and the longest path prefix,
@@ -256,34 +263,37 @@ formats keep for themselves (`_inputs`) are `Value` entries and answer
 404.
 
 Writes from a browser on another origin are refused. Downloads served
-whole are counted by package, version and day (`stats.rs`).
+whole are counted by package, version and day (`serving/stats.rs`).
 
 ## Mirrors
 
-A mirror (deb or files) follows an upstream: a sync job runs a mirror
-engine of `pkgpod-mirror` into the repository's received tree,
-`<storage>/trees/<repo>/`, which is served where it lies; there are no
-versions. The `source` setting picks the engine: `rsync://` or
-`host::module` for rsync, `http(s)://` for the HTTP engines (apt
-archives by their Release files, checked against the `keyring` if one
-is set; plain trees by their directory listings). Indexes are switched
-in only after the files they name are in place, so a failed run leaves
-the old state. A deb mirror with `resign` serves its Release files
-signed with the server's key instead of the upstream's (`resign.rs`).
+A mirror (deb, rpm, arch, apk or files) follows an upstream: a sync
+job runs a mirror engine of `pkgpod-mirror` into the repository's
+received tree, `<storage>/trees/<repo>/`, which is served where it
+lies; there are no versions. The `source` setting picks the engine
+(`pkgpod_base::source_kind` reads it): `rsync://` or `host::module`
+for rsync, `http(s)://` for the HTTP engines (apt archives by their
+Release files and dnf repositories by `repomd.xml`, signatures checked
+against the `keyring` if one is set; Arch and Alpine repositories by
+their databases and indexes, whose signatures their clients check;
+plain trees by their directory listings). Indexes are switched in only
+after the files they name are in place, so a failed run leaves the old
+state. A deb mirror with `resign` serves its Release files signed with
+the server's key instead of the upstream's (`jobs/resign.rs`).
 Packages of a deb mirror can be promoted into a hosted repository
-(`promote.rs`).
+(`jobs/promote.rs`).
 
 ## Proxy repositories
 
-A proxy (`proxy.rs`; OCI in `oci.rs`) fetches from its `upstream` when
-a client asks and keeps what it fetched, by path, in the engine's
-`cache` table and the storage's store. The format's classifier says
-what a request is: a **file** (an artifact that never changes, kept
-until it is evicted by hand or for `max_mib`, unless pinned) or
-**metadata** (a version list, asked for again when older than
-`metadata_minutes`, with its validators, and served as it was while the
-upstream is not there). A **miss** records that the upstream had
-nothing there. Names in `exclude` are never asked for upstream. A
+A proxy (`serving/proxy.rs`; OCI in `protocols/oci.rs`) fetches from
+its `upstream` when a client asks and keeps what it fetched, by path,
+in the engine's `cache` table and the storage's store. The format's
+classifier says what a request is: a **file** (an artifact that never
+changes, kept until it is evicted by hand or for `max_mib`, unless
+pinned) or **metadata** (a version list, asked for again when older
+than `metadata_minutes`, with its validators, and served as it was
+while the upstream is not there). A **miss** records that the upstream
+had nothing there. Names in `exclude` are never asked for upstream. A
 files proxy renews its files as metadata (a file server replaces files
 under the same name), lists directories from the upstream's HTML
 listings, and streams a file not kept yet to the client while it is
@@ -293,21 +303,23 @@ no uploads and have no versions.
 
 ## Group repositories
 
-A group (`group.rs`) reads its `members` (repositories of its format
-that are not groups) in order. For each package, the first member that
-has it answers alone: versions are not merged, so a public package of
-the same name further down never adds to or outranks yours. Listings
-and search show every member's entries. A group is read through: its
-readers read the members through it (anonymous readers of a public
-group only its public members), downloads count on the member, and
-writes are refused with the member to publish to.
+A group (`serving/group.rs`) reads its `members` (repositories of its
+format that are not groups) in order. For each package, the first
+member that has it answers alone: versions are not merged, so a public
+package of the same name further down never adds to or outranks yours.
+A proxy member whose upstream fails while it keeps nothing for the name
+ends the search with a 502, rather than let a later member answer for
+it. Listings and search show every member's entries. A group is read
+through: its readers read the members through it (anonymous readers of
+a public group only its public members), downloads count on the
+member, and writes are refused with the member to publish to.
 
 ## Jobs
 
-Jobs (`jobs.rs`) run in the background, one at a time per repository,
-each on its own thread: mirror syncs (`sync`, by hand or by the
-mirror's `schedule`, a cron expression checked every minute) and
-imports (`import`, `import.rs`): an apt archive into a hosted deb
+Jobs (`jobs/mod.rs`) run in the background, one at a time per
+repository, each on its own thread: mirror syncs (`sync`, by hand or by
+the mirror's `schedule`, a cron expression checked every minute) and
+imports (`import`, `jobs/import.rs`): an apt archive into a hosted deb
 repository, a tree (rsync, HTTP listings or a directory on the server)
 into a hosted files repository, chosen images of a registry into an OCI
 repository. An import is one version.
@@ -327,8 +339,8 @@ stopped otherwise are marked failed on the next start.
 
 ## Rights
 
-`auth.rs`: users, teams, grants and tokens, one model for the console,
-the API, the CLI and every client.
+`auth/mod.rs`: users, teams, grants and tokens, one model for the
+console, the API, the CLI and every client.
 
 - A server admin may do everything.
 - Others get a role per repository, `read`, `write` or `admin`, from

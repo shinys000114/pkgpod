@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The JSON API, `/api/v1`, on the management listener. The console and
-//! the CLI use nothing else.
+//! The JSON API, `/api/v1`, on the management listener. The CLI uses
+//! nothing else; the console calls these handlers for every change, so
+//! rights, plans and checks are the same, and has a few views of its
+//! own.
 //!
 //! Authentication: `Authorization: Bearer <token>`, Basic (user and
 //! password or token), or the console's session cookie (changes then
