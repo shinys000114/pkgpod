@@ -444,6 +444,7 @@ header {{ padding:1.2rem 1.5rem; border-bottom:1px solid var(--line); background
 h1 {{ margin:0; font-size:1.3rem; font-weight:600; overflow-wrap:anywhere; }}
 .meta {{ color:var(--muted); font-size:13px; margin-top:.3rem; }}
 main {{ padding:0 1.5rem 2rem; max-width:64rem; }}
+.list-head {{ font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); font-weight:600; margin:1.2rem 0 0; padding-bottom:.4rem; border-bottom:1px solid var(--line); }}
 .repo {{ padding:.8rem 0; border-bottom:1px solid var(--line); }}
 .top {{ display:flex; flex-wrap:wrap; gap:.4rem .6rem; align-items:baseline; }}
 .name {{ font-weight:650; font-size:1.05rem; }} a.name {{ color:var(--link); text-decoration:none; }} a.name:hover {{ text-decoration:underline; }}
@@ -466,7 +467,7 @@ pre {{ margin:.15rem 0; padding:.5rem .7rem; background:var(--head); border:1px 
 @media (max-width:640px) {{ header, main {{ padding-left:1rem; padding-right:1rem; }} }}
 </style></head>
 <body><header><h1>{title}</h1><div class="meta">{n} repositor{ies}</div></header>
-<main>{head}{list}{foot}</main></body></html>
+<main>{head}<h2 class="list-head">Repositories</h2>{list}{foot}</main></body></html>
 "#,
         title = esc(&title),
         n = rows.len(),

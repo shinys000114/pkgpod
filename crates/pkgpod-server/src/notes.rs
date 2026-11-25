@@ -79,7 +79,89 @@ pub fn render(md: &str) -> String {
         e => e,
     });
     let mut out = String::new();
-    html::push_html(&mut out, events);
+    html::push_html(&mut out, autolink(events).into_iter());
+    out
+}
+
+/// Bare http(s) addresses in text made links, as GitHub shows a README:
+/// not inside a link, an image's text or code.
+fn autolink<'a>(events: impl Iterator<Item = Event<'a>>) -> Vec<Event<'a>> {
+    use pulldown_cmark::{LinkType, TagEnd};
+    // Text the parser split (at a `_`, say) in one piece again.
+    let mut merged: Vec<Event<'a>> = Vec::new();
+    for e in events {
+        if let (Event::Text(t), Some(Event::Text(prev))) = (&e, merged.last_mut()) {
+            *prev = CowStr::from(format!("{prev}{t}"));
+            continue;
+        }
+        merged.push(e);
+    }
+    let mut out = Vec::new();
+    let (mut in_link, mut in_code) = (0usize, 0usize);
+    for e in merged {
+        match &e {
+            Event::Start(Tag::Link { .. } | Tag::Image { .. }) => in_link += 1,
+            Event::End(TagEnd::Link | TagEnd::Image) => in_link = in_link.saturating_sub(1),
+            Event::Start(Tag::CodeBlock(_)) => in_code += 1,
+            Event::End(TagEnd::CodeBlock) => in_code = in_code.saturating_sub(1),
+            _ => {}
+        }
+        let Event::Text(t) = &e else {
+            out.push(e);
+            continue;
+        };
+        if in_link > 0 || in_code > 0 || !t.contains("http") {
+            out.push(e);
+            continue;
+        }
+        let mut rest: &str = t;
+        while let Some(i) = ["https://", "http://"]
+            .iter()
+            .filter_map(|p| rest.find(p))
+            .min()
+        {
+            let tail = &rest[i..];
+            let mut end = tail
+                .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '`'))
+                .unwrap_or(tail.len());
+            // Punctuation after an address is the sentence's.
+            while end > 0 {
+                let c = tail[..end].chars().last().unwrap_or(' ');
+                let open = tail[..end].matches('(').count();
+                let close = tail[..end].matches(')').count();
+                if matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | '\'' | ']')
+                    || (c == ')' && close > open)
+                {
+                    end -= c.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            let url = &tail[..end];
+            if url.len() <= "https://".len() {
+                out.push(Event::Text(CowStr::from(
+                    rest[..i + end.max(1)].to_string(),
+                )));
+                rest = &rest[i + end.max(1)..];
+                continue;
+            }
+            if i > 0 {
+                out.push(Event::Text(CowStr::from(rest[..i].to_string())));
+            }
+            out.push(Event::Start(Tag::Link {
+                link_type: LinkType::Autolink,
+                dest_url: safe_url(CowStr::from(url.to_string()), false),
+                title: CowStr::Borrowed(""),
+                id: CowStr::Borrowed(""),
+            }));
+            out.push(Event::Text(CowStr::from(url.to_string())));
+            out.push(Event::End(TagEnd::Link));
+            rest = &tail[end..];
+        }
+        if !rest.is_empty() {
+            out.push(Event::Text(CowStr::from(rest.to_string())));
+        }
+    }
     out
 }
 
@@ -114,6 +196,25 @@ fn safe_url(u: CowStr<'_>, image: bool) -> CowStr<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bare_addresses_are_links() {
+        let h = render(
+            "* Debian: https://mirror.example.org/debian/.\n* (see https://x.example/a_(b)) and `https://code.example/`\n",
+        );
+        assert!(h.contains(r#"<a href="https://mirror.example.org/debian/">https://mirror.example.org/debian/</a>."#), "{h}");
+        assert!(
+            h.contains(r#"<a href="https://x.example/a_(b)">https://x.example/a_(b)</a>)"#),
+            "{h}"
+        );
+        assert!(h.contains("<code>https://code.example/</code>"), "{h}");
+        // Not twice inside a link, nor in a code block.
+        let h =
+            render("[https://a.example/](https://a.example/)\n\n```\nhttps://b.example/\n```\n");
+        assert_eq!(h.matches("<a ").count(), 1, "{h}");
+        assert!(h.contains("<pre><code>https://b.example/"), "{h}");
+        assert_eq!(render("http:// alone"), "<p>http:// alone</p>\n");
+    }
 
     #[test]
     fn markdown_renders() {
