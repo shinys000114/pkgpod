@@ -1719,6 +1719,35 @@ async fn serve_mirror(
         Err(_) => return status(StatusCode::BAD_REQUEST),
     };
     *req.uri_mut() = uri;
+    // ServeDir answers a Range without looking at If-Range, so a
+    // download resumed after a sync replaced the file got the new file's
+    // tail after the old one's start. A range only of the same file (the
+    // ETag ServeDir gives it), else the whole file; a date gets the whole
+    // file, as in serve_tagged.
+    if let Some(cond) = req
+        .headers_mut()
+        .remove(header::IF_RANGE)
+        .and_then(|v| v.to_str().ok().map(str::to_string))
+    {
+        let f = full.clone();
+        let etag = tokio::task::spawn_blocking(move || std::fs::metadata(f).ok())
+            .await
+            .ok()
+            .flatten()
+            .and_then(|m| Some((m.len(), http_time(m.modified().ok()?))))
+            .and_then(|(len, t)| {
+                let d = t.duration_since(std::time::UNIX_EPOCH).ok()?;
+                Some(format!(
+                    "\"{:x}.{:08x}-{:x}\"",
+                    d.as_secs(),
+                    d.subsec_nanos(),
+                    len
+                ))
+            });
+        if etag.as_deref() != Some(cond.trim()) {
+            req.headers_mut().remove(header::RANGE);
+        }
+    }
     let mut r = match ServeDir::with_backend(tree, MirrorFs)
         .with_buf_chunk_size(256 << 10)
         .append_index_html_on_directories(false)
@@ -2434,6 +2463,67 @@ mod tests {
         assert!(mirror_hidden(false, ".treeinfo"));
         assert!(!mirror_hidden(true, ".treeinfo"));
         assert!(!mirror_hidden(false, "f_1_amd64.deb"));
+    }
+
+    /// A download of a mirror's file resumed with If-Range gets the rest
+    /// only of the same file: after a sync replaced it, the whole new
+    /// one, never the new one's tail after the old one's start.
+    #[tokio::test]
+    async fn mirror_ranges_are_of_the_same_file() {
+        let d = tempfile::tempdir().unwrap();
+        let tree = d.path().to_path_buf();
+        let name = "f_1_amd64.deb";
+        let rel = [name.to_string()];
+        let path = format!("/m/{name}");
+        std::fs::write(tree.join(name), "old content").unwrap();
+        let get = |h: Vec<(header::HeaderName, String)>| {
+            let mut req = Request::builder().uri(&path);
+            for (k, v) in h {
+                req = req.header(k, v);
+            }
+            serve_mirror(
+                tree.clone(),
+                &rel,
+                &path,
+                false,
+                req.body(Body::empty()).unwrap(),
+            )
+        };
+        let old = get(vec![]).await.headers()[header::ETAG]
+            .to_str()
+            .unwrap()
+            .to_string();
+        let range = |v: &str| {
+            vec![
+                (header::RANGE, "bytes=4-".to_string()),
+                (header::IF_RANGE, v.to_string()),
+            ]
+        };
+        let r = get(range(&old)).await;
+        assert_eq!(r.status(), StatusCode::PARTIAL_CONTENT);
+        // A sync puts other content there (and another time).
+        let f = tree.join(name);
+        std::fs::write(&f, "new content!").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&f)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000))
+            .unwrap();
+        for cond in [old.as_str(), "Tue, 15 Nov 1994 08:12:31 GMT"] {
+            let r = get(range(cond)).await;
+            assert_eq!(r.status(), StatusCode::OK, "{cond}");
+            let body = axum::body::to_bytes(r.into_body(), 64).await.unwrap();
+            assert_eq!(&body[..], b"new content!", "{cond}");
+        }
+        let new = get(vec![]).await.headers()[header::ETAG]
+            .to_str()
+            .unwrap()
+            .to_string();
+        let r = get(range(&new)).await;
+        assert_eq!(r.status(), StatusCode::PARTIAL_CONTENT);
+        let body = axum::body::to_bytes(r.into_body(), 64).await.unwrap();
+        assert_eq!(&body[..], b"content!");
     }
 
     /// rsync keeps an upstream's file times, from before 1970 too: such a
