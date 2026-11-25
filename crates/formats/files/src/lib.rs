@@ -295,6 +295,13 @@ impl Format for Files {
                 "",
                 "Also point this link at what is uploaded (its directory, for a path ending in /): master/latest.",
             ),
+            // Text, not an integer field: that would refuse times before
+            // 1970 and give the console's form a 0 to send.
+            Field::text(
+                "mtime",
+                "",
+                "The file's modification time, unix seconds; empty: now.",
+            ),
         ]
     }
 

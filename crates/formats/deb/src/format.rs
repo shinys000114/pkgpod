@@ -484,6 +484,33 @@ impl Deb {
         ] {
             check_line(k, v)?;
         }
+        // Fewer architectures must not leave packages the dist keeps in
+        // no index (as copy and move check them going in).
+        if given("architectures") && !def.architectures.is_empty() {
+            let mut left = Vec::new();
+            for (path, entry) in e.walk(&format!("dists/{name}"))? {
+                if let Some((_, c, f)) = split_pkg_path(&path)
+                    && components.iter().any(|x| x == c)
+                    && let Some((_, _, m)) = pkg_meta(&entry)
+                    && m.architecture != "all"
+                    && !def.architectures.contains(&m.architecture)
+                {
+                    left.push(format!("{f} ({})", m.architecture));
+                }
+            }
+            if !left.is_empty() {
+                let n = left.len();
+                left.truncate(5);
+                if n > 5 {
+                    left.push(format!("{} more", n - 5));
+                }
+                return Err(Error::Invalid(format!(
+                    "dist {name} holds packages of other architectures: {}; publishing {} would list them in no index",
+                    left.join(", "),
+                    def.architectures.join(" ")
+                )));
+            }
+        }
         let mut dropped = Vec::new();
         for (c, _) in e.list(&format!("dists/{name}"))? {
             if !c.starts_with('_') && !components.contains(&c) {

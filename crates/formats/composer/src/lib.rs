@@ -52,41 +52,91 @@ pub fn check_name(n: &str) -> Result<()> {
     }
 }
 
-/// Composer's normalized version: four numbers, a stability suffix
-/// (`1.2` -> `1.2.0.0`, `v1.0.0-beta1` -> `1.0.0.0-beta1`).
+/// Composer's normalized version, as its VersionParser::normalize makes
+/// it: four numbers and a stability suffix (`1.2` -> `1.2.0.0`,
+/// `v1.0.0-b.1` -> `1.0.0.0-beta1`). Spellings that normalize the same
+/// are one version to composer, so an upload is found by this. Numbers
+/// are read as numbers (composer keeps `1.02` and `beta01` as written,
+/// but compares them equal to `1.2` and `beta1`). Dev versions and build
+/// metadata (`+...`) are refused.
 pub fn normalize(v: &str) -> Result<String> {
     let bad = || invalid(format!("{v:?} is not a version"));
-    let s = v.trim().trim_start_matches(['v', 'V']);
-    let (nums, rest) = match s.find(|c: char| !(c.is_ascii_digit() || c == '.')) {
-        Some(i) => (&s[..i], &s[i..]),
-        None => (s, ""),
-    };
-    let parts: Vec<&str> = nums.split('.').collect();
-    if nums.is_empty() || parts.len() > 4 || parts.iter().any(|p| p.is_empty()) {
-        return Err(bad());
-    }
-    let mut n: Vec<u64> = parts
-        .iter()
-        .map(|p| p.parse().map_err(|_| bad()))
-        .collect::<Result<_>>()?;
-    n.resize(4, 0);
-    let mut out = n.iter().map(u64::to_string).collect::<Vec<_>>().join(".");
-    let rest = rest
-        .trim_start_matches(['-', '.', '_'])
-        .to_ascii_lowercase();
-    if !rest.is_empty() {
-        let ok = [
-            "alpha", "a", "beta", "b", "rc", "patch", "pl", "p", "stable",
-        ]
-        .iter()
-        .any(|s| rest.starts_with(s));
-        if !ok || !rest.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.') {
+    let s = v.trim();
+    let s = s.strip_prefix(['v', 'V']).unwrap_or(s);
+    // Up to four numbers; a `.` before anything but a digit starts the
+    // suffix (`1.0.0.beta1`).
+    let mut n = Vec::new();
+    let mut rest = s;
+    loop {
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        if end == 0 {
             return Err(bad());
         }
-        out.push('-');
-        out.push_str(&rest);
+        n.push(rest[..end].parse::<u64>().map_err(|_| bad())?);
+        rest = &rest[end..];
+        match rest.strip_prefix('.') {
+            Some(r) if r.starts_with(|c: char| c.is_ascii_digit()) => rest = r,
+            _ => break,
+        }
     }
-    Ok(out)
+    if n.len() > 4 {
+        return Err(bad());
+    }
+    n.resize(4, 0);
+    let out = n.iter().map(u64::to_string).collect::<Vec<_>>().join(".");
+    // [._-]?, then a stability word and its numbers ([.-]?digits, any
+    // number of times), as composer's pattern has them; the first word
+    // the rest fits wins, as there.
+    let rest = rest.strip_prefix(['.', '_', '-']).unwrap_or(rest);
+    if rest.is_empty() {
+        return Ok(out);
+    }
+    let numbers = |t: &str| {
+        let mut t = t;
+        while !t.is_empty() {
+            t = t.strip_prefix(['.', '-']).unwrap_or(t);
+            let d = t.find(|c: char| !c.is_ascii_digit()).unwrap_or(t.len());
+            if d == 0 {
+                return false;
+            }
+            t = &t[d..];
+        }
+        true
+    };
+    let (word, num) = [
+        "stable", "beta", "b", "RC", "alpha", "a", "patch", "pl", "p",
+    ]
+    .iter()
+    .find_map(|w| {
+        let (head, tail) = rest.split_at_checked(w.len())?;
+        (head.eq_ignore_ascii_case(w) && numbers(tail)).then_some((head, tail))
+    })
+    .ok_or_else(bad)?;
+    // Composer drops a stable suffix only spelt in lower case (and its
+    // numbers with it); STABLE is a suffix like the others.
+    if word == "stable" {
+        return Ok(out);
+    }
+    let lower = word.to_ascii_lowercase();
+    let word = match lower.as_str() {
+        "a" => "alpha",
+        "b" => "beta",
+        "p" | "pl" => "patch",
+        "rc" => "RC",
+        w => w,
+    };
+    // Its numbers as numbers too, joined by dots: composer keeps
+    // beta01 and alpha2.1-3 as written, but compares them equal to beta1
+    // and alpha2.1.3.
+    let num = num
+        .split(['.', '-'])
+        .filter(|x| !x.is_empty())
+        .map(|x| x.parse::<u64>().map(|x| x.to_string()).map_err(|_| bad()))
+        .collect::<Result<Vec<_>>>()?
+        .join(".");
+    Ok(format!("{out}-{word}{num}"))
 }
 
 /// A package read from its zip.
@@ -216,7 +266,8 @@ impl Format for Composer {
         drop(data);
         let path = format!("{}/{}.zip", pkg.name, pkg.version);
         // One version however it is spelt: composer takes 1.0.0 and
-        // v1.0.0 for the same, and p2 lists only one of them.
+        // v1.0.0 (or 1.0.0-b1 and 1.0.0-beta.1) for the same, and p2
+        // lists only one of them.
         for (_, entry) in e.list(&pkg.name)? {
             if let Some(Entry::Blob { sha256, meta, .. }) = entry
                 && meta.get("version_normalized").and_then(Value::as_str)
@@ -296,7 +347,7 @@ mod tests {
         );
         assert_eq!(normalize("1.2").unwrap(), "1.2.0.0");
         assert_eq!(normalize("v1.0.0-beta1").unwrap(), "1.0.0.0-beta1");
-        assert_eq!(normalize("2.0.0-RC2").unwrap(), "2.0.0.0-rc2");
+        assert_eq!(normalize("2.0.0-RC2").unwrap(), "2.0.0.0-RC2");
         assert!(normalize("1.x").is_err() && normalize("dev-main").is_err());
         let json = br#"{"name": "acme/hello", "description": "d", "autoload": {"psr-4": {"Acme\\": "src/"}}}"#;
         let z = zip::make(&[
@@ -315,5 +366,86 @@ mod tests {
         );
         assert_eq!(e["dist"]["url"], "http://x/files/acme/hello/1.0.0.zip");
         assert_eq!(e["autoload"]["psr-4"]["Acme\\"], "src/");
+    }
+
+    /// What composer's own VersionParser::normalize makes of them
+    /// (composer 2): one composer version is one normalized version.
+    #[test]
+    fn versions_as_composer_normalizes_them() {
+        for (v, want) in [
+            ("1.0.0", "1.0.0.0"),
+            ("1.2", "1.2.0.0"),
+            (" 1.0.0", "1.0.0.0"),
+            ("v1.0.0-beta1", "1.0.0.0-beta1"),
+            ("V1.0", "1.0.0.0"),
+            ("1.0.0-beta1", "1.0.0.0-beta1"),
+            ("1.0.0-beta.1", "1.0.0.0-beta1"),
+            ("1.0.0-b1", "1.0.0.0-beta1"),
+            ("1.0.0-BETA1", "1.0.0.0-beta1"),
+            ("1.0.0_beta1", "1.0.0.0-beta1"),
+            ("1.0.0.beta1", "1.0.0.0-beta1"),
+            ("1.0.0-beta-2", "1.0.0.0-beta2"),
+            ("1.0.0-beta", "1.0.0.0-beta"),
+            ("10.4.13-b", "10.4.13.0-beta"),
+            ("10.4.13beta.2", "10.4.13.0-beta2"),
+            ("v1.13.11-beta.0", "1.13.11.0-beta0"),
+            ("1.13.11.0-beta0", "1.13.11.0-beta0"),
+            ("1.0.0-a1", "1.0.0.0-alpha1"),
+            ("1.0.0-alpha1", "1.0.0.0-alpha1"),
+            ("1.0.0-alpha.3.1", "1.0.0.0-alpha3.1"),
+            ("1.0.0-p1", "1.0.0.0-patch1"),
+            ("1.0.0-pl1", "1.0.0.0-patch1"),
+            ("1.0.0-patch1", "1.0.0.0-patch1"),
+            ("1.0.0-p", "1.0.0.0-patch"),
+            ("1.0.0-rc.1", "1.0.0.0-RC1"),
+            ("1.0.0-Rc1", "1.0.0.0-RC1"),
+            ("1.0.0RC1", "1.0.0.0-RC1"),
+            ("1.0.0.RC.15", "1.0.0.0-RC15"),
+            ("1.0.0-rc", "1.0.0.0-RC"),
+            ("2.0.0-RC2", "2.0.0.0-RC2"),
+            ("1.0.0-stable", "1.0.0.0"),
+            ("1.0.0stable", "1.0.0.0"),
+            ("1.0.0.stable", "1.0.0.0"),
+            ("1.0.0_stable", "1.0.0.0"),
+            ("1.0.0-stable1", "1.0.0.0"),
+            ("1.0.0-STABLE", "1.0.0.0-stable"),
+            ("1.0.0-STABLE1", "1.0.0.0-stable1"),
+        ] {
+            assert_eq!(normalize(v).ok().as_deref(), Some(want), "{v:?}");
+        }
+        // Composer keeps these numbers as written (beta01, alpha2.1-3,
+        // beta1-2), but compares them equal to these: one version.
+        for (v, want) in [
+            ("1.0.0-beta01", "1.0.0.0-beta1"),
+            ("1.0.0-alpha-2.1-3", "1.0.0.0-alpha2.1.3"),
+            ("1.0.0-beta1-2", "1.0.0.0-beta1.2"),
+            ("1.02-RC01", "1.2.0.0-RC1"),
+        ] {
+            assert_eq!(normalize(v).ok().as_deref(), Some(want), "{v:?}");
+        }
+        assert!(normalize("1.0.0-beta18446744073709551616").is_err());
+        for v in [
+            "1.0.0-beta1foo",
+            "1.0.0-beta1.",
+            "1.0.0-beta..1",
+            "1.0.0-beta-.1",
+            "1.0.0-beta.-1",
+            "1.0.0--beta1",
+            "1.0.0-beta_1",
+            "1.0.0-dev1",
+            "1.0.0-1",
+            "1.0.0.0.0",
+            "1.x",
+            "vv1.0",
+            // Composer takes these, but they are not uploaded here: dev
+            // versions are branches, and composer drops build metadata,
+            // so 1.0.0+build5 would be 1.0.0 spelt another way.
+            "1.0.0-dev",
+            "1.0.0-beta1-dev",
+            "dev-main",
+            "1.0.0+build5",
+        ] {
+            assert!(normalize(v).is_err(), "{v:?}");
+        }
     }
 }

@@ -591,3 +591,46 @@ fn copy_and_promote_keep_to_the_target_architectures() {
     f.e.plan_promote("ppa", None, &paths("tool_1.0_all.deb"), "stable", "t")
         .unwrap();
 }
+
+#[test]
+fn dist_set_keeps_the_architectures_of_what_the_dist_holds() {
+    let Some(f) = fx() else { return };
+    f.op(
+        "dist-set",
+        json!({"name": "noble", "components": ["main", "extra"]}),
+    )
+    .unwrap();
+    let hello = build_deb(f.dir.path(), "hello", "1.0", "amd64", "gzip", "");
+    let world = build_deb(f.dir.path(), "world", "2.0", "arm64", "gzip", "");
+    let tool = build_deb(f.dir.path(), "tool", "1.0", "all", "gzip", "");
+    f.upload(&hello, json!({})).unwrap();
+    f.upload(&world, json!({"component": "extra"})).unwrap();
+    f.upload(&tool, json!({})).unwrap();
+    // world would be in no index: refused, and named.
+    let err = f
+        .op(
+            "dist-set",
+            json!({"name": "noble", "architectures": ["amd64"]}),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::Invalid(_)) && err.to_string().contains("world_2.0_arm64.deb (arm64)"),
+        "{err}"
+    );
+    let pk =
+        String::from_utf8(f.served("dists/noble/extra/binary-arm64/Packages").unwrap()).unwrap();
+    assert!(pk.contains("Package: world\n"), "{pk}");
+    // With its architecture, or with its component dropped, it goes.
+    f.op(
+        "dist-set",
+        json!({"name": "noble", "architectures": ["amd64", "arm64"]}),
+    )
+    .unwrap();
+    f.op(
+        "dist-set",
+        json!({"name": "noble", "components": ["main"], "architectures": ["amd64"]}),
+    )
+    .unwrap();
+    let rel = String::from_utf8(f.served("dists/noble/Release").unwrap()).unwrap();
+    assert!(rel.contains("Architectures: amd64 all\n"), "{rel}");
+}

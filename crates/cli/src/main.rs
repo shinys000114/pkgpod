@@ -135,6 +135,7 @@ pub(crate) enum Cmd {
     Label {
         repo: String,
         name: String,
+        /// The version to name: a number or label (default: the current one).
         #[arg(long, short)]
         version: Option<String>,
         /// A note kept with the label.
@@ -161,6 +162,8 @@ pub(crate) enum Cmd {
         /// Paths; with --dist (from a mirror), packages.
         #[arg(required = true)]
         paths: Vec<String>,
+        /// The source's version: a number or label (default: the current
+        /// one); not with --dist.
         #[arg(long, short)]
         version: Option<String>,
         /// From a mirror: its dist.
@@ -639,9 +642,17 @@ mod tests {
         Cli::command().debug_assert();
         fn walk(c: &clap::Command, at: &str, missing: &mut Vec<String>) {
             for a in c.get_arguments() {
-                let id = a.get_id().as_str();
-                if !a.is_positional() && a.get_help().is_none() && id != "help" && id != "version" {
-                    missing.push(format!("{at} --{id}"));
+                // clap's own --help and --version, by what they do: an
+                // option of ours may be called version too.
+                let own = matches!(
+                    a.get_action(),
+                    clap::ArgAction::Help
+                        | clap::ArgAction::HelpShort
+                        | clap::ArgAction::HelpLong
+                        | clap::ArgAction::Version
+                );
+                if !a.is_positional() && a.get_help().is_none() && !own {
+                    missing.push(format!("{at} --{}", a.get_id()));
                 }
             }
             for sub in c.get_subcommands() {

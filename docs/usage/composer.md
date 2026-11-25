@@ -62,8 +62,10 @@ curl -H "Authorization: Bearer <token>" --data-binary @pkg.zip \
   "https://pkg.example.org:8090/api/v1/repos/php/upload?filename=pkg.zip&version=1.0.0"
 ```
 
-A version is uploaded once: another zip for it is refused (409). A zip
-is at most 512 MiB.
+A version is uploaded once, however it is spelt (composer takes
+`v1.0.0` for `1.0.0`, and `1.0.0-b1` or `1.0.0-beta.1` for
+`1.0.0-beta1`): another zip for it is refused (409). A zip is at most
+512 MiB.
 
 ## Operations
 

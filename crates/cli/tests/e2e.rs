@@ -11871,6 +11871,28 @@ fn misspelt_parameters_and_secrets_in_addresses_are_refused() {
     let body = r.text().unwrap();
     assert!(body.contains("rplace"), "{body}");
     assert_eq!(put("?replace=true").status().as_u16(), 201);
+    // mtime is an upload parameter too, from the CLI and over PUT.
+    s.cli(&["upload", "t", f, "-s", "path=m/", "-s", "mtime=1700000000"])
+        .unwrap();
+    let c = reqwest::blocking::Client::new();
+    let r = c
+        .put(s.url("/t/p/f.txt?mtime=1600000000"))
+        .basic_auth("admin", Some(pw.trim()))
+        .body("y")
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 201);
+    for (path, when) in [
+        ("/t/m/f.txt", "Tue, 14 Nov 2023 22:13:20 GMT"),
+        ("/t/p/f.txt", "Sun, 13 Sep 2020 12:26:40 GMT"),
+    ] {
+        let r = c
+            .get(s.url(path))
+            .basic_auth("admin", Some(pw.trim()))
+            .send()
+            .unwrap();
+        assert_eq!(r.headers()["last-modified"], when, "{path}");
+    }
     // And operations.
     let e = s
         .cli(&["op", "t", "move", "from=a", "too=c", "-y"])
@@ -17582,6 +17604,28 @@ fn composer_one_version_however_spelt() {
             .len(),
         1
     );
+    // So are a stability's spellings: b is beta, and beta.1 is beta1.
+    let three = make("three");
+    let (st, out) = upload(three.clone(), "1.0.0-beta1");
+    assert_eq!(st, 201, "{out}");
+    let (st, out) = upload(three, "1.0.0-b1");
+    assert!(st == 201 && out.contains("already there"), "{out}");
+    let (st, out) = upload(make("four"), "1.0.0-beta.1");
+    assert_eq!(st, 409, "{out}");
+    let p2: Value = c
+        .get(s.url("/php/p2/acme/hello.json"))
+        .basic_auth("token", Some(&tok))
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    let list = p2["packages"]["acme/hello"].as_array().unwrap();
+    let beta: Vec<_> = list
+        .iter()
+        .filter(|x| x["version_normalized"] == "1.0.0.0-beta1")
+        .collect();
+    assert!(list.len() == 2 && beta.len() == 1, "{p2}");
+    assert_eq!(beta[0]["version"], "1.0.0-beta1", "{p2}");
 }
 
 const MINIFORGE_IMAGE: &str = "condaforge/miniforge3:latest";
