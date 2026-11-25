@@ -81,6 +81,7 @@ Mirror, besides `description`, `urls` and `public`:
 | `bwlimit` | Bandwidth limit | 0 | KiB/s; 0: none. |
 | `parallel` | Parallel | 8 | Parallel downloads (http). |
 | `ignore_missing` | Missing files allowed | none | Pool files the indexes list but upstream does not serve, accepted as missing. |
+| `allow_older` | Allow older | false | Take an upstream Release older than the one served (an upstream that went back on purpose); otherwise that dist fails (http). |
 
 ## Creating a repository
 
@@ -287,7 +288,11 @@ given, fetching what they list (`components`, `architectures`,
 `sources`, `udebs`, `extras` narrow or widen it). With a `keyring`, the
 Release signature is checked and every file against its index; a sync
 that fails leaves the served tree as it was. Without one, the job's log
-says the signature is not checked.
+says the signature is not checked. A Release older (by its `Date:`)
+than the one served is not taken unless `allow_older` is set, and a
+pool file upstream rebuilt under the same name is put in place only
+when its dist switches. The by-hash files of the Release a switch
+replaces are kept until the next one.
 
 ```sh
 pkgpod repo create debian -k mirror \
@@ -303,7 +308,9 @@ first, then the indexes, then deletions), with the `rsync` program on
 the server. What narrows an http mirror (`dists`, `components`,
 `architectures`, `sources`, `udebs`, `extras`) does not apply, nor do
 `keyring` and `resign`: the tree is not checked against a signature.
-`prune`, `max_delete` and `bwlimit` do.
+`prune`, `max_delete` and `bwlimit` do. The first pass takes nothing
+under `dists/` but by-hash files: every other index there comes with
+the Release that names it.
 
 A `file:///` address of a directory on the server is read as an http
 source is; setting one is for server admins.

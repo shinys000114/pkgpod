@@ -223,10 +223,13 @@ pub struct Pruned {
 
 /// Files under `dirs` (relative to `dest`) for which `is_payload` holds
 /// and that `keep` does not name: deleted when `prune` and no more than
-/// `max_delete` go; counted otherwise.
+/// `max_delete` go; counted otherwise. Nothing is deleted in `failed`
+/// (the directories of repositories that failed in this run).
+#[allow(clippy::too_many_arguments)]
 pub fn prune(
     dest: &Path,
     dirs: &BTreeSet<String>,
+    failed: &BTreeSet<String>,
     keep: &BTreeSet<String>,
     is_payload: impl Fn(&str) -> bool,
     prune: bool,
@@ -234,7 +237,9 @@ pub fn prune(
     log: &(dyn Fn(&str) + Sync),
 ) -> Result<Pruned, Error> {
     let mut gone = Vec::new();
-    for d in dirs {
+    // A failed repository's old index still names its packages, also
+    // where another repository's directory holds or shares its own.
+    for d in dirs.difference(failed) {
         let mut stack = vec![dest.join(d)];
         while let Some(dir) = stack.pop() {
             let Ok(rd) = fs::read_dir(&dir) else { continue };
@@ -245,16 +250,16 @@ pub fn prune(
                 if name.starts_with('.') || name == "repodata" {
                     continue;
                 }
+                let rel = p
+                    .strip_prefix(dest)
+                    .map(|r| r.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 if ft.is_dir() {
-                    stack.push(p);
-                } else if ft.is_file() && is_payload(&name) {
-                    let rel = p
-                        .strip_prefix(dest)
-                        .map(|r| r.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    if !keep.contains(&rel) {
-                        gone.push((rel, p));
+                    if !failed.contains(&rel) {
+                        stack.push(p);
                     }
+                } else if ft.is_file() && is_payload(&name) && !keep.contains(&rel) {
+                    gone.push((rel, p));
                 }
             }
         }

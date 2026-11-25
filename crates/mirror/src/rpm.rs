@@ -38,6 +38,9 @@ pub struct RpmMirror {
     /// Delete packages no repository names any more (otherwise counted).
     pub prune: bool,
     pub max_delete: usize,
+    /// Take a repomd.xml older than the one served (an upstream that went
+    /// back on purpose); otherwise that repository fails.
+    pub allow_older: bool,
 }
 
 impl RpmMirror {
@@ -58,6 +61,7 @@ impl RpmMirror {
             retries: 3,
             prune: false,
             max_delete: 10_000,
+            allow_older: false,
         }
     }
 }
@@ -96,6 +100,7 @@ pub struct Data {
     pub href: String,
     pub sha256: String,
     pub size: Option<u64>,
+    pub timestamp: Option<i64>,
 }
 
 /// One package of `primary`.
@@ -153,6 +158,7 @@ pub fn parse_repomd(xml: &[u8]) -> Result<Vec<Data>, Error> {
                                 href: String::new(),
                                 sha256: String::new(),
                                 size: None,
+                                timestamp: None,
                             },
                             String::new(),
                         ))
@@ -193,6 +199,7 @@ pub fn parse_repomd(xml: &[u8]) -> Result<Vec<Data>, Error> {
                             d.sha256 = text.trim().to_string();
                         }
                         "size" => d.size = text.trim().parse().ok(),
+                        "timestamp" => d.timestamp = text.trim().parse().ok(),
                         "data" => {
                             let (d, _) = cur.take().expect("in a data");
                             if d.href.is_empty() || d.sha256.is_empty() {
@@ -373,6 +380,7 @@ pub fn sync(m: &RpmMirror, ctx: &Ctx) -> Result<RpmReport, Error> {
     };
     let mut keep = BTreeSet::new();
     let mut ok_dirs = BTreeSet::new();
+    let mut failed_dirs = BTreeSet::new();
     for dir in &repos {
         if ctx.cancel.load(Ordering::Relaxed) {
             return Err(Error::Interrupted);
@@ -400,6 +408,7 @@ pub fn sync(m: &RpmMirror, ctx: &Ctx) -> Result<RpmReport, Error> {
                     packages: 0,
                     error: Some(e.to_string()),
                 });
+                failed_dirs.insert(dir.clone());
             }
         }
     }
@@ -408,6 +417,7 @@ pub fn sync(m: &RpmMirror, ctx: &Ctx) -> Result<RpmReport, Error> {
     let p = prune(
         ctx.dest,
         &ok_dirs,
+        &failed_dirs,
         &keep,
         |n| n.ends_with(".rpm"),
         m.prune,
@@ -466,6 +476,22 @@ fn sync_repo(
         ctx.dest.join(dir)
     };
     let current = local.join("repodata");
+    // An older repomd.xml (a stale upstream mirror, or a replay) would
+    // roll the repository back, and prune would then delete the newer
+    // packages.
+    let newest = |d: &[Data]| d.iter().filter_map(|d| d.timestamp).max();
+    if !m.allow_older
+        && let Some(new) = newest(&data)
+        && let Some(old) = fs::read(current.join("repomd.xml"))
+            .ok()
+            .and_then(|b| parse_repomd(&b).ok())
+            .and_then(|d| newest(&d))
+        && new < old
+    {
+        return Err(Error::Upstream(format!(
+            "repodata/repomd.xml (timestamp {new}) is older than the one served ({old}); if the upstream went back on purpose, set allow_older=true and sync again"
+        )));
+    }
     let staging = local.join(".repodata.pkgpod-new");
     if staging.exists() {
         fs::remove_dir_all(&staging)?;
@@ -604,6 +630,7 @@ mod tests {
                 href: "repodata/aaaa-primary.xml.gz".into(),
                 sha256: "aaaa".into(),
                 size: Some(3984180),
+                timestamp: Some(1),
             }
         );
         assert_eq!((d[1].kind.as_str(), d[1].size), ("group", None));

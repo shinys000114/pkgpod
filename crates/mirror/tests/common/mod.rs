@@ -197,6 +197,8 @@ pub struct Resign {
     /// Listed in Release but not served.
     pub phantom: Vec<String>,
     pub extra_components: Vec<String>,
+    /// The Release's `Date:` (now if not given).
+    pub date: Option<time::OffsetDateTime>,
 }
 
 impl Upstream {
@@ -322,12 +324,11 @@ impl Upstream {
         let mut all_comps: Vec<String> = comps.iter().map(|c| c.to_string()).collect();
         all_comps.extend(how.extra_components.iter().cloned());
         let archs: Vec<String> = archs.iter().map(|a| a.to_string()).collect();
-        let mut text = release_text(
-            &ReleaseMeta::new(dist, "Test", "test"),
-            &archs,
-            &all_comps,
-            &files,
-        );
+        let mut meta = ReleaseMeta::new(dist, "Test", "test");
+        if let Some(d) = how.date {
+            meta.date = d;
+        }
+        let mut text = release_text(&meta, &archs, &all_comps, &files);
         if how.by_hash {
             text = text.replacen(
                 "\nArchitectures:",

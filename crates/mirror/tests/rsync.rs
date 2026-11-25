@@ -318,6 +318,103 @@ fn cancel_stops_a_forked_rsync() {
     assert!(t.elapsed() < Duration::from_secs(15), "{:?}", t.elapsed());
 }
 
+/// Other index files under dists/ (Translation, Contents) come with the
+/// Release that names them, in pass 2; by-hash files may come first.
+#[test]
+fn apt_mode_brings_every_index_with_its_release() {
+    let Some(up) = Upstream::new() else { return };
+    let a = up.deb("aa", "1.0", "amd64", "a");
+    up.publish("stable", &["amd64"], &[("main", vec![a])]);
+    let d = up.dist_dir("stable");
+    for (p, body) in [
+        ("main/i18n/Translation-en", "Package: aa\n"),
+        ("main/Contents-amd64", "usr/bin/aa main/aa\n"),
+        ("main/dep11/Components-amd64.yml", "---\n"),
+        ("main/i18n/by-hash/SHA256/0123abcd", "Package: aa\n"),
+    ] {
+        std::fs::create_dir_all(d.join(p).parent().unwrap()).unwrap();
+        std::fs::write(d.join(p), body).unwrap();
+    }
+    let Some(dm) = Daemon::start(&up.root) else {
+        return;
+    };
+    let out = tempfile::tempdir().unwrap();
+    let dest = out.path().join("m");
+    let (_, lines) = ok(&RsyncMirror::new(&dm.url, Mode::Apt), &dest);
+    let split = lines
+        .iter()
+        .position(|l| l.starts_with("rsync indexes"))
+        .unwrap();
+    let (first, second) = lines.split_at(split);
+    for f in ["Translation-en", "Contents-amd64", "Components-amd64.yml"] {
+        assert!(!first.iter().any(|l| l.contains(f)), "{f}: {first:#?}");
+        assert!(second.iter().any(|l| l.contains(f)), "{f}: {second:#?}");
+    }
+    assert!(first.iter().any(|l| l.contains("by-hash/SHA256/0123abcd")));
+    assert_eq!(tree(&dest), tree(&up.root));
+}
+
+/// No limit on deletions (as an import asks) is still a number rsync
+/// takes.
+#[test]
+fn no_limit_on_deletions() {
+    if !have("rsync") {
+        return;
+    }
+    let src = tempfile::tempdir().unwrap();
+    std::fs::write(src.path().join("a"), "a").unwrap();
+    let Some(d) = Daemon::start(src.path()) else {
+        return;
+    };
+    let out = tempfile::tempdir().unwrap();
+    let dest = out.path().join("t");
+    let mut m = RsyncMirror::new(&d.url, Mode::Tree);
+    m.max_delete = usize::MAX;
+    ok(&m, &dest);
+    assert_eq!(tree(&dest), ["a"]);
+}
+
+/// A failed pass says why in the report, not only in the log.
+#[test]
+fn a_failed_pass_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = dir.path().join("rsync");
+    let text = dir.path().join("rsync.sh");
+    std::fs::write(
+        &text,
+        "#!/bin/sh\n\
+         echo 'rsync: [sender] send_files failed to open \"/srv/up/pool/x.deb\" (in up): Permission denied (13)' >&2\n\
+         echo 'rsync: [sender] send_files failed to open \"/srv/up/pool/y.deb\" (in up): Permission denied (13)' >&2\n\
+         echo 'rsync error: some files/attrs were not transferred (see previous errors) (code 23) at main.c(1338) [generator=3.2.7]' >&2\n\
+         echo 'rsync: one more' >&2\n\
+         exit 23\n",
+    )
+    .unwrap();
+    // Made by another process, as in cancel_stops_a_forked_rsync.
+    assert!(
+        std::process::Command::new("install")
+            .args(["-m", "755"])
+            .arg(&text)
+            .arg(&fake)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut m = RsyncMirror::new("rsync://127.0.0.1:1/up/", Mode::Apt);
+    m.rsync = fake;
+    let (r, _) = run(&m, &dir.path().join("t"), &AtomicBool::new(false));
+    let r = r.unwrap();
+    assert!(!r.ok);
+    let err = r.error.unwrap();
+    assert!(
+        err.starts_with("payloads: rsync exited 23")
+            && err.contains("send_files failed to open \"/srv/up/pool/x.deb\""),
+        "{err}"
+    );
+    assert_eq!(r.passes[0].errors.len(), 3, "{:#?}", r.passes[0]);
+    assert!(r.passes[0].errors[2].starts_with("rsync error:"));
+}
+
 #[test]
 fn only_daemon_sources() {
     let out = tempfile::tempdir().unwrap();

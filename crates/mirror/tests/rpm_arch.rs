@@ -174,6 +174,112 @@ fn dnf_repositories_then_nothing_to_do_then_kept_and_pruned() {
     assert!(!e.out.path().join("escape.rpm").exists());
 }
 
+/// A repomd.xml older than the one served is not taken (unless allowed).
+#[test]
+fn an_older_repomd_is_not_taken() {
+    use pkgpod_mirror::rpm::{RpmMirror, sync};
+    let e = Env::new();
+    let root = e.up.path();
+    let stamp = |t: i64| {
+        let p = root.join("9/BaseOS/repodata/repomd.xml");
+        let x = std::fs::read_to_string(&p).unwrap();
+        std::fs::write(
+            &p,
+            x.replace("</data>", &format!("<timestamp>{t}</timestamp></data>")),
+        )
+        .unwrap();
+    };
+    rpm_repo(root, "9/BaseOS", &[("Packages/a-2.rpm", "a2")], None);
+    stamp(2000);
+    let mut m = RpmMirror::new(&e.srv.url, &["9/BaseOS".into()]);
+    m.prune = true;
+    m.retries = 1;
+    let (cancel, log) = (AtomicBool::new(false), |l: &str| eprintln!("mirror: {l}"));
+    let r = sync(&m, &e.ctx(&cancel, &log)).unwrap();
+    assert!(r.ok(), "{r:#?}");
+    rpm_repo(root, "9/BaseOS", &[("Packages/a-1.rpm", "a1")], None);
+    stamp(1000);
+    let r = sync(&m, &e.ctx(&cancel, &log)).unwrap();
+    assert!(!r.ok(), "{r:#?}");
+    let err = r.repos[0].error.as_deref().unwrap();
+    assert!(err.contains("older than the one served"), "{err}");
+    let d = e.dest();
+    assert!(d.join("9/BaseOS/Packages/a-2.rpm").exists());
+    assert!(!d.join("9/BaseOS/Packages/a-1.rpm").exists());
+    m.allow_older = true;
+    let r = sync(&m, &e.ctx(&cancel, &log)).unwrap();
+    assert!(r.ok(), "{r:#?}");
+    assert!(d.join("9/BaseOS/Packages/a-1.rpm").exists());
+}
+
+/// A repository that fails keeps its packages when another one's
+/// directory holds it.
+#[test]
+fn a_failed_repository_inside_another_keeps_its_packages() {
+    use pkgpod_mirror::rpm::{RpmMirror, sync};
+    let e = Env::new();
+    let root = e.up.path();
+    rpm_repo(root, "9/BaseOS", &[("Packages/a-1.rpm", "a1")], None);
+    rpm_repo(
+        root,
+        "9/BaseOS/debug",
+        &[("Packages/a-debuginfo-1.rpm", "d1")],
+        None,
+    );
+    let mut m = RpmMirror::new(&e.srv.url, &["9/BaseOS".into(), "9/BaseOS/debug".into()]);
+    m.prune = true;
+    m.retries = 1;
+    let (cancel, log) = (AtomicBool::new(false), |l: &str| eprintln!("mirror: {l}"));
+    let r = sync(&m, &e.ctx(&cancel, &log)).unwrap();
+    assert!(r.ok(), "{r:#?}");
+    e.srv
+        .faults()
+        .missing
+        .insert("9/BaseOS/debug/repodata/repomd.xml".into());
+    let r = sync(&m, &e.ctx(&cancel, &log)).unwrap();
+    assert!(r.repos[0].ok && !r.repos[1].ok, "{r:#?}");
+    assert_eq!(r.deleted, 0, "{r:#?}");
+    assert!(
+        e.dest()
+            .join("9/BaseOS/debug/Packages/a-debuginfo-1.rpm")
+            .exists()
+    );
+}
+
+/// Arch databases that share a directory: one that fails keeps its
+/// packages there.
+#[test]
+fn arch_databases_sharing_a_directory() {
+    use pkgpod_mirror::arch::{ArchMirror, sync};
+    let e = Env::new();
+    let root = e.up.path();
+    arch_repo(
+        root,
+        "x86_64",
+        "core",
+        &[("a-1-1-x86_64.pkg.tar.zst", "a1")],
+    );
+    arch_repo(root, "x86_64", "extra", &[("b-1-1-any.pkg.tar.zst", "b1")]);
+    let mut m = ArchMirror::new(
+        &e.srv.url,
+        &["core".into(), "extra".into()],
+        &["x86_64".into()],
+    );
+    m.layout = "$arch".into();
+    m.prune = true;
+    m.retries = 1;
+    let (cancel, log) = (AtomicBool::new(false), |l: &str| eprintln!("mirror: {l}"));
+    let r = sync(&m, &e.ctx(&cancel, &log)).unwrap();
+    assert!(r.ok(), "{r:#?}");
+    e.srv.faults().missing.insert("x86_64/extra.db".into());
+    let r = sync(&m, &e.ctx(&cancel, &log)).unwrap();
+    assert!(r.repos[0].ok && !r.repos[1].ok, "{r:#?}");
+    assert_eq!(r.deleted, 0, "{r:#?}");
+    let d = e.dest();
+    assert!(d.join("x86_64/b-1-1-any.pkg.tar.zst").exists());
+    assert!(d.join("x86_64/b-1-1-any.pkg.tar.zst.sig").exists());
+}
+
 /// An Arch repository database with these packages (file, content).
 fn arch_repo(root: &Path, dir: &str, repo: &str, pkgs: &[(&str, &str)]) {
     let mut b = tar::Builder::new(Vec::new());

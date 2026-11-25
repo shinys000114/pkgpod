@@ -169,6 +169,7 @@ pub fn sync(m: &ApkMirror, ctx: &Ctx) -> Result<ApkReport, Error> {
     let mut cache = HashCache::load(ctx.state_dir);
     let mut keep = BTreeSet::new();
     let mut ok_dirs = BTreeSet::new();
+    let mut failed_dirs = BTreeSet::new();
     for b in &m.branches {
         for r in &m.repos {
             for a in &m.arches {
@@ -193,11 +194,12 @@ pub fn sync(m: &ApkMirror, ctx: &Ctx) -> Result<ApkReport, Error> {
                     Err(e) => {
                         (ctx.log)(&format!("repository {dir}: {e}"));
                         report.repos.push(RepoReport {
-                            repo: dir,
+                            repo: dir.clone(),
                             ok: false,
                             packages: 0,
                             error: Some(e.to_string()),
                         });
+                        failed_dirs.insert(dir);
                     }
                 }
             }
@@ -207,6 +209,7 @@ pub fn sync(m: &ApkMirror, ctx: &Ctx) -> Result<ApkReport, Error> {
     let p = prune(
         ctx.dest,
         &ok_dirs,
+        &failed_dirs,
         &keep,
         |n| n.ends_with(".apk"),
         m.prune,

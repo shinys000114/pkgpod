@@ -654,6 +654,7 @@ fn sync(
     if r.format == "rpm" {
         let mut m = pkgpod_mirror::rpm::RpmMirror::new(&source, &list_of(r, "repos"));
         m.prune = r.setting_bool("prune");
+        m.allow_older = r.setting_bool("allow_older");
         m.max_delete = int_of(r, "max_delete", 10_000).max(0) as usize;
         m.parallel = int_of(r, "parallel", 8).clamp(1, 64) as usize;
         let keyring = r.setting_str("keyring").trim();
@@ -763,6 +764,7 @@ fn sync(
     m.max_delete = int_of(r, "max_delete", 10_000).max(0) as usize;
     m.parallel = int_of(r, "parallel", 8).clamp(1, 64) as usize;
     m.ignore_missing = list_of(r, "ignore_missing").into_iter().collect();
+    m.allow_older = r.setting_bool("allow_older");
     let keyring = r.setting_str("keyring").trim();
     if !keyring.is_empty() {
         m.keyring = Some(

@@ -613,6 +613,11 @@ impl Format for Rpm {
                     "keyring",
                     "The upstream's public key(s), armored; each repodata/repomd.xml.asc is checked against them (http). Empty: not checked.",
                 ),
+                Field::bool(
+                    "allow_older",
+                    false,
+                    "Take a repomd.xml older than the one served (an upstream that went back on purpose); otherwise that repository fails (http).",
+                ),
             ];
             v.extend(pkgpod_engine::settings::mirror_common());
             return v;
