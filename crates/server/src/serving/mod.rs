@@ -1721,30 +1721,37 @@ async fn serve_mirror(
     *req.uri_mut() = uri;
     // ServeDir answers a Range without looking at If-Range, so a
     // download resumed after a sync replaced the file got the new file's
-    // tail after the old one's start. A range only of the same file (the
-    // ETag ServeDir gives it), else the whole file; a date gets the whole
-    // file, as in serve_tagged.
+    // tail after the old one's start. A range only of the same file, else
+    // the whole file: If-Range naming the ETag ServeDir gives it, or its
+    // Last-Modified (apt resumes with the date it was given; a mirror's
+    // files keep their upstream's times, and ServeDir answers
+    // If-Modified-Since to the same second).
     if let Some(cond) = req
         .headers_mut()
         .remove(header::IF_RANGE)
         .and_then(|v| v.to_str().ok().map(str::to_string))
     {
         let f = full.clone();
-        let etag = tokio::task::spawn_blocking(move || std::fs::metadata(f).ok())
+        let now = |m: std::fs::Metadata| Some((m.len(), http_time(m.modified().ok()?)));
+        let same = match tokio::task::spawn_blocking(move || std::fs::metadata(f).ok())
             .await
             .ok()
             .flatten()
-            .and_then(|m| Some((m.len(), http_time(m.modified().ok()?))))
-            .and_then(|(len, t)| {
-                let d = t.duration_since(std::time::UNIX_EPOCH).ok()?;
-                Some(format!(
-                    "\"{:x}.{:08x}-{:x}\"",
-                    d.as_secs(),
-                    d.subsec_nanos(),
-                    len
-                ))
-            });
-        if etag.as_deref() != Some(cond.trim()) {
+            .and_then(now)
+        {
+            Some((len, t)) => {
+                let cond = cond.trim();
+                let etag = t
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| format!("\"{:x}.{:08x}-{:x}\"", d.as_secs(), d.subsec_nanos(), len));
+                etag.as_deref() == Some(cond)
+                    || httpdate::parse_http_date(cond)
+                        .is_ok_and(|d| httpdate::fmt_http_date(d) == httpdate::fmt_http_date(t))
+            }
+            None => false,
+        };
+        if !same {
             req.headers_mut().remove(header::RANGE);
         }
     }
@@ -2489,7 +2496,9 @@ mod tests {
                 req.body(Body::empty()).unwrap(),
             )
         };
-        let old = get(vec![]).await.headers()[header::ETAG]
+        let first = get(vec![]).await;
+        let old = first.headers()[header::ETAG].to_str().unwrap().to_string();
+        let old_date = first.headers()[header::LAST_MODIFIED]
             .to_str()
             .unwrap()
             .to_string();
@@ -2510,7 +2519,7 @@ mod tests {
             .unwrap()
             .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000))
             .unwrap();
-        for cond in [old.as_str(), "Tue, 15 Nov 1994 08:12:31 GMT"] {
+        for cond in [old.as_str(), old_date.as_str()] {
             let r = get(range(cond)).await;
             assert_eq!(r.status(), StatusCode::OK, "{cond}");
             let body = axum::body::to_bytes(r.into_body(), 64).await.unwrap();
@@ -2520,10 +2529,16 @@ mod tests {
             .to_str()
             .unwrap()
             .to_string();
-        let r = get(range(&new)).await;
-        assert_eq!(r.status(), StatusCode::PARTIAL_CONTENT);
-        let body = axum::body::to_bytes(r.into_body(), 64).await.unwrap();
-        assert_eq!(&body[..], b"content!");
+        // By its ETag, or by its Last-Modified as apt resumes.
+        let date = httpdate::fmt_http_date(
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000),
+        );
+        for cond in [new.as_str(), date.as_str()] {
+            let r = get(range(cond)).await;
+            assert_eq!(r.status(), StatusCode::PARTIAL_CONTENT, "{cond}");
+            let body = axum::body::to_bytes(r.into_body(), 64).await.unwrap();
+            assert_eq!(&body[..], b"content!", "{cond}");
+        }
     }
 
     /// rsync keeps an upstream's file times, from before 1970 too: such a
