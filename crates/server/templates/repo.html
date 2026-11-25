@@ -4,7 +4,7 @@
 {% block main %}
 <div class="page-head">
   <div class="title">
-    <h1>{{ name }} <span class="fmt fmt-{{ format }}">{{ format_title }}</span>{% if mirror %}<span class="tag">mirror</span>{% endif %}{% if public %}<span class="tag">public</span>{% endif %}</h1>
+    <h1>{{ name }} <span class="fmt fmt-{{ format }}">{{ format_title }}</span>{% if kind != "hosted" %}<span class="tag">{{ kind }}</span>{% endif %}{% if public %}<span class="tag">public</span>{% endif %}</h1>
     {% if !description.is_empty() %}<p class="sub">{{ description }}</p>{% endif %}
   </div>
 </div>

@@ -15,6 +15,9 @@ pub struct GrantRow {
 #[template(path = "cache.html")]
 pub(crate) struct CachePart {
     pub(crate) repo: String,
+    /// A path as the format's clients ask for one, for the prefetch box
+    /// (none: the format's proxy cannot prefetch, an image's).
+    pub(crate) example: &'static str,
     pub(crate) q: String,
     pub(crate) can_write: bool,
     pub(crate) total: String,
@@ -65,6 +68,15 @@ pub(crate) fn cache_view(app: &App, v: &Viewer, repo: String, q: String, note: S
         })
         .collect();
     render(&CachePart {
+        example: match r.format.as_str() {
+            "go" => "example.com/mod/@v/v1.2.3.zip",
+            "npm" => "lodash/-/lodash-4.17.21.tgz",
+            "pypi" => "simple/requests/",
+            "cargo" => "api/v1/crates/serde/1.0.0/download",
+            "maven" => "org/example/lib/1.0/lib-1.0.jar",
+            "oci" => "",
+            _ => "images/latest/disk.qcow2",
+        },
         can_write: app.auth.role(&v.caller, &repo, r.setting_bool("public")) >= Some(Role::Write),
         total: crate::serving::human(files),
         repo,
@@ -102,7 +114,9 @@ pub(crate) async fn cache_change(
                 .join("; "),
             None => format!("{action}: {} changed", s(&r["changed"])),
         },
-        Err(e) => return err_part(e),
+        // Said in the card, which the answer replaces: one line in its
+        // place would leave no list and no form to try again.
+        Err(e) => e.to_string(),
     };
     cache_view(&app, &v, repo, String::new(), note)
 }
@@ -184,7 +198,9 @@ pub(crate) async fn badges_part(
     };
     let public = r.setting_bool("public");
     let can_admin = app.auth.role(&v.caller, &repo, public) == Some(Role::Admin);
-    let token = if public {
+    // A private repository's badge token is its admins' (as in the API):
+    // it shows the badges to anyone who has it.
+    let token = if public || !can_admin {
         None
     } else {
         crate::serving::badge::token(&app, &repo).ok().flatten()
@@ -332,6 +348,12 @@ pub(crate) struct SettingsPart {
     pub(crate) server_admin: bool,
     /// Cleanup rules apply, and the viewer may preview them.
     pub(crate) cleanup: bool,
+    /// It has versions: Republish makes a new one.
+    pub(crate) versioned: bool,
+    /// A mirror (its received files can go with it), a proxy (its cache
+    /// goes with it).
+    pub(crate) mirror: bool,
+    pub(crate) proxy: bool,
 }
 
 /// A repository's settings: one form, its fields by what they are about.
@@ -359,6 +381,9 @@ pub(crate) async fn settings_part(State(app): St, v: Viewer, Path(repo): Path<St
         groups: field_groups(&title, r.kind, fields),
         can_admin,
         server_admin: v.caller.is_admin(),
+        versioned: r.kind.versioned(),
+        mirror: r.kind == Kind::Mirror,
+        proxy: r.kind == Kind::Proxy,
         repo,
     })
 }
@@ -560,6 +585,15 @@ pub(crate) async fn settings_save(
     Path(repo): Path<String>,
     Form(form): Form<Vec<(String, String)>>,
 ) -> Response {
+    let seq = |app: &App| {
+        app.engine
+            .repo(&repo)
+            .and_then(|r| app.engine.current(&r))
+            .ok()
+            .flatten()
+            .map(|v| v.seq)
+    };
+    let before = seq(&app);
     let fields = match app
         .engine
         .repo(&repo)
@@ -573,17 +607,21 @@ pub(crate) async fn settings_save(
         Err(e) => return err_part(e),
     };
     match api::repo_patch(
-        State(app),
+        State(app.clone()),
         v.who(),
-        Path(repo),
+        Path(repo.clone()),
         Json(api::PatchReq { settings }),
     )
     .await
     {
-        Ok(_) => msg(
-            true,
-            "Saved. A changed setting that affects what is published made a new version.",
-        ),
+        // A new version only when what is published changed.
+        Ok(_) => match seq(&app) {
+            Some(n) if Some(n) != before => msg(
+                true,
+                format!("Saved. What is published changed: version {n}."),
+            ),
+            _ => msg(true, "Saved."),
+        },
         Err(e) => err_part(e),
     }
 }
@@ -600,7 +638,7 @@ pub(crate) async fn grant(
         role: form_get(&form, "role").to_string(),
     };
     match api::grant(State(app.clone()), v.who(), Path(repo.clone()), Json(req)).await {
-        Ok(_) => access_part(State(app), v, headers, Path(repo)).await,
+        Ok(_) => to_tab(access_part(State(app), v, headers, Path(repo)).await),
         Err(e) => err_part(e),
     }
 }
@@ -612,7 +650,7 @@ pub(crate) async fn revoke(
     Path((repo, subject)): Path<(String, String)>,
 ) -> Response {
     match api::revoke(State(app.clone()), v.who(), Path((repo.clone(), subject))).await {
-        Ok(_) => access_part(State(app), v, headers, Path(repo)).await,
+        Ok(_) => to_tab(access_part(State(app), v, headers, Path(repo)).await),
         Err(e) => err_part(e),
     }
 }

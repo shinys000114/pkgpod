@@ -4,17 +4,18 @@
   <div class="card-head"><h2>Rights</h2><span class="hint">server admins may do everything; grants on * (Users &amp; teams) cover every repository</span></div>
   {% if grants.is_empty() %}<p class="empty">No grants on this repository.</p>{% else %}
   <div class="table-wrap"><table><thead><tr><th>Who</th><th>Role</th><th></th></tr></thead><tbody>
-  {% for g in grants %}<tr><td>{{ g.subject }}</td><td>{{ g.role }}</td><td class="acts"><button class="link danger" hx-post="/c/r/{{ repo }}/grants/{{ g.subject|urlencode }}/delete" hx-target="#tab">remove</button></td></tr>{% endfor %}
+  {% for g in grants %}<tr><td>{{ g.subject }}</td><td>{{ g.role }}</td><td class="acts"><button class="link danger" hx-post="/c/r/{{ repo }}/grants/{{ g.subject|urlencode }}/delete" hx-target="#access-result">remove</button></td></tr>{% endfor %}
   </tbody></table></div>
   {% endif %}
   <div class="card-body">
   {% if users.is_empty() && teams.is_empty() %}<p class="muted small">Only server admins so far, who may do everything; add users or teams in <a href="/admin/people">Users &amp; teams</a>.</p>{% else %}
-  <form class="inline" hx-post="/c/r/{{ repo }}/grants" hx-target="#tab">
+  <form class="inline" hx-post="/c/r/{{ repo }}/grants" hx-target="#access-result">
     <select name="subject">{% for u in users %}<option value="user:{{ u }}">user {{ u }}</option>{% endfor %}{% for t in teams %}<option value="team:{{ t }}">team {{ t }}</option>{% endfor %}</select>
     <select name="role"><option>read</option><option>write</option><option>admin</option></select>
     <button type="submit">Grant</button>
   </form>{% endif %}
   </div>
+  <div id="access-result" class="card-body results"></div>
 </div>
 {% endif %}
 {% if can_admin %}

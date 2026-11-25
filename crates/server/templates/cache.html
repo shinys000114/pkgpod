@@ -2,7 +2,7 @@
 <div class="card" id="cache">
   <div class="card-head"><h2>Cache</h2><span class="hint">{{ total }} of files; files stay until evicted (pinned ones also over the size limit), metadata is asked for again after its time</span>
     <form class="inline" hx-get="/r/{{ repo }}/cache" hx-target="#cache" hx-swap="outerHTML" hx-trigger="input delay:300ms, change">
-      <input type="search" name="q" value="{{ q }}" placeholder="path starts with" autocomplete="off" spellcheck="false">
+      <input type="search" id="cache-q" name="q" value="{{ q }}" placeholder="path starts with" autocomplete="off" spellcheck="false">
     </form>
   </div>
   {% if !note.is_empty() %}<p class="card-body small">{{ note }}</p>{% endif %}
@@ -15,10 +15,10 @@
     </tr>{% endfor %}</tbody>
   </table></div>
   {% endif %}
-  {% if can_write %}
+  {% if can_write && !example.is_empty() %}
   <div class="card-body">
   <form hx-post="/c/r/{{ repo }}/cache/prefetch" hx-target="#cache" hx-swap="outerHTML">
-    <label class="field wide"><span>Prefetch (a path a line, as clients ask for them)</span><textarea name="path" rows="2" placeholder="example.com/mod/@v/v1.2.3.zip" spellcheck="false"></textarea></label>
+    <label class="field wide"><span>Prefetch (a path a line, as clients ask for them)</span><textarea name="path" rows="2" placeholder="{{ example }}" spellcheck="false"></textarea></label>
     <div class="form-foot"><button type="submit">Fetch now</button></div>
   </form>
   </div>

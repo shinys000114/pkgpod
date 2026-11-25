@@ -31,7 +31,12 @@ pub(crate) struct PeoplePage {
     pub(crate) global: Vec<GrantRow>,
 }
 
-pub(crate) async fn people_page(State(app): St, v: Viewer) -> Result<Response> {
+pub(crate) async fn people_page(st: St, v: Viewer) -> Response {
+    let s = v.shell("people");
+    page(s, people_page_of(st, v).await)
+}
+
+async fn people_page_of(State(app): St, v: Viewer) -> Result<Response> {
     app.require_admin(&v.caller)?;
     let all = app.engine.repos()?;
     let users: Vec<UserRow> = app

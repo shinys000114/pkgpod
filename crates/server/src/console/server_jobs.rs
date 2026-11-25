@@ -42,7 +42,12 @@ pub(crate) struct ServerJobsPage {
 pub(crate) const JOBS_PAGE: usize = 100;
 
 /// Every repository's syncs and imports, filtered, newest first.
-pub(crate) async fn server_jobs(
+pub(crate) async fn server_jobs(st: St, v: Viewer, f: Query<crate::jobs::Filter>) -> Response {
+    let s = v.shell("server");
+    page(s, server_jobs_of(st, v, f).await)
+}
+
+async fn server_jobs_of(
     State(app): St,
     v: Viewer,
     Query(f): Query<crate::jobs::Filter>,

@@ -183,7 +183,12 @@ pub(crate) fn strs(v: &Value) -> Vec<String> {
     v.as_array().into_iter().flatten().map(s).collect()
 }
 
-pub(crate) async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response> {
+pub(crate) async fn index(st: St, v: Viewer, headers: HeaderMap) -> Response {
+    let s = v.shell("repos");
+    page(s, index_of(st, v, headers).await)
+}
+
+async fn index_of(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response> {
     let list = json_of(api::repos(State(app.clone()), v.who()).await)?;
     let app2 = app.clone();
     let (counts, cached, syncs) = api::blocking(&app, move |_| {
@@ -302,11 +307,12 @@ pub(crate) struct NewRepoPage {
 }
 
 /// A new repository: what it holds, then its name and settings.
-pub(crate) async fn new_repo_page(
-    State(app): St,
-    v: Viewer,
-    headers: HeaderMap,
-) -> Result<Response> {
+pub(crate) async fn new_repo_page(st: St, v: Viewer, headers: HeaderMap) -> Response {
+    let s = v.shell("repos");
+    page(s, new_repo_of(st, v, headers).await)
+}
+
+async fn new_repo_of(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response> {
     app.require_admin(&v.caller)?;
     let host = host_of(&headers);
     let hints = settings_hints(&app);

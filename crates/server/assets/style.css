@@ -175,21 +175,7 @@ main { padding: 1.6rem 2rem 3rem; max-width: 1280px; width: 100%; min-width: 0; 
 .card-head h2 { flex: 1 1 auto; }
 .card-head .hint { color: var(--muted); font-size: 13px; font-weight: 400; }
 .card-body { padding: 1rem 1.1rem; }
-.card-body.flush { padding: 0; }
 .card > .table-wrap:last-child table tr:last-child td { border-bottom: 0; }
-.grid { display: grid; gap: 1.1rem; grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr)); align-items: start; }
-.grid > .card { margin-bottom: 0; }
-.stack > * + * { margin-top: 1.1rem; }
-.grid + .card, .grid + .grid { margin-top: 1.1rem; }
-
-.stats { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); margin-bottom: 1.1rem; }
-.stat {
-  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
-  padding: .85rem 1.1rem; box-shadow: var(--shadow);
-}
-.stat .label { color: var(--muted); font-size: 12.5px; text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
-.stat .value { font-size: 1.6rem; font-weight: 650; font-variant-numeric: tabular-nums; margin-top: .15rem; }
-.stat .value.bad { color: var(--bad); }
 
 /* ---- tables ----------------------------------------------------------- */
 .table-wrap { overflow-x: auto; }
@@ -207,18 +193,6 @@ td .mono { color: var(--muted); }
 td.acts { white-space: nowrap; text-align: right; }
 .empty { color: var(--muted); padding: 1rem 1.1rem; margin: 0; }
 
-/* the dist x component matrix */
-table.matrix { width: auto; min-width: 0; }
-table.matrix th, table.matrix td { text-align: center; padding: .45rem .7rem; }
-table.matrix tbody th { text-align: left; background: transparent; color: var(--fg); text-transform: none; font-size: 13.5px; letter-spacing: 0; }
-table.matrix thead th:first-child { background: var(--surface-2); }
-.count {
-  display: inline-block; min-width: 2.6rem; padding: .15rem .45rem; border-radius: 6px;
-  font-variant-numeric: tabular-nums; font-weight: 600; background: var(--accent-soft); color: var(--accent);
-}
-.count.zero { background: transparent; color: var(--muted); font-weight: 400; }
-.count.none { background: transparent; color: var(--line-strong); font-weight: 400; }
-
 /* ---- badges, tags ----------------------------------------------------- */
 .badge {
   display: inline-flex; align-items: center; gap: .35rem; white-space: nowrap;
@@ -228,7 +202,6 @@ table.matrix thead th:first-child { background: var(--surface-2); }
 .badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .badge.ok { background: var(--ok-soft); color: var(--ok); }
 .badge.bad { background: var(--bad-soft); color: var(--bad); }
-.badge.warn { background: var(--warn-soft); color: var(--warn); }
 .badge.run { background: var(--run-soft); color: var(--run); }
 .badge.run::before { animation: pulse 1.2s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: .25; } }
@@ -281,11 +254,10 @@ button.link.danger:hover { background: var(--bad-soft); }
 .field > span { color: var(--muted); }
 .field small { color: var(--muted); font-weight: 400; }
 .form-foot { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; margin-top: .9rem; }
-.form-foot .spacer { flex: 1; }
 label.check { display: inline-flex; gap: .4rem; align-items: center; font-size: 13.5px; color: var(--fg); cursor: pointer; }
 /* A yes/no setting in a grid of fields: the box and its name on one line,
    at the top of the cell like the other fields' names, the help below. */
-label.check.field { display: flex; flex-direction: column; align-items: stretch; gap: .3rem; padding-top: 1.45rem; }
+label.check.field { display: flex; flex-direction: column; align-items: stretch; gap: .3rem; padding-top: 1.8rem; }
 label.check.field .check-line { display: inline-flex; gap: .45rem; align-items: center; color: var(--fg); font-weight: 500; }
 .dist-pick { border: 0; padding: 0; margin: 0; min-width: 0; display: flex; flex-direction: column; align-items: stretch; gap: .3rem; }
 .dist-pick legend { padding: 0; margin-bottom: .3rem; color: var(--muted); font-size: 13px; font-weight: 500; }
@@ -322,6 +294,9 @@ details.card > summary { border-radius: var(--radius); }
 }
 .plan.done { border-left-color: var(--ok); background: color-mix(in srgb, var(--ok-soft) 55%, var(--surface)); }
 .plan > p:first-child { margin-top: 0; }
+/* An answer the page could not show, when nothing on it says it (app.js). */
+.toast { position: fixed; right: 1rem; bottom: 1rem; z-index: 20; max-width: min(28rem, calc(100% - 2rem)); cursor: pointer; }
+.toast .plan { margin: 0; box-shadow: 0 4px 16px rgba(0, 0, 0, .15); }
 .plan form { margin-top: .6rem; }
 ul.changes { margin: .4rem 0; padding: 0; list-style: none; max-height: 22rem; overflow: auto; }
 ul.changes li { padding: .12rem 0; overflow-wrap: anywhere; }
@@ -341,10 +316,6 @@ pre.log {
 }
 .badge-broken .callout { margin: 0; }
 .callout.warn { background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 30%, transparent); }
-.secret {
-  display: block; padding: .5rem .7rem; margin-top: .4rem; border-radius: 6px; background: var(--surface-2);
-  overflow-wrap: anywhere; user-select: all;
-}
 
 /* ---- login ------------------------------------------------------------ */
 .login-wrap { min-height: 100vh; display: grid; place-items: center; padding: 1rem; }
@@ -390,29 +361,9 @@ details.card > .panel-body { border-top: 1px solid var(--line); padding-top: 1re
   th, td { padding: .5rem .7rem; }
   .card-head, .card-body, .toolbar, details.panel > summary, details.panel > .panel-body, .empty { padding-left: .8rem; padding-right: .8rem; }
   h1 { font-size: 1.25rem; }
-  .stat .value { font-size: 1.3rem; }
-  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; }
   .card-head .hint { display: none; }
   details.panel > summary .hint { display: none; }
 }
-
-/* ---- layout grid ---------------------------------------------------------- */
-.enter-default { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); border: 0; padding: 0; }
-table.cellgrid td input:not([type="checkbox"]) { min-width: 7rem; }
-table.cellgrid th.cell, table.cellgrid td.cell { text-align: center; white-space: nowrap; }
-table.cellgrid td.cell input[type="checkbox"] { width: 1.05rem; height: 1.05rem; }
-
-/* ---- TOML help and checks ------------------------------------------------- */
-.check { margin: .35rem 0 0; font-size: 13px; }
-.check.ok { color: var(--ok, #15803d); }
-pre.check.bad { color: var(--bad); white-space: pre-wrap; font: 12.5px/1.45 var(--mono); background: var(--bad-soft); padding: .45rem .6rem; border-radius: 6px; }
-details.toml-help { margin-top: .6rem; border: 1px solid var(--line); border-radius: 8px; }
-details.toml-help > summary { cursor: pointer; padding: .45rem .7rem; font-weight: 500; }
-details.toml-help .help-body { padding: 0 .8rem .8rem; }
-details.toml-help h4 { margin: .7rem 0 .35rem; font-size: 13.5px; }
-table.help td { padding: .25rem .5rem; border-bottom: 1px solid var(--line); vertical-align: top; font-size: 13px; }
-table.help td:first-child { white-space: nowrap; }
-
 
 /* ---- pkgpod additions ---------------------------------------------------- */
 .side .ver { font-size: 11.5px; padding: 0 .6rem; opacity: .7; }
@@ -474,7 +425,7 @@ table.repos .repo-name { font-weight: 650; }
 /* A repository's numbers, under its name. */
 .stats { display: flex; flex-wrap: wrap; gap: .6rem; margin: -.3rem 0 .8rem; }
 .stat { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: .45rem .8rem;
-  display: flex; flex-direction: column; min-width: 8rem; max-width: 100%; }
+  box-shadow: var(--shadow); display: flex; flex-direction: column; min-width: 8rem; max-width: 100%; }
 .stat .k { font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
 .stat .v { font-weight: 600; overflow-wrap: anywhere; }
 
@@ -488,7 +439,7 @@ table.repos .repo-name { font-weight: 650; }
 /* The open tab. */
 .tabs .tab[aria-selected="true"] { color: var(--fg); background: var(--surface); border: 1px solid var(--line);
   border-bottom-color: var(--surface); margin-bottom: -1px; }
-#tab > .card:first-child, #tab > .grid:first-child { margin-top: 0; }
+#tab > .card:first-child { margin-top: 0; }
 
 /* Commands with a copy button. */
 button.copy { font-size: 12px; padding: .15rem .55rem; border-radius: 6px; }
@@ -560,6 +511,13 @@ table.sortable th[aria-sort="descending"]::after { content: " ▼"; font-size: 1
 .bulk select { width: auto; }
 button.link.pkg-name { font-weight: 600; color: var(--fg); padding: 0; }
 button.link.pkg-name:hover { color: var(--accent); background: none; }
+/* The catalog's cells: a path keeps room to be read; a long name or
+   version wraps rather than squeezing it. */
+#pkg-pick td.mono-wrap { min-width: 14rem; }
+#pkg-pick td.name-cell { min-width: 8rem; overflow-wrap: anywhere; }
+#pkg-pick td.ver { min-width: 6rem; overflow-wrap: anywhere; }
+#pkg-pick td.num { white-space: nowrap; }
+#pkg-pick button.pkg-name { white-space: normal; text-align: left; justify-content: flex-start; overflow-wrap: anywhere; }
 .pkg-detail { margin: 0 1.1rem 1rem; border: 1px solid var(--line); border-radius: var(--radius); padding: .8rem 1rem; background: var(--surface-2); }
 .pkg-detail-head { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; margin-bottom: .5rem; }
 .pkg-detail-head b { flex: 1; }

@@ -7,8 +7,11 @@ use super::*;
 pub struct UsageRow {
     pub name: String,
     pub format: String,
+    pub title: String,
+    /// hosted, mirror, proxy, group, ...
+    pub kind: &'static str,
     /// What its current version uses, and all its versions (or a
-    /// mirror's tree on disk).
+    /// mirror's tree on disk, a proxy's cache).
     pub now: String,
     pub all: String,
 }
@@ -160,7 +163,11 @@ pub(crate) fn server_glance(
     let errors = logged.iter().filter(|e| e.level == "error").count();
     add(
         "Logged since the start".to_string(),
-        format!("{errors} errors, {} warnings", logged.len() - errors),
+        format!(
+            "{}, {}",
+            plural(errors, "error"),
+            plural(logged.len() - errors, "warning")
+        ),
         if errors > 0 {
             "bad"
         } else if logged.is_empty() {
@@ -171,6 +178,11 @@ pub(crate) fn server_glance(
         "/admin/server/logs?level=warn",
     );
     g
+}
+
+/// A count in words: `1 error`, `2 errors`.
+pub(crate) fn plural(n: usize, one: &str) -> String {
+    format!("{n} {one}{}", if n == 1 { "" } else { "s" })
 }
 
 #[derive(Template)]
@@ -184,8 +196,9 @@ pub(crate) struct UsagePart {
 }
 
 /// What each repository's content takes: its current version's blobs, all
-/// its versions' (each blob counted once), a mirror's tree; across hosted
-/// repositories, what the shared store saves. Counted when asked.
+/// its versions' (each blob counted once), a mirror's tree, a proxy's
+/// cache; across hosted repositories and caches, what the shared store
+/// saves. Counted when asked.
 pub(crate) async fn usage_part(State(app): St, v: Viewer) -> Response {
     if let Err(e) = app.require_admin(&v.caller) {
         return err_part(e);
@@ -197,6 +210,36 @@ pub(crate) async fn usage_part(State(app): St, v: Viewer) -> Response {
         let mut everyone: HashMap<pkgpod_base::Digest, u64> = HashMap::new();
         let (mut mirrors, mut hosted, mut capped) = (0u64, 0u64, false);
         for r in app2.engine.repos()? {
+            let row = |now: String, all: String| UsageRow {
+                name: r.name.clone(),
+                format: r.format.clone(),
+                title: app2
+                    .engine
+                    .format(&r.format)
+                    .map_or_else(|_| r.format.clone(), |f| f.title().to_string()),
+                kind: r.kind.as_str(),
+                now,
+                all,
+            };
+            if r.kind == Kind::Group {
+                // It holds nothing: its members' are theirs.
+                rows.push(row(String::new(), String::new()));
+                continue;
+            }
+            if r.kind == Kind::Proxy {
+                // What it keeps is in the shared store, as hosted files.
+                let mut blobs = HashMap::new();
+                for c in app2.engine.cache_list(&r.name, "", i64::MAX as usize)? {
+                    if let Some(sha) = c.sha256 {
+                        blobs.insert(sha, c.size);
+                    }
+                }
+                let bytes: u64 = blobs.values().sum();
+                hosted += bytes;
+                everyone.extend(blobs);
+                rows.push(row(crate::serving::human(bytes), String::new()));
+                continue;
+            }
             if r.kind == Kind::Mirror {
                 let (mut n, mut bytes) = (0u64, 0u64);
                 let mut stack = vec![r.tree_dir()];
@@ -220,12 +263,7 @@ pub(crate) async fn usage_part(State(app): St, v: Viewer) -> Response {
                     }
                 }
                 mirrors += bytes;
-                rows.push(UsageRow {
-                    name: r.name.clone(),
-                    format: r.format.clone(),
-                    now: crate::serving::human(bytes),
-                    all: String::new(),
-                });
+                rows.push(row(crate::serving::human(bytes), String::new()));
                 continue;
             }
             let sum = |roots: &[pkgpod_base::Digest]| -> Result<HashMap<pkgpod_base::Digest, u64>> {
@@ -256,12 +294,10 @@ pub(crate) async fn usage_part(State(app): St, v: Viewer) -> Response {
             let bytes: u64 = every.values().sum();
             hosted += bytes;
             everyone.extend(every);
-            rows.push(UsageRow {
-                name: r.name.clone(),
-                format: r.format.clone(),
-                now: crate::serving::human(now.values().sum()),
-                all: crate::serving::human(bytes),
-            });
+            rows.push(row(
+                crate::serving::human(now.values().sum()),
+                crate::serving::human(bytes),
+            ));
         }
         // A blob two repositories have is stored once.
         let unique: u64 = everyone.values().sum();
@@ -606,8 +642,9 @@ pub(crate) struct ServerPage {
 /// have their own pages).
 pub(crate) const SERVER_TABS: [&str; 4] = ["serving", "storage", "keys", "publishing"];
 
-pub(crate) async fn server_page(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response> {
-    server_tab_page(app, v, headers, "overview").await
+pub(crate) async fn server_page(State(app): St, v: Viewer, headers: HeaderMap) -> Response {
+    let s = v.shell("server");
+    page(s, server_tab_page(app, v, headers, "overview").await)
 }
 
 pub(crate) async fn server_tab(
@@ -615,11 +652,12 @@ pub(crate) async fn server_tab(
     v: Viewer,
     headers: HeaderMap,
     Path(tab): Path<String>,
-) -> Result<Response> {
+) -> Response {
+    let s = v.shell("server");
     let Some(tab) = SERVER_TABS.iter().find(|t| **t == tab) else {
-        return Err(Error::NotFound(format!("no server page {tab}")));
+        return page_err(s, Error::NotFound(format!("no server page {tab}")));
     };
-    server_tab_page(app, v, headers, tab).await
+    page(s, server_tab_page(app, v, headers, tab).await)
 }
 
 pub(crate) async fn server_tab_page(

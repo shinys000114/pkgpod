@@ -34,7 +34,12 @@ pub(crate) struct ServerLogsPage {
 pub(crate) const LOG_PAGE: usize = 500;
 
 /// The server's recent events, newest first.
-pub(crate) async fn server_logs(
+pub(crate) async fn server_logs(st: St, v: Viewer, q: Query<HashMap<String, String>>) -> Response {
+    let s = v.shell("server");
+    page(s, server_logs_of(st, v, q).await)
+}
+
+async fn server_logs_of(
     State(app): St,
     v: Viewer,
     Query(q): Query<HashMap<String, String>>,

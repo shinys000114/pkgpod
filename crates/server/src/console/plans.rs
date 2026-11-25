@@ -240,7 +240,7 @@ pub(crate) async fn label(
         force: form_get(&form, "force") == "on",
     };
     match api::label(State(app.clone()), v.who(), Path(repo.clone()), Json(req)).await {
-        Ok(_) => versions_part(State(app), v, Path(repo), headers).await,
+        Ok(_) => to_tab(versions_part(State(app), v, Path(repo), headers).await),
         Err(e) => err_part(e),
     }
 }
@@ -252,7 +252,7 @@ pub(crate) async fn unlabel(
     headers: HeaderMap,
 ) -> Response {
     match api::unlabel(State(app.clone()), v.who(), Path((repo.clone(), l))).await {
-        Ok(_) => versions_part(State(app), v, Path(repo), headers).await,
+        Ok(_) => to_tab(versions_part(State(app), v, Path(repo), headers).await),
         Err(e) => err_part(e),
     }
 }
