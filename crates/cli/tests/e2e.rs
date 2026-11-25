@@ -2472,6 +2472,61 @@ fn stopping_answers_the_requests_in_flight() {
     assert!(status.success(), "{status}");
 }
 
+#[test]
+fn aborted_transfers_leave_server_and_cli_alone() {
+    use std::io::{Read, Write};
+    let mut s = Server::start();
+    s.cli(&[
+        "repo",
+        "create",
+        "big",
+        "-k",
+        "mirror",
+        "-s",
+        "source=http://127.0.0.1:9/",
+        "-s",
+        "dists=x",
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let tree = s.dir.path().join("data/storages/main/trees/big");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::write(tree.join("big.bin"), vec![7u8; 32 << 20]).unwrap();
+    // Clients that give up on a download part way: the server writes on
+    // into a closed connection, and goes on serving.
+    for _ in 0..8 {
+        let mut c = std::net::TcpStream::connect(("127.0.0.1", s.serve_port)).unwrap();
+        c.write_all(b"GET /big/big.bin HTTP/1.1\r\nHost: t\r\n\r\n")
+            .unwrap();
+        let mut b = vec![0u8; 64 << 10];
+        c.read_exact(&mut b).unwrap();
+        drop(c);
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(s.child.try_wait().unwrap().is_none(), "the server died");
+    assert_eq!(get(&s.url("/big/big.bin"), None).0, 200);
+    // An upload the server refuses before reading it: the CLI says why
+    // instead of dying of the closed connection without a word.
+    let f = s.dir.path().join("refused.bin");
+    std::fs::write(&f, vec![1u8; 8 << 20]).unwrap();
+    let out = s
+        .cmd()
+        .args(["upload", "nothing-here"])
+        .arg(&f)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(out.status.code().is_some(), "killed: {}", out.status);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).starts_with("pkgpod: "),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = s.child.kill();
+}
+
 /// The sha256 a Release lists for `path`.
 fn release_sha256(release: &str, path: &str) -> String {
     let mut in_sha = false;

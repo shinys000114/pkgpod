@@ -413,12 +413,10 @@ enum AdminCmd {
 }
 
 fn main() -> ExitCode {
-    // Output piped into `head`: end quietly when the reader goes away.
-    // SAFETY: setting a signal disposition before any thread starts.
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-    }
     let cli = Cli::parse();
+    if !matches!(cli.cmd, Cmd::Serve(_)) {
+        quiet_when_output_is_cut();
+    }
     if matches!(cli.cmd, Cmd::Serve(_) | Cmd::Admin { .. }) {
         // The database, keys and stores are the server's and its group's.
         // SAFETY: plain libc call before any thread starts.
@@ -438,6 +436,26 @@ fn main() -> ExitCode {
             ExitCode::from(e.code)
         }
     }
+}
+
+/// Output piped into `head`: end quietly when the reader goes away.
+/// (Not by SIGPIPE's default action: that ends the process on any
+/// closed pipe or socket without a word, a server on a client that gave
+/// up on a download, the CLI on an upload the server refused.)
+fn quiet_when_output_is_cut() {
+    let next = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let p = info.payload();
+        let msg = p
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| p.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        if msg.starts_with("failed printing to stdout") && msg.contains("Broken pipe") {
+            std::process::exit(0);
+        }
+        next(info);
+    }));
 }
 
 fn load(a: &ServerArgs) -> Result<pkgpod_server::config::Config, client::CliError> {
