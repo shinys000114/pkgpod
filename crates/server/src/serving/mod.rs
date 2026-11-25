@@ -57,11 +57,17 @@ pub fn basic_caller(app: &App, h: &HeaderMap, surface: &'static str) -> Result<C
         .strip_prefix("Bearer ")
         .or_else(|| v.strip_prefix("Token "))
     {
-        return app.auth.token(t.trim()).ok_or(Error::Unauthorized);
+        return app
+            .auth
+            .token_at(t.trim(), surface)
+            .ok_or(Error::Unauthorized);
     }
     // A token alone, as cargo sends it.
     if v.starts_with(crate::auth::TOKEN_PREFIX) {
-        return app.auth.token(v.trim()).ok_or(Error::Unauthorized);
+        return app
+            .auth
+            .token_at(v.trim(), surface)
+            .ok_or(Error::Unauthorized);
     }
     let (user, pw) = v
         .strip_prefix("Basic ")

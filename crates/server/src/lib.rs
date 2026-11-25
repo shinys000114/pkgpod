@@ -301,6 +301,7 @@ pub async fn run(app: Arc<App>) -> Result<(), String> {
     listeners::reconcile(&app);
     let sched = jobs::scheduler(app.clone());
     let counts = stats::writer(app.clone());
+    let failed = auth::failed_writer(app.clone());
     let hooks = webhooks::worker(app.clone());
     let gc = {
         let app = app.clone();
@@ -402,6 +403,10 @@ pub async fn run(app: Arc<App>) -> Result<(), String> {
     if let Ok(Err(e)) = tokio::task::spawn_blocking(move || app2.stats.flush(&app2)).await {
         tracing::warn!("download counts: {e}");
     }
+    // And the failed logins (a burst cut by the stop among them).
+    failed.abort();
+    let app2 = app.clone();
+    let _ = tokio::task::spawn_blocking(move || app2.auth.flush_failed()).await;
     drop(lock);
     match drained {
         Ok(r) => r.unwrap_or_else(|e| Err(e.to_string())),

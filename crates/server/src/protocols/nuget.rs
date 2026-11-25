@@ -62,12 +62,16 @@ pub struct Ask {
 
 pub async fn handle(app: Arc<App>, mut a: Ask, req: Request) -> Response {
     // nuget push and delete send the key in X-NuGet-ApiKey.
-    if let Some(k) = req
+    let key = req
         .headers()
         .get("x-nuget-apikey")
         .and_then(|v| v.to_str().ok())
-    {
-        let Some(c) = app.auth.token(k.trim()) else {
+        .map(|k| k.trim().to_string());
+    if let Some(k) = key {
+        // A refusal is counted in the audit log: off the async threads.
+        let app2 = app.clone();
+        let c = tokio::task::spawn_blocking(move || app2.auth.token_at(&k, "serving")).await;
+        let Ok(Some(c)) = c else {
             return text(StatusCode::FORBIDDEN, "the API key is not valid");
         };
         a.role = app

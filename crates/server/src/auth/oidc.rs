@@ -123,6 +123,18 @@ impl Rule {
                 .is_some_and(|v| glob(pat, &v))
         })
     }
+
+    /// Whether `o` says what this says (when made and used aside).
+    fn says_as(&self, o: &Rule) -> bool {
+        self.name == o.name
+            && self.issuer == o.issuer
+            && self.audience == o.audience
+            && self.claims == o.claims
+            && self.user == o.user
+            && self.repos == o.repos
+            && self.write == o.write
+            && self.minutes == o.minutes
+    }
 }
 
 /// An issuer's address: https, or http on the loopback (tests, a local
@@ -156,28 +168,32 @@ fn check_issuer(url: &str) -> Result<()> {
 
 // ---- rules ----
 
+/// Rules as [`rule_row`] reads them, with their ids and user ids after.
+const RULES: &str =
+    "SELECT r.name, r.issuer, r.audience, r.claims, COALESCE(u.name, ''), r.repos, r.write,
+        r.minutes, r.created, r.used, r.id, r.user
+     FROM trust_rules r LEFT JOIN users u ON u.id = r.user";
+
+fn rule_row(r: &rusqlite::Row) -> rusqlite::Result<Rule> {
+    Ok(Rule {
+        name: r.get(0)?,
+        issuer: r.get(1)?,
+        audience: r.get(2)?,
+        claims: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default(),
+        user: r.get(4)?,
+        repos: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
+        write: r.get(6)?,
+        minutes: r.get(7)?,
+        created: r.get(8)?,
+        used: r.get(9)?,
+    })
+}
+
 pub fn rules(app: &App) -> Result<Vec<Rule>> {
     Ok(app.db.read(|c| {
-        let mut st = c.prepare(
-            "SELECT r.name, r.issuer, r.audience, r.claims, COALESCE(u.name, ''), r.repos, r.write,
-                    r.minutes, r.created, r.used
-             FROM trust_rules r LEFT JOIN users u ON u.id = r.user ORDER BY r.name",
-        )?;
-        st.query_map([], |r| {
-            Ok(Rule {
-                name: r.get(0)?,
-                issuer: r.get(1)?,
-                audience: r.get(2)?,
-                claims: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default(),
-                user: r.get(4)?,
-                repos: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
-                write: r.get(6)?,
-                minutes: r.get(7)?,
-                created: r.get(8)?,
-                used: r.get(9)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()
+        let mut st = c.prepare(&format!("{RULES} ORDER BY r.name"))?;
+        st.query_map([], rule_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()
     })?)
 }
 
@@ -368,6 +384,11 @@ pub struct Verifier {
     keys: Mutex<HashMap<String, (Instant, Vec<Jwk>)>>,
     /// When an issuer's keys were last asked for again for an unknown key.
     asked: Mutex<HashMap<String, Instant>>,
+    /// When asking an issuer for its keys last failed, and why.
+    failed: Mutex<HashMap<String, (Instant, String)>>,
+    /// One asking at a time per issuer: who comes meanwhile without
+    /// fresh keys waits, then takes what it got.
+    asking: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     seen: Mutex<HashMap<String, i64>>,
 }
 
@@ -400,6 +421,17 @@ async fn fetch_json(url: &str) -> std::result::Result<Value, String> {
     serde_json::from_slice(&body).map_err(|e| format!("{url}: {e}"))
 }
 
+/// An issuer's keys, from the key set its discovery document names.
+async fn fetch_keys(issuer: &str) -> std::result::Result<Vec<Jwk>, String> {
+    let doc = fetch_json(&format!("{issuer}/.well-known/openid-configuration")).await?;
+    let uri = doc["jwks_uri"]
+        .as_str()
+        .ok_or("no jwks_uri in its discovery document")?;
+    check_issuer(uri).map_err(|e| e.to_string())?;
+    let set = fetch_json(uri).await?;
+    Ok(serde_json::from_value(set["keys"].clone()).unwrap_or_default())
+}
+
 fn b64(s: &str) -> Result<Vec<u8>> {
     base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(s.trim_end_matches('='))
@@ -409,8 +441,31 @@ fn b64(s: &str) -> Result<Vec<u8>> {
 impl Verifier {
     /// The issuer's keys (from its discovery document), fetched again
     /// when old or when asked to (that at most every
-    /// [`KEYS_ASKED_AGAIN`]).
+    /// [`KEYS_ASKED_AGAIN`]); after a failure, not asked for again
+    /// within that either.
     async fn keys(&self, issuer: &str, again: bool) -> Result<Vec<Jwk>> {
+        let fail = |e: String| Error::Forbidden(format!("the issuer's keys: {e}"));
+        // Keys kept fresh need no wait behind an asking (one any caller
+        // can bring about with a key the issuer does not have).
+        {
+            let kept = self.keys.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((at, k)) = kept.get(issuer)
+                && !again
+                && at.elapsed() < KEYS_KEPT
+            {
+                return Ok(k.clone());
+            }
+        }
+        // Other tokens that come while the issuer is asked wait for its
+        // answer (or its timeout) and take that, instead of asking each.
+        let one = self
+            .asking
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(issuer.to_string())
+            .or_default()
+            .clone();
+        let _one = one.lock().await;
         {
             let kept = self.keys.lock().unwrap_or_else(|e| e.into_inner());
             let kept = kept.get(issuer);
@@ -421,22 +476,35 @@ impl Verifier {
             match kept {
                 Some((at, k)) if !again && at.elapsed() < KEYS_KEPT => return Ok(k.clone()),
                 Some((_, k)) if again && lately => return Ok(k.clone()),
-                _ if again => {
-                    asked.insert(issuer.to_string(), Instant::now());
-                }
                 _ => {}
             }
+            // An issuer that failed (down, or a rule's address wrong) is
+            // not asked again at once either: else any caller could make
+            // the server ask it with every token it sends.
+            let failed = self.failed.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((t, e)) = failed.get(issuer)
+                && t.elapsed() < KEYS_ASKED_AGAIN
+            {
+                return Err(fail(e.clone()));
+            }
+            if again {
+                asked.insert(issuer.to_string(), Instant::now());
+            }
         }
-        let fail = |e: String| Error::Forbidden(format!("the issuer's keys: {e}"));
-        let doc = fetch_json(&format!("{issuer}/.well-known/openid-configuration"))
-            .await
-            .map_err(fail)?;
-        let uri = doc["jwks_uri"]
-            .as_str()
-            .ok_or_else(|| fail("no jwks_uri in its discovery document".into()))?;
-        check_issuer(uri).map_err(|e| fail(e.to_string()))?;
-        let set = fetch_json(uri).await.map_err(fail)?;
-        let keys: Vec<Jwk> = serde_json::from_value(set["keys"].clone()).unwrap_or_default();
+        let keys = match fetch_keys(issuer).await {
+            Ok(k) => k,
+            Err(e) => {
+                self.failed
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(issuer.to_string(), (Instant::now(), e.clone()));
+                return Err(fail(e));
+            }
+        };
+        self.failed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(issuer);
         self.keys
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -626,46 +694,8 @@ pub async fn exchange(app: &Arc<App>, jwt: &str, rule: Option<&str>) -> Result<V
             "this OIDC token was exchanged already: ask the CI for a new one".into(),
         ));
     }
-    let app2 = app.clone();
     let (r2, who2) = (r.clone(), who.clone());
-    let (token, info) = crate::api::blocking(app, move |_| {
-        let now = pkgpod_base::now();
-        // Old exchanged tokens go: one is made for every CI run.
-        app2.db.write(|tx| {
-            tx.execute(
-                "DELETE FROM tokens WHERE name LIKE 'trust:%' AND expires IS NOT NULL AND expires < ?1",
-                [now - 86400],
-            )?;
-            tx.execute(
-                "UPDATE trust_rules SET used = ?1 WHERE name = ?2",
-                params![now, r2.name],
-            )
-        })?;
-        let expires = now + r2.minutes * 60;
-        if r2.user.is_empty() {
-            // A publisher token: checked against its rule when used.
-            let id: i64 = app2.db.read(|c| {
-                c.query_row("SELECT id FROM trust_rules WHERE name = ?1", [&r2.name], |r| {
-                    r.get(0)
-                })
-            })?;
-            let token = app2.auth.create_publisher_token(id, expires)?;
-            return Ok((token, Some(expires)));
-        }
-        // The claims cut to fit, never the rule's name its tokens are
-        // found by.
-        let mut name = format!("{} ", token_name(&r2.name));
-        let mut end = who2.len().min(200usize.saturating_sub(name.len()));
-        while !who2.is_char_boundary(end) {
-            end -= 1;
-        }
-        name.push_str(&who2[..end]);
-        let (token, info) =
-            app2.auth
-                .create_token(&r2.user, &name, &r2.repos, r2.write, Some(expires))?;
-        Ok((token, info.expires))
-    })
-    .await?;
+    let (token, info) = crate::api::blocking(app, move |app| give(app, &r2, &who2)).await?;
     let actor = if r.user.is_empty() {
         format!("trust:{}", r.name)
     } else {
@@ -680,6 +710,53 @@ pub async fn exchange(app: &Arc<App>, jwt: &str, rule: Option<&str>) -> Result<V
         "write": r.write,
         "rule": r.name,
     }))
+}
+
+/// Makes the token rule `r` gives for a CI's claims (`who`); returns it
+/// and when it expires.
+fn give(app: &App, r: &Rule, who: &str) -> Result<(String, Option<i64>)> {
+    let now = pkgpod_base::now();
+    let expires = now + r.minutes * 60;
+    // The claims cut to fit, never the rule's name its tokens are
+    // found by.
+    let mut name = format!("{} ", token_name(&r.name));
+    let mut end = who.len().min(200usize.saturating_sub(name.len()));
+    while !who.is_char_boundary(end) {
+        end -= 1;
+    }
+    name.push_str(&who[..end]);
+    let token = app.db.write(|tx| {
+        // Old exchanged tokens go: one is made for every CI run.
+        tx.execute(
+            "DELETE FROM tokens WHERE name LIKE 'trust:%' AND expires IS NOT NULL AND expires < ?1",
+            [now - 86400],
+        )?;
+        // The rule read again where its token is made: one changed or
+        // removed while the CI's token was checked gives none, else the
+        // token would outlive those the change took away (a change after
+        // this transaction takes it away too).
+        let found = tx
+            .query_row(&format!("{RULES} WHERE r.name = ?1"), [&r.name], |x| {
+                Ok((rule_row(x)?, x.get::<_, i64>(10)?, x.get(11)?))
+            })
+            .optional()?;
+        let Some((_, id, user)) = found.filter(|(now_r, ..)| now_r.says_as(r)) else {
+            return Err(Error::Forbidden(format!(
+                "the trust rule {} changed meanwhile: ask again",
+                r.name
+            )));
+        };
+        tx.execute(
+            "UPDATE trust_rules SET used = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        Ok(match user {
+            // A publisher token: checked against its rule when used.
+            None => crate::auth::insert_publisher_token(tx, id, expires)?,
+            Some(u) => crate::auth::insert_token(tx, u, &name, &r.repos, r.write, Some(expires))?.0,
+        })
+    })?;
+    Ok((token, Some(expires)))
 }
 
 /// Whether a trust rule of this name exists (for the console).
@@ -871,6 +948,168 @@ mod tests {
         assert_eq!(asked.load(Ordering::SeqCst), 4);
         assert!(v.verify(&t, &issuers).await.is_ok());
         assert_eq!(asked.load(Ordering::SeqCst), 4);
+    }
+
+    /// A rule changed or removed while a CI's token was checked gives
+    /// no token: it would outlive the ones the change took away.
+    #[test]
+    fn a_rule_changed_meanwhile_gives_no_token() {
+        let d = tempfile::tempdir().unwrap();
+        let app = App::open(crate::config::Config {
+            data_dir: d.path().join("data"),
+            ..Default::default()
+        })
+        .unwrap();
+        app.engine
+            .create_repo(
+                pkgpod_engine::NewRepo {
+                    name: "r1".into(),
+                    format: "files".into(),
+                    kind: pkgpod_engine::Kind::Hosted,
+                    storage: None,
+                    settings: json!({}),
+                },
+                "test",
+            )
+            .unwrap();
+        app.auth.create_user("ci", "password1", false).unwrap();
+        let rule = Rule {
+            name: "rel".into(),
+            issuer: "http://127.0.0.1:1".into(),
+            audience: AUDIENCE.into(),
+            claims: [("repository".to_string(), "me/x".to_string())].into(),
+            user: "ci".into(),
+            repos: vec!["r1".into()],
+            write: true,
+            minutes: 30,
+            created: 0,
+            used: None,
+        };
+        let refused = |r: &Rule| match give(&app, r, "repository=me/x") {
+            Err(Error::Forbidden(_)) => true,
+            Err(e) => panic!("{e}"),
+            Ok(_) => false,
+        };
+        let tokens = || app.auth.tokens(Some("ci")).unwrap().len();
+        // Removed.
+        let seen = put_rule(&app, rule.clone()).unwrap();
+        remove_rule(&app, "rel").unwrap();
+        assert!(refused(&seen));
+        assert_eq!(tokens(), 0);
+        // Made to read only, or to trust another repository.
+        let seen = put_rule(&app, rule.clone()).unwrap();
+        put_rule(
+            &app,
+            Rule {
+                write: false,
+                ..rule.clone()
+            },
+        )
+        .unwrap();
+        assert!(refused(&seen));
+        let seen = put_rule(&app, rule.clone()).unwrap();
+        let mut other = rule.clone();
+        other.claims.insert("repository".into(), "me/y".into());
+        put_rule(&app, other).unwrap();
+        assert!(refused(&seen));
+        assert_eq!(tokens(), 0);
+        // As it was read: given.
+        let seen = put_rule(&app, rule.clone()).unwrap();
+        let (t, _) = give(&app, &seen, "repository=me/x").unwrap();
+        assert!(app.auth.token(&t).is_some());
+        // A publisher's rule the same.
+        let publ = Rule {
+            name: "pub".into(),
+            user: String::new(),
+            ..rule.clone()
+        };
+        let seen = put_rule(&app, publ.clone()).unwrap();
+        put_rule(
+            &app,
+            Rule {
+                write: false,
+                ..publ.clone()
+            },
+        )
+        .unwrap();
+        assert!(refused(&seen));
+        let seen = put_rule(&app, publ).unwrap();
+        let (t, _) = give(&app, &seen, "").unwrap();
+        assert!(app.auth.token(&t).is_some());
+    }
+
+    /// Keys kept fresh are used while their issuer is asked (for a key
+    /// it does not have, say), not after that is answered.
+    #[tokio::test]
+    async fn kept_keys_do_not_wait_for_an_asking() {
+        let url = "http://127.0.0.1:1";
+        let iss = testutil::Issuer::new(url);
+        let v = Verifier::default();
+        let keys: Vec<Jwk> = serde_json::from_value(iss.jwks()["keys"].clone()).unwrap();
+        v.keys
+            .lock()
+            .unwrap()
+            .insert(url.into(), (Instant::now(), keys));
+        let one = v
+            .asking
+            .lock()
+            .unwrap()
+            .entry(url.into())
+            .or_default()
+            .clone();
+        let _asking = one.lock().await;
+        let t = iss.token(json!({"aud": "pkgpod"}));
+        let issuers = [url.to_string()];
+        let r = tokio::time::timeout(Duration::from_secs(5), v.verify(&t, &issuers)).await;
+        assert!(r.expect("it waited for the asking").is_ok());
+    }
+
+    /// An issuer that fails is not asked again for every token, whether
+    /// they come at once or one after another.
+    #[tokio::test]
+    async fn failing_issuers_are_asked_seldom() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
+        let asked = Arc::new(AtomicUsize::new(0));
+        let a2 = asked.clone();
+        std::thread::spawn(move || {
+            for conn in l.incoming() {
+                let Ok(mut conn) = conn else { continue };
+                let mut r = BufReader::new(conn.try_clone().unwrap());
+                loop {
+                    let mut h = String::new();
+                    if r.read_line(&mut h).unwrap_or(0) == 0 || h == "\r\n" {
+                        break;
+                    }
+                }
+                a2.fetch_add(1, Ordering::SeqCst);
+                // Slow, so tokens sent at once all come while it answers.
+                std::thread::sleep(Duration::from_millis(300));
+                let _ = write!(
+                    conn,
+                    "HTTP/1.1 500 X\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                );
+            }
+        });
+        let v = Verifier::default();
+        let t = testutil::Issuer::new(&url).token(json!({"aud": "pkgpod"}));
+        let issuers = [url.clone()];
+        let (a, b, c) = tokio::join!(
+            v.verify(&t, &issuers),
+            v.verify(&t, &issuers),
+            v.verify(&t, &issuers)
+        );
+        for r in [a, b, c] {
+            let e = r.unwrap_err().to_string();
+            assert!(e.contains("500"), "{e}");
+        }
+        for _ in 0..3 {
+            let e = v.verify(&t, &issuers).await.unwrap_err().to_string();
+            assert!(e.contains("500"), "{e}");
+        }
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
     }
 
     #[test]

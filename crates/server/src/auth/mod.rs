@@ -270,6 +270,31 @@ fn failed_detail(who: &str, surface: &str, n: u64) -> String {
     }
 }
 
+/// Writes the failed-login counts held back every
+/// [`FAILED_WRITE_SECS`]: a burst that stops is counted whole without a
+/// failure after it.
+pub fn failed_writer(app: Arc<crate::App>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let every = std::time::Duration::from_secs(FAILED_WRITE_SECS as u64);
+        let mut t = tokio::time::interval(every);
+        t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            t.tick().await;
+            let app = app.clone();
+            let _ = tokio::task::spawn_blocking(move || app.auth.flush_failed()).await;
+        }
+    })
+}
+
+/// Logs the failed logins of tokens at `surface` as their row is
+/// written: each of the first ten, then with the count now and then.
+fn log_tokens(who: &str, surface: &str, n: u64) {
+    if who == "tokens" {
+        let times = if n == 1 { "time" } else { "times" };
+        tracing::warn!("failed login: a token on {surface} ({n} {times})");
+    }
+}
+
 const USER_COLS: &str = "id, name, admin, disabled, created";
 
 fn row_user(r: &rusqlite::Row) -> rusqlite::Result<User> {
@@ -498,37 +523,52 @@ impl Auth {
     /// guesses at names do not fill the audit log).
     fn login_failed(&self, name: &str, who: &'static str, surface: &'static str) {
         let shown: String = name.chars().take(64).collect();
-        tracing::warn!("failed login: user {shown:?} on {surface}");
+        // A token is refused without a password check, as fast as a
+        // client sends it (a revoked one, in a loop): its failures are
+        // logged as their row is written instead.
+        if who != "tokens" {
+            tracing::warn!("failed login: user {shown:?} on {surface}");
+        }
         let target = if who.is_empty() { shown } else { String::new() };
         self.count_failed(target, who, surface, now());
     }
 
+    /// A token sent alone (as Bearer, as cargo sends one, as an API key)
+    /// at `surface`: the caller it stands for. A refusal is a failed
+    /// login, as one of a token sent as a password is.
+    pub fn token_at(&self, token: &str, surface: &'static str) -> Option<Caller> {
+        let c = self.token(token);
+        if c.is_none() {
+            self.login_failed("", "tokens", surface);
+        }
+        c
+    }
+
     /// Counts a failed login in its audit row. A count held back is
     /// written with the next failure, of anyone, [`FAILED_WRITE_SECS`]
-    /// later: a burst that stops is still counted whole.
+    /// later, or by [`Auth::flush_failed`]: a burst that stops is still
+    /// counted whole.
     fn count_failed(&self, target: String, who: &'static str, surface: &'static str, now: i64) {
         let mut failed = self.failed.lock().unwrap_or_else(|e| e.into_inner());
-        failed.retain(|&(_, who, surface), f| {
-            let done = f.first <= now - FAILED_ROW_SECS;
-            if done || f.written <= now - FAILED_WRITE_SECS {
-                self.write_failed(who, surface, f, now);
-            }
-            !done
-        });
-        if failed.len() >= 1024 {
-            for ((_, who, surface), f) in failed.iter_mut() {
-                self.write_failed(who, surface, f, now);
-            }
-            failed.clear();
-        }
         let key = (target, who, surface);
-        if let Some(f) = failed.get_mut(&key) {
-            f.n += 1;
-            if f.n <= 10 || f.written <= now - FAILED_WRITE_SECS {
-                self.write_failed(who, surface, f, now);
+        // Counted before the rows are written: a write this failure
+        // brings about then has it in.
+        let counted = match failed.get_mut(&key) {
+            Some(f) if f.first > now - FAILED_ROW_SECS => {
+                f.n += 1;
+                true
             }
+            _ => false,
+        };
+        self.write_held(&mut failed, now, false);
+        if counted {
             return;
         }
+        if failed.len() >= 1024 {
+            self.write_held(&mut failed, now, true);
+            failed.clear();
+        }
+        log_tokens(who, surface, 1);
         let id = self.db.write(|tx| {
             tx.execute(
                 "INSERT INTO audit (time, actor, action, target, detail) VALUES (?1, 'anonymous', 'login failed', ?2, ?3)",
@@ -550,19 +590,44 @@ impl Auth {
         }
     }
 
+    /// Writes the failed-login counts held back, so none waits for a
+    /// later failure; the server does every [`FAILED_WRITE_SECS`] and
+    /// when it stops.
+    pub fn flush_failed(&self) {
+        let mut failed = self.failed.lock().unwrap_or_else(|e| e.into_inner());
+        self.write_held(&mut failed, now(), true);
+    }
+
+    /// Writes the counts of the first ten failures of a row, those last
+    /// written [`FAILED_WRITE_SECS`] ago or more, or `all`; rows past
+    /// their [`FAILED_ROW_SECS`] are written and let go.
+    fn write_held(&self, failed: &mut Failed, now: i64, all: bool) {
+        failed.retain(|&(_, who, surface), f| {
+            let done = f.first <= now - FAILED_ROW_SECS;
+            if all || done || f.n <= 10 || f.written <= now - FAILED_WRITE_SECS {
+                self.write_failed(who, surface, f, now);
+            }
+            !done
+        });
+    }
+
     /// Writes the count of `f` to its audit row, when the row says less.
     fn write_failed(&self, who: &str, surface: &str, f: &mut Failures, now: i64) {
         if f.shown == f.n {
             return;
         }
+        log_tokens(who, surface, f.n);
         let detail = failed_detail(who, surface, f.n);
-        let _ = self.db.write(|tx| {
+        let w = self.db.write(|tx| {
             tx.execute(
                 "UPDATE audit SET detail = ?1 WHERE id = ?2",
                 params![detail, f.id],
             )
         });
-        (f.shown, f.written) = (f.n, now);
+        // A write that failed is tried again.
+        if w.is_ok() {
+            (f.shown, f.written) = (f.n, now);
+        }
     }
 
     /// A token given as a password, with the user name its client sent.
@@ -657,21 +722,6 @@ impl Auth {
         })
     }
 
-    /// Makes a publisher token for a rule without a user; returns it
-    /// (shown once).
-    pub fn create_publisher_token(&self, rule_id: i64, expires: i64) -> Result<String> {
-        let token = format!("{TOKEN_PREFIX}{}", random_hex(20));
-        let now = now();
-        self.db.write(|tx| {
-            tx.execute("DELETE FROM publish_tokens WHERE expires < ?1", [now])?;
-            tx.execute(
-                "INSERT INTO publish_tokens (hash, rule, expires, created) VALUES (?1, ?2, ?3, ?4)",
-                params![sha(&token), rule_id, expires, now],
-            )
-        })?;
-        Ok(token)
-    }
-
     // ---- tokens ----
 
     /// Makes a token; returns it (shown once) and its record.
@@ -687,23 +737,9 @@ impl Auth {
         if name.trim().is_empty() {
             return Err(Error::Invalid("a token needs a name".into()));
         }
-        let token = format!("{TOKEN_PREFIX}{}", random_hex(20));
-        let id = self.db.write(|tx| {
-            tx.execute(
-                "INSERT INTO tokens (user, name, hash, repos, write, expires, created)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    u.id,
-                    name.trim(),
-                    sha(&token),
-                    serde_json::to_string(repos).expect("list"),
-                    write,
-                    expires,
-                    now()
-                ],
-            )?;
-            Ok::<_, rusqlite::Error>(tx.last_insert_rowid())
-        })?;
+        let (token, id) = self
+            .db
+            .write(|tx| insert_token(tx, u.id, name, repos, write, expires))?;
         let info = self
             .tokens(Some(user))?
             .into_iter()
@@ -1034,6 +1070,50 @@ impl Auth {
     }
 }
 
+/// Makes a token of user `user` in `tx`; returns it (shown once) and
+/// its id.
+pub(crate) fn insert_token(
+    tx: &rusqlite::Transaction,
+    user: i64,
+    name: &str,
+    repos: &[String],
+    write: bool,
+    expires: Option<i64>,
+) -> rusqlite::Result<(String, i64)> {
+    let token = format!("{TOKEN_PREFIX}{}", random_hex(20));
+    tx.execute(
+        "INSERT INTO tokens (user, name, hash, repos, write, expires, created)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            user,
+            name.trim(),
+            sha(&token),
+            serde_json::to_string(repos).expect("list"),
+            write,
+            expires,
+            now()
+        ],
+    )?;
+    Ok((token, tx.last_insert_rowid()))
+}
+
+/// Makes a publisher token for a rule without a user in `tx`; returns
+/// it (shown once).
+pub(crate) fn insert_publisher_token(
+    tx: &rusqlite::Transaction,
+    rule_id: i64,
+    expires: i64,
+) -> rusqlite::Result<String> {
+    let token = format!("{TOKEN_PREFIX}{}", random_hex(20));
+    let now = now();
+    tx.execute("DELETE FROM publish_tokens WHERE expires < ?1", [now])?;
+    tx.execute(
+        "INSERT INTO publish_tokens (hash, rule, expires, created) VALUES (?1, ?2, ?3, ?4)",
+        params![sha(&token), rule_id, expires, now],
+    )?;
+    Ok(token)
+}
+
 fn unique(e: rusqlite::Error, msg: &str) -> Error {
     match e {
         rusqlite::Error::SqliteFailure(f, _)
@@ -1156,17 +1236,51 @@ mod tests {
                 r#""dev" "api, 3 times""#,
             ]
         );
-        // What was held back is written with a later failure.
-        a.count_failed("dev".into(), "", "serving", now() + FAILED_WRITE_SECS);
+        // What was held back is written by a flush, with no failure
+        // after it.
+        a.flush_failed();
         assert_eq!(
             rows(),
             [
-                r#""dev" "serving, 1 time""#,
                 r#""" "serving, 20 times, tokens""#,
                 r#""" "api, 2 times, unknown users""#,
                 r#""dev" "console, 1 time""#,
                 r#""dev" "api, 3 times""#,
             ]
         );
+    }
+
+    /// A count held back is written by the next failure a while later,
+    /// that failure counted in it, or by a flush with no failure after.
+    #[test]
+    fn held_back_failures_are_written() {
+        let (_d, a) = auth();
+        let rows = || -> Vec<String> {
+            a.audit_log(10)
+                .unwrap()
+                .iter()
+                .map(|r| r["detail"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let t = now();
+        for _ in 0..12 {
+            a.count_failed(String::new(), "tokens", "api", t);
+        }
+        assert_eq!(rows(), ["api, 10 times, tokens"]);
+        a.count_failed(String::new(), "tokens", "api", t + FAILED_WRITE_SECS + 1);
+        assert_eq!(rows(), ["api, 13 times, tokens"]);
+        for _ in 0..5 {
+            a.count_failed(String::new(), "tokens", "api", t + FAILED_WRITE_SECS + 2);
+        }
+        assert_eq!(rows(), ["api, 13 times, tokens"]);
+        a.flush_failed();
+        assert_eq!(rows(), ["api, 18 times, tokens"]);
+        // A token sent alone and refused counts as one sent as a
+        // password does.
+        assert!(a.token_at("pkgpod_not-a-token", "api").is_none());
+        a.flush_failed();
+        assert_eq!(rows(), ["api, 19 times, tokens"]);
+        assert!(a.token_at("pkgpod_not-a-token", "serving").is_none());
+        assert_eq!(rows(), ["serving, 1 time, tokens", "api, 19 times, tokens"]);
     }
 }

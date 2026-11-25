@@ -2474,6 +2474,75 @@ fn repository_admins_and_tokens_keep_to_their_rights() {
     assert_eq!(failed[0]["detail"], "api, 2 times", "{v}");
 }
 
+/// Tokens refused however they are sent (Bearer, alone as cargo sends
+/// one, as nuget's API key) are failed logins too. A count held back is
+/// written soon with no failure after it, and when the server stops.
+#[test]
+fn failed_logins_are_counted_whole() {
+    use reqwest::Method;
+    let mut s = Server::start();
+    s.cli(&["repo", "create", "nug", "-f", "nuget"]).unwrap();
+    let c = reqwest::blocking::Client::new();
+    let status = |r: reqwest::blocking::RequestBuilder| r.send().unwrap().status().as_u16();
+    let bearer = |i: usize| {
+        let r = c.get(format!("{}/api/v1/me", s.api));
+        status(r.bearer_auth(format!("pkgpod_bad{i}")))
+    };
+    for i in 0..12 {
+        assert_eq!(bearer(i), 401);
+        let r = c.get(s.url("/nug/"));
+        assert_eq!(
+            status(r.header("authorization", format!("pkgpod_bad{i}"))),
+            401
+        );
+    }
+    for i in 0..3 {
+        let r = c.put(s.url("/nug/api/v2/package"));
+        assert_eq!(
+            status(r.header("x-nuget-apikey", format!("pkgpod_bad{i}"))),
+            403
+        );
+    }
+    let pw = std::fs::read_to_string(s.dir.path().join("data/admin-password")).unwrap();
+    let failed = |s: &Server| -> Vec<String> {
+        let admin = As::User("admin", pw.trim());
+        let (_, v, _) = call(s, Method::GET, "/api/v1/audit", admin, Value::Null);
+        let mut d: Vec<String> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["action"] == "login failed")
+            .map(|r| r["detail"].as_str().unwrap().to_string())
+            .collect();
+        d.sort();
+        d
+    };
+    let t = Instant::now();
+    while failed(&s) != ["api, 12 times, tokens", "serving, 15 times, tokens"] {
+        assert!(t.elapsed() < Duration::from_secs(30), "{:?}", failed(&s));
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // Stopped in a burst.
+    for i in 0..15 {
+        assert_eq!(bearer(i), 401);
+    }
+    let st = Command::new("kill")
+        .args(["-TERM", &s.child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(st.success());
+    let t = Instant::now();
+    while s.child.try_wait().unwrap().is_none() {
+        assert!(t.elapsed() < Duration::from_secs(40), "it did not stop");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    s.restart();
+    assert_eq!(
+        failed(&s),
+        ["api, 27 times, tokens", "serving, 15 times, tokens"]
+    );
+}
+
 /// What would break something is refused, or done whole: a signing key
 /// replaced or deleted while repositories use it, settings changed in
 /// part, a listener on an address in use. A change taken back, or one
