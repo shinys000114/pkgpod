@@ -3121,6 +3121,33 @@ fn openapi_describes_what_the_api_sends() {
     );
     let v = a.ok("get", "/api/v1/cli", "/api/v1/cli", None, 200);
     assert!(v["sha256"].as_str().is_some_and(|h| h.len() == 64), "{v}");
+    // A host's page: set, listed, removed.
+    let v = a.ok(
+        "put",
+        "/api/v1/hosts/{host}",
+        "/api/v1/hosts/pkg.example.org",
+        Some(json!({"title": "Packages", "header": "# Hello"})),
+        200,
+    );
+    assert_eq!(
+        (&v["host"], &v["footer"]),
+        (&json!("pkg.example.org"), &json!(""))
+    );
+    let v = a.ok("get", "/api/v1/hosts", "/api/v1/hosts", None, 200);
+    assert!(
+        v.as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h["page"]["title"] == "Packages"),
+        "{v}"
+    );
+    a.ok(
+        "delete",
+        "/api/v1/hosts/{host}",
+        "/api/v1/hosts/pkg.example.org",
+        None,
+        204,
+    );
     // Webhooks: one to nowhere, pinged, its delivery sent again, removed.
     let wh = "/api/v1/webhooks";
     let v = a.ok(
@@ -5734,6 +5761,132 @@ fn files_hosted() {
     assert!(
         found.to_string().contains("tools/v1/tool.tar.gz") && found.to_string().contains("\"v1\""),
         "{found}"
+    );
+}
+
+/// A host's root without a repository of its own: a page of its
+/// repositories, whatever their format, with a title and Markdown set by
+/// server admins.
+#[test]
+fn host_pages() {
+    let s = Server::start();
+    let mk = |name: &str, f: &str, public: bool, desc: &str| {
+        s.cli(&[
+            "repo",
+            "create",
+            name,
+            "-f",
+            f,
+            "-s",
+            &format!("urls=http://pkgs.test/{name}/"),
+            "-s",
+            &format!("public={public}"),
+            "-s",
+            &format!("description={desc}"),
+        ])
+        .unwrap();
+    };
+    mk("tools", "files", true, "Build tools");
+    mk("js", "npm", true, "JavaScript packages");
+    mk("secret", "files", false, "Not for everyone");
+    let c = reqwest::blocking::Client::new();
+    let page = |auth: Option<(&str, &str)>| {
+        let mut r = c.get(s.url("/")).header("host", "pkgs.test");
+        if let Some((u, p)) = auth {
+            r = r.basic_auth(u, Some(p));
+        }
+        let r = r.send().unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+        r.text().unwrap()
+    };
+    // Every format, each as it is used; what the reader may not read is
+    // not there.
+    let p = page(None);
+    assert!(
+        p.contains(r#"<a class="name" href="tools/">tools</a>"#),
+        "{p}"
+    );
+    assert!(
+        p.contains(r#"<span class="name">js</span>"#),
+        "an npm registry is not a tree: {p}"
+    );
+    assert!(
+        p.contains("JavaScript packages") && p.contains("registry=http://pkgs.test/js/"),
+        "{p}"
+    );
+    assert!(p.contains("version 1 ·"), "{p}");
+    assert!(!p.contains("secret") && p.contains("2 repositories"), "{p}");
+    assert!(
+        !p.contains("_authToken"),
+        "how to publish is not for readers: {p}"
+    );
+    // A title and Markdown above and below, rendered safely.
+    let md = s.dir.path().join("head.md");
+    std::fs::write(
+        &md,
+        "# Team packages\n\nAsk **the team**.\n\n<script>alert(1)</script>\n",
+    )
+    .unwrap();
+    let out = s
+        .cli(&[
+            "host",
+            "set",
+            "pkgs.test",
+            "--title",
+            "Packages",
+            "--header",
+            md.to_str().unwrap(),
+        ])
+        .unwrap();
+    assert!(out.contains("page of pkgs.test set"), "{out}");
+    s.cli_in(
+        &["host", "set", "pkgs.test", "--footer", "-"],
+        "Kept by *ops*.",
+    )
+    .unwrap();
+    let p = page(None);
+    assert!(p.contains("<title>Packages</title>"), "{p}");
+    let (h, list, f) = (
+        p.find("<h1>Team packages</h1>").expect("header"),
+        p.find(r#"href="tools/""#).unwrap(),
+        p.find("Kept by <em>ops</em>").expect("footer"),
+    );
+    assert!(h < list && list < f, "{p}");
+    assert!(
+        p.contains("&lt;script&gt;") && !p.contains("<script"),
+        "{p}"
+    );
+    // The admin sees the private one too.
+    let pw = std::fs::read_to_string(s.dir.path().join("data/admin-password")).unwrap();
+    let p = page(Some(("admin", pw.trim())));
+    assert!(
+        p.contains("Not for everyone") && p.contains("3 repositories"),
+        "{p}"
+    );
+    // Listed with its page; shown as written; removed.
+    let l = s.cli(&["host", "list"]).unwrap();
+    assert!(
+        l.contains("pkgs.test") && l.contains("Packages, header, footer"),
+        "{l}"
+    );
+    let sh = s.cli(&["host", "show", "pkgs.test"]).unwrap();
+    assert!(sh.contains("# Team packages"), "{sh}");
+    s.cli(&["host", "clear", "pkgs.test"]).unwrap();
+    let p = page(None);
+    assert!(
+        !p.contains("Team packages") && p.contains("<title>pkgs.test</title>"),
+        "{p}"
+    );
+    // A host whose root is a repository: that answers there.
+    mk("root", "files", true, "The top");
+    s.cli(&["repo", "set", "root", "urls=http://pkgs.test/"])
+        .unwrap();
+    let l = s.cli(&["host", "list"]).unwrap();
+    assert!(l.contains("repository root"), "{l}");
+    let p = page(None);
+    assert!(
+        !p.contains("repositories</div>"),
+        "the repository's own listing: {p}"
     );
 }
 
@@ -9136,7 +9289,7 @@ fn httpdate_now() -> String {
 }
 
 #[test]
-fn serving_root_lists_trees_not_registries() {
+fn serving_root_links_trees_and_names_registries() {
     let s = Server::start();
     for (name, format) in [
         ("tree-deb", "deb"),
@@ -9171,7 +9324,8 @@ fn serving_root_lists_trees_not_registries() {
     }
     s.cli(&["repo", "create", "hidden-oci", "-f", "oci"])
         .unwrap();
-    // The listing names what is browsed; registries answer their clients.
+    // Every repository there: a tree linked to be browsed, a registry
+    // named with how its clients use it; a private one not to strangers.
     let (st, root) = get(&s.url("/"), None);
     assert_eq!(st, 200);
     for name in [
@@ -9188,7 +9342,10 @@ fn serving_root_lists_trees_not_registries() {
         "tree-arch",
         "tree-ipk",
     ] {
-        assert!(root.contains(name), "{name}: {root}");
+        assert!(
+            root.contains(&format!("href=\"{name}/\"")),
+            "{name}: {root}"
+        );
     }
     for name in [
         "reg-npm",
@@ -9202,10 +9359,14 @@ fn serving_root_lists_trees_not_registries() {
         "reg-galaxy",
         "reg-conan",
         "reg-swift",
-        "hidden-oci",
     ] {
-        assert!(!root.contains(name), "{name}: {root}");
+        assert!(
+            root.contains(&format!("<span class=\"name\">{name}</span>"))
+                && !root.contains(&format!("href=\"{name}/\"")),
+            "{name}: {root}"
+        );
     }
+    assert!(!root.contains("hidden-oci"), "{root}");
     let (st, note) = get(&s.url("/reg-oci/"), None);
     assert_eq!(st, 200);
     assert!(

@@ -609,6 +609,53 @@ fn schemas() -> Value {
             ),
         ),
         (
+            "HostPage",
+            object(
+                "A host's front page.",
+                vec![
+                    ("host", string()),
+                    ("title", text("Empty: the host's name.")),
+                    ("header", text("Markdown above the repositories.")),
+                    ("footer", text("Markdown below them.")),
+                    ("updated", integer()),
+                    ("actor", string()),
+                ],
+                &["host", "title", "header", "footer", "updated", "actor"],
+            ),
+        ),
+        (
+            "HostPageSet",
+            object(
+                "",
+                vec![
+                    ("title", string()),
+                    ("header", string()),
+                    ("footer", string()),
+                ],
+                &[],
+            ),
+        ),
+        (
+            "Host",
+            object(
+                "",
+                vec![
+                    ("host", string()),
+                    ("url", text("Its root, as an address names it.")),
+                    ("repos", strings()),
+                    (
+                        "root_repo",
+                        nullable(
+                            "string",
+                            "The repository that has the host's root: it answers there, not the page.",
+                        ),
+                    ),
+                    ("page", or_null(sref("HostPage"))),
+                ],
+                &["host", "url", "repos", "root_repo", "page"],
+            ),
+        ),
+        (
             "Webhook",
             object(
                 "An outgoing webhook: these events, of these repositories (none: all), sent to url.",
@@ -1431,6 +1478,13 @@ fn ops() -> Vec<Op> {
             .reply(200, "The token.", sref("OidcToken")),
         op("get", "/api/v1/cli", "cli_info", "The pkgpod command this server hands out (its own build): version, platform, SHA-256, where to get it; no credentials needed.")
             .reply(200, "The command.", sref("Cli")),
+        op("get", "/api/v1/hosts", "hosts", "Every host the repositories' addresses name: its repositories, the one that has its root (then it answers there, not the page) and its page (server admin).")
+            .reply(200, "The hosts.", array(sref("Host"))),
+        op("put", "/api/v1/hosts/{host}", "host_put", "Set a host's page: title, and Markdown above (header) and below (footer) its repositories; what is left out stays (server admin).")
+            .body("HostPageSet")
+            .reply(200, "The page.", sref("HostPage")),
+        op("delete", "/api/v1/hosts/{host}", "host_delete", "Remove a host's page (server admin).")
+            .empty(204, "Removed."),
         op("get", "/api/v1/webhooks", "webhooks", "Outgoing webhooks, each with its last delivery (server admin).")
             .reply(200, "The webhooks.", array(sref("Webhook"))),
         op("post", "/api/v1/webhooks", "webhook_put", "Add a webhook, or change the one of the same name (server admin); a secret left out is kept.")
@@ -1524,6 +1578,10 @@ fn path_param(path: &str, name: &str) -> (Value, &'static str) {
         "id" if path.starts_with("/api/v1/webhooks/") => (integer(), "Delivery id."),
         "id" => (integer(), "Job id."),
         "user" => (string(), "User name."),
+        "host" => (
+            string(),
+            "Host name (with :port if its addresses have one).",
+        ),
         "team" => (string(), "Team name."),
         _ => (string(), "Name."),
     }

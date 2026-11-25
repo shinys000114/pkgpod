@@ -184,6 +184,18 @@ CREATE TABLE webhook_deliveries (
 CREATE INDEX webhook_deliveries_hook ON webhook_deliveries(hook, id);
 CREATE INDEX webhook_deliveries_due ON webhook_deliveries(state, next_try);
 ",
+    // A host's front page (its root, when no repository has it): a title
+    // and Markdown above and below the list of its repositories.
+    "
+CREATE TABLE host_pages (
+    host TEXT PRIMARY KEY,
+    title TEXT NOT NULL DEFAULT '',
+    header TEXT NOT NULL DEFAULT '',
+    footer TEXT NOT NULL DEFAULT '',
+    updated INTEGER NOT NULL,
+    actor TEXT NOT NULL
+);
+",
 ];
 
 pub fn migrate(db: &Db) -> pkgpod_base::Result<()> {
@@ -207,6 +219,7 @@ mod tests {
             "c4eb88395a908cdd",
             "fcc2c4368702bf38",
             "bc20a95501f079e1",
+            "6c9cf89a642c0e1a",
         ];
         let got: Vec<String> = super::STEPS
             .iter()

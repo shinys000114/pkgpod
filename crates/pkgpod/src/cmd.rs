@@ -160,6 +160,31 @@ pub enum TokenCmd {
 }
 
 #[derive(Subcommand)]
+pub enum HostCmd {
+    /// Every host the repositories' addresses name, and its page.
+    List,
+    /// Set a host's page; what is left out stays.
+    ///
+    /// pkgpod host set mirror.example.org --title "Mirrors" --header README.md
+    Set {
+        host: String,
+        #[arg(long)]
+        title: Option<String>,
+        /// A Markdown file shown above the repositories ("-": stdin;
+        /// an empty file removes it).
+        #[arg(long)]
+        header: Option<std::path::PathBuf>,
+        /// A Markdown file shown below them.
+        #[arg(long)]
+        footer: Option<std::path::PathBuf>,
+    },
+    /// Show a host's page settings (its Markdown as written).
+    Show { host: String },
+    /// Remove a host's page (the list of repositories stays).
+    Clear { host: String },
+}
+
+#[derive(Subcommand)]
 pub enum WebhookCmd {
     List,
     /// Add a webhook, or change the one of the same name.
@@ -911,6 +936,117 @@ pub fn run(
                 c.send(
                     Method::DELETE,
                     &format!("/api/v1/tokens/{id}"),
+                    &Value::Null,
+                )?;
+            }
+        },
+        Cmd::Host(h) => match h {
+            HostCmd::List => {
+                let v = c.get("/api/v1/hosts")?;
+                x.print(&v, |v| {
+                    let mut rows = vec![vec![
+                        "HOST".into(),
+                        "ROOT".into(),
+                        "REPOS".into(),
+                        "PAGE".into(),
+                    ]];
+                    for h in v.as_array().into_iter().flatten() {
+                        let repos: Vec<String> =
+                            h["repos"].as_array().into_iter().flatten().map(s).collect();
+                        rows.push(vec![
+                            s(&h["host"]),
+                            match h["root_repo"].as_str() {
+                                Some(r) => format!("repository {r}"),
+                                None => "page".into(),
+                            },
+                            repos.len().to_string(),
+                            if h["page"].is_object() {
+                                let p = &h["page"];
+                                let t = p["title"].as_str().unwrap_or("");
+                                format!(
+                                    "{}{}{}",
+                                    if t.is_empty() { "-" } else { t },
+                                    if p["header"].as_str().is_some_and(|x| !x.is_empty()) {
+                                        ", header"
+                                    } else {
+                                        ""
+                                    },
+                                    if p["footer"].as_str().is_some_and(|x| !x.is_empty()) {
+                                        ", footer"
+                                    } else {
+                                        ""
+                                    }
+                                )
+                            } else {
+                                "-".into()
+                            },
+                        ]);
+                    }
+                    table(rows);
+                });
+            }
+            HostCmd::Set {
+                host,
+                title,
+                header,
+                footer,
+            } => {
+                let read = |p: &std::path::Path| -> Result<String, CliError> {
+                    if p.as_os_str() == "-" {
+                        let mut t = String::new();
+                        std::io::Read::read_to_string(&mut std::io::stdin(), &mut t)
+                            .map_err(|e| CliError::other(format!("reading stdin: {e}")))?;
+                        Ok(t)
+                    } else {
+                        std::fs::read_to_string(p)
+                            .map_err(|e| CliError::other(format!("{}: {e}", p.display())))
+                    }
+                };
+                let mut b = serde_json::Map::new();
+                if let Some(t) = title {
+                    b.insert("title".into(), json!(t));
+                }
+                if let Some(p) = header {
+                    b.insert("header".into(), json!(read(&p)?));
+                }
+                if let Some(p) = footer {
+                    b.insert("footer".into(), json!(read(&p)?));
+                }
+                let v = c.send(
+                    Method::PUT,
+                    &format!("/api/v1/hosts/{}", enc(&host)),
+                    &Value::Object(b),
+                )?;
+                x.print(&v, |v| println!("page of {} set", s(&v["host"])));
+            }
+            HostCmd::Show { host } => {
+                let v = c.get("/api/v1/hosts")?;
+                let h = v
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|h| h["host"].as_str() == Some(host.to_ascii_lowercase().as_str()))
+                    .cloned()
+                    .ok_or_else(|| CliError::other(format!("no host {host}")))?;
+                x.print(&h, |h| {
+                    println!("{} ({})", s(&h["host"]), s(&h["url"]));
+                    if let Some(r) = h["root_repo"].as_str() {
+                        println!("its root is repository {r}: that answers there, not the page");
+                    }
+                    let p = &h["page"];
+                    println!("title: {}", p["title"].as_str().unwrap_or(""));
+                    for k in ["header", "footer"] {
+                        let t = p[k].as_str().unwrap_or("");
+                        if !t.is_empty() {
+                            println!("--- {k}\n{}", t.trim_end());
+                        }
+                    }
+                });
+            }
+            HostCmd::Clear { host } => {
+                c.send(
+                    Method::DELETE,
+                    &format!("/api/v1/hosts/{}", enc(&host)),
                     &Value::Null,
                 )?;
             }

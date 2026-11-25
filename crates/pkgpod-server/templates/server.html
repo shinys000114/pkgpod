@@ -75,6 +75,27 @@ steps:
   </details>
   </div>
 </div>
+<div class="card" id="hosts">
+  <div class="card-head"><h2>Host pages</h2><span class="hint">what a host's root shows when no repository has it: its repositories, how they stand and how to use them, with a title and Markdown above and below</span></div>
+  {% if hosts.is_empty() %}<p class="empty">No host: repositories without addresses are reached at /&lt;name&gt;/ on every serving listener.</p>{% else %}
+  <div class="card-body host-pages">
+  {% for h in hosts %}
+  <details class="host"{% if h.repos == 0 %} open{% endif %}>
+    <summary><b>{{ h.host }}</b> <span class="muted small">{{ h.repos }} repositor{% if h.repos == 1 %}y{% else %}ies{% endif %}{% if !h.root_repo.is_empty() %} · its root is repository {{ h.root_repo }}{% endif %}{% if !h.updated.is_empty() %} · page set {{ h.updated }}{% endif %}</span> <a href="{{ h.url }}" target="_blank" rel="noopener" class="small">open ↗</a></summary>
+    {% if !h.root_repo.is_empty() %}<p class="callout">Its root is the repository {{ h.root_repo }}: that answers there, and frames its listing with its own <code>.HEADER.md</code> and <code>.FOOTER.md</code>. A page set here shows only when no repository has the root.</p>{% endif %}
+    <form hx-post="/c/hosts/{{ h.host|urlencode }}" hx-target="#server-result">
+      <div class="fields">
+        <label class="field wide"><span>Title</span><input name="title" value="{{ h.title }}" placeholder="{{ h.host }}" autocomplete="off"></label>
+        <label class="field wide"><span>Above the repositories</span><textarea name="header" rows="8" spellcheck="false" placeholder="# Mirrors&#10;&#10;What is here, who it is for, when it syncs.">{{ h.header }}</textarea><small>Markdown (tables, links, images); raw HTML is shown as text.</small></label>
+        <label class="field wide"><span>Below them</span><textarea name="footer" rows="3" spellcheck="false" placeholder="Questions: the team.">{{ h.footer }}</textarea></label>
+      </div>
+      <div class="form-foot"><button type="submit">Save page</button>{% if !h.updated.is_empty() %} <button type="button" class="link danger" hx-post="/c/hosts/{{ h.host|urlencode }}/clear" hx-target="#server-result" hx-confirm="Remove the page of {{ h.host }}? Its repositories are still listed.">remove page</button>{% endif %}</div>
+    </form>
+  </details>
+  {% endfor %}
+  </div>
+  {% endif %}
+</div>
 <div class="card" id="webhooks">
   <div class="card-head"><h2>Webhooks</h2><span class="hint">new versions, labels and ended jobs sent to other services: a deploy after a publish (GitHub repository_dispatch), a chat line when a sync fails</span></div>
   {% if hooks.is_empty() %}<p class="empty">No webhooks.</p>{% else %}

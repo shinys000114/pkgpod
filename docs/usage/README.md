@@ -106,6 +106,32 @@ applies it); the rules also run daily. `GET /api/v1/formats` (`pkgpod
 repo formats`) gives every format's kinds, settings by kind and
 operations.
 
+### Host pages
+
+A host's root (`https://pkg.example.org/`) that no repository has
+shows a page of the repositories there, whatever their format, as far
+as the reader may read them: each with its description, kind, how it
+stands (a mirror's last sync, a hosted repository's version) and how to
+use it (as its How to use tab says, without what only publishing
+needs). A tree (files, deb, rpm, ...) is linked to be browsed; a
+registry (npm, OCI, ...) is named with its clients' commands. A shared
+prefix (`/team/` above `/team/ppa/`) shows the same list.
+
+Server admins give a host's page a title and Markdown above and below
+the list (rendered as a files repository's `.HEADER.md`: tables, links,
+images; raw HTML shown as text). In the console: Server, Host pages.
+
+```sh
+pkgpod host list                                   # hosts, their repositories, their pages
+pkgpod host set pkg.example.org --title "Team packages" --header README.md --footer footer.md
+pkgpod host show pkg.example.org
+pkgpod host clear pkg.example.org
+```
+
+A host whose root a repository has (a files repository at
+`https://pkg.example.org/`, say) shows that repository there instead;
+its listing has its own `.HEADER.md` and `.FOOTER.md`.
+
 ## Versions, labels and snapshots
 
 Every change to a hosted repository makes a version: an upload, an

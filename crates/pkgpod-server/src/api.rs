@@ -309,6 +309,8 @@ pub fn router() -> Router<Arc<App>> {
         .route("/api/v1/trust/{name}", delete(trust_delete))
         .route("/api/v1/oidc/token", post(oidc_token))
         .route("/api/v1/cli", get(crate::cli_dl::cli_info))
+        .route("/api/v1/hosts", get(hosts))
+        .route("/api/v1/hosts/{host}", put(host_put).delete(host_delete))
         .route("/api/v1/webhooks", get(webhooks).post(webhook_put))
         .route("/api/v1/webhooks/{name}", delete(webhook_delete))
         .route(
@@ -1649,6 +1651,58 @@ pub(crate) async fn token_create(
         StatusCode::CREATED,
         Json(json!({"token": token, "info": info})),
     ))
+}
+
+// ---- host pages ----
+
+/// Every host the repositories' addresses name, with its page.
+pub(crate) async fn hosts(State(app): St, Who(c): Who) -> Result<Json<Value>> {
+    app.require_admin(&c)?;
+    let app2 = app.clone();
+    Ok(Json(json!(
+        blocking(&app, move |_| crate::hosts::list(&app2)).await?
+    )))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HostReq {
+    #[serde(default)]
+    pub(crate) title: Option<String>,
+    #[serde(default)]
+    pub(crate) header: Option<String>,
+    #[serde(default)]
+    pub(crate) footer: Option<String>,
+}
+
+/// Sets a host's page: its title and the Markdown above and below its
+/// repositories (what is left out stays).
+pub(crate) async fn host_put(
+    State(app): St,
+    Who(c): Who,
+    Path(host): Path<String>,
+    Json(req): Json<HostReq>,
+) -> Result<Json<Value>> {
+    app.require_admin(&c)?;
+    let (app2, who) = (app.clone(), c.name().to_string());
+    let p = blocking(&app, move |_| {
+        crate::hosts::put(&app2, &host, req.title, req.header, req.footer, &who)
+    })
+    .await?;
+    app.auth.audit(c.name(), "host page", &p.host, "");
+    Ok(Json(json!(p)))
+}
+
+pub(crate) async fn host_delete(
+    State(app): St,
+    Who(c): Who,
+    Path(host): Path<String>,
+) -> Result<StatusCode> {
+    app.require_admin(&c)?;
+    let (app2, h2) = (app.clone(), host.clone());
+    blocking(&app, move |_| crate::hosts::remove(&app2, &h2)).await?;
+    app.auth.audit(c.name(), "host page remove", &host, "");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ---- webhooks ----
