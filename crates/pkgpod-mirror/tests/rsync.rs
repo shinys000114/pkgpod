@@ -258,13 +258,24 @@ fn tree_mode_and_cancel() {
 fn cancel_stops_a_forked_rsync() {
     let dir = tempfile::tempdir().unwrap();
     let fake = dir.path().join("rsync");
+    let text = dir.path().join("rsync.sh");
     std::fs::write(
-        &fake,
+        &text,
         "#!/bin/sh\ntrap '' TERM\necho started\nsh -c \"trap '' TERM; sleep 600\" &\nwait\n",
     )
     .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // Made by another process: a test forking meanwhile would inherit
+    // this one's write descriptor, and running the script would fail
+    // with "Text file busy".
+    assert!(
+        std::process::Command::new("install")
+            .args(["-m", "755"])
+            .arg(&text)
+            .arg(&fake)
+            .status()
+            .unwrap()
+            .success()
+    );
     let mut m = RsyncMirror::new("rsync://127.0.0.1:1/up/", Mode::Tree);
     m.rsync = fake;
     let dest = dir.path().join("t");
