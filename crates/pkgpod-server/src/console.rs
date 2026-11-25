@@ -5461,7 +5461,7 @@ fn ci_example(app: &App, base: &str, r: Option<&pkgpod_engine::RepoInfo>) -> Str
         _ => ("dist/*", Vec::new(), Vec::new()),
     };
     let action = crate::cli_dl::ci_action(app).unwrap_or_else(|| {
-        "<owner>/pkgpod@master   # the pkgpod action: its place in Settings below".into()
+        "<owner>/pkgpod@master   # the pkgpod action: set its place below".into()
     });
     let mut s = format!(
         "permissions:\n  id-token: write   # the job may ask GitHub for its OIDC token\n  contents: read\n\
