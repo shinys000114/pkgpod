@@ -205,6 +205,12 @@ repository itself.
 - Pass the path unchanged (no prefix stripped), and the whole host when
   OCI, Terraform or badges are used: those are at the host's root.
 - Uploads may be up to 8 GiB; raise the proxy's limit on request bodies.
+  A CDN in front has limits of its own, which its lower plans do not
+  let you raise: Cloudflare takes at most 100 MB per request and waits
+  100 s for an answer (`gc`, deleting a repository with its tree or a
+  large promote can take longer, and still finish on the server). Send
+  big uploads and such calls to a name that does not go through it (DNS
+  only, or the management listener over the LAN or an SSH tunnel).
 - pkgpod closes a connection that has been idle for 3 minutes; keep the
   proxy's idle connections to it shorter than that (Caddy keeps them 2
   minutes and nginx 1 by default), or an upload sent on one being closed

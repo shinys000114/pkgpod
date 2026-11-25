@@ -506,7 +506,8 @@ curl -u token:<token> -F file=@hello_1.0-1.dsc -F file=@hello_1.0.orig.tar.gz \
 `pkgpod` is the server and its client. As a client it talks to the
 management listener's API: `--url` (or `PKGPOD_URL`), else the saved
 login, else port 8090 of the loopback address over http; `--token` (or `PKGPOD_TOKEN`),
-else the saved login's token. `--json` prints the API's JSON instead
+else the saved login's token when the URL is the saved login's server
+(another server gets none). `--json` prints the API's JSON instead
 of tables. `pkgpod <command> --help` describes every command.
 
 ```sh

@@ -117,6 +117,8 @@ impl Client {
         let http = reqwest::blocking::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(None)
+            // What is asking, in the server's and a proxy's logs.
+            .user_agent(concat!("pkgpod/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| CliError::other(chain(&e)))?;
         Ok(Client { base, auth, http })
@@ -189,29 +191,87 @@ impl Client {
         self.send(Method::POST, path, body)
     }
 
-    /// Sends files as one multipart upload (other params in the query).
-    pub fn upload_many(&self, path: &str, files: &[std::path::PathBuf]) -> Result<Value, CliError> {
+    /// That `repo` is there and may be uploaded to, asked before an
+    /// upload: a server that refuses one answers before it reads the
+    /// body and closes the connection, and its answer is then mostly lost
+    /// to the error of sending the rest.
+    pub fn may_upload(&self, repo: &str) -> Result<(), CliError> {
+        let v = self.get(&format!("/api/v1/repos/{}", enc(repo)))?;
+        if v["role"] != "read" {
+            return Ok(());
+        }
+        Err(CliError {
+            code: code_for(403),
+            message: match self.auth {
+                None => format!("{repo}: uploading needs a login (pkgpod login) or a token"),
+                Some(_) => format!("you may only read {repo}: uploading needs write"),
+            },
+        })
+    }
+
+    /// Sends files as one multipart upload into `repo` (other params in
+    /// `query`).
+    pub fn upload_many(
+        &self,
+        repo: &str,
+        query: &str,
+        files: &[std::path::PathBuf],
+    ) -> Result<Value, CliError> {
         let mut form = reqwest::blocking::multipart::Form::new();
         for f in files {
             form = form
                 .file("file", f)
                 .map_err(|e| CliError::other(format!("{}: {e}", f.display())))?;
         }
-        self.finish(self.req(Method::POST, path).multipart(form).send())
+        let path = format!("/api/v1/repos/{}/upload?{query}", enc(repo));
+        self.finish_upload(repo, self.req(Method::POST, &path).multipart(form).send())
     }
 
-    /// Streams a file as the raw body.
-    pub fn upload(&self, path: &str, file: &Path) -> Result<Value, CliError> {
+    /// Streams a file as the raw body of an upload into `repo`.
+    pub fn upload(&self, repo: &str, query: &str, file: &Path) -> Result<Value, CliError> {
         let f = fs::File::open(file)
             .map_err(|e| CliError::other(format!("{}: {e}", file.display())))?;
         let len = f.metadata().map(|m| m.len()).unwrap_or(0);
         let body = reqwest::blocking::Body::sized(f, len);
-        self.finish(
-            self.req(Method::POST, path)
+        let path = format!("/api/v1/repos/{}/upload?{query}", enc(repo));
+        self.finish_upload(
+            repo,
+            self.req(Method::POST, &path)
                 .header("content-type", "application/octet-stream")
                 .body(body)
                 .send(),
         )
+    }
+
+    /// An upload's answer; when the connection was closed before the
+    /// whole body was sent, the server's reason if it now refuses what
+    /// [`Client::may_upload`] allowed, else most likely a proxy in front.
+    fn finish_upload(
+        &self,
+        repo: &str,
+        r: Result<Response, reqwest::Error>,
+    ) -> Result<Value, CliError> {
+        match r {
+            Err(e) if !e.is_connect() => {
+                self.may_upload(repo)?;
+                Err(CliError::other(format!(
+                    "{}: the connection was closed before the whole upload was sent; a \
+                     proxy in front may limit the size of a request (Cloudflare: 100 MB): \
+                     upload through an address without it",
+                    self.base
+                )))
+            }
+            r => self.finish(r),
+        }
+    }
+}
+
+/// Whether two server URLs name the same server: scheme, host and port
+/// (a default port written or not, a host in any case).
+pub fn same_server(a: &str, b: &str) -> bool {
+    match (reqwest::Url::parse(a), reqwest::Url::parse(b)) {
+        (Ok(a), Ok(b)) => a.origin().is_tuple() && a.origin() == b.origin(),
+        _ => false,
     }
 }
 
@@ -232,12 +292,45 @@ pub fn enc(s: &str) -> String {
 /// what to do when a proxy in front stopped the request.
 fn not_pkgpod(status: reqwest::StatusCode, text: &str, challenged: bool, base: &str) -> String {
     let html = text.trim_start().starts_with('<');
+    let code = status.as_u16();
+    // The code alone where it has no name (a proxy's own, as 524).
+    let status = match status.canonical_reason() {
+        Some(r) => format!("{code} {r}"),
+        None => code.to_string(),
+    };
     if challenged || (html && text.contains("Just a moment") && text.contains("challenge")) {
         return format!(
             "{status} from a proxy in front of {base}, not from pkgpod: it asks for a browser \
              challenge (Cloudflare's bot protection). Let API requests through it (a rule \
              that skips the challenge for /api/), or use an address without it"
         );
+    }
+    // A proxy's limits. pkgpod never answers 504, 522 or 524 itself, and
+    // its own 413 (a JSON body over the API's limit) is plain text, not
+    // a page.
+    match code {
+        413 if html => {
+            return format!(
+                "{status} from a proxy in front of {base}, not from pkgpod: it refused the \
+                 size of the request (Cloudflare: 100 MB). Upload through an address \
+                 without it"
+            );
+        }
+        504 | 524 => {
+            return format!(
+                "{status} from a proxy in front of {base}, not from pkgpod: it stopped \
+                 waiting for the answer (Cloudflare waits 100 s), but the server may still \
+                 finish the request: look with pkgpod jobs or pkgpod versions before trying \
+                 again, and send long calls to an address without it"
+            );
+        }
+        522 => {
+            return format!(
+                "{status} from a proxy in front of {base}, not from pkgpod: it could not \
+                 reach the server"
+            );
+        }
+        _ => {}
     }
     if html {
         return format!("{status} from {base}, not from pkgpod (an HTML page: a proxy in front?)");
@@ -270,5 +363,50 @@ mod tests {
             not_pkgpod(st, " short ", false, "https://x"),
             "403 Forbidden: short"
         );
+        // A proxy's limits: what it did, and what the server may still do.
+        let code = |n| reqwest::StatusCode::from_u16(n).unwrap();
+        let m = not_pkgpod(code(524), "<html>timeout</html>", false, "https://x");
+        assert!(
+            m.starts_with("524 from a proxy") && m.contains("may still finish"),
+            "{m}"
+        );
+        let m = not_pkgpod(code(504), "gateway timeout", false, "https://x");
+        assert!(m.contains("may still finish"), "{m}");
+        let m = not_pkgpod(code(522), "<html></html>", false, "https://x");
+        assert!(
+            m.contains("could not reach") && !m.contains("finish"),
+            "{m}"
+        );
+        let m = not_pkgpod(code(413), "<html>too large</html>", false, "https://x");
+        assert!(m.contains("size") && m.contains("100 MB"), "{m}");
+        let own = "Failed to buffer the request body: length limit exceeded";
+        assert_eq!(
+            not_pkgpod(code(413), own, false, "https://x"),
+            format!("413 Payload Too Large: {own}")
+        );
+        assert_eq!(not_pkgpod(code(599), "x", false, "https://x"), "599: x");
+    }
+
+    #[test]
+    fn the_same_server() {
+        for (a, b) in [
+            ("https://pkg.example.org", "https://pkg.example.org/"),
+            ("https://pkg.example.org", "https://PKG.example.org:443"),
+            ("http://127.0.0.1:8090", "HTTP://127.0.0.1:8090/api"),
+        ] {
+            assert!(same_server(a, b), "{a} {b}");
+        }
+        for (a, b) in [
+            ("https://pkg.example.org", "http://pkg.example.org"),
+            ("https://pkg.example.org", "https://pkg.example.org:8090"),
+            (
+                "https://pkg.example.org",
+                "https://pkg.example.org.evil.test",
+            ),
+            ("http://127.0.0.1:8090", "http://localhost:8090"),
+            ("", ""),
+        ] {
+            assert!(!same_server(a, b), "{a} {b}");
+        }
     }
 }

@@ -19,10 +19,16 @@ use clap::{Args, Parser, Subcommand};
 #[command(name = "pkgpod", version = pkgpod_base::version(), about = "A team package server and its client")]
 struct Cli {
     /// Server API URL (default: the saved login, else http://127.0.0.1:8090).
-    #[arg(long, global = true, env = "PKGPOD_URL")]
+    #[arg(long, global = true, env = "PKGPOD_URL", help_heading = "Server")]
     url: Option<String>,
-    /// API token (default: the saved login).
-    #[arg(long, global = true, env = "PKGPOD_TOKEN", hide_env_values = true)]
+    /// API token (default: the saved login's, for its server only).
+    #[arg(
+        long,
+        global = true,
+        env = "PKGPOD_TOKEN",
+        hide_env_values = true,
+        help_heading = "Server"
+    )]
     token: Option<String>,
     /// Print the API's JSON instead of tables.
     #[arg(long, global = true)]
@@ -34,7 +40,7 @@ struct Cli {
 #[derive(Args)]
 pub(crate) struct ServerArgs {
     /// Configuration file.
-    #[arg(long, short, default_value = pkgpod_server::config::DEFAULT_PATH, env = "PKGPOD_CONFIG")]
+    #[arg(long, short, global = true, default_value = pkgpod_server::config::DEFAULT_PATH, env = "PKGPOD_CONFIG")]
     config: PathBuf,
 }
 
@@ -56,6 +62,7 @@ pub(crate) enum Cmd {
     /// a password (GitHub Actions: `permissions: id-token: write`), as a
     /// trust rule on the server allows; the token saved lasts minutes.
     Login {
+        /// The user to log in as (the password is asked for).
         #[arg(long, short, required_unless_present = "oidc")]
         user: Option<String>,
         /// Read the password from stdin.
@@ -130,6 +137,7 @@ pub(crate) enum Cmd {
         name: String,
         #[arg(long, short)]
         version: Option<String>,
+        /// A note kept with the label.
         #[arg(long, default_value = "")]
         note: String,
         /// Move an existing label.
@@ -158,15 +166,16 @@ pub(crate) enum Cmd {
         /// From a mirror: its dist.
         #[arg(long)]
         dist: Option<String>,
-        /// From a mirror: only these components / architectures.
+        /// From a mirror: only these components.
         #[arg(long, value_delimiter = ',')]
         components: Vec<String>,
+        /// From a mirror: only these architectures.
         #[arg(long, value_delimiter = ',')]
         architectures: Vec<String>,
-        /// The target's dist (default: the mirror's) and component
-        /// (default: the package's).
+        /// The target's dist (default: the mirror's).
         #[arg(long)]
         into: Option<String>,
+        /// The target's component (default: the package's).
         #[arg(long)]
         component: Option<String>,
         /// Replace package files of the same name with other content.
@@ -186,6 +195,7 @@ pub(crate) enum Cmd {
     /// Search packages by name.
     Search {
         query: String,
+        /// Only in this repository.
         #[arg(long, short)]
         repo: Option<String>,
         /// At most this many (the server's default: 200).
@@ -267,8 +277,10 @@ pub(crate) enum Cmd {
         /// from standard input.
         #[arg(long)]
         username: Option<String>,
+        /// deb: only these components.
         #[arg(long, value_delimiter = ',')]
         components: Vec<String>,
+        /// deb: only these architectures.
         #[arg(long, value_delimiter = ',')]
         architectures: Vec<String>,
         /// The upstream's public key (armored file) to check signatures.
@@ -384,6 +396,7 @@ pub(crate) enum Cmd {
     },
     /// Collect garbage.
     Gc {
+        /// Only count what would be removed.
         #[arg(long)]
         dry_run: bool,
         /// Keep what is younger than this.
@@ -397,6 +410,7 @@ enum AdminCmd {
     /// Set a user's password (creating the user as an admin if missing).
     Password {
         user: String,
+        /// Read the password from stdin.
         #[arg(long)]
         password_stdin: bool,
     },
@@ -406,6 +420,7 @@ enum AdminCmd {
     /// server runs.
     Backup {
         to: PathBuf,
+        /// The mirrors' received trees too.
         #[arg(long)]
         mirrors: bool,
     },
@@ -416,6 +431,7 @@ enum AdminCmd {
     /// names is in the store (with --deep, with its sha256); exits 1 on
     /// problems. Safe while the server runs.
     Check {
+        /// Each blob's sha256 too (reads them all).
         #[arg(long)]
         deep: bool,
     },
@@ -473,16 +489,30 @@ fn load(a: &ServerArgs) -> Result<pkgpod_server::config::Config, client::CliErro
 
 fn serve(a: &ServerArgs) -> Result<(), client::CliError> {
     let cfg = load(a)?;
-    // To stderr (the journal), and the recent events kept for the
-    // console's Logs page.
+    // To stdout (the journal), and the recent events kept for the
+    // console's Logs page. Colours only on a terminal (not in a file or
+    // the journal), and no time of our own where the journal stamps
+    // each line.
+    use std::io::IsTerminal;
+    use tracing_subscriber::Layer;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
+    let ansi = std::io::stdout().is_terminal();
+    let journal = stdout_is_journal();
+    let out = tracing_subscriber::fmt::layer()
+        .with_target(false)
+        .with_ansi(ansi);
+    let out = if journal {
+        out.without_time().boxed()
+    } else {
+        out.boxed()
+    };
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_env("PKGPOD_LOG")
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&cfg.log)),
         )
-        .with(tracing_subscriber::fmt::layer().with_target(false))
+        .with(out)
         .with(pkgpod_server::ops::logs::layer())
         .init();
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -500,6 +530,22 @@ fn serve(a: &ServerArgs) -> Result<(), client::CliError> {
     // does not hold the exit up once the requests have been answered.
     rt.shutdown_timeout(std::time::Duration::from_secs(5));
     r
+}
+
+/// Whether stdout is the journal: the stream systemd names in
+/// JOURNAL_STREAM ("<dev>:<ino>"). The variable alone is not enough:
+/// whatever a service starts inherits it, a shell in a terminal too.
+fn stdout_is_journal() -> bool {
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::MetadataExt;
+    let Some(j) = std::env::var_os("JOURNAL_STREAM") else {
+        return false;
+    };
+    let m = std::io::stdout()
+        .as_fd()
+        .try_clone_to_owned()
+        .and_then(|fd| std::fs::File::from(fd).metadata());
+    m.is_ok_and(|m| j.to_str() == Some(&format!("{}:{}", m.dev(), m.ino())))
 }
 
 fn admin(a: &ServerArgs, cmd: AdminCmd) -> Result<(), client::CliError> {
@@ -580,4 +626,50 @@ fn admin(a: &ServerArgs, cmd: AdminCmd) -> Result<(), client::CliError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// Every command and option says in its help what it is.
+    #[test]
+    fn help_describes_every_command_and_option() {
+        Cli::command().debug_assert();
+        fn walk(c: &clap::Command, at: &str, missing: &mut Vec<String>) {
+            for a in c.get_arguments() {
+                let id = a.get_id().as_str();
+                if !a.is_positional() && a.get_help().is_none() && id != "help" && id != "version" {
+                    missing.push(format!("{at} --{id}"));
+                }
+            }
+            for sub in c.get_subcommands() {
+                let at = format!("{at} {}", sub.get_name());
+                if sub.get_about().is_none() {
+                    missing.push(at.clone());
+                }
+                walk(sub, &at, missing);
+            }
+        }
+        let mut missing = Vec::new();
+        walk(&Cli::command(), "pkgpod", &mut missing);
+        assert!(missing.is_empty(), "no help: {missing:#?}");
+    }
+
+    /// `admin -c` before or after its subcommand.
+    #[test]
+    fn admin_config_anywhere() {
+        for args in [
+            ["pkgpod", "admin", "-c", "/x.toml", "check"],
+            ["pkgpod", "admin", "check", "-c", "/x.toml"],
+        ] {
+            match Cli::try_parse_from(args).unwrap().cmd {
+                Cmd::Admin { server, .. } => {
+                    assert_eq!(server.config, PathBuf::from("/x.toml"), "{args:?}")
+                }
+                _ => panic!("{args:?}"),
+            }
+        }
+    }
 }

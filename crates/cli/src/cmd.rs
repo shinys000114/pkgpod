@@ -9,7 +9,7 @@ use reqwest::Method;
 use serde_json::{Value, json};
 
 use crate::Cmd;
-use crate::client::{CliError, Client, Saved, enc, load_saved, save};
+use crate::client::{CliError, Client, Saved, enc, load_saved, same_server, save};
 use crate::term;
 
 #[derive(Args)]
@@ -28,11 +28,14 @@ pub enum RepoCmd {
     /// Create a repository.
     Create {
         name: String,
+        /// The format: deb, rpm, npm, ... (`pkgpod repo formats` lists
+        /// them, with their settings).
         #[arg(long, short, default_value = "deb")]
         format: String,
         /// hosted, mirror, proxy (-s upstream=...) or group (-s members=a,b).
         #[arg(long, short, default_value = "hosted")]
         kind: String,
+        /// The storage its files go to (default: main).
         #[arg(long)]
         storage: Option<String>,
         /// Settings (urls=https://pkg.example.org/ppa/ public=true ...).
@@ -45,6 +48,7 @@ pub enum RepoCmd {
         name: String,
         #[arg(value_name = "KEY=VALUE")]
         settings: Vec<String>,
+        /// A setting, as create takes it.
         #[arg(long = "set", short = 's', value_name = "KEY=VALUE")]
         set: Vec<String>,
     },
@@ -74,58 +78,63 @@ pub enum RepoCmd {
 
 #[derive(Subcommand)]
 pub enum UserCmd {
+    /// Every user.
     List,
+    /// Add a user (its password is asked for).
     Add {
         name: String,
+        /// A server admin.
         #[arg(long)]
         admin: bool,
+        /// Read the password from stdin.
         #[arg(long)]
         password_stdin: bool,
     },
     /// Change a user (admin, disabled, password).
     Set {
         name: String,
+        /// A server admin (true) or not (false).
         #[arg(long)]
         admin: Option<bool>,
+        /// Not able to log in (true) or able again (false).
         #[arg(long)]
         disabled: Option<bool>,
+        /// Set a new password (asked on the terminal).
         #[arg(long)]
         password: bool,
+        /// Set a new password, read from stdin.
+        #[arg(long)]
+        password_stdin: bool,
     },
-    Delete {
-        name: String,
-    },
+    /// Delete a user.
+    Delete { name: String },
     /// Change your own password.
-    Passwd,
+    Passwd {
+        /// Read the current and the new password from stdin, a line
+        /// each.
+        #[arg(long)]
+        password_stdin: bool,
+    },
 }
 
 #[derive(Subcommand)]
 pub enum TeamCmd {
+    /// Teams and their members.
     List,
-    Add {
-        name: String,
-    },
-    Delete {
-        name: String,
-    },
+    /// Add a team.
+    Add { name: String },
+    /// Delete a team.
+    Delete { name: String },
     /// Add members.
-    Join {
-        team: String,
-        users: Vec<String>,
-    },
+    Join { team: String, users: Vec<String> },
     /// Remove members.
-    Leave {
-        team: String,
-        users: Vec<String>,
-    },
+    Leave { team: String, users: Vec<String> },
 }
 
 #[derive(Subcommand)]
 pub enum GrantCmd {
     /// Rights on a repository.
-    List {
-        repo: String,
-    },
+    List { repo: String },
     /// Give user:<name> or team:<name> a role (read, write, admin) on a
     /// repository (or `*`, every one).
     Set {
@@ -133,15 +142,15 @@ pub enum GrantCmd {
         subject: String,
         role: String,
     },
-    Revoke {
-        repo: String,
-        subject: String,
-    },
+    /// Take user:<name>'s or team:<name>'s role on a repository away.
+    Revoke { repo: String, subject: String },
 }
 
 #[derive(Subcommand)]
 pub enum TokenCmd {
+    /// Your tokens.
     List {
+        /// Every user's (server admins).
         #[arg(long)]
         all: bool,
     },
@@ -154,12 +163,12 @@ pub enum TokenCmd {
         /// May change repositories (default: read only).
         #[arg(long)]
         write: bool,
+        /// Days until it stops working (default: never).
         #[arg(long)]
         expires_days: Option<i64>,
     },
-    Delete {
-        id: i64,
-    },
+    /// Delete a token (by the id list shows).
+    Delete { id: i64 },
 }
 
 #[derive(Subcommand)]
@@ -171,6 +180,7 @@ pub enum HostCmd {
     /// pkgpod host set mirror.example.org --title "Mirrors" --header README.md
     Set {
         host: String,
+        /// The page's title.
         #[arg(long)]
         title: Option<String>,
         /// A Markdown file shown above the repositories ("-": stdin;
@@ -192,6 +202,7 @@ pub enum ScheduleCmd {
     /// Every mirror's schedule, next run and last sync; with --plan the
     /// syncs of the next day, and which wait for a slot or are skipped.
     List {
+        /// The syncs of the next day instead.
         #[arg(long)]
         plan: bool,
     },
@@ -206,6 +217,7 @@ pub enum ScheduleCmd {
 
 #[derive(Subcommand)]
 pub enum WebhookCmd {
+    /// Webhooks and their last delivery.
     List,
     /// Add a webhook, or change the one of the same name.
     ///
@@ -233,28 +245,21 @@ pub enum WebhookCmd {
         #[arg(long)]
         disabled: bool,
     },
-    Remove {
-        name: String,
-    },
+    /// Remove a webhook.
+    Remove { name: String },
     /// The last deliveries, newest first.
-    Deliveries {
-        name: String,
-    },
+    Deliveries { name: String },
     /// Send a ping.
-    Ping {
-        name: String,
-    },
+    Ping { name: String },
     /// Send a delivery again.
-    Retry {
-        name: String,
-        id: i64,
-    },
+    Retry { name: String, id: i64 },
 }
 
 // Parsed once per run: the size of its largest variant does not matter.
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum TrustCmd {
+    /// Trust rules.
     List,
     /// Add a trust rule, or replace the one of the same name.
     ///
@@ -280,6 +285,7 @@ pub enum TrustCmd {
         /// Another issuer than GitHub's (its https URL).
         #[arg(long)]
         issuer: Option<String>,
+        /// The audience the CI's token must be for.
         #[arg(long, default_value = "pkgpod")]
         audience: String,
         /// The pkgpod user whose token is given (server admins). Without
@@ -297,32 +303,35 @@ pub enum TrustCmd {
         #[arg(long, default_value_t = 15)]
         minutes: i64,
     },
-    Remove {
-        name: String,
-    },
+    /// Remove a trust rule.
+    Remove { name: String },
 }
 
 #[derive(Subcommand)]
 pub enum ListenerCmd {
+    /// Listeners and their state.
     List,
     /// Add or change a listener.
     Set {
         name: String,
         addr: String,
+        /// A PEM certificate chain file: HTTPS (with --key).
         #[arg(long, default_value = "")]
         cert: String,
+        /// The certificate's PEM key file.
         #[arg(long, default_value = "")]
         key: String,
+        /// Kept, but not listening.
         #[arg(long)]
         disabled: bool,
     },
-    Delete {
-        name: String,
-    },
+    /// Delete a listener.
+    Delete { name: String },
 }
 
 #[derive(Subcommand)]
 pub enum KeyCmd {
+    /// Signing keys.
     List,
     /// Import a secret key (as gpg --export-secret-keys --armor writes
     /// it; `-` for standard input).
@@ -344,9 +353,9 @@ pub enum KeyCmd {
         #[arg(long)]
         replace: bool,
     },
-    Default {
-        name: String,
-    },
+    /// Make a key the one that signs for repositories naming none.
+    Default { name: String },
+    /// Delete a key.
     Delete {
         name: String,
         /// Delete it although repositories sign with it.
@@ -354,15 +363,16 @@ pub enum KeyCmd {
         force: bool,
     },
     /// Print the public key.
-    Public {
-        name: String,
-    },
+    Public { name: String },
 }
 
 #[derive(Subcommand)]
 pub enum StorageCmd {
+    /// Storages and their directories.
     List,
+    /// Add a storage, or change its directory.
     Set { name: String, path: String },
+    /// Delete a storage no repository uses.
     Delete { name: String },
 }
 
@@ -546,9 +556,21 @@ pub fn run(
         }
         return login(&url, user.as_deref().unwrap_or_default(), *password_stdin);
     }
-    let token = token
-        .or_else(|| saved.map(|s| s.token))
-        .filter(|t| !t.is_empty());
+    // The saved token goes only to the server it was made by: another
+    // --url or PKGPOD_URL may be anyone's.
+    let token = match (token, saved) {
+        (Some(t), _) => Some(t),
+        (None, Some(s)) if !s.token.is_empty() && !same_server(&s.url, &url) => {
+            eprintln!(
+                "pkgpod: the saved login is for {}, not {url}: its token is not sent \
+                 (log in there, or give --token)",
+                s.url
+            );
+            None
+        }
+        (None, s) => s.map(|s| s.token),
+    }
+    .filter(|t| !t.is_empty());
     let x = Ctx {
         c: Client::new(&url, token.map(|t| (t, None)))?,
         json,
@@ -653,10 +675,10 @@ pub fn run(
                     }
                 }
             }
+            c.may_upload(&repo)?;
             if !parts.is_empty() || files.len() > 1 {
                 files.extend(parts);
-                let path = format!("/api/v1/repos/{}/upload?{q}", enc(&repo));
-                let v = c.upload_many(&path, &files)?;
+                let v = c.upload_many(&repo, &q, &files)?;
                 x.print(&v, |v| {
                     for r in v.as_array().into_iter().flatten() {
                         show_outcome(r);
@@ -670,12 +692,7 @@ pub fn run(
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
                 let sep = if q.is_empty() { "" } else { "&" };
-                let path = format!(
-                    "/api/v1/repos/{}/upload?{q}{sep}filename={}",
-                    enc(&repo),
-                    enc(&fname)
-                );
-                let v = c.upload(&path, &f)?;
+                let v = c.upload(&repo, &format!("{q}{sep}filename={}", enc(&fname)), &f)?;
                 x.print(&v, |v| {
                     for r in v.as_array().into_iter().flatten() {
                         show_outcome(r);
@@ -839,21 +856,17 @@ pub fn run(
             TeamCmd::List => {
                 let v = c.get("/api/v1/teams")?;
                 x.print(&v, |v| {
-                    table(
-                        v.as_array()
+                    let mut rows = vec![vec!["NAME".into(), "MEMBERS".into()]];
+                    for t in v.as_array().into_iter().flatten() {
+                        let m: Vec<String> = t["members"]
+                            .as_array()
                             .into_iter()
                             .flatten()
-                            .map(|t| {
-                                let m: Vec<String> = t["members"]
-                                    .as_array()
-                                    .into_iter()
-                                    .flatten()
-                                    .map(s)
-                                    .collect();
-                                vec![s(&t["name"]), m.join(" ")]
-                            })
-                            .collect(),
-                    );
+                            .map(s)
+                            .collect();
+                        rows.push(vec![s(&t["name"]), m.join(" ")]);
+                    }
+                    table(rows);
                 });
             }
             TeamCmd::Add { name } => {
@@ -889,13 +902,11 @@ pub fn run(
             GrantCmd::List { repo } => {
                 let v = c.get(&format!("/api/v1/repos/{}/grants", enc(&repo)))?;
                 x.print(&v, |v| {
-                    table(
-                        v.as_array()
-                            .into_iter()
-                            .flatten()
-                            .map(|g| vec![s(&g["subject"]), s(&g["role"])])
-                            .collect(),
-                    );
+                    let mut rows = vec![vec!["SUBJECT".into(), "ROLE".into()]];
+                    for g in v.as_array().into_iter().flatten() {
+                        rows.push(vec![s(&g["subject"]), s(&g["role"])]);
+                    }
+                    table(rows);
                 });
             }
             GrantCmd::Set {
@@ -1526,24 +1537,19 @@ pub fn run(
             KeyCmd::List => {
                 let v = c.get("/api/v1/keys")?;
                 x.print(&v, |v| {
-                    table(
-                        v.as_array()
-                            .into_iter()
-                            .flatten()
-                            .map(|k| {
-                                vec![
-                                    s(&k["name"]),
-                                    s(&k["fingerprint"]),
-                                    match (k["default"] == json!(true), k["missing"] == json!(true))
-                                    {
-                                        (_, true) => "no secret key: import it".into(),
-                                        (true, _) => "default".into(),
-                                        _ => String::new(),
-                                    },
-                                ]
-                            })
-                            .collect(),
-                    );
+                    let mut rows = vec![vec!["NAME".into(), "FINGERPRINT".into(), "".into()]];
+                    for k in v.as_array().into_iter().flatten() {
+                        rows.push(vec![
+                            s(&k["name"]),
+                            s(&k["fingerprint"]),
+                            match (k["default"] == json!(true), k["missing"] == json!(true)) {
+                                (_, true) => "no secret key: import it".into(),
+                                (true, _) => "default".into(),
+                                _ => String::new(),
+                            },
+                        ]);
+                    }
+                    table(rows);
                 });
             }
             KeyCmd::Import {
@@ -1629,13 +1635,11 @@ pub fn run(
             StorageCmd::List => {
                 let v = c.get("/api/v1/storages")?;
                 x.print(&v, |v| {
-                    table(
-                        v.as_array()
-                            .into_iter()
-                            .flatten()
-                            .map(|s2| vec![s(&s2["name"]), s(&s2["path"])])
-                            .collect(),
-                    )
+                    let mut rows = vec![vec!["NAME".into(), "PATH".into()]];
+                    for st in v.as_array().into_iter().flatten() {
+                        rows.push(vec![s(&st["name"]), s(&st["path"])]);
+                    }
+                    table(rows);
                 });
             }
             StorageCmd::Set { name, path } => {
@@ -1749,8 +1753,11 @@ pub fn run(
                 std::thread::sleep(std::time::Duration::from_secs(2));
                 let v = match c.get(&q(last, 5000)) {
                     Ok(v) => v,
-                    // Restarting: try again.
-                    Err(_) => continue,
+                    // Restarting (no connection, a proxy's 502): try again.
+                    Err(e) if e.code == 1 => continue,
+                    // Refused (the token deleted, the right taken away):
+                    // asking again does not change that.
+                    Err(e) => return Err(e),
                 };
                 if v["started"].as_i64() != started {
                     println!("-- the server started again --");
@@ -1798,6 +1805,7 @@ pub fn run(
             x.print(&v, |v| {
                 let mut rows = vec![vec![
                     "JOB".into(),
+                    "KIND".into(),
                     "REPO".into(),
                     "STATE".into(),
                     "STARTED".into(),
@@ -1807,6 +1815,7 @@ pub fn run(
                 for j in v.as_array().into_iter().flatten() {
                     rows.push(vec![
                         s(&j["id"]),
+                        s(&j["kind"]),
                         s(&j["repo"]),
                         s(&j["state"]),
                         when(j["started"].as_i64()),
@@ -2214,19 +2223,37 @@ fn repo(x: &Ctx, cmd: RepoCmd) -> Result<(), CliError> {
                         f["kinds"].as_array().into_iter().flatten().map(s).collect();
                     println!("{} ({}): {}", s(&f["id"]), s(&f["title"]), kinds.join(", "));
                     // Settings by kind: a mirror's are not a hosted one's.
-                    for (kind, list) in f["settings"].as_object().into_iter().flatten() {
+                    let settings: Vec<(&String, Vec<&Value>)> = f["settings"]
+                        .as_object()
+                        .into_iter()
+                        .flatten()
+                        .map(|(k, l)| (k, l.as_array().into_iter().flatten().collect()))
+                        .collect();
+                    // Columns as wide as this format's longest entry.
+                    let width = |vs: &mut dyn Iterator<Item = &Value>| {
+                        vs.map(|v| s(v).chars().count()).max().unwrap_or(0)
+                    };
+                    let all = || settings.iter().flat_map(|(_, l)| l.iter());
+                    let nw = width(&mut all().map(|st| &st["name"]));
+                    let tw = width(&mut all().map(|st| &st["type"]));
+                    for (kind, list) in &settings {
                         println!("  settings ({kind}):");
-                        for st in list.as_array().into_iter().flatten() {
+                        for st in list {
                             println!(
-                                "    {:<16} {:<8} {}",
+                                "    {:<nw$} {:<tw$} {}",
                                 s(&st["name"]),
                                 s(&st["type"]),
                                 s(&st["help"])
                             );
                         }
                     }
+                    let ops: Vec<&Value> = f["ops"].as_array().into_iter().flatten().collect();
+                    if ops.is_empty() {
+                        continue;
+                    }
+                    let ow = width(&mut ops.iter().map(|o| &o["name"]));
                     println!("  operations:");
-                    for o in f["ops"].as_array().into_iter().flatten() {
+                    for o in ops {
                         let ps: Vec<String> = o["params"]
                             .as_array()
                             .into_iter()
@@ -2234,7 +2261,7 @@ fn repo(x: &Ctx, cmd: RepoCmd) -> Result<(), CliError> {
                             .map(|p| s(&p["name"]))
                             .collect();
                         println!(
-                            "    {:<12} {} ({})",
+                            "    {:<ow$} {} ({})",
                             s(&o["name"]),
                             s(&o["help"]),
                             ps.join(", ")
@@ -2295,9 +2322,18 @@ fn user(x: &Ctx, cmd: UserCmd) -> Result<(), CliError> {
             admin,
             disabled,
             password,
+            password_stdin,
         } => {
-            let pw = if password {
-                Some(read_pw(false, &format!("New password for {name}: "))?)
+            if admin.is_none() && disabled.is_none() && !password && !password_stdin {
+                return Err(CliError::usage(
+                    "nothing to change: give --admin, --disabled, --password or --password-stdin",
+                ));
+            }
+            let pw = if password || password_stdin {
+                Some(read_pw(
+                    password_stdin,
+                    &format!("New password for {name}: "),
+                )?)
             } else {
                 None
             };
@@ -2314,9 +2350,9 @@ fn user(x: &Ctx, cmd: UserCmd) -> Result<(), CliError> {
                 &Value::Null,
             )?;
         }
-        UserCmd::Passwd => {
-            let old = read_pw(false, "Current password: ")?;
-            let new = read_pw(false, "New password: ")?;
+        UserCmd::Passwd { password_stdin } => {
+            let old = read_pw(password_stdin, "Current password: ")?;
+            let new = read_pw(password_stdin, "New password: ")?;
             c.post("/api/v1/me/password", &json!({"old": old, "new": new}))?;
             println!("password changed");
         }
@@ -2375,7 +2411,7 @@ fn login_oidc(url: &str, audience: &str, rule: Option<&str>) -> Result<(), CliEr
         .as_str()
         .ok_or_else(|| CliError::other("no token in the reply"))?;
     let p = save(&Saved {
-        url: url.to_string(),
+        url: c.base.clone(),
         token: token.to_string(),
     })?;
     println!(
@@ -2414,7 +2450,7 @@ fn login(url: &str, user: &str, stdin: bool) -> Result<(), CliError> {
         .as_str()
         .ok_or_else(|| CliError::other("no token in the reply"))?;
     let p = save(&Saved {
-        url: url.to_string(),
+        url: c.base.clone(),
         token: token.to_string(),
     })?;
     println!("logged in as {user}; token saved in {}", p.display());

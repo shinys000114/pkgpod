@@ -8,10 +8,14 @@ use rustix::termios::{LocalModes, OptionalActions, tcgetattr, tcsetattr};
 
 /// Prompts on the controlling terminal and reads a line without echo.
 pub fn read_password(prompt: &str) -> io::Result<String> {
+    // In a script or a CI job there is none to ask on.
     let tty = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open("/dev/tty")?;
+        .open("/dev/tty")
+        .map_err(|e| {
+            io::Error::new(e.kind(), format!("no terminal ({e}): use --password-stdin"))
+        })?;
     let old = tcgetattr(&tty)?;
     let mut quiet = old.clone();
     quiet.local_modes.remove(LocalModes::ECHO);
