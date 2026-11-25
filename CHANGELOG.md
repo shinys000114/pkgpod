@@ -33,7 +33,8 @@ Formats:
   differ in either, is refused (imports read Release files the same
   way).
 - **Files**: trees uploaded by path, each file with the modification
-  time given (`mtime`) or the upload's; links (`master/latest`) that
+  time given (`mtime`, whole unix seconds up to the end of the year
+  9999; another value is refused) or the upload's; links (`master/latest`) that
   serve another path of the tree; a directory's `.HEADER.md` and
   `.FOOTER.md` shown above and below its listing; cleanup of old build
   directories; mirrors and imports over rsync and HTTP listings
@@ -95,7 +96,8 @@ Formats:
   normalizes it to, so what composer takes for one version is one here
   (`v1.0.0` and `1.0.0`; `1.0.0-beta1`, `1.0.0-beta.1`, `1.0.0-b1` and
   `1.0.0-beta01`), and a suffix composer refuses (`1.0.0-beta_1`) is
-  refused, as are dev versions and `+build` metadata.
+  refused, as are dev versions and `+build` metadata; white space around
+  a version is taken off.
 - **Conda**: channels with a repodata.json per subdir (noarch and the
   usual platforms always), `.conda` and `.tar.bz2` packages read for
   their info/index.json.
@@ -119,7 +121,9 @@ Formats:
   with a pkgpod token as the password, search, recipe and package
   revisions and their files; a revision's files wait until its
   manifest, uploaded last, brings them in as one version; conan remove
-  removes revisions as versions too.
+  removes revisions as versions too. A private remote answers a
+  logged-in user without a grant 404 and an anonymous ping 401, as its
+  other calls do.
 - **Swift**: the Swift package registry API (SE-0292, version 1):
   releases, release metadata, source archives (with a Digest header),
   manifests and their Swift-version variants, identifiers by repository
@@ -266,7 +270,14 @@ the store has lost is a 500 with `no-store`, and logged. A mirror's
 files are served with the types a hosted repository gives the same
 names (a files mirror keeps the extension's where those have none),
 and what its engine keeps for itself (a pool file's replacement
-waiting for its dist) is neither listed nor served.
+waiting for its dist) is neither listed nor served. A mirror's file
+with a time before 1970 or after the year 9999 (rsync keeps an
+upstream's) is served with the nearest time an HTTP date can say, and
+a range of a mirror's file only when `If-Range` names the file as it
+is now (its ETag or its Last-Modified), else the whole file, so a
+download resumed after a sync never splices two files. OCI answers of
+a repository that is not public, or of a group with such a member,
+carry `Vary: Authorization` too.
 
 Input is bounded: a .deb's control file is read up to 1 MiB and its
 control.tar up to 64 MiB, and the ar name table and long names of a
@@ -309,7 +320,7 @@ cache card, says why a change failed and keeps its buttons; an error
 of a poll (the job lists, every 5 s) is said in the note at the page's
 foot, not over a result, and goes when a poll is answered again. A
 job's page shows its state as it changes (a queued job starting)
-while its log streams. Browse offers downloads for files only. A
+while its log streams, a line longer than a read in pieces. Browse offers downloads for files only. A
 private repository's badge token is shown to its admins only. The
 login page says where the first admin's password is kept only until
 the first login to the console. Every answer of the management
