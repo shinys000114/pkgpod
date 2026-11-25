@@ -426,12 +426,12 @@ your role):
 
 | Tab | What it does |
 | --- | --- |
-| Packages (Images for OCI, All files for files) | The current version's packages, filtered by name; a package's details and downloads; Remove… and Promote… on the checked ones. A deb mirror's Packages come from its own indexes, by dist, component and architecture, with promotion of the checked ones into a hosted repository. |
+| Packages (Images for OCI, All files for files) | The current version's packages, filtered by name (a name with several files, versions or places folded under one row, which chooses them all); a package's details and downloads; Remove… and Promote… on the checked ones. A deb mirror's Packages come from its own indexes, by dist, component and architecture, with promotion of the checked ones into a hosted repository. |
 | Browse | The repository's tree, by directory. |
 | Versions | Versions and labels: compare two versions, label one, see its changes, roll back to it. |
 | How to use | The client commands for this repository with its address (for deb, per dist; rpm, per group; apk, per branch/repository; ipk, per feed); Make a token puts a token for this repository in them. |
 | Activity | What was done to the repository and by whom (writers). |
-| Upload & change | Upload files (all in one version, with the format's upload fields; not for OCI and npm, whose clients publish), the format's operations (each previewed as a plan before it is applied), Import (deb, files, oci), Promote into another repository of the format. |
+| Upload & change | Upload files first (all in one version, with the format's upload fields; not for OCI and npm, whose clients publish); then Change, the format's operations (each previewed as a plan before it is applied); then Import (deb, files, oci) and Promote into another repository of the format. |
 | Sync | Mirrors: the source, the next scheduled run, Sync now, recent jobs and their logs. A job that found files gone upstream lists them and can allow them to be missing. |
 | Members | Groups: the repositories it reads, in order. |
 | Cache | Proxies: what is kept, with pin, unpin, evict, and fetching paths now. |

@@ -3521,6 +3521,7 @@ pub struct PkgRow {
     pub version: String,
     pub extra: String,
     pub size: String,
+    pub bytes: u64,
     /// What removing it removes (a source package's directory).
     pub path: String,
     /// The file itself, in the stored tree.
@@ -3529,10 +3530,56 @@ pub struct PkgRow {
     pub downloads: i64,
 }
 
+/// The files of one package name, shown under one row when it has
+/// several (versions, dists, architectures).
+pub struct PkgGroup {
+    pub name: String,
+    pub rows: Vec<PkgRow>,
+    pub versions: usize,
+    pub size: String,
+    /// Each version's downloads once (they are counted by version).
+    pub downloads: i64,
+}
+
+/// Rows by package name, in the order they came; one group per row
+/// when `by_name` is off.
+fn pkg_groups(rows: Vec<PkgRow>, by_name: bool) -> Vec<PkgGroup> {
+    let mut out: Vec<PkgGroup> = Vec::new();
+    for r in rows {
+        match out.last_mut() {
+            Some(g) if by_name && g.name == r.name => g.rows.push(r),
+            _ => out.push(PkgGroup {
+                name: r.name.clone(),
+                rows: vec![r],
+                versions: 0,
+                size: String::new(),
+                downloads: 0,
+            }),
+        }
+    }
+    for g in &mut out {
+        let mut seen: Vec<&str> = Vec::new();
+        for r in &g.rows {
+            if !seen.contains(&r.version.as_str()) {
+                seen.push(&r.version);
+                g.downloads += r.downloads;
+            }
+        }
+        g.versions = seen.len();
+        g.size = crate::serve::human(g.rows.iter().map(|r| r.bytes).sum());
+    }
+    out
+}
+
 #[derive(Template)]
 #[template(path = "packages.html")]
 struct PackagesPart {
-    rows: Vec<PkgRow>,
+    groups: Vec<PkgGroup>,
+    /// Some name has several files: they are folded under it (and the
+    /// table is not sorted by column).
+    grouped: bool,
+    /// Rows in all.
+    total: usize,
     show_repo: bool,
     can_write: bool,
     repo: String,
@@ -3621,6 +3668,7 @@ fn pkg_rows(v: &Value) -> Vec<PkgRow> {
                 .as_u64()
                 .map(crate::serve::human)
                 .unwrap_or_default(),
+            bytes: h["size"].as_u64().unwrap_or(0),
             path: package_path(&s(&h["path"])),
             file: s(&h["path"]),
             downloads: 0,
@@ -3751,6 +3799,7 @@ async fn mirror_packages(app: Arc<App>, v: Viewer, repo: String, q: MirrorQ) -> 
                     version: p.version.clone(),
                     extra: p.arch.clone(),
                     size: crate::serve::human(p.size),
+                    bytes: p.size,
                     path: p.filename.clone(),
                     file: p.filename.clone(),
                     downloads: 0,
@@ -3852,9 +3901,14 @@ async fn packages_part(
     } else {
         Vec::new()
     };
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+    let total = rows.len();
+    let groups = pkg_groups(rows, true);
     render(&PackagesPart {
-        limit_hit: rows.len() >= limit,
-        rows,
+        limit_hit: total >= limit,
+        grouped: groups.iter().any(|g| g.rows.len() > 1),
+        total,
+        groups,
         show_repo: false,
         can_write,
         repo,
@@ -4967,9 +5021,12 @@ async fn search_rows(State(app): St, v: Viewer, Query(q): Query<QQ>) -> Response
     ) {
         Ok(list) => {
             let rows = pkg_rows(&list);
+            let total = rows.len();
             render(&PackagesPart {
-                limit_hit: rows.len() >= limit,
-                rows,
+                limit_hit: total >= limit,
+                grouped: false,
+                total,
+                groups: pkg_groups(rows, false),
                 show_repo: true,
                 can_write: false,
                 repo: String::new(),
