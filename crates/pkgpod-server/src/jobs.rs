@@ -604,6 +604,7 @@ fn sync(
         let mode = match r.format.as_str() {
             "rpm" => pkgpod_mirror::rsync::Mode::Rpm,
             "arch" => pkgpod_mirror::rsync::Mode::Arch,
+            "apk" => pkgpod_mirror::rsync::Mode::Apk,
             _ => pkgpod_mirror::rsync::Mode::Apt,
         };
         let mut m = pkgpod_mirror::rsync::RsyncMirror::new(&source, mode);
@@ -669,6 +670,35 @@ fn sync(
             s.push_str(&format!(
                 "; {}: {}",
                 if x.repo.is_empty() { "/" } else { &x.repo },
+                x.error.as_deref().unwrap_or("failed")
+            ));
+        }
+        return Ok((rep.ok(), s, json!(rep)));
+    }
+    if r.format == "apk" {
+        let mut m = pkgpod_mirror::apk::ApkMirror::new(
+            &source,
+            &list_of(r, "branches"),
+            &list_of(r, "repos"),
+            &list_of(r, "architectures"),
+        );
+        m.prune = r.setting_bool("prune");
+        m.max_delete = int_of(r, "max_delete", 10_000).max(0) as usize;
+        m.parallel = int_of(r, "parallel", 8).clamp(1, 64) as usize;
+        let rep = pkgpod_mirror::apk::sync(&m, &ctx).map_err(interrupted)?;
+        let mut s = format!(
+            "{} file(s) downloaded ({}), {} deleted",
+            rep.downloaded,
+            crate::serve::human(rep.downloaded_bytes),
+            rep.deleted
+        );
+        if rep.would_delete > 0 {
+            s.push_str(&format!(", {} unreferenced left", rep.would_delete));
+        }
+        for x in rep.repos.iter().filter(|x| !x.ok) {
+            s.push_str(&format!(
+                "; {}: {}",
+                x.repo,
                 x.error.as_deref().unwrap_or("failed")
             ));
         }

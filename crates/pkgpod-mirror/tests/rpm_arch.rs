@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The dnf and Arch mirror engines against a local server: everything
+//! The dnf, Arch and Alpine mirror engines against a local server: everything
 //! the indexes name, checked; nothing fetched again; a failure keeps the
 //! old index; what no index names pruned.
 
@@ -277,4 +277,73 @@ fn arch_repositories_with_their_signatures_database_last() {
         d.join("core/os/x86_64/a-2-1-x86_64.pkg.tar.zst.sig")
             .exists()
     );
+}
+
+/// An Alpine repository index naming these packages.
+fn apk_repo(root: &Path, dir: &str, pkgs: &[Vec<u8>]) {
+    let mut stanzas = Vec::new();
+    for a in pkgs {
+        let p = pkgpod_apk::read_package(a).unwrap();
+        put(root, &format!("{dir}/{}-{}.apk", p.name, p.version), a);
+        stanzas.push(p.stanza);
+    }
+    let refs: Vec<&str> = stanzas.iter().map(String::as_str).collect();
+    let idx = pkgpod_apk::index("test", &refs, 0, |_| {
+        Ok(("test.rsa.pub".into(), vec![1, 2, 3]))
+    })
+    .unwrap();
+    put(root, &format!("{dir}/APKINDEX.tar.gz"), &idx);
+}
+
+#[test]
+fn alpine_repositories_checked_by_their_control_checksum() {
+    use pkgpod_apk::testutil::make_apk;
+    use pkgpod_mirror::apk::{ApkMirror, sync};
+    let e = Env::new();
+    let root = e.up.path();
+    let hello = |v: &str| make_apk("hello", v, "x86_64", ("usr/bin/hello", v.as_bytes()));
+    apk_repo(root, "v3.22/main/x86_64", &[hello("1.0-r0")]);
+    apk_repo(
+        root,
+        "v3.22/community/x86_64",
+        &[make_apk("tool", "2-r0", "x86_64", ("usr/bin/tool", b"t"))],
+    );
+    let mut m = ApkMirror::new(
+        &e.srv.url,
+        &["v3.22".into()],
+        &["main".into(), "community".into()],
+        &["x86_64".into()],
+    );
+    m.prune = true;
+    m.retries = 1;
+    let (cancel, log) = (AtomicBool::new(false), |l: &str| eprintln!("mirror: {l}"));
+    let r = sync(&m, &e.ctx(&cancel, &log)).unwrap();
+    assert!(r.ok(), "{r:#?}");
+    assert_eq!((r.pool_files, r.downloaded), (2, 2));
+    let d = e.dest();
+    assert!(d.join("v3.22/main/x86_64/hello-1.0-r0.apk").exists());
+    assert_eq!(
+        std::fs::read(d.join("v3.22/main/x86_64/APKINDEX.tar.gz")).unwrap(),
+        std::fs::read(root.join("v3.22/main/x86_64/APKINDEX.tar.gz")).unwrap()
+    );
+    let r = sync(&m, &e.ctx(&cancel, &log)).unwrap();
+    assert_eq!(r.downloaded, 0, "{r:#?}");
+    // Upstream serving other content than the index names: refused, the
+    // old index stays.
+    let old = std::fs::read(d.join("v3.22/main/x86_64/APKINDEX.tar.gz")).unwrap();
+    apk_repo(root, "v3.22/main/x86_64", &[hello("1.1-r0")]);
+    put(root, "v3.22/main/x86_64/hello-1.1-r0.apk", &hello("9.9-r0"));
+    let r = sync(&m, &e.ctx(&cancel, &log)).unwrap();
+    assert!(!r.ok(), "{r:#?}");
+    assert_eq!(
+        std::fs::read(d.join("v3.22/main/x86_64/APKINDEX.tar.gz")).unwrap(),
+        old
+    );
+    assert!(!d.join("v3.22/main/x86_64/hello-1.1-r0.apk").exists());
+    // Right again: switched, the old package pruned.
+    apk_repo(root, "v3.22/main/x86_64", &[hello("1.1-r0")]);
+    let r = sync(&m, &e.ctx(&cancel, &log)).unwrap();
+    assert!(r.ok(), "{r:#?}");
+    assert!(d.join("v3.22/main/x86_64/hello-1.1-r0.apk").exists());
+    assert!(!d.join("v3.22/main/x86_64/hello-1.0-r0.apk").exists());
 }

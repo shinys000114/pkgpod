@@ -10855,6 +10855,42 @@ fn alpine_packages_with_apk() {
             "{image}: {out}"
         );
     }
+
+    // A mirror of it over http: packages checked against the index, the
+    // index as signed upstream; apk trusting it with upstream's key only.
+    s.cli(&["repo", "set", "alp", "public=true"]).unwrap();
+    s.cli(&[
+        "repo",
+        "create",
+        "alpmir",
+        "-f",
+        "apk",
+        "-k",
+        "mirror",
+        "-s",
+        &format!("source={}", s.url("/alp/")),
+        "-s",
+        "branches=v3.22",
+        "-s",
+        "repos=main",
+        "-s",
+        "architectures=x86_64",
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let out = s.cli(&["sync", "alpmir", "--wait"]).unwrap();
+    assert!(out.contains("ok:"), "{out}");
+    let mirror = format!(
+        "echo {}v3.22/main > /etc/apk/repositories && apk update && apk add hello-apk motd-apk && hello-apk",
+        s.url("/alpmir/")
+    );
+    for &image in &images {
+        let (ok, out) = in_alpine(image, Some((&key, &name)), &mirror);
+        assert!(ok && out.contains("hello 1."), "{image}: {out}");
+        let (ok, out) = in_alpine(image, None, &mirror);
+        assert!(!ok && out.contains("UNTRUSTED"), "{image}: {out}");
+    }
 }
 
 #[test]

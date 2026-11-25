@@ -26,6 +26,8 @@ pub enum Mode {
     Rpm,
     /// Arch Linux repositories: packages first, then the databases.
     Arch,
+    /// Alpine repositories: packages first, then each APKINDEX.
+    Apk,
     Tree,
 }
 
@@ -114,6 +116,8 @@ pub struct Ctx<'a> {
 const INDEX_EXCLUDES: [&str; 4] = ["Packages*", "Sources*", "Release*", "InRelease"];
 /// A dnf repository's metadata: it names the packages, so it comes last.
 const RPM_INDEX_EXCLUDES: [&str; 1] = ["repodata/"];
+/// An Alpine repository's index: last.
+const APK_INDEX_EXCLUDES: [&str; 1] = ["APKINDEX.tar.gz"];
 /// An Arch repository's databases (and their signatures): last.
 const ARCH_INDEX_EXCLUDES: [&str; 7] = [
     "*.db",
@@ -157,10 +161,11 @@ pub fn sync(m: &RsyncMirror, ctx: &Ctx) -> Result<RsyncReport, Error> {
         .collect();
     let passes: Vec<(&str, Vec<String>, bool)> = match m.mode {
         Mode::Tree => vec![("tree", temp.clone(), m.delete)],
-        Mode::Apt | Mode::Rpm | Mode::Arch => {
+        Mode::Apt | Mode::Rpm | Mode::Arch | Mode::Apk => {
             let excludes: &[&str] = match m.mode {
                 Mode::Rpm => &RPM_INDEX_EXCLUDES,
                 Mode::Arch => &ARCH_INDEX_EXCLUDES,
+                Mode::Apk => &APK_INDEX_EXCLUDES,
                 _ => &INDEX_EXCLUDES,
             };
             let mut first: Vec<String> =

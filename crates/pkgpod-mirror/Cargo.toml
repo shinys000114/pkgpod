@@ -1,6 +1,6 @@
 [package]
 name = "pkgpod-mirror"
-description = "pkgpod mirror engines: apt, dnf and Arch repositories over HTTP, rsync"
+description = "pkgpod mirror engines: apt, dnf, Arch and Alpine repositories over HTTP, rsync"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,6 +11,7 @@ publish = false
 [dependencies]
 pkgpod-base.workspace = true
 pkgpod-deb.workspace = true
+pkgpod-apk.workspace = true
 reqwest.workspace = true
 thiserror.workspace = true
 flate2.workspace = true
@@ -30,6 +31,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "time", "macros"] }
 
 [dev-dependencies]
 pkgpod-deb = { workspace = true, features = ["testutil"] }
+pkgpod-apk = { workspace = true, features = ["testutil"] }
 tempfile.workspace = true
 axum.workspace = true
 tower-http = { workspace = true, features = ["fs"] }
