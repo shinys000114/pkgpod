@@ -367,7 +367,13 @@ fn fetch_and_take_in(
             name: d.clone(),
             suite: field("Suite"),
             codename: field("Codename"),
-            description: field("Description"),
+            // A dist's description is one line here; an upstream one
+            // that goes on is cut at its first line.
+            description: field("Description")
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_string(),
             components: comps,
             files,
             sources,

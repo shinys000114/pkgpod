@@ -90,7 +90,8 @@ pub struct ReleaseMeta {
     pub valid_until: Option<OffsetDateTime>,
     pub not_automatic: bool,
     pub but_automatic_upgrades: bool,
-    /// Index files can also be fetched by their sha256 (`by-hash/`).
+    /// Index files can also be fetched by their sha256 and sha512
+    /// (`by-hash/`).
     pub acquire_by_hash: bool,
 }
 

@@ -15,7 +15,7 @@
 //! ```text
 //! dists/<dist>/{Release,InRelease,Release.gpg}
 //! dists/<dist>/<component>/binary-<arch>/{Packages,Packages.gz,Packages.xz,Release}
-//! dists/<dist>/<component>/binary-<arch>/by-hash/SHA256/<sha256>
+//! dists/<dist>/<component>/binary-<arch>/by-hash/{SHA256,SHA512}/<hash>
 //! pool/<component>/<prefix>/<source>/<file>.deb
 //! key.asc                                  the public key (signed repositories)
 //! <path>                                   the other files (a README, a keyring)
@@ -35,7 +35,6 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 
 use crate::control::parse_paragraph;
-use crate::deb::read_deb;
 use crate::hash::{Hashes, hash_bytes};
 use crate::index::{
     IndexFile, IndexPackage, ReleaseMeta, component_release, gzip, packages_text, release_text, xz,
@@ -45,7 +44,7 @@ use crate::version;
 
 /// Bumped when the published layout changes, so no dist is reused from a
 /// version published by an older pkgpod.
-const GENERATOR: u32 = 3;
+const GENERATOR: u32 = 4;
 
 pub struct Deb;
 
@@ -187,6 +186,17 @@ pub fn check_name(what: &str, s: &str) -> Result<()> {
     }
 }
 
+/// A value the signed Release has on one line: a line break would add
+/// fields of the writer's choosing, or end the paragraph.
+fn check_line(what: &str, s: &str) -> Result<()> {
+    if s.contains(char::is_control) {
+        return Err(Error::Invalid(format!(
+            "{what} {s:?}: one line of text, without control characters"
+        )));
+    }
+    Ok(())
+}
+
 fn dist_path(d: &str) -> String {
     format!("dists/{d}/_dist")
 }
@@ -283,6 +293,22 @@ fn check_source_into(
                 )));
             }
         }
+    }
+    Ok(())
+}
+
+/// Can `file`, a package of `arch`, go into dist `d`? Only where an
+/// index lists it: arch-all ones anywhere, others where the dist
+/// publishes their architecture (or names none).
+fn check_arch(def: &DistDef, d: &str, file: &str, arch: &str) -> Result<()> {
+    if arch != "all"
+        && !def.architectures.is_empty()
+        && !def.architectures.iter().any(|a| a == arch)
+    {
+        return Err(Error::Invalid(format!(
+            "{file} is {arch}; dist {d} publishes {}",
+            def.architectures.join(" ")
+        )));
     }
     Ok(())
 }
@@ -440,6 +466,15 @@ impl Deb {
             not_automatic: flag("not_automatic", old.not_automatic),
             but_automatic_upgrades: flag("but_automatic_upgrades", old.but_automatic_upgrades),
         };
+        for (k, v) in [
+            ("suite", &def.suite),
+            ("codename", &def.codename),
+            ("origin", &def.origin),
+            ("label", &def.label),
+            ("description", &def.description),
+        ] {
+            check_line(k, v)?;
+        }
         let mut dropped = Vec::new();
         for (c, _) in e.list(&format!("dists/{name}"))? {
             if !c.starts_with('_') && !components.contains(&c) {
@@ -561,6 +596,12 @@ impl Deb {
         if !defs.contains_key(from) {
             return Err(Error::NotFound(format!("no dist {from}")));
         }
+        // A move would put each package at its own path, then remove it.
+        if from == to {
+            return Err(Error::Invalid(format!(
+                "from and to are the same dist ({from})"
+            )));
+        }
         let mut picked = Vec::new();
         for (path, entry) in e.walk(&format!("dists/{from}"))? {
             let Some((_, c, f)) = split_pkg_path(&path) else {
@@ -575,6 +616,7 @@ impl Deb {
                 if !to_def.components.iter().any(|x| x == c) {
                     return Err(Error::Invalid(format!("dist {to} has no component {c}")));
                 }
+                check_arch(to_def, to, f, &m.architecture)?;
                 picked.push((path.clone(), format!("dists/{to}/{c}/{f}"), entry));
             }
         }
@@ -621,8 +663,16 @@ impl Deb {
     }
 
     fn ingest_deb(&self, cx: &Cx, up: &Upload, p: &Value, e: &mut Edit) -> Result<String> {
-        let file = cx.store.path(&up.sha256);
-        let info = read_deb(&file)?;
+        // Errors name the upload, not the store's path of it.
+        let f = std::fs::File::open(cx.store.path(&up.sha256))?;
+        let info = crate::deb::read_deb_from(std::io::BufReader::new(f))
+            .and_then(|i| i.check_fields().map(|_| i))
+            .map_err(|x| {
+                Error::Invalid(format!(
+                    "{}: {x}",
+                    up.filename.as_deref().unwrap_or("the upload")
+                ))
+            })?;
 
         if info.hashes.sha256 != up.sha256.hex() {
             return Err(Error::Corrupt("uploaded file changed while read".into()));
@@ -671,13 +721,7 @@ impl Deb {
             if !def.components.contains(&comp) {
                 return Err(Error::Invalid(format!("dist {d} has no component {comp}")));
             }
-            if arch != "all" && !def.architectures.is_empty() && !def.architectures.contains(&arch)
-            {
-                return Err(Error::Invalid(format!(
-                    "{filename} is {arch}; dist {d} publishes {}",
-                    def.architectures.join(" ")
-                )));
-            }
+            check_arch(def, d, &filename, &arch)?;
             let clash = pool_clashes(e, &comp, &filename, &up.sha256)?;
             if !clash.is_empty() {
                 if !replace {
@@ -871,6 +915,9 @@ impl Format for Deb {
     }
 
     fn check_settings(&self, kind: Kind, settings: &Value) -> Result<()> {
+        for k in ["origin", "label"] {
+            check_line(k, str_of(settings, k))?;
+        }
         if kind != Kind::Mirror {
             return Ok(());
         }
@@ -1166,8 +1213,7 @@ impl Format for Deb {
             let mut head = [0u8; 8];
             let n = {
                 use std::io::Read;
-                let mut f = std::fs::File::open(&path)
-                    .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
+                let mut f = std::fs::File::open(&path)?;
                 f.read(&mut head).unwrap_or(0)
             };
             if head[..n] == *b"!<arch>\n" {
@@ -1176,8 +1222,7 @@ impl Format for Deb {
             }
             let named = up.filename.as_deref().is_some_and(|n| n.ends_with(".dsc"));
             if (named || up.filename.is_none()) && up.size < (1 << 20) {
-                let data = std::fs::read(&path)
-                    .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
+                let data = std::fs::read(&path)?;
                 match crate::dsc::parse_dsc(&data) {
                     Ok(d) => {
                         dscs.push((up, d, data));
@@ -1256,6 +1301,9 @@ impl Format for Deb {
                 return Err(Error::Invalid(format!(
                     "the target's dist {d} has no component {c}"
                 )));
+            }
+            if let Some((_, _, m)) = pkg_meta(entry) {
+                check_arch(def, d, f, &m.architecture)?;
             }
             if let Entry::Blob { sha256, .. } = entry {
                 let clash = pool_clashes(e, c, f, sha256)?;
@@ -1357,6 +1405,7 @@ fn publish(cx: &PublishCx) -> Result<Option<Digest>> {
             "label": str_of(settings, "label"),
             "sign": bool_of(settings, "sign"),
             "by_hash": bool_of(settings, "by_hash"),
+            "valid_days": valid_days,
             "key": cx.signer.key_id(cx.key()).unwrap_or_default(),
         })
     };
@@ -1549,8 +1598,11 @@ fn generate_dist(
             });
         }
         if by_hash && meta.acquire_by_hash {
+            // apt asks by the strongest hash the Release lists (SHA512);
+            // SHA256 for the older ones.
             let dir = rel.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
             out.push((format!("{dir}/by-hash/SHA256/{}", h.sha256), data.clone()));
+            out.push((format!("{dir}/by-hash/SHA512/{}", h.sha512), data.clone()));
         }
         out.push((rel, data));
     };

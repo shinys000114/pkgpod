@@ -63,9 +63,12 @@ pub fn check_feed(s: &str) -> Result<()> {
 /// The `control` file in a control tarball (gzip'd tar).
 fn control_in_tar_gz(data: &[u8]) -> Result<String> {
     let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(data));
+    // Raw entries: tar reads a GNU long name or a pax header whole,
+    // whatever size it claims.
     for f in ar
         .entries()
         .map_err(|e| invalid(format!("control.tar.gz: {e}")))?
+        .raw(true)
     {
         let mut f = f.map_err(|e| invalid(format!("control.tar.gz: {e}")))?;
         let p = f
@@ -99,6 +102,7 @@ pub fn read_package(data: &[u8]) -> Result<Paragraph> {
         for f in ar
             .entries()
             .map_err(|e| invalid(format!("the package: {e}")))?
+            .raw(true)
         {
             let mut f = f.map_err(|e| invalid(format!("the package: {e}")))?;
             let p = f
@@ -424,5 +428,88 @@ mod tests {
         assert!(
             check_feed("main").is_ok() && check_feed("../x").is_err() && check_feed("a/b").is_err()
         );
+    }
+
+    /// Yocto's ipk (an ar archive) with `control` as its control file.
+    fn yocto_ipk(control: &[u8]) -> Vec<u8> {
+        let tgz = |p: &str, d: &[u8]| {
+            let mut b = tar::Builder::new(flate2::write::GzEncoder::new(
+                Vec::new(),
+                flate2::Compression::fast(),
+            ));
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Regular);
+            h.set_size(d.len() as u64);
+            h.set_mode(0o644);
+            b.append_data(&mut h, p, d).unwrap();
+            b.into_inner().unwrap().finish().unwrap()
+        };
+        let mut ar = b"!<arch>\n".to_vec();
+        for (name, data) in [
+            ("debian-binary", b"2.0\n".to_vec()),
+            ("control.tar.gz", tgz("./control", control)),
+            ("data.tar.gz", tgz("./usr/share/hello", b"hi")),
+        ] {
+            ar.extend(
+                format!(
+                    "{:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n",
+                    name,
+                    0,
+                    0,
+                    0,
+                    100644,
+                    data.len()
+                )
+                .as_bytes(),
+            );
+            ar.extend(&data);
+            if data.len() % 2 == 1 {
+                ar.push(b'\n');
+            }
+        }
+        ar
+    }
+
+    #[test]
+    fn control_is_bounded() {
+        let big = format!("{CONTROL}X-Padding: {}\n", "a".repeat(1 << 20));
+        let err = read_package(&yocto_ipk(big.as_bytes())).unwrap_err();
+        assert!(err.to_string().contains("larger than 1 MiB"), "{err}");
+        // OpenWrt's (a tar.gz): a GNU long name, which tar would read
+        // whole whatever size it claims, is not taken as a name.
+        let control_tgz = {
+            let ipk = make_ipk(CONTROL, &[]);
+            let mut a = tar::Archive::new(flate2::read::GzDecoder::new(&ipk[..]));
+            let mut found = Vec::new();
+            for f in a.entries().unwrap() {
+                let mut f = f.unwrap();
+                if f.path().unwrap().ends_with("control.tar.gz") {
+                    f.read_to_end(&mut found).unwrap();
+                }
+            }
+            found
+        };
+        let mut b = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::fast(),
+        ));
+        for (name, kind, data) in [
+            (
+                "././@LongLink",
+                tar::EntryType::GNULongName,
+                &b"./control.tar.gz\0"[..],
+            ),
+            ("decoy", tar::EntryType::Regular, &control_tgz[..]),
+        ] {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(kind);
+            h.set_size(data.len() as u64);
+            h.set_mode(0o644);
+            h.as_gnu_mut().unwrap().name[..name.len()].copy_from_slice(name.as_bytes());
+            h.set_cksum();
+            b.append(&h, data).unwrap();
+        }
+        let ipk = b.into_inner().unwrap().finish().unwrap();
+        assert!(read_package(&ipk).is_err());
     }
 }
