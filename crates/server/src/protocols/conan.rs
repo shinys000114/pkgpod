@@ -191,13 +191,14 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
         _ => {}
     }
     if a.role.is_none() {
+        // Logged in without a right: as if it were not there.
         return if a.caller.user.is_none() {
             text(
                 StatusCode::UNAUTHORIZED,
                 "log in: conan remote login <remote> token -p <token>",
             )
         } else {
-            text(StatusCode::FORBIDDEN, "no access")
+            text(StatusCode::NOT_FOUND, "not found")
         };
     }
     let writing = matches!(method, Method::PUT | Method::DELETE);

@@ -49,6 +49,10 @@ pub async fn handle(
             );
             return r;
         }
+        // Without a right: as if it were not there.
+        if role.is_none() {
+            return text(StatusCode::NOT_FOUND, "not found");
+        }
         return text(
             StatusCode::FORBIDDEN,
             format!("no write access to {}", repo.name),

@@ -18,7 +18,7 @@ pub mod stats;
 pub mod status;
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use axum::Router;
 use axum::body::Body;
@@ -365,7 +365,9 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
         .map(String::from)
         .or_else(|| req.uri().authority().map(|a| a.to_string()))
         .unwrap_or_default();
-    let raw_path = req.uri().path().to_string();
+    // One leading slash: redirects built from the path (a directory's
+    // trailing slash) are then never to //<another host>/.
+    let raw_path = format!("/{}", req.uri().path().trim_start_matches('/'));
     let Some(path) = segments(&raw_path) else {
         return status(StatusCode::BAD_REQUEST);
     };
@@ -382,7 +384,8 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
         return status(StatusCode::FORBIDDEN);
     }
     // Checking a password is slow on purpose: off the async threads.
-    let caller = if req.headers().contains_key(header::AUTHORIZATION) {
+    let authorized = req.headers().contains_key(header::AUTHORIZATION);
+    let caller = if authorized {
         let (app2, h) = (app.clone(), req.headers().clone());
         match tokio::task::spawn_blocking(move || basic_caller(&app2, &h)).await {
             Ok(Ok(c)) => c,
@@ -427,12 +430,26 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
     }
     if registry && crate::protocols::oci::claims(&table, &host, &path[1..]) {
         let rest = path[1..].to_vec();
-        return match crate::protocols::oci::handle(app.clone(), caller.clone(), &host, &rest, req)
-            .await
-        {
-            Some(r) => r,
-            None => status(StatusCode::NOT_FOUND),
-        };
+        let reading = matches!(method, Method::GET | Method::HEAD);
+        let mut r =
+            match crate::protocols::oci::handle(app.clone(), caller.clone(), &host, &rest, req)
+                .await
+            {
+                Some(r) => r,
+                None => status(StatusCode::NOT_FOUND),
+            };
+        // What a tag names, the tags and referrers lists and the catalog
+        // change in place: revalidated, as other indexes are (blobs say
+        // how long they keep).
+        if reading && r.status().is_success() && !r.headers().contains_key(header::CACHE_CONTROL) {
+            r.headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+        }
+        // Without credentials only a public repository answers.
+        if authorized {
+            private(&mut r);
+        }
+        return r;
     }
     if registry && method != Method::GET && method != Method::HEAD && method != Method::PUT {
         return status(StatusCode::METHOD_NOT_ALLOWED);
@@ -465,9 +482,8 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
                 Ok(s) => s,
                 Err(_) => return status(StatusCode::NOT_FOUND),
             };
-            let role = app
-                .auth
-                .role(&caller, &repo, served.repo.setting_bool("public"));
+            let public = served.repo.setting_bool("public");
+            let role = app.auth.role(&caller, &repo, public);
             let at = At {
                 served,
                 role,
@@ -478,9 +494,70 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
                 host,
                 raw_path,
             };
-            serve_repo(app, at, req).await
+            let mut r = serve_repo(app, at, req).await;
+            if authorized || !public {
+                private(&mut r);
+            }
+            r
         }
     }
+}
+
+/// Keeps an answer out of shared caches: one of a repository that is
+/// not public, or to a request with credentials. A cache in between
+/// (a CDN keys on the URL alone) would hand it to the next client asking
+/// for the URL, with or without a right to it; the client's own cache
+/// may keep it as long as it said.
+pub(crate) fn private(r: &mut Response) {
+    let ok = r.status().is_success();
+    let h = r.headers_mut();
+    let cc = match h.get(header::CACHE_CONTROL).and_then(|v| v.to_str().ok()) {
+        Some(v) => v
+            .strip_prefix("public")
+            .map(|rest| format!("private{rest}")),
+        None => ok.then(|| "private".to_string()),
+    };
+    if let Some(v) = cc.and_then(|v| HeaderValue::from_str(&v).ok()) {
+        h.insert(header::CACHE_CONTROL, v);
+    }
+    h.append(header::VARY, HeaderValue::from_static("Authorization"));
+}
+
+/// Whether an If-None-Match value names `etag` (quoted), compared
+/// weakly as RFC 9110 has it for If-None-Match: a cache in front that
+/// compresses an answer marks its ETag weak (`W/"..."`) and asks with
+/// that.
+pub(crate) fn inm_matches(inm: &str, etag: &str) -> bool {
+    fn weak(t: &str) -> &str {
+        t.strip_prefix("W/").unwrap_or(t)
+    }
+    inm.split(',')
+        .map(str::trim)
+        .any(|t| t == "*" || weak(t) == weak(etag))
+}
+
+/// Takes a leading `@<label>` segment off `rel` (and onto `base_url`):
+/// the version to answer from, and whether a label named it; `None` for
+/// a label that is not there. Only for a caller with a role: for others
+/// the segment stays, and the protocol refuses them as it refuses any of
+/// their requests, so whether a label is there is not told to them.
+fn take_label(
+    app: &App,
+    served: &crate::Served,
+    role: Option<Role>,
+    rel: &mut Vec<String>,
+    base_url: Option<&mut String>,
+) -> Option<(Option<pkgpod_engine::Version>, bool)> {
+    let label = rel.first().and_then(|f| f.strip_prefix('@'));
+    let (Some(label), Some(_)) = (label, role) else {
+        return Some((served.current.clone(), false));
+    };
+    let v = app.labelled(&served.repo.name, label).ok()?;
+    if let Some(b) = base_url {
+        b.push_str(&format!("{}/", percent_encode(&rel[0])));
+    }
+    rel.remove(0);
+    Some((Some(v), true))
 }
 
 /// A repository's request, once its route is found.
@@ -709,19 +786,16 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
         return crate::protocols::gems::handle(app, served.repo, caller, role, req).await;
     }
     if served.repo.format == "swift" {
+        if role.is_none() && caller.user.is_some() {
+            return status(StatusCode::NOT_FOUND);
+        }
         let mut base_url = client_base(route.as_ref(), &host, &base, &req);
         let mut rel = rel;
-        let mut version = served.current.clone();
-        let mut labelled = false;
-        if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
-            let Ok(v) = app.labelled(&served.repo.name, label) else {
-                return status(StatusCode::NOT_FOUND);
-            };
-            base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
-            version = Some(v);
-            labelled = true;
-            rel.remove(0);
-        }
+        let Some((version, labelled)) =
+            take_label(&app, &served, role, &mut rel, Some(&mut base_url))
+        else {
+            return status(StatusCode::NOT_FOUND);
+        };
         if rel.is_empty() && matches!(method, Method::GET | Method::HEAD) {
             if role.is_none() {
                 return deny(&caller);
@@ -747,17 +821,13 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
     }
     if served.repo.format == "conan" {
         let mut rel = rel;
-        let mut version = served.current.clone();
-        let mut labelled = false;
-        if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
-            let Ok(v) = app.labelled(&served.repo.name, label) else {
-                return status(StatusCode::NOT_FOUND);
-            };
-            version = Some(v);
-            labelled = true;
-            rel.remove(0);
-        }
+        let Some((version, labelled)) = take_label(&app, &served, role, &mut rel, None) else {
+            return status(StatusCode::NOT_FOUND);
+        };
         if rel.is_empty() && matches!(method, Method::GET | Method::HEAD) {
+            if role.is_none() {
+                return deny(&caller);
+            }
             return client_note(
                 StatusCode::OK,
                 format!(
@@ -796,19 +866,16 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
         return crate::protocols::conan::handle(app, ask, req).await;
     }
     if served.repo.format == "galaxy" {
+        if role.is_none() && caller.user.is_some() {
+            return status(StatusCode::NOT_FOUND);
+        }
         let mut base_url = client_base(route.as_ref(), &host, &base, &req);
         let mut rel = rel;
-        let mut version = served.current.clone();
-        let mut labelled = false;
-        if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
-            let Ok(v) = app.labelled(&served.repo.name, label) else {
-                return status(StatusCode::NOT_FOUND);
-            };
-            base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
-            version = Some(v);
-            labelled = true;
-            rel.remove(0);
-        }
+        let Some((version, labelled)) =
+            take_label(&app, &served, role, &mut rel, Some(&mut base_url))
+        else {
+            return status(StatusCode::NOT_FOUND);
+        };
         let ask = crate::protocols::galaxy::Ask {
             repo: served.repo,
             version,
@@ -823,17 +890,11 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
     if served.repo.format == "pub" {
         let mut base_url = client_base(route.as_ref(), &host, &base, &req);
         let mut rel = rel;
-        let mut version = served.current.clone();
-        let mut labelled = false;
-        if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
-            let Ok(v) = app.labelled(&served.repo.name, label) else {
-                return status(StatusCode::NOT_FOUND);
-            };
-            base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
-            version = Some(v);
-            labelled = true;
-            rel.remove(0);
-        }
+        let Some((version, labelled)) =
+            take_label(&app, &served, role, &mut rel, Some(&mut base_url))
+        else {
+            return status(StatusCode::NOT_FOUND);
+        };
         if rel.is_empty() && matches!(method, Method::GET | Method::HEAD) {
             if role.is_none() {
                 return deny(&caller);
@@ -860,17 +921,11 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
     if served.repo.format == "nuget" {
         let mut base_url = client_base(route.as_ref(), &host, &base, &req);
         let mut rel = rel;
-        let mut version = served.current.clone();
-        let mut labelled = false;
-        if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
-            let Ok(v) = app.labelled(&served.repo.name, label) else {
-                return status(StatusCode::NOT_FOUND);
-            };
-            base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
-            version = Some(v);
-            labelled = true;
-            rel.remove(0);
-        }
+        let Some((version, labelled)) =
+            take_label(&app, &served, role, &mut rel, Some(&mut base_url))
+        else {
+            return status(StatusCode::NOT_FOUND);
+        };
         if rel.is_empty() && matches!(method, Method::GET | Method::HEAD) {
             if role.is_none() {
                 return deny(&caller);
@@ -897,17 +952,11 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
     if served.repo.format == "cargo" {
         let mut base_url = client_base(route.as_ref(), &host, &base, &req);
         let mut rel = rel;
-        let mut version = served.current.clone();
-        let mut labelled = false;
-        if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
-            let Ok(v) = app.labelled(&served.repo.name, label) else {
-                return status(StatusCode::NOT_FOUND);
-            };
-            base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
-            version = Some(v);
-            labelled = true;
-            rel.remove(0);
-        }
+        let Some((version, labelled)) =
+            take_label(&app, &served, role, &mut rel, Some(&mut base_url))
+        else {
+            return status(StatusCode::NOT_FOUND);
+        };
         if rel.is_empty() && matches!(method, Method::GET | Method::HEAD) {
             if role.is_none() {
                 return deny(&caller);
@@ -1151,18 +1200,22 @@ async fn get(
         Entry::Blob { sha256, meta, .. } => {
             let mtime = meta.get("mtime").and_then(Value::as_i64);
             let files = s.repo.format == "files";
-            serve_counted(
-                app,
-                &s.repo.name,
-                &rel_s,
-                &s.repo.store().path(&sha256),
-                &sha256,
-                &rel_s,
-                mtime,
-                files,
-                req,
-            )
-            .await
+            // The ETag a format's clients check a file against, if it
+            // gives one (bundler before 2.5: a compact index file's MD5).
+            let etag = match meta
+                .get("etag")
+                .and_then(Value::as_str)
+                .filter(|t| !t.is_empty() && t.bytes().all(|b| b.is_ascii_alphanumeric()))
+            {
+                Some(t) => format!("\"{t}\""),
+                None => format!("\"{}\"", sha256.hex()),
+            };
+            let counts = crate::serving::stats::counts(req.method(), req.headers());
+            let file = s.repo.store().path(&sha256);
+            let r = serve_tagged(&file, &etag, &rel_s, mtime, files, req).await;
+            app.stats
+                .file(counts, &r, &s.repo.name, &rel_s, Some(&sha256));
+            r
         }
         _ => status(StatusCode::NOT_FOUND),
     }
@@ -1203,9 +1256,12 @@ pub fn content_type(name: &str) -> &'static str {
 }
 
 /// Built-in Cache-Control rules: apt indexes are revalidated (they change
-/// in place), by-hash and pool files kept (their names change with their
-/// content), checksum files revalidated, the rest kept for an hour.
-const DEFAULT_CACHE: [(&str, &str); 25] = [
+/// in place), by-hash files kept (their names change with their content)
+/// and a mirror's pool files (an archive never puts other content at a
+/// pool name; a hosted repository's are revalidated, see
+/// [`stored_cache_control`]), checksum files revalidated, the rest kept
+/// for an hour.
+const DEFAULT_CACHE: [(&str, &str); 28] = [
     ("**/by-hash/**", "public, max-age=31536000, immutable"),
     ("dists/**", "no-cache"),
     ("pool/**", "public, max-age=31536000"),
@@ -1232,8 +1288,27 @@ const DEFAULT_CACHE: [(&str, &str); 25] = [
     ("**/*.md5", "no-cache"),
     ("**/*.sha1", "no-cache"),
     ("key.asc", "no-cache"),
+    // ipk feeds: the index and its signature change together.
+    ("**/Packages", "no-cache"),
+    ("**/Packages.*", "no-cache"),
+    ("key.pub", "no-cache"),
     ("**", "public, max-age=3600"),
 ];
+
+/// [`DEFAULT_CACHE`] compiled, once: each pattern, and for "**/x" also
+/// "x" (which matches at the top).
+static CACHE_RULES: LazyLock<Vec<(Vec<glob::Pattern>, &'static str)>> = LazyLock::new(|| {
+    DEFAULT_CACHE
+        .iter()
+        .map(|(p, v)| {
+            let pats = std::iter::once(*p)
+                .chain(p.strip_prefix("**/"))
+                .filter_map(|p| glob::Pattern::new(p).ok())
+                .collect();
+            (pats, *v)
+        })
+        .collect()
+});
 
 pub fn cache_control(rel: &str) -> &'static str {
     let opts = glob::MatchOptions {
@@ -1242,15 +1317,25 @@ pub fn cache_control(rel: &str) -> &'static str {
         require_literal_leading_dot: false,
     };
     let rel = rel.trim_start_matches('/');
-    for (p, v) in DEFAULT_CACHE {
-        let hit = glob::Pattern::new(p).is_ok_and(|g| g.matches_with(rel, opts))
-            // "**/x" also matches "x" at the top.
-            || p.strip_prefix("**/").is_some_and(|q| glob::Pattern::new(q).is_ok_and(|g| g.matches_with(rel, opts)));
-        if hit {
+    for (pats, v) in CACHE_RULES.iter() {
+        if pats.iter().any(|g| g.matches_with(rel, opts)) {
             return v;
         }
     }
     "public, max-age=3600"
+}
+
+/// [`cache_control`] for a file of a stored version (not a mirror's
+/// received tree): a pool file is revalidated (by its ETag), as a
+/// replace, a removal and a new upload, or a rollback put other content
+/// at its name; what is under by-hash is still kept.
+fn stored_cache_control(rel: &str) -> &'static str {
+    let rel = rel.trim_start_matches('/');
+    if rel.starts_with("pool/") && !rel.split('/').any(|s| s == "by-hash") {
+        "no-cache"
+    } else {
+        cache_control(rel)
+    }
 }
 
 /// A blob of the content store. `mtime` (the entry's, unix seconds) is
@@ -1283,9 +1368,20 @@ pub(crate) async fn serve_blob(
     rel: &str,
     mtime: Option<i64>,
     files: bool,
+    req: Request,
+) -> Response {
+    serve_tagged(file, &format!("\"{}\"", sha.hex()), rel, mtime, files, req).await
+}
+
+/// [`serve_blob`] with its ETag given (quoted).
+async fn serve_tagged(
+    file: &std::path::Path,
+    etag: &str,
+    rel: &str,
+    mtime: Option<i64>,
+    files: bool,
     mut req: Request,
 ) -> Response {
-    let etag = format!("\"{}\"", sha.hex());
     let modified =
         mtime.map(|t| std::time::UNIX_EPOCH + std::time::Duration::from_secs(t.max(0) as u64));
     let inm = req
@@ -1293,7 +1389,7 @@ pub(crate) async fn serve_blob(
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok());
     let fresh = match inm {
-        Some(v) => v.split(',').any(|t| t.trim() == etag || t.trim() == "*"),
+        Some(v) => inm_matches(v, etag),
         // If-Modified-Since only without If-None-Match, against our time.
         None => modified.is_some_and(|m| {
             req.headers()
@@ -1305,8 +1401,9 @@ pub(crate) async fn serve_blob(
     };
     if fresh {
         let mut r = status(StatusCode::NOT_MODIFIED);
-        r.headers_mut()
-            .insert(header::ETAG, HeaderValue::from_str(&etag).expect("hex"));
+        if let Ok(v) = HeaderValue::from_str(etag) {
+            r.headers_mut().insert(header::ETAG, v);
+        }
         if let Some(m) = modified
             && let Ok(v) = HeaderValue::from_str(&httpdate::fmt_http_date(m))
         {
@@ -1342,6 +1439,16 @@ pub(crate) async fn serve_blob(
         Ok(r) => r.map(Body::new),
         Err(_) => return status(StatusCode::INTERNAL_SERVER_ERROR),
     };
+    if r.status() == StatusCode::NOT_FOUND {
+        // A tree names it, but the store has no such file: lost (a disk
+        // missing, a damaged store), not a path that never was; and not
+        // an answer to keep.
+        tracing::error!("{rel}: {} is missing from the store", file.display());
+        let mut r = status(StatusCode::INTERNAL_SERVER_ERROR);
+        r.headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        return r;
+    }
     let h = r.headers_mut();
     h.insert(
         header::CONTENT_TYPE,
@@ -1354,10 +1461,12 @@ pub(crate) async fn serve_blob(
         HeaderValue::from_static(if files {
             "no-cache"
         } else {
-            cache_control(rel)
+            stored_cache_control(rel)
         }),
     );
-    h.insert(header::ETAG, HeaderValue::from_str(&etag).expect("hex"));
+    if let Ok(v) = HeaderValue::from_str(etag) {
+        h.insert(header::ETAG, v);
+    }
     match modified {
         Some(m) => {
             if let Ok(v) = HeaderValue::from_str(&httpdate::fmt_http_date(m)) {
@@ -1448,9 +1557,7 @@ async fn resigned(
     };
     let rel_s = rel.join("/");
     let etag = format!("\"{}\"", Digest::of(&body).hex());
-    let fresh = inm
-        .as_deref()
-        .is_some_and(|v| v.split(',').any(|t| t.trim() == etag || t.trim() == "*"));
+    let fresh = inm.as_deref().is_some_and(|v| inm_matches(v, &etag));
     let mut r = if fresh {
         status(StatusCode::NOT_MODIFIED)
     } else {
@@ -1485,9 +1592,16 @@ pub(crate) fn inside(tree: &std::path::Path, p: &std::path::Path) -> Option<Path
     real.starts_with(&root).then_some(real)
 }
 
-/// A mirror's received tree. `files`: a file tree, whose dot-files are
-/// served (`.treeinfo`), but not what the engines keep for themselves;
-/// in other trees no dot-file is.
+/// Whether `name` in a mirror's received tree is kept from readers: what
+/// the engines write there for themselves (partial downloads, rsync's
+/// temporary files) in every tree, and dot-files but in a files mirror's
+/// (`files`), which serves them (`.treeinfo`).
+pub(crate) fn mirror_hidden(files: bool, name: &str) -> bool {
+    pkgpod_files::engine_name(name) || (!files && name.starts_with('.'))
+}
+
+/// A mirror's received tree; what [`mirror_hidden`] names is not
+/// served.
 async fn serve_mirror(
     tree: PathBuf,
     rel: &[String],
@@ -1499,13 +1613,7 @@ async fn serve_mirror(
     let full = tree.join(&rel_s);
     let head = req.method() == Method::HEAD;
     let query = req.uri().query().unwrap_or("").to_string();
-    let hidden = move |name: &str| {
-        if files {
-            pkgpod_files::engine_name(name)
-        } else {
-            name.starts_with('.')
-        }
-    };
+    let hidden = move |name: &str| mirror_hidden(files, name);
     if rel.iter().any(|s| hidden(s)) {
         return status(StatusCode::NOT_FOUND);
     }
@@ -1576,13 +1684,7 @@ pub(crate) fn dir_entries(app: &App, s: &crate::Served, rel: &[String]) -> Optio
     let rel_s = rel.join("/");
     if s.repo.kind == Kind::Mirror {
         let files = s.repo.format == "files";
-        let hidden = move |name: &str| {
-            if files {
-                pkgpod_files::engine_name(name)
-            } else {
-                name.starts_with('.')
-            }
-        };
+        let hidden = move |name: &str| mirror_hidden(files, name);
         if rel.iter().any(|x| hidden(x)) {
             return None;
         }
@@ -2039,11 +2141,78 @@ mod tests {
             "info/hello",
             "org/x/a/maven-metadata.xml",
             "org/x/a/maven-metadata.xml.sha1",
+            "x86_64/Packages",
+            "x86_64/Packages.gz",
+            "x86_64/Packages.sig",
+            "Packages",
+            "key.pub",
         ] {
             assert_eq!(cache_control(index), "no-cache", "{index}");
         }
         assert!(cache_control("pk/x86_64/hello-1.0-1-x86_64.pkg.tar.zst").contains("3600"));
         assert_eq!(cache_control("images/disk.img"), "public, max-age=3600");
+        assert!(cache_control("x86_64/hello_1.0_x86_64.ipk").contains("3600"));
+        // A hosted repository's pool file may get other content: asked
+        // again; its by-hash indexes are still kept.
+        assert_eq!(
+            stored_cache_control("pool/main/h/hello/hello_1_all.deb"),
+            "no-cache"
+        );
+        assert!(
+            stored_cache_control("dists/noble/main/binary-amd64/by-hash/SHA256/ab")
+                .contains("immutable")
+        );
+        assert_eq!(stored_cache_control("dists/noble/InRelease"), "no-cache");
+    }
+
+    #[test]
+    fn weak_validators_and_private_answers() {
+        let e = "\"abc\"";
+        for inm in ["\"abc\"", "W/\"abc\"", "\"x\", W/\"abc\"", " * "] {
+            assert!(inm_matches(inm, e), "{inm}");
+        }
+        for inm in ["\"abcd\"", "W/\"x\"", "abc", ""] {
+            assert!(!inm_matches(inm, e), "{inm}");
+        }
+        let answer = |cc: Option<&str>, st: StatusCode| {
+            let mut r = status(st);
+            if let Some(v) = cc {
+                r.headers_mut()
+                    .insert(header::CACHE_CONTROL, HeaderValue::from_str(v).unwrap());
+            }
+            private(&mut r);
+            (
+                r.headers()
+                    .get(header::CACHE_CONTROL)
+                    .map(|v| v.to_str().unwrap().to_string()),
+                r.headers()[header::VARY].to_str().unwrap().to_string(),
+            )
+        };
+        assert_eq!(
+            answer(Some("public, max-age=31536000, immutable"), StatusCode::OK),
+            (
+                Some("private, max-age=31536000, immutable".into()),
+                "Authorization".into()
+            )
+        );
+        assert_eq!(
+            answer(Some("no-cache"), StatusCode::OK).0.as_deref(),
+            Some("no-cache")
+        );
+        assert_eq!(answer(None, StatusCode::OK).0.as_deref(), Some("private"));
+        // A 304 says nothing that would replace what the client keeps.
+        assert_eq!(answer(None, StatusCode::NOT_MODIFIED).0, None);
+    }
+
+    #[test]
+    fn mirror_trees_hide_engine_files() {
+        for name in ["f_1_amd64.deb.pkgpod-part", ".rsync-partial", ".~tmp~"] {
+            assert!(mirror_hidden(false, name), "{name}");
+            assert!(mirror_hidden(true, name), "{name}");
+        }
+        assert!(mirror_hidden(false, ".treeinfo"));
+        assert!(!mirror_hidden(true, ".treeinfo"));
+        assert!(!mirror_hidden(false, "f_1_amd64.deb"));
     }
 
     #[test]

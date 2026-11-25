@@ -132,6 +132,12 @@ Upload parameters:
 | `replace` | false | Replace a package file of the same name with other content, everywhere. |
 | `path` | empty | Not a package: put the file at this path beside `dists/` and `pool/`. |
 
+A pool file's name stays when its content changes (`replace`, a
+removal and a new upload, a rollback), so caches in front are told to
+ask again each time (`Cache-Control: no-cache`; the answer is a short
+304 while the ETag, its SHA-256, is the same). Only the indexes under
+`by-hash/` are kept for a year.
+
 ```sh
 pkgpod upload ppa hello_1.0_amd64.deb -s dists=noble
 pkgpod upload ppa *.deb -s dists=jammy,noble -s component=contrib    # one version

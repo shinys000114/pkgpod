@@ -419,6 +419,13 @@ pub fn full_index(gems: &[(String, String, String)]) -> Vec<(&'static str, Vec<u
     ]
 }
 
+fn md5_hex(s: &str) -> String {
+    md5::Md5::digest(s.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 /// The compact index of gems given as (name, compact line, yanked): the
 /// `versions` file, `names` and each `info/<name>`.
 pub fn compact_index(
@@ -443,10 +450,7 @@ pub fn compact_index(
             .iter()
             .map(|l| l.split(' ').next().unwrap_or(""))
             .collect();
-        let md5 = md5::Md5::digest(info.as_bytes())
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>();
+        let md5 = md5_hex(&info);
         versions.push_str(&format!("{name} {} {md5}\n", vs.join(",")));
         names.push_str(name);
         names.push('\n');
@@ -661,9 +665,11 @@ impl Format for Gems {
             let (d, n) = cx.store.put_bytes(&data)?;
             view.put(name, Entry::blob(d, n, Value::Null))?;
         }
+        // Served with the MD5 of their content as ETag: bundler before
+        // 2.5 checks what it downloads against it.
         let mut text = |path: &str, t: &str| -> Result<()> {
             let (d, n) = cx.store.put_bytes(t.as_bytes())?;
-            view.put(path, Entry::blob(d, n, Value::Null))?;
+            view.put(path, Entry::blob(d, n, json!({"etag": md5_hex(t)})))?;
             Ok(())
         };
         text("versions", &versions)?;

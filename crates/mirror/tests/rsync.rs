@@ -251,6 +251,32 @@ fn tree_mode_and_cancel() {
     );
 }
 
+/// What an interrupted transfer left (rsync's partial-dir) goes once a
+/// run completes: rsync never removes it, and of a file dropped upstream
+/// meanwhile it would stay for good.
+#[test]
+fn partial_dirs_go_after_a_complete_run() {
+    if !have("rsync") {
+        return;
+    }
+    let src = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(src.path().join("images")).unwrap();
+    std::fs::write(src.path().join("images/a.img"), "a").unwrap();
+    let Some(d) = Daemon::start(src.path()) else {
+        return;
+    };
+    let out = tempfile::tempdir().unwrap();
+    let dest = out.path().join("t");
+    let m = RsyncMirror::new(&d.url, Mode::Tree);
+    ok(&m, &dest);
+    let partial = dest.join("images/.rsync-partial");
+    std::fs::create_dir_all(&partial).unwrap();
+    std::fs::write(partial.join("gone.img"), "half").unwrap();
+    let (_, lines) = ok(&m, &dest);
+    assert!(!partial.exists(), "{lines:?}");
+    assert!(dest.join("images/a.img").is_file());
+}
+
 /// A cancel stops every process of the rsync run, not only the first:
 /// a forked one that ignores SIGTERM and holds the output pipes would
 /// otherwise keep the sync from ever returning.

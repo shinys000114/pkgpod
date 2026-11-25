@@ -5968,6 +5968,492 @@ fn files_hosted() {
     );
 }
 
+/// A response's status and the headers these tests look at.
+struct Seen {
+    status: u16,
+    cache: String,
+    vary: String,
+    etag: String,
+    location: String,
+    body: String,
+}
+
+fn seen(r: reqwest::blocking::Response) -> Seen {
+    let h = |k: &str| {
+        r.headers()
+            .get_all(k)
+            .iter()
+            .map(|v| v.to_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let (cache, vary, etag, location) = (h("cache-control"), h("vary"), h("etag"), h("location"));
+    Seen {
+        status: r.status().as_u16(),
+        cache,
+        vary,
+        etag,
+        location,
+        body: r.text().unwrap_or_default(),
+    }
+}
+
+/// What caches in front may keep: answers of a repository that is not
+/// public, and answers to a request with credentials, only the client
+/// (`private`, varying by Authorization); a hosted repository's pool
+/// files are revalidated (a replace puts other content at the same
+/// name), its by-hash indexes kept.
+#[test]
+fn shared_caches_keep_only_what_anyone_may_read() {
+    if !have("dpkg-deb") {
+        return;
+    }
+    let s = Server::start();
+    for (name, public) in [("pd", false), ("pubd", true)] {
+        s.cli(&[
+            "repo",
+            "create",
+            name,
+            "-s",
+            "sign=false",
+            "-s",
+            &format!("public={public}"),
+        ])
+        .unwrap();
+        s.cli(&["op", name, "dist-set", "name=noble", "-y"])
+            .unwrap();
+    }
+    let tok = s
+        .cli(&["token", "create", "r", "--repos", "pd,pubd"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let debs = s.dir.path().join("debs");
+    std::fs::create_dir_all(&debs).unwrap();
+    let one = build_deb(&debs, "hello", "1.0", "all", "xz", "");
+    for name in ["pd", "pubd"] {
+        s.cli(&["upload", name, one.to_str().unwrap()]).unwrap();
+    }
+    let c = reqwest::blocking::Client::new();
+    let fetch = |path: &str, auth: bool, inm: Option<&str>| {
+        let mut r = c.get(s.url(path));
+        if auth {
+            r = r.basic_auth("token", Some(&tok));
+        }
+        if let Some(e) = inm {
+            r = r.header("if-none-match", e);
+        }
+        seen(r.send().unwrap())
+    };
+    let packages = fetch("/pubd/dists/noble/main/binary-all/Packages", false, None);
+    let pool = packages
+        .body
+        .lines()
+        .find_map(|l| l.strip_prefix("Filename: "))
+        .unwrap()
+        .to_string();
+    let release = fetch("/pubd/dists/noble/Release", false, None).body;
+    let by_hash = format!(
+        "dists/noble/main/binary-all/by-hash/SHA256/{}",
+        release_sha256(&release, "main/binary-all/Packages")
+    );
+    // A public repository to anyone: kept by any cache.
+    let r = fetch(&format!("/pubd/{by_hash}"), false, None);
+    assert_eq!(r.status, 200);
+    assert_eq!(r.cache, "public, max-age=31536000, immutable");
+    assert_eq!(r.vary, "");
+    // To a caller with credentials, or of a private repository: by the
+    // client only, and never the answer to another Authorization.
+    for repo in ["pubd", "pd"] {
+        let r = fetch(&format!("/{repo}/{by_hash}"), true, None);
+        assert_eq!(r.status, 200, "{repo}");
+        assert_eq!(r.cache, "private, max-age=31536000, immutable", "{repo}");
+        assert!(r.vary.contains("Authorization"), "{repo}: {}", r.vary);
+        let r = fetch(&format!("/{repo}/{pool}"), true, None);
+        assert_eq!(r.status, 200, "{repo}");
+        assert!(r.vary.contains("Authorization"), "{repo}: {}", r.vary);
+    }
+    // A console download goes by a session cookie: the browser's only,
+    // even of a public repository.
+    let (cc, sid, _) = console_session(&s, "pk", "pk-password");
+    let r = seen(
+        cc.get(format!(
+            "{}/r/pubd/file?path={}&served=1",
+            s.api,
+            pool.replace('/', "%2F")
+        ))
+        .header("cookie", format!("pkgpod_session={sid}"))
+        .send()
+        .unwrap(),
+    );
+    assert_eq!(r.status, 200);
+    assert!(r.cache.starts_with("private"), "{}", r.cache);
+    // A pool file is asked again each time: a replace puts other content
+    // at its name, and the ETag tells.
+    let r = fetch(&format!("/pubd/{pool}"), false, None);
+    assert_eq!(r.cache, "no-cache");
+    let old = r.etag;
+    assert_eq!(
+        fetch(&format!("/pubd/{pool}"), false, Some(&old)).status,
+        304
+    );
+    let other = s.dir.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let two = build_deb(&other, "hello", "1.0", "all", "xz", "Depends: libc6\n");
+    s.cli(&[
+        "upload",
+        "pubd",
+        two.to_str().unwrap(),
+        "-s",
+        "replace=true",
+    ])
+    .unwrap();
+    let r = fetch(&format!("/pubd/{pool}"), false, Some(&old));
+    assert_eq!(r.status, 200);
+    assert_ne!(r.etag, old);
+    assert_eq!(r.cache, "no-cache");
+}
+
+/// Conditional requests as caches in front send them (a CDN that
+/// compresses marks the ETag weak), a directory's redirect never to
+/// another host, and a file its tree names but the store lost.
+#[test]
+fn weak_validators_redirects_and_lost_files() {
+    let s = Server::start();
+    s.cli(&["repo", "create", "f", "-f", "files", "-s", "public=true"])
+        .unwrap();
+    let up = s.dir.path().join("up");
+    std::fs::create_dir_all(&up).unwrap();
+    std::fs::write(up.join("t.txt"), "lost soon").unwrap();
+    s.cli(&[
+        "upload",
+        "f",
+        up.join("t.txt").to_str().unwrap(),
+        "-s",
+        "path=tools/",
+    ])
+    .unwrap();
+    let c = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let fetch = |path: &str, inm: Option<&str>| {
+        let mut r = c.get(s.url(path));
+        if let Some(e) = inm {
+            r = r.header("if-none-match", e);
+        }
+        seen(r.send().unwrap())
+    };
+    let etag = fetch("/f/tools/t.txt", None).etag;
+    assert!(etag.starts_with('"'), "{etag}");
+    for inm in [format!("W/{etag}"), format!("\"other\", W/{etag}")] {
+        assert_eq!(fetch("/f/tools/t.txt", Some(&inm)).status, 304, "{inm}");
+    }
+    assert_eq!(fetch("/f/tools/t.txt", Some("W/\"other\"")).status, 200);
+    let badge = "/.well-known/pkgpod/badges/f/status.svg";
+    let etag = fetch(badge, None).etag;
+    assert_eq!(fetch(badge, Some(&format!("W/{etag}"))).status, 304);
+    // A path beginning with // redirects within this host.
+    let r = fetch("//f/tools", None);
+    assert_eq!(r.status, 308);
+    assert_eq!(r.location, "/f/tools/");
+    // The store lost the file: an error, logged, that no cache keeps;
+    // not the 404 of a path that never was.
+    let h = pkgpod_deb::hash::hash_bytes(b"lost soon").sha256;
+    std::fs::remove_file(
+        s.dir
+            .path()
+            .join(format!("data/storages/main/store/{}/{h}", &h[..2])),
+    )
+    .unwrap();
+    let r = fetch("/f/tools/t.txt", None);
+    assert_eq!(r.status, 500);
+    assert_eq!(r.cache, "no-store");
+    let l = s
+        .cli(&[
+            "logs",
+            "--level",
+            "error",
+            "--grep",
+            "missing from the store",
+        ])
+        .unwrap();
+    assert!(l.contains("tools/t.txt"), "{l}");
+}
+
+/// What a sync leaves while it runs (a partial download) is not served
+/// from a mirror's tree, nor listed.
+#[test]
+fn mirror_trees_hide_partial_files() {
+    let s = Server::start();
+    s.cli(&[
+        "repo",
+        "create",
+        "mir",
+        "-k",
+        "mirror",
+        "-s",
+        "source=http://127.0.0.1:9/",
+        "-s",
+        "dists=x",
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let dir = s
+        .dir
+        .path()
+        .join("data/storages/main/trees/mir/pool/main/f");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("f_1_amd64.deb"), "whole").unwrap();
+    std::fs::write(dir.join("f_1_amd64.deb.pkgpod-part"), "half").unwrap();
+    assert_eq!(get(&s.url("/mir/pool/main/f/f_1_amd64.deb"), None).0, 200);
+    assert_eq!(
+        get(&s.url("/mir/pool/main/f/f_1_amd64.deb.pkgpod-part"), None).0,
+        404
+    );
+    let (st, list) = get(&s.url("/mir/pool/main/f/"), None);
+    assert_eq!(st, 200);
+    assert!(
+        list.contains("f_1_amd64.deb") && !list.contains("pkgpod-part"),
+        "{list}"
+    );
+    let pw = std::fs::read_to_string(s.dir.path().join("data/admin-password")).unwrap();
+    let (st, tree) = get(
+        &format!("{}/api/v1/repos/mir/tree?path=pool/main/f", s.api),
+        Some(("admin", pw.trim())),
+    );
+    assert_eq!(st, 200);
+    assert!(
+        tree.contains("f_1_amd64.deb") && !tree.contains("pkgpod-part"),
+        "{tree}"
+    );
+}
+
+/// What a tag names, and the tags list, change in place: asked again
+/// each time.
+#[test]
+fn oci_tags_are_revalidated() {
+    let s = Server::start();
+    s.cli(&["repo", "create", "img", "-f", "oci"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "img", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let reg = Reg {
+        c: reqwest::blocking::Client::new(),
+        base: s.url(""),
+        tok: Some(&tok),
+        host: None,
+    };
+    let cfg = reg.blob("img/app", b"{}");
+    let layer = reg.blob("img/app", &[7u8; 1000]);
+    let m = image_manifest(&cfg, &[(&layer, 1000)], None);
+    let (st, digest) = reg.manifest("img/app", "1.0", OCI_M, &m);
+    assert_eq!(st, 201, "{digest}");
+    for path in ["/v2/img/app/manifests/1.0", "/v2/img/app/tags/list"] {
+        let r = seen(reg.req(reqwest::Method::GET, path).send().unwrap());
+        assert_eq!(r.status, 200, "{path}");
+        assert_eq!(r.cache, "no-cache", "{path}");
+        assert!(r.vary.contains("Authorization"), "{path}: {}", r.vary);
+    }
+    let r = seen(
+        reg.req(reqwest::Method::GET, &format!("/v2/img/app/blobs/{layer}"))
+            .send()
+            .unwrap(),
+    );
+    assert_eq!(r.status, 200);
+    assert!(r.cache.starts_with("private"), "{}", r.cache);
+}
+
+/// A caller without a right to a repository learns nothing of it: not
+/// its notes, not which labels it has; a logged-in one is answered as if
+/// it were not there, and only a reader who may not write is refused.
+#[test]
+fn refusals_tell_nothing_of_what_is_there() {
+    let s = Server::start();
+    s.cli_in(&["user", "add", "dev", "--password-stdin"], "dev-password")
+        .unwrap();
+    for (name, format) in [
+        ("cpp", "conan"),
+        ("charts", "helm"),
+        ("rb", "gems"),
+        ("sw", "swift"),
+        ("gal", "galaxy"),
+        ("cr", "cargo"),
+        ("dp", "pub"),
+        ("nu", "nuget"),
+    ] {
+        s.cli(&["repo", "create", name, "-f", format]).unwrap();
+    }
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "cpp", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let c = reqwest::blocking::Client::new();
+    let rev = "/cpp/v2/conans/hello/1.0/_/_/revisions/0123abcd/files";
+    for (file, body) in [
+        ("conanfile.py", "from conan import ConanFile\n"),
+        ("conanmanifest.txt", "1\n"),
+    ] {
+        let r = c
+            .put(s.url(&format!("{rev}/{file}")))
+            .bearer_auth(&tok)
+            .body(body)
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 201, "{file}");
+    }
+    s.cli(&["label", "cpp", "first"]).unwrap();
+    let status = |m: reqwest::Method, path: &str, dev: bool| {
+        let mut r = c.request(m, s.url(path));
+        if dev {
+            r = r.basic_auth("dev", Some("dev-password"));
+        }
+        r.send().unwrap().status().as_u16()
+    };
+    let get = reqwest::Method::GET;
+    assert_eq!(
+        status(get.clone(), "/cpp/", false),
+        401,
+        "the remote's note"
+    );
+    // A label that is there and one that is not: the same refusal.
+    for repo in ["cpp", "sw", "gal", "cr", "dp", "nu"] {
+        let known = status(get.clone(), &format!("/{repo}/@first/x"), false);
+        let unknown = status(get.clone(), &format!("/{repo}/@nothere/x"), false);
+        assert_eq!(unknown, 401, "{repo}");
+        if repo == "cpp" {
+            assert_eq!(known, 401, "{repo}");
+        }
+    }
+    // Logged in, without a right: not there.
+    for path in [
+        "/cpp/v2/conans/search",
+        "/charts/api/charts",
+        "/sw/identifiers?url=x",
+        "/gal/api/",
+    ] {
+        assert_eq!(status(get.clone(), path, true), 404, "{path}");
+    }
+    assert_eq!(
+        status(reqwest::Method::POST, "/rb/api/v1/gems", true),
+        404,
+        "gem push"
+    );
+    // A reader who may not write: refused.
+    s.cli(&["grant", "set", "rb", "user:dev", "read"]).unwrap();
+    assert_eq!(status(reqwest::Method::POST, "/rb/api/v1/gems", true), 403);
+}
+
+/// The compact index's files have the MD5 of their content as ETag:
+/// bundler before 2.5 checks a download against it (and asks again with
+/// it).
+#[test]
+fn gems_compact_index_etags_are_md5() {
+    if !have("tar") || !have("gzip") || !have("md5sum") {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&["repo", "create", "rb", "-f", "gems", "-s", "public=true"])
+        .unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "rb", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let work = s.dir.path().join("gem");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(
+        work.join("metadata"),
+        "--- !ruby/object:Gem::Specification\nname: hello-pk\nversion: !ruby/object:Gem::Version\n  version: 1.0.0\nplatform: ruby\nauthors:\n- t\nsummary: test\n",
+    )
+    .unwrap();
+    let run = |cmd: &str, args: &[&str]| {
+        let o = Command::new(cmd)
+            .args(args)
+            .current_dir(&work)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{cmd}: {o:?}");
+        String::from_utf8(o.stdout).unwrap()
+    };
+    run("gzip", &["-n", "metadata"]);
+    run("tar", &["-cf", "hello-pk-1.0.0.gem", "metadata.gz"]);
+    let c = reqwest::blocking::Client::new();
+    let r = c
+        .post(s.url("/rb/api/v1/gems"))
+        .basic_auth("token", Some(&tok))
+        .body(std::fs::read(work.join("hello-pk-1.0.0.gem")).unwrap())
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200, "{}", r.text().unwrap());
+    let fetch = |path: &str, inm: Option<&str>| {
+        let mut r = c.get(s.url(path));
+        if let Some(e) = inm {
+            r = r.header("if-none-match", e);
+        }
+        seen(r.send().unwrap())
+    };
+    let md5 = |body: &str| {
+        std::fs::write(work.join("got"), body).unwrap();
+        run("md5sum", &["got"])
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_string()
+    };
+    let versions = fetch("/rb/versions", None);
+    assert_eq!(versions.status, 200);
+    assert_eq!(versions.etag, format!("\"{}\"", md5(&versions.body)));
+    assert_eq!(fetch("/rb/versions", Some(&versions.etag)).status, 304);
+    let names = fetch("/rb/names", None);
+    assert_eq!(names.etag, format!("\"{}\"", md5(&names.body)));
+    // versions names each info file's MD5: the ETag it is checked against.
+    let listed = versions
+        .body
+        .lines()
+        .find_map(|l| l.strip_prefix("hello-pk 1.0.0 "))
+        .unwrap()
+        .to_string();
+    let info = fetch("/rb/info/hello-pk", None);
+    assert_eq!(info.etag, format!("\"{listed}\""));
+    assert_eq!(info.etag, format!("\"{}\"", md5(&info.body)));
+}
+
+/// A host page for a host that no address names: its root lists what
+/// every serving listener serves without an address, and its link is of
+/// the scheme it is served by.
+#[test]
+fn host_page_of_a_host_without_addresses() {
+    let s = Server::start();
+    for name in ["a", "b"] {
+        s.cli(&["repo", "create", name, "-f", "files", "-s", "public=true"])
+            .unwrap();
+    }
+    s.cli(&["host", "set", "plain.test", "--title", "Plain"])
+        .unwrap();
+    let hosts = s.json(&["host", "list"]);
+    let h = hosts
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["host"] == "plain.test")
+        .unwrap();
+    assert_eq!(h["url"], "http://plain.test/", "{h}");
+    assert_eq!(h["repos"], json!(["a", "b"]), "{h}");
+    let page = reqwest::blocking::Client::new()
+        .get(s.url("/"))
+        .header("host", "plain.test")
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(page.contains("2 repositories"), "{page}");
+}
+
 /// A host's root without a repository of its own: a page of its
 /// repositories, whatever their format, with a title and Markdown set by
 /// server admins.
