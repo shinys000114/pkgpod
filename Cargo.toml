@@ -64,6 +64,7 @@ semver = "1"
 crc32fast = "1"
 rsa = "0.9"
 yaml-rust2 = "0.13"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 quick-xml = "0.42"
 rand = "0.8"
 ed25519-dalek = "2.2"

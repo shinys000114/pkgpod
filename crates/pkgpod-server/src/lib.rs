@@ -23,6 +23,7 @@ pub mod jobs;
 pub mod keys;
 pub mod listeners;
 pub mod metrics;
+pub mod notes;
 pub mod npm;
 pub mod nuget;
 pub mod oci;

@@ -5613,6 +5613,105 @@ fn files_hosted() {
     );
 }
 
+/// `.HEADER.md` and `.FOOTER.md` in a files repository's directory are
+/// rendered above and below its listing, safely, per version.
+#[test]
+fn files_directory_notes() {
+    let s = Server::start();
+    s.cli(&["repo", "create", "f", "-f", "files", "-s", "public=true"])
+        .unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "f", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let c = reqwest::blocking::Client::new();
+    let put = |path: &str, body: Vec<u8>| {
+        let r = c
+            .put(s.url(&format!("/f/{path}?replace=1")))
+            .basic_auth("token", Some(&tok))
+            .body(body)
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 201, "{path}: {}", r.text().unwrap());
+    };
+    let page = |path: &str| {
+        let r = c.get(s.url(path)).send().unwrap();
+        assert_eq!(r.status().as_u16(), 200, "{path}");
+        let csp = r.headers()["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .to_string();
+        (csp, r.text().unwrap())
+    };
+    put("tool.tar.gz", b"tool".to_vec());
+    put("docs/guide.txt", b"guide".to_vec());
+    // Without notes the listing is as before.
+    let (csp, plain) = page("/f/");
+    assert!(
+        csp.contains("default-src 'none'") && !csp.contains("script-src"),
+        "{csp}"
+    );
+    assert!(!plain.contains("class=\"note"), "{plain}");
+
+    put(
+        ".HEADER.md",
+        b"# Team files\n\nBuilds and [the guide](docs/).\n\n<script>alert(1)</script>\n\n[x](javascript:alert(1))\n".to_vec(),
+    );
+    put(".FOOTER.md", b"Questions: *the team*".to_vec());
+    let (_, h) = page("/f/");
+    let head = h
+        .find("<section class=\"note head\"><h1>Team files</h1>")
+        .expect(&h);
+    let table = h.find("<table class=\"list\">").unwrap();
+    let foot = h
+        .find("<section class=\"note foot\"><p>Questions: <em>the team</em></p>")
+        .expect(&h);
+    assert!(head < table && table < foot, "{h}");
+    assert!(h.contains(r#"<a href="docs/">the guide</a>"#), "{h}");
+    assert!(
+        h.contains("&lt;script&gt;") && !h.contains("<script"),
+        "{h}"
+    );
+    assert!(h.contains(r##"<a href="#">x</a>"##), "{h}");
+    // Rendered, not listed; still there to download.
+    assert!(
+        !h.contains(">.HEADER.md<") && !h.contains(">.FOOTER.md<"),
+        "{h}"
+    );
+    assert!(h.contains(">tool.tar.gz<"), "{h}");
+    let (st, raw) = get(&s.url("/f/.FOOTER.md"), None);
+    assert_eq!((st, raw.as_str()), (200, "Questions: *the team*"));
+    // HEAD reads nothing and sends no body.
+    let r = c.head(s.url("/f/")).send().unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+
+    // A directory's own notes; another directory's are not inherited.
+    put("docs/.HEADER.md", b"## Docs".to_vec());
+    let (_, d) = page("/f/docs/");
+    assert!(
+        d.contains("<h2>Docs</h2>") && !d.contains("Team files"),
+        "{d}"
+    );
+    // Too large: not rendered, listed as a file.
+    put("big/.HEADER.md", vec![b'x'; 64 * 1024 + 1]);
+    let (_, b) = page("/f/big/");
+    assert!(
+        !b.contains("class=\"note") && b.contains(">.HEADER.md<"),
+        "{b}"
+    );
+
+    // A label keeps the notes of its version.
+    s.cli(&["label", "f", "before"]).unwrap();
+    put(".HEADER.md", b"# Changed".to_vec());
+    assert!(page("/f/").1.contains("<h1>Changed</h1>"));
+    let (_, old) = page("/f/@before/");
+    assert!(
+        old.contains("<h1>Team files</h1>") && !old.contains("Changed"),
+        "{old}"
+    );
+}
+
 #[test]
 fn files_mirror_and_import_over_http_listings() {
     let s = Server::start();
@@ -5701,6 +5800,17 @@ fn files_mirror_and_import_over_http_listings() {
         listing.contains("inner") && !listing.contains("leak"),
         "{listing}"
     );
+    // Notes in a received tree are rendered; through a link they are not.
+    std::fs::write(tree.join(".HEADER.md"), "# Mirrored *files*").unwrap();
+    std::os::unix::fs::symlink(&secret, tree.join("iso/.HEADER.md")).unwrap();
+    let (_, listing) = get(&s.url("/m/"), None);
+    assert!(
+        listing.contains("<section class=\"note head\"><h1>Mirrored <em>files</em></h1>"),
+        "{listing}"
+    );
+    let (_, iso) = get(&s.url("/m/iso/"), None);
+    assert!(!iso.contains("class=\"note"), "{iso}");
+    std::fs::remove_file(tree.join("iso/.HEADER.md")).unwrap();
     std::os::unix::fs::symlink(s.dir.path().join("data"), tree.join("datadir")).unwrap();
     assert!(
         s.cli(&["ls", "m", "datadir"]).is_err(),

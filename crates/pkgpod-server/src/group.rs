@@ -307,7 +307,9 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
             .ok()
             .flatten();
             match entries {
-                Some(es) => crate::serve::listing(&at.raw_path, es, &query, head),
+                Some(es) => {
+                    crate::serve::listing(&at.raw_path, es, &query, head, &Default::default())
+                }
                 None => crate::serve::status(StatusCode::NOT_FOUND),
             }
         }

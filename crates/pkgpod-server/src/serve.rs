@@ -377,6 +377,7 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
                 entries,
                 req.uri().query().unwrap_or(""),
                 method == Method::HEAD,
+                &Default::default(),
             )
         }
         Hit::Repo {
@@ -1032,7 +1033,8 @@ async fn get(
                     _ => None,
                 })
                 .collect();
-            listing(raw_path, entries, &query, head)
+            let notes = tree_notes(&s.repo, &t, head).await;
+            listing(raw_path, entries, &query, head, &notes)
         }
         Entry::Blob { sha256, meta, .. } => {
             let mtime = meta.get("mtime").and_then(Value::as_i64);
@@ -1407,10 +1409,17 @@ async fn serve_mirror(
             return Redirect::permanent(&format!("{raw_path}/")).into_response();
         }
         let tree2 = tree.clone();
-        let entries = tokio::task::spawn_blocking(move || fs_entries(&tree2, &full, hidden))
-            .await
-            .unwrap_or_default();
-        return listing(raw_path, entries, &query, head);
+        let (entries, notes) = tokio::task::spawn_blocking(move || {
+            let notes = if files && !head {
+                fs_notes(&tree2, &full)
+            } else {
+                Default::default()
+            };
+            (fs_entries(&tree2, &full, hidden), notes)
+        })
+        .await
+        .unwrap_or_default();
+        return listing(raw_path, entries, &query, head, &notes);
     }
     let uri: Uri = match format!(
         "/{}",
@@ -1662,7 +1671,14 @@ pub struct ListEntry {
     pub modified: Option<std::time::SystemTime>,
 }
 
-pub(crate) fn listing(path: &str, entries: Vec<ListEntry>, query: &str, head: bool) -> Response {
+pub(crate) fn listing(
+    path: &str,
+    mut entries: Vec<ListEntry>,
+    query: &str,
+    head: bool,
+    notes: &crate::notes::Notes,
+) -> Response {
+    entries.retain(|e| e.dir || !notes.shown(&e.name));
     let q = |k: &str| {
         query
             .split('&')
@@ -1679,16 +1695,70 @@ pub(crate) fn listing(path: &str, entries: Vec<ListEntry>, query: &str, head: bo
     let body = if head {
         String::new()
     } else {
-        listing_html(path, entries, sort)
+        listing_html(path, entries, sort, notes)
     };
     (
         [
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
             (header::CACHE_CONTROL, "no-cache"),
+            // The page has no script; a note's HTML cannot add one.
+            (header::CONTENT_SECURITY_POLICY, LISTING_CSP),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
         ],
         body,
     )
         .into_response()
+}
+
+const LISTING_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; \
+    img-src 'self' https: data:; base-uri 'none'; form-action 'none'";
+
+/// A files repository's notes in a directory of its tree, read from the
+/// store; nothing for other formats or on HEAD.
+pub(crate) async fn tree_notes(
+    repo: &pkgpod_engine::RepoInfo,
+    t: &pkgpod_engine::tree::Tree,
+    head: bool,
+) -> crate::notes::Notes {
+    use crate::notes::{FOOTER, HEADER, MAX, Notes};
+    if repo.format != "files" || head {
+        return Notes::default();
+    }
+    let blobs: Vec<(String, pkgpod_base::Digest)> = [HEADER, FOOTER]
+        .iter()
+        .filter_map(|n| match t.get(*n) {
+            Some(Entry::Blob { sha256, size, .. }) if *size <= MAX => {
+                Some((n.to_string(), *sha256))
+            }
+            _ => None,
+        })
+        .collect();
+    if blobs.is_empty() {
+        return Notes::default();
+    }
+    let store = repo.store();
+    tokio::task::spawn_blocking(move || {
+        Notes::load(|name| {
+            let (_, d) = blobs.iter().find(|(n, _)| n == name)?;
+            store.read(d).ok()
+        })
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// A files mirror's notes in a directory of its received tree: regular
+/// files inside the tree only, never through a link.
+fn fs_notes(tree: &std::path::Path, dir: &std::path::Path) -> crate::notes::Notes {
+    use crate::notes::{MAX, Notes};
+    Notes::load(|name| {
+        let p = dir.join(name);
+        let md = std::fs::symlink_metadata(&p).ok()?;
+        if !md.is_file() || md.len() > MAX || inside(tree, &p).is_none() {
+            return None;
+        }
+        std::fs::read(&p).ok()
+    })
 }
 
 pub fn human(n: u64) -> String {
@@ -1708,7 +1778,12 @@ pub fn human(n: u64) -> String {
 
 /// A directory listing in the manner of Caddy's file browser:
 /// breadcrumb, directories first, name / size / modified, sortable.
-pub fn listing_html(path: &str, mut entries: Vec<ListEntry>, (key, desc): (&str, bool)) -> String {
+pub fn listing_html(
+    path: &str,
+    mut entries: Vec<ListEntry>,
+    (key, desc): (&str, bool),
+    notes: &crate::notes::Notes,
+) -> String {
     entries.sort_by(|a, b| {
         let o = match key {
             "size" => a.size.cmp(&b.size),
@@ -1774,20 +1849,44 @@ h1 {{ margin:0; font-size:1.25rem; font-weight:600; overflow-wrap:anywhere; }}
 h1 a {{ color:inherit; text-decoration:none; }} h1 a:hover {{ color:var(--link); }}
 .meta {{ color:var(--muted); font-size:13px; margin-top:.3rem; }}
 main {{ padding:0 1.5rem 2rem; }}
-table {{ width:100%; border-collapse:collapse; }}
+table {{ border-collapse:collapse; }}
 th, td {{ text-align:left; padding:.45rem .6rem; border-bottom:1px solid var(--line); }}
-th {{ font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }}
-th a {{ color:inherit; text-decoration:none; }}
-td a {{ color:var(--link); text-decoration:none; overflow-wrap:anywhere; }} td a:hover {{ text-decoration:underline; }}
+.list {{ width:100%; }}
+.list th {{ font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }}
+.list th a {{ color:inherit; text-decoration:none; }}
+.list td a {{ color:var(--link); text-decoration:none; overflow-wrap:anywhere; }} .list td a:hover {{ text-decoration:underline; }}
 .num {{ text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; }}
-td:last-child {{ white-space:nowrap; color:var(--muted); font-variant-numeric:tabular-nums; }}
-@media (max-width:640px) {{ td:last-child, th:last-child {{ display:none; }} header, main {{ padding-left:1rem; padding-right:1rem; }} }}
+.list td:last-child {{ white-space:nowrap; color:var(--muted); font-variant-numeric:tabular-nums; }}
+@media (max-width:640px) {{ .list td:last-child, .list th:last-child {{ display:none; }} header, main {{ padding-left:1rem; padding-right:1rem; }} }}
+.note {{ max-width:56rem; overflow-wrap:anywhere; }}
+.note.head {{ padding:1rem 0 .6rem; border-bottom:1px solid var(--line); margin-bottom:.4rem; }}
+.note.foot {{ padding:1.2rem 0 0; }}
+.note > :first-child {{ margin-top:0; }} .note > :last-child {{ margin-bottom:0; }}
+.note h1 {{ font-size:1.4rem; }} .note h2 {{ font-size:1.15rem; }} .note h3 {{ font-size:1rem; }}
+.note a {{ color:var(--link); }}
+.note img {{ max-width:100%; height:auto; vertical-align:middle; }}
+.note code {{ font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; background:var(--head); padding:.1rem .3rem; border-radius:4px; }}
+.note pre {{ background:var(--head); border:1px solid var(--line); border-radius:6px; padding:.7rem .9rem; overflow-x:auto; }}
+.note pre code {{ background:none; padding:0; }}
+.note blockquote {{ margin:.6rem 0; padding:.1rem .9rem; border-left:3px solid var(--line); color:var(--muted); }}
+.note table {{ margin:.6rem 0; display:block; overflow-x:auto; }} .note th, .note td {{ padding:.3rem .6rem; }}
+.note th {{ font-weight:600; border-bottom-width:2px; }}
 </style></head>
 <body><header><h1>{crumbs}</h1><div class="meta">{dirs} director{dies}, {files} file{fs}, {total}</div></header>
-<main><table><thead><tr><th>{h_name}</th><th class="num">{h_size}</th><th>{h_time}</th></tr></thead>
+<main>{note_head}<table class="list"><thead><tr><th>{h_name}</th><th class="num">{h_size}</th><th>{h_time}</th></tr></thead>
 <tbody>
-{rows}</tbody></table></main></body></html>
+{rows}</tbody></table>{note_foot}</main></body></html>
 "#,
+        note_head = notes
+            .header
+            .as_deref()
+            .map(|h| format!("<section class=\"note head\">{h}</section>"))
+            .unwrap_or_default(),
+        note_foot = notes
+            .footer
+            .as_deref()
+            .map(|h| format!("<section class=\"note foot\">{h}</section>"))
+            .unwrap_or_default(),
         title = html(&shown),
         dies = if dirs == 1 { "y" } else { "ies" },
         fs = if files == 1 { "" } else { "s" },
@@ -1866,7 +1965,7 @@ mod tests {
                 modified: None,
             },
         ];
-        let h = listing_html("/ppa/pool/", entries, ("size", true));
+        let h = listing_html("/ppa/pool/", entries, ("size", true), &Default::default());
         assert!(
             h.contains("&lt;x&gt;&amp;&quot;") && !h.contains("<x>"),
             "{h}"
