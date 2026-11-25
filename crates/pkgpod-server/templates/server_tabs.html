@@ -1,6 +1,6 @@
 {# SPDX-License-Identifier: AGPL-3.0-only #}
 {# The Server pages' head and sections; `tab` names the one shown. #}
-<div class="page-head"><div class="title"><h1>Server</h1><p class="sub">Data in <span class="mono">{{ data_dir }}</span>; console and API on <span class="mono">{{ management }}</span> (from the configuration file).</p></div></div>
+<div class="page-head"><div class="title"><h1>Server</h1><p class="sub">{% if !console_url.is_empty() %}At <a href="{{ console_url }}">{{ console_url }}</a>; data in{% else %}Data in{% endif %} <span class="mono">{{ data_dir }}</span>; console and API listen on <span class="mono">{{ management }}</span> (the configuration file).</p></div></div>
 <nav class="tabs" aria-label="Server">
   <a class="tab" href="/admin/server"{% if tab == "overview" %} aria-selected="true"{% endif %}>Overview</a>
   <a class="tab" href="/admin/server/jobs"{% if tab == "jobs" %} aria-selected="true"{% endif %}>Jobs</a>

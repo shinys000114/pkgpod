@@ -13,6 +13,17 @@
   </tbody></table></div>
 </div>
 {% else if tab == "serving" %}
+<div class="card" id="console-address">
+  <div class="card-head"><h2>Console</h2><span class="hint">where people and CI reach the console and API</span></div>
+  <div class="card-body">
+  <p class="muted small">It listens on <span class="mono">{{ management }}</span> (the configuration file: <code>listen</code>). Its public address is the one the CLI's install script and download, and the CI examples, name; {% if console_url.is_empty() %}not set, they name whatever address each request comes to (its Host).{% else %}set, they name it whatever a request says.{% endif %}</p>
+  <form class="inline" hx-post="/c/settings/ci" hx-target="next .result">
+    <label class="field"><span>Public address</span><input name="console_url" value="{{ console_url }}" placeholder="https://pkg.example.org" size="34" autocomplete="off" spellcheck="false"></label>
+    <button type="submit">Save</button>
+  </form>
+  <div class="result"></div>
+  </div>
+</div>
 <div class="card">
   <div class="card-head"><h2>Serving listeners</h2><span class="hint">repositories are served on every listener, chosen by their addresses; a reverse proxy in front gives certificates</span></div>
   <div class="table-wrap"><table><thead><tr><th>Name</th><th>Address</th><th>Serves</th><th>State</th><th></th></tr></thead><tbody>
@@ -133,14 +144,12 @@
   {% include "trust_form.html" %}
   </details>
   <details class="more"><summary>In a GitHub Actions workflow</summary>
-<p class="muted small">For a repository here; the job needs a rule that trusts its GitHub repository and workflow. The address is {% if console_url.is_empty() %}the one your browser reached this page at (its Host): set the console's public address below, and the examples, the CLI's install script and its download name it whatever address a request comes to{% else %}the console's public address, as set below{% endif %}.</p>
+<p class="muted small">For a repository here; the job needs a rule that trusts its GitHub repository and workflow. The address is {% if console_url.is_empty() %}the one your browser reached this page at: set the console's public address in <a href="/admin/server/serving#console-address">Listeners &amp; hosts</a>{% else %}the console's public address (<a href="/admin/server/serving#console-address">Listeners &amp; hosts</a>){% endif %}.</p>
 <pre class="code">{{ ci_example }}</pre>
-<form hx-post="/c/settings/ci" hx-target="next .result">
-  <div class="fields">
-    <label class="field"><span>Console address</span><input name="console_url" value="{{ console_url }}" placeholder="https://pkg.example.org" autocomplete="off" spellcheck="false"><small>Where CI jobs reach the console and API. Empty: as each request names it.</small></label>
-    <label class="field"><span>pkgpod action</span><input name="ci_action" value="{{ ci_action }}" placeholder="owner/pkgpod@master" autocomplete="off" spellcheck="false"><small>Where the action is on GitHub: owner/repository@ref.</small></label>
-  </div>
-  <div class="form-foot"><button type="submit">Save</button></div>
+<form class="inline" hx-post="/c/settings/ci" hx-target="next .result">
+  <label class="field"><span>pkgpod action</span><input name="ci_action" value="{{ ci_action }}" placeholder="owner/pkgpod@master" size="30" autocomplete="off" spellcheck="false"></label>
+  <button type="submit">Save</button>
+  <span class="muted small">Where the action is on GitHub: owner/repository@ref.</span>
 </form>
 <div class="result"></div>
   </details>

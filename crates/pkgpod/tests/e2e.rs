@@ -6964,6 +6964,35 @@ fn cli_from_the_server() {
         a.extend_from_slice(&bad);
         assert!(s.cli(&a).is_err(), "{bad:?}");
     }
+    // In the console: the address with the listener, the action beside
+    // the example; saving one leaves the other.
+    let (c, sid, csrf) = console_session(&s, "ops", "ops-password");
+    let r = c
+        .post(format!("{}/c/settings/ci", s.api))
+        .header("cookie", format!("pkgpod_session={sid}"))
+        .header("x-csrf-token", &csrf)
+        .form(&[("ci_action", "team/pkgpod@v2")])
+        .send()
+        .unwrap();
+    assert!(r.headers().contains_key("hx-refresh"));
+    let st = s.cli(&["settings"]).unwrap();
+    assert!(
+        st.contains("console_url = https://pkg.example.org")
+            && st.contains("ci_action = team/pkgpod@v2"),
+        "{st}"
+    );
+    let serving = c
+        .get(format!("{}/admin/server/serving", s.api))
+        .header("cookie", format!("pkgpod_session={sid}"))
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(
+        serving.contains(r#"id="console-address""#)
+            && serving.contains(r#"value="https://pkg.example.org""#),
+        "{serving}"
+    );
     s.cli(&["settings", "--console-url", ""]).unwrap();
     let sh = reqwest::blocking::get(format!("{}/cli/install.sh", s.api))
         .unwrap()
