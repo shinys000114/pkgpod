@@ -1668,6 +1668,15 @@ async fn serve_mirror(
                 cache_control(&rel_s)
             }),
         );
+        // The types a hosted repository gives these names: ServeDir
+        // guesses by extension alone (InRelease and .deb as octet-stream,
+        // .rpm as audio). A files mirror keeps its guess where the table
+        // has none, for the images and documents such trees hold.
+        let ty = content_type(&rel_s);
+        if !files || ty != "application/octet-stream" {
+            r.headers_mut()
+                .insert(header::CONTENT_TYPE, HeaderValue::from_static(ty));
+        }
     }
     sandbox(r.headers_mut());
     r

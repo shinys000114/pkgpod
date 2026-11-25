@@ -23,5 +23,9 @@ pub fn router(app: Arc<App>) -> Router {
         )
         .merge(crate::console::router())
         .fallback(crate::console::not_found)
+        // After the fallback, so a path nothing has gets them too.
+        .layer(axum::middleware::map_response(
+            crate::console::security_headers,
+        ))
         .with_state(app)
 }

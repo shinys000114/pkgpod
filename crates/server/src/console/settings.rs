@@ -178,6 +178,8 @@ pub(crate) struct BadgesPart {
     pub(crate) badges: Vec<BadgeRow>,
     /// The scheme and host the badges are served at.
     pub(crate) root: String,
+    /// Why a token change failed.
+    pub(crate) error: String,
 }
 
 pub(crate) struct BadgeRow {
@@ -192,6 +194,19 @@ pub(crate) async fn badges_part(
     Path(repo): Path<String>,
     headers: HeaderMap,
 ) -> Response {
+    badges_view(&app, &v, repo, &headers, String::new())
+}
+
+/// The badges card, saying `error` when a token change failed: the
+/// answer replaces the card, and one line in its place would leave no
+/// buttons to try again.
+fn badges_view(
+    app: &App,
+    v: &Viewer,
+    repo: String,
+    headers: &HeaderMap,
+    error: String,
+) -> Response {
     let r = match app.repo_for(&v.caller, &repo, Role::Read) {
         Ok(r) => r,
         Err(e) => return err_part(e),
@@ -203,11 +218,11 @@ pub(crate) async fn badges_part(
     let token = if public || !can_admin {
         None
     } else {
-        crate::serving::badge::token(&app, &repo).ok().flatten()
+        crate::serving::badge::token(app, &repo).ok().flatten()
     };
     // The serving address's scheme and host.
     let urls = strs(&r.settings["urls"]);
-    let base = base_url(&app, &r, &urls, &host_of(&headers));
+    let base = base_url(app, &r, &urls, &host_of(headers));
     let root = match base.split_once("://") {
         Some((s, rest)) => format!("{s}://{}", rest.split('/').next().unwrap_or("")),
         None => base.clone(),
@@ -251,6 +266,7 @@ pub(crate) async fn badges_part(
         can_admin,
         badges,
         root,
+        error,
     })
 }
 
@@ -260,10 +276,11 @@ pub(crate) async fn badge_token_new(
     Path(repo): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    match api::badge_token_new(State(app.clone()), v.who(), Path(repo.clone())).await {
-        Ok(_) => badges_part(State(app), v, Path(repo), headers).await,
-        Err(e) => err_part(e),
-    }
+    let error = match api::badge_token_new(State(app.clone()), v.who(), Path(repo.clone())).await {
+        Ok(_) => String::new(),
+        Err(e) => e.to_string(),
+    };
+    badges_view(&app, &v, repo, &headers, error)
 }
 
 pub(crate) async fn badge_token_drop(
@@ -272,10 +289,11 @@ pub(crate) async fn badge_token_drop(
     Path(repo): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    match api::badge_token_drop(State(app.clone()), v.who(), Path(repo.clone())).await {
-        Ok(_) => badges_part(State(app), v, Path(repo), headers).await,
-        Err(e) => err_part(e),
-    }
+    let error = match api::badge_token_drop(State(app.clone()), v.who(), Path(repo.clone())).await {
+        Ok(_) => String::new(),
+        Err(e) => e.to_string(),
+    };
+    badges_view(&app, &v, repo, &headers, error)
 }
 
 /// A part of a repository's settings form, under a heading.

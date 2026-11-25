@@ -301,19 +301,19 @@ pub fn cleanup_fields() -> Vec<Field> {
         Field::int(
             "cleanup_prerelease_days",
             0,
-            "Cleanup: remove pre-releases in for longer than this many days (0: never).",
+            "Cleanup: remove pre-releases added more than this many days ago (0: never).",
         )
         .at_most(DAYS),
         Field::int(
             "cleanup_unused_days",
             0,
-            "Cleanup: remove versions in and not downloaded for this many days (0: never; needs download counts kept at least as long).",
+            "Cleanup: remove versions added, and last downloaded if ever, more than this many days ago (0: never; needs download counts kept at least as long).",
         )
         .at_most(DAYS),
         Field::int(
             "cleanup_max",
             50,
-            "Cleanup: the daily run holds a cleanup that would remove more versions than this, for review.",
+            "Cleanup: when the daily run would remove more versions than this, it removes none; preview and apply such a cleanup by hand.",
         ),
     ]
 }

@@ -195,6 +195,10 @@ pub(crate) struct UsagePart {
     pub(crate) capped: bool,
 }
 
+/// At most this many of a proxy's cached files are counted in Storage
+/// use: each is read as a whole row, and all are held until counted.
+const USAGE_CACHE_ROWS: usize = 100_000;
+
 /// What each repository's content takes: its current version's blobs, all
 /// its versions' (each blob counted once), a mirror's tree, a proxy's
 /// cache; across hosted repositories and caches, what the shared store
@@ -229,7 +233,9 @@ pub(crate) async fn usage_part(State(app): St, v: Viewer) -> Response {
             if r.kind == Kind::Proxy {
                 // What it keeps is in the shared store, as hosted files.
                 let mut blobs = HashMap::new();
-                for c in app2.engine.cache_list(&r.name, "", i64::MAX as usize)? {
+                let cached = app2.engine.cache_list(&r.name, "", USAGE_CACHE_ROWS + 1)?;
+                capped |= cached.len() > USAGE_CACHE_ROWS;
+                for c in cached.into_iter().take(USAGE_CACHE_ROWS) {
                     if let Some(sha) = c.sha256 {
                         blobs.insert(sha, c.size);
                     }

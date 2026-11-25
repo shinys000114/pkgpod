@@ -446,6 +446,26 @@ pub(crate) async fn listener_delete(
     }
 }
 
+/// `?replace=1` when the form's box is ticked.
+fn replace_q(form: &[(String, String)]) -> api::ReplaceQ {
+    api::ReplaceQ {
+        replace: (form_get(form, "replace") == "on").then(|| "1".to_string()),
+    }
+}
+
+/// A key change refused, in the console's words: the API's message
+/// names the CLI's flags, which are boxes here.
+fn key_refused(e: Error) -> Response {
+    let text = e
+        .to_string()
+        .replace("pass --replace", "tick Replace the existing key")
+        .replace(
+            "pass --force",
+            "tick Delete although repositories sign with it",
+        );
+    msg(false, text)
+}
+
 pub(crate) async fn key_generate(
     State(app): St,
     v: Viewer,
@@ -458,13 +478,13 @@ pub(crate) async fn key_generate(
         State(app),
         v.who(),
         Path(form_get(&form, "name").trim().to_string()),
-        Query(Default::default()),
+        Query(replace_q(&form)),
         Json(req),
     )
     .await
     {
         Ok(_) => refresh(),
-        Err(e) => err_part(e),
+        Err(e) => key_refused(e),
     }
 }
 
@@ -481,13 +501,13 @@ pub(crate) async fn key_add(
         State(app),
         v.who(),
         Path(form_get(&form, "name").trim().to_string()),
-        Query(Default::default()),
+        Query(replace_q(&form)),
         Json(req),
     )
     .await
     {
         Ok(_) => refresh(),
-        Err(e) => err_part(e),
+        Err(e) => key_refused(e),
     }
 }
 
@@ -498,10 +518,18 @@ pub(crate) async fn key_default(State(app): St, v: Viewer, Path(name): Path<Stri
     }
 }
 
-pub(crate) async fn key_delete(State(app): St, v: Viewer, Path(name): Path<String>) -> Response {
-    match api::key_delete(State(app), v.who(), Path(name), Query(Default::default())).await {
+pub(crate) async fn key_delete(
+    State(app): St,
+    v: Viewer,
+    Path(name): Path<String>,
+    Form(form): Form<Vec<(String, String)>>,
+) -> Response {
+    let q = api::ForceQ {
+        force: (form_get(&form, "force") == "on").then(|| "1".to_string()),
+    };
+    match api::key_delete(State(app), v.who(), Path(name), Query(q)).await {
         Ok(_) => refresh(),
-        Err(e) => err_part(e),
+        Err(e) => key_refused(e),
     }
 }
 

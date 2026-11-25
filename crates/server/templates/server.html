@@ -112,12 +112,13 @@
   {% for k in keys %}<tr><td><b>{{ k.name }}</b>{% if k.default %} <span class="tag accent">default</span>{% endif %}{% if k.missing %} <span class="tag st-bad">no secret key: import it again</span>{% endif %}</td><td>{{ k.uid }}<div class="mono small">{{ k.fingerprint }}</div></td>
     <td class="acts nowrap"><a href="/api/v1/keys/{{ k.name|urlencode }}/public">public key</a>
     {% if !k.default %}<button class="link" hx-post="/c/keys/{{ k.name|urlencode }}/default" hx-target="#server-result">make default</button>{% endif %}
-    <button class="link danger" hx-post="/c/keys/{{ k.name|urlencode }}/delete" hx-target="#server-result" hx-confirm="Delete key {{ k.name }}? Its secret key is deleted; repositories signed with it cannot be signed again with it.">remove</button></td></tr>{% endfor %}
+    <button class="link danger" hx-post="/c/keys/{{ k.name|urlencode }}/delete" hx-include="#key-force" hx-target="#server-result" hx-confirm="Delete key {{ k.name }}? Its secret key is deleted; repositories signed with it cannot be signed again with it.">remove</button></td></tr>{% endfor %}
   </tbody></table></div>
+  <div class="card-body"><label class="check"><input type="checkbox" id="key-force" name="force" autocomplete="off"> Delete although repositories sign with it</label></div>
   {% endif %}
   <div class="card-body">
   <form class="inline" hx-post="/c/keys/generate" hx-target="#server-result">
-    New key <input name="name" required placeholder="main" size="10" autocomplete="off" autocapitalize="off" spellcheck="false"> for <input name="uid" required placeholder="Team packages &lt;packages@example.org&gt;" size="36" autocomplete="off"> <button type="submit">Generate</button>
+    New key <input name="name" required placeholder="main" size="10" autocomplete="off" autocapitalize="off" spellcheck="false"> for <input name="uid" required placeholder="Team packages &lt;packages@example.org&gt;" size="36" autocomplete="off"> <label class="check"><input type="checkbox" name="replace" autocomplete="off"> Replace the existing key</label> <button type="submit">Generate</button>
   </form>
   <details class="more"><summary>Import a key</summary>
   <form hx-post="/c/keys" hx-target="#server-result">
@@ -125,6 +126,7 @@
       <label class="field"><span>Import a key as</span><input name="name" required placeholder="name" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
       <label class="field"><span>Its passphrase</span><input name="passphrase" type="password" autocomplete="new-password" placeholder="if it has one"></label>
       <label class="field wide"><span>Secret key</span><textarea name="secret_key" rows="4" required spellcheck="false" placeholder="gpg --export-secret-keys --armor &lt;fingerprint&gt;"></textarea><small>Kept by pkgpod in its data directory (mode 0600) and in backups.</small></label>
+      <label class="check field"><span class="check-line"><input type="checkbox" name="replace" autocomplete="off"> <span>Replace the existing key</span></span><small>One of this name: what it signs is signed by the new key from the next publish on.</small></label>
     </div>
     <div class="form-foot"><button type="submit">Import</button></div>
   </form>
