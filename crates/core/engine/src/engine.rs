@@ -1123,25 +1123,34 @@ impl Engine {
     /// Packages whose name contains `q` (all if empty), in one repository
     /// or all.
     pub fn search(&self, q: &str, repo: Option<&str>, limit: usize) -> Result<Vec<Found>> {
+        let ids = match repo {
+            Some(n) => Some(vec![self.repo(n)?.id]),
+            None => None,
+        };
+        self.search_in(q, ids.as_deref(), limit)
+    }
+
+    /// [`search`](Self::search) in the repositories of `ids` only (all
+    /// with `None`): those a caller may read, so that the limit, and
+    /// whether it cut the list, count nothing of the others.
+    pub fn search_in(&self, q: &str, ids: Option<&[i64]>, limit: usize) -> Result<Vec<Found>> {
         let like = format!(
             "%{}%",
             q.replace('\\', "\\\\")
                 .replace('%', "\\%")
                 .replace('_', "\\_")
         );
-        let repo_id = match repo {
-            Some(n) => Some(self.repo(n)?.id),
-            None => None,
-        };
+        let ids = ids.map(|v| serde_json::json!(v).to_string());
         let v = self.db.read(|c| {
             let mut st = c.prepare(
                 "SELECT r.name, r.format, c.path, c.name, c.version, c.extra, c.size
                  FROM catalog c JOIN repos r ON r.id = c.repo
-                 WHERE c.name LIKE ?1 ESCAPE '\\' AND (?2 IS NULL OR c.repo = ?2)
+                 WHERE c.name LIKE ?1 ESCAPE '\\'
+                   AND (?2 IS NULL OR c.repo IN (SELECT value FROM json_each(?2)))
                  ORDER BY c.name, r.name, c.path LIMIT ?3",
             )?;
             let v = st
-                .query_map(params![like, repo_id, limit as i64], |r| {
+                .query_map(params![like, ids, limit as i64], |r| {
                     Ok(Found {
                         repo: r.get(0)?,
                         format: r.get(1)?,

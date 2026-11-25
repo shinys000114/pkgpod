@@ -321,6 +321,15 @@ the Release that names it.
 A `file:///` address of a directory on the server is read as an http
 source is; setting one is for server admins.
 
+As with a hosted repository, caches in front are told to ask again for
+a mirror's pool files each time (`Cache-Control: no-cache`; the answer
+is a short 304 while the file is the same): a sync puts other content
+at a pool name when upstream rebuilt a file under it, an rsync pass
+copies a changed file over, and a source moved to another upstream may
+have other builds under the same names. A cache that kept the old file
+would fail apt's hash check. Only the files under `by-hash/` are kept
+for a year.
+
 ### Re-signing
 
 With `resign=true`, a mirror serves its Release files signed with our

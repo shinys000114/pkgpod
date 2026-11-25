@@ -486,6 +486,13 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
             };
             let public = served.repo.setting_bool("public");
             let role = app.auth.role(&caller, &repo, public);
+            // A group with a member that is not public answers callers
+            // without a role on it from its public members only, others
+            // from all: the same URL, other files. Kept out of shared
+            // caches, as a private repository's answers are.
+            let shared = public
+                && (served.repo.kind != Kind::Group
+                    || crate::serving::group::all_public(&app, &served.repo));
             let at = At {
                 served,
                 role,
@@ -497,7 +504,7 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
                 raw_path,
             };
             let mut r = serve_repo(app, at, req).await;
-            if authorized || !public {
+            if authorized || !shared {
                 private(&mut r);
             }
             r
@@ -1006,6 +1013,11 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
             ),
         );
     }
+    // Without a right, refused whatever the method (a logged-in caller
+    // as if it were not there), before what the method may do is told.
+    if role.is_none() {
+        return deny(&caller);
+    }
     if method == Method::DELETE {
         return status(StatusCode::METHOD_NOT_ALLOWED);
     }
@@ -1033,9 +1045,6 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
             };
         }
         return put(app, served.repo, rel, caller, req).await;
-    }
-    if role.is_none() {
-        return deny(&caller);
     }
     get(&app, served, rel, &raw_path, req).await
 }
@@ -1258,15 +1267,16 @@ pub fn content_type(name: &str) -> &'static str {
 }
 
 /// Built-in Cache-Control rules: apt indexes are revalidated (they change
-/// in place), by-hash files kept (their names change with their content)
-/// and a mirror's pool files (an archive never puts other content at a
-/// pool name; a hosted repository's are revalidated, see
-/// [`stored_cache_control`]), checksum files revalidated, the rest kept
-/// for an hour.
+/// in place), by-hash files kept (their names change with their
+/// content), pool files revalidated (cheap, by ETag): a replace in a
+/// hosted repository and a mirror's sync (of a file upstream rebuilt,
+/// by rsync, from another source) put other content at a pool name, and
+/// a cache that kept the old file would fail apt's hash check. Checksum
+/// files are revalidated, the rest kept for an hour.
 const DEFAULT_CACHE: [(&str, &str); 28] = [
     ("**/by-hash/**", "public, max-age=31536000, immutable"),
     ("dists/**", "no-cache"),
-    ("pool/**", "public, max-age=31536000"),
+    ("pool/**", "no-cache"),
     ("project/trace/**", "no-cache"),
     ("**/*SUMS*", "no-cache"),
     ("**/*.sha256", "no-cache"),
@@ -2167,7 +2177,13 @@ mod tests {
         assert!(
             cache_control("dists/noble/main/binary-amd64/by-hash/SHA256/ab").contains("immutable")
         );
-        assert!(cache_control("pool/main/h/hello/hello_1_all.deb").contains("31536000"));
+        // A pool file may get other content (a replace, a mirror's sync):
+        // asked again; by-hash indexes are still kept.
+        assert_eq!(
+            cache_control("pool/main/h/hello/hello_1_all.deb"),
+            "no-cache"
+        );
+        assert!(cache_control("pool/main/by-hash/SHA256/ab").contains("immutable"));
         assert_eq!(cache_control("releases/noble/SHA256SUMS"), "no-cache");
         assert_eq!(cache_control("SHA256SUMS"), "no-cache");
         for index in [

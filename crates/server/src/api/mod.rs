@@ -891,16 +891,11 @@ pub(crate) async fn repo_patch(
             r = app.engine.repo(&repo)?;
         }
         // What a proxy keeps is what its upstream gave: another upstream
-        // is asked afresh.
+        // is asked afresh, and a fetch from the old one still running is
+        // not kept after this (see proxy::keep).
         let mut evicted = 0;
         if r.kind == Kind::Proxy && r.setting_str("upstream") != r0.setting_str("upstream") {
-            let paths: Vec<String> = app
-                .engine
-                .cache_list(&repo, "", i64::MAX as usize)?
-                .into_iter()
-                .map(|row| row.path)
-                .collect();
-            evicted = app.engine.cache_evict(&repo, &paths)?;
+            evicted = crate::serving::proxy::forget_all(app, &repo)?;
         }
         if r.settings != r0.settings {
             let mut detail = req.settings.to_string();
@@ -1202,24 +1197,25 @@ pub(crate) async fn packages(
 /// there were more.
 fn search_hits(app: &App, c: &Caller, q: &SearchQ) -> Result<(Value, bool)> {
     let limit = q.limit.unwrap_or(200).min(2000);
-    let hits = app.engine.search(&q.q, q.repo.as_deref(), limit * 4 + 1)?;
-    // Cut before the rights were looked at: there may be more.
-    let unread = hits.len() > limit * 4;
-    let mut seen = std::collections::HashMap::new();
-    let mut v: Vec<_> = hits
-        .into_iter()
-        .filter(|h| {
-            *seen.entry(h.repo.clone()).or_insert_with(|| {
-                app.engine
-                    .repo(&h.repo)
-                    .ok()
-                    .and_then(|r| app.auth.role(c, &r.name, r.setting_bool("public")))
+    // Only what the caller may read is looked through: the list, and
+    // whether it was cut, then tell nothing of private repositories (one
+    // named is answered as one not there).
+    let ids: Vec<i64> = match &q.repo {
+        Some(n) => vec![app.repo_for(c, n, Role::Read)?.id],
+        None => app
+            .engine
+            .repos()?
+            .into_iter()
+            .filter(|r| {
+                app.auth
+                    .role(c, &r.name, r.setting_bool("public"))
                     .is_some()
             })
-        })
-        .take(limit + 1)
-        .collect();
-    let more = v.len() > limit || unread;
+            .map(|r| r.id)
+            .collect(),
+    };
+    let mut v = app.engine.search_in(&q.q, Some(&ids), limit + 1)?;
+    let more = v.len() > limit;
     v.truncate(limit);
     Ok((json!(v), more))
 }

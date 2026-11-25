@@ -58,10 +58,11 @@ a later member's package of the same name. What names no package
 (a file of a files repository) comes from the first member that has it;
 directory listings show every member's. Its readers read the members
 through it (a token for the group alone is enough; anonymous readers of
-a public group read only its public members), and downloads count on
-the member. Nothing is uploaded to a group: publish to a member. A
-group cannot be a member, and whoever sets the members must be able to
-read them.
+a public group read only its public members, so while it has a member
+that is not public, its answers are kept by clients only, not by caches
+in front), and downloads count on the member. Nothing is uploaded to a
+group: publish to a member. A group cannot be a member, and whoever
+sets the members must be able to read them.
 
 A **proxy** fetches a file the first time it is asked for and keeps it
 until it is evicted (by hand, or for the size limit `max_mib`, unless

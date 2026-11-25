@@ -617,8 +617,8 @@ async fn proxy(
         version,
     };
     let put = |rw: CacheRow| {
-        let (app2, repo2) = (app.clone(), r.name.clone());
-        blocking(move || app2.engine.cache_put(&repo2, &rw))
+        let (app2, r2) = (app.clone(), r.clone());
+        blocking(move || crate::serving::proxy::keep(&app2, &r2, &rw))
     };
     match target {
         Target::Manifest(re) => {
@@ -628,11 +628,22 @@ async fn proxy(
             let fresh = have
                 .as_ref()
                 .is_some_and(|h| !by_tag || now - h.fetched < ttl);
-            let got = if fresh {
+            // While the upstream did not answer in time: what a tag
+            // named is kept, without asking it.
+            let quiet = have.is_some() && crate::serving::proxy::is_quiet(&r.name);
+            let got = if fresh || quiet {
                 have.clone()
             } else {
                 let (reg2, up2, re2) = (reg.clone(), up.clone(), re.clone());
-                match blocking(move || reg2.manifest(&up2, &re2)).await {
+                let fetch = blocking(move || reg2.manifest(&up2, &re2));
+                let fetched = match &have {
+                    // What a tag named is kept: not waited for long.
+                    Some(_) => crate::serving::proxy::waited(&r.name, fetch)
+                        .await
+                        .flatten(),
+                    None => fetch.await,
+                };
+                match fetched {
                     Some(Ok((body, mt, digest))) => {
                         let store = r.store();
                         let stored = blocking(move || {

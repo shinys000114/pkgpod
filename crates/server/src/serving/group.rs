@@ -128,6 +128,14 @@ fn members(app: &App, at: &At) -> Vec<Served> {
         .collect()
 }
 
+/// Whether every member the group lists is there and public: then
+/// [`members`] are the same for every caller, and so are its answers.
+pub(crate) fn all_public(app: &App, g: &pkgpod_engine::RepoInfo) -> bool {
+    g.setting_list("members")
+        .iter()
+        .all(|m| app.served(m).is_ok_and(|m| m.repo.setting_bool("public")))
+}
+
 /// Whether a member has state-tree directory `key`.
 fn has(app: &App, m: &Served, key: &str) -> bool {
     if m.repo.kind == Kind::Mirror {

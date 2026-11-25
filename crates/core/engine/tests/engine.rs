@@ -215,6 +215,18 @@ fn catalog_follows_the_current_version() {
     e.apply(&plan, "test").unwrap();
     assert_eq!(e.search("apt", Some("one"), 10).unwrap().len(), 1);
     assert!(e.search("_", None, 10).unwrap().is_empty());
+    // Only in the repositories given: the limit counts only theirs.
+    hosted(&e, "two");
+    upload(&e, "two", "p/aptz_1", "4");
+    let two = e.repo("two").unwrap().id;
+    let found = e.search_in("apt", Some(&[two]), 1).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(
+        (found[0].repo.as_str(), found[0].name.as_str()),
+        ("two", "aptz")
+    );
+    assert!(e.search_in("apt", Some(&[]), 10).unwrap().is_empty());
+    assert_eq!(e.search_in("apt", None, 10).unwrap().len(), 2);
 }
 
 #[test]

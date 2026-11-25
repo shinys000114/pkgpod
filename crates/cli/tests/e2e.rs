@@ -7930,6 +7930,140 @@ fn proxy_serves_kept_metadata_soon_while_its_upstream_hangs() {
     assert!(took < Duration::from_secs(3), "asked again: {took:?}");
 }
 
+/// [`proxy_serves_kept_metadata_soon_while_its_upstream_hangs`] for a
+/// file server's kept file and for what an image proxy keeps of a tag:
+/// neither waits for the upstream long.
+#[test]
+fn proxies_serve_kept_files_and_tags_soon_while_their_upstream_hangs() {
+    use std::sync::atomic::Ordering;
+    let manifest = json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json",
+                   "digest": format!("sha256:{}", "0".repeat(64)), "size": 2},
+        "layers": [],
+    })
+    .to_string();
+    let (port, log, held) = stub_upstream_held(vec![
+        ("/f.txt".into(), "text/plain", b"hello".to_vec()),
+        (
+            "/v2/x/app/manifests/1.0".into(),
+            "application/vnd.oci.image.manifest.v1+json",
+            manifest.clone().into_bytes(),
+        ),
+    ]);
+    let s = Server::start();
+    for (name, format, upstream) in [
+        ("fprox", "files", format!("http://127.0.0.1:{port}/")),
+        ("oprox", "oci", format!("http://127.0.0.1:{port}/x")),
+    ] {
+        s.cli(&[
+            "repo",
+            "create",
+            name,
+            "-f",
+            format,
+            "-k",
+            "proxy",
+            "-s",
+            &format!("upstream={upstream}"),
+            "-s",
+            "metadata_minutes=0",
+            "-s",
+            "public=true",
+        ])
+        .unwrap();
+    }
+    let c = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(90))
+        .build()
+        .unwrap();
+    for (path, want) in [
+        ("/fprox/f.txt", "hello"),
+        ("/v2/oprox/app/manifests/1.0", manifest.as_str()),
+    ] {
+        held.store(false, Ordering::Relaxed);
+        let get = || {
+            let t = Instant::now();
+            let r = c.get(s.url(path)).send().unwrap();
+            let st = r.status().as_u16();
+            assert_eq!(r.text().unwrap(), want, "{path}");
+            (st, t.elapsed())
+        };
+        assert_eq!(get().0, 200, "{path}");
+        held.store(true, Ordering::Relaxed);
+        let (st, took) = get();
+        assert_eq!(st, 200, "{path}");
+        assert!(took < Duration::from_secs(20), "{path}: {took:?}");
+        let asked = log.lock().unwrap().len();
+        let (st, took) = get();
+        assert_eq!(st, 200, "{path}");
+        assert!(took < Duration::from_secs(3), "{path}: {took:?}");
+        assert_eq!(log.lock().unwrap().len(), asked, "{path}: asked again");
+    }
+}
+
+/// A fetch from a proxy's old upstream that ends after the upstream was
+/// changed reaches its client, but is not kept: the next request asks
+/// the new upstream.
+#[test]
+fn proxies_keep_nothing_their_old_upstream_sends_late() {
+    use std::sync::atomic::Ordering;
+    let zip = "/example.com/m/@v/v1.0.0.zip";
+    let (old, old_log, held) = stub_upstream_held(vec![
+        (zip.into(), "application/zip", b"OLD".to_vec()),
+        ("/f.txt".into(), "text/plain", b"OLD".to_vec()),
+    ]);
+    let (new, new_log) = stub_upstream_log(
+        0,
+        vec![
+            (zip.into(), b"NEW".to_vec()),
+            ("/f.txt".into(), b"NEW".to_vec()),
+        ],
+    );
+    let s = Server::start();
+    for (name, format, path) in [("gp", "go", zip), ("fp", "files", "/f.txt")] {
+        s.cli(&[
+            "repo",
+            "create",
+            name,
+            "-f",
+            format,
+            "-k",
+            "proxy",
+            "-s",
+            &format!("upstream=http://127.0.0.1:{old}/"),
+            "-s",
+            "public=true",
+        ])
+        .unwrap();
+        held.store(true, Ordering::Relaxed);
+        let url = s.url(&format!("/{name}{path}"));
+        let first =
+            std::thread::spawn(move || reqwest::blocking::get(url).unwrap().text().unwrap());
+        let t = Instant::now();
+        while !old_log.lock().unwrap().iter().any(|p| p == path) {
+            assert!(t.elapsed() < Duration::from_secs(20), "{name}: not asked");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        s.cli(&[
+            "repo",
+            "set",
+            name,
+            &format!("upstream=http://127.0.0.1:{new}/"),
+        ])
+        .unwrap();
+        held.store(false, Ordering::Relaxed);
+        assert_eq!(first.join().unwrap(), "OLD", "{name}");
+        let (st, body) = get(&s.url(&format!("/{name}{path}")), None);
+        assert_eq!((st, body.as_str()), (200, "NEW"), "{name}");
+        assert!(
+            new_log.lock().unwrap().iter().any(|p| p == path),
+            "{name}: the new upstream was not asked"
+        );
+    }
+}
+
 /// A deb mirror does not take an older Release than the one it serves
 /// (here: its source moved to an upstream that is behind) unless
 /// allowed to.
@@ -8747,6 +8881,64 @@ fn stub_upstream_log(
         }
     });
     (port, log)
+}
+
+/// A stand-in upstream that answers each path with its content type and
+/// body (and 404), noting the path first; while `held` is set, a
+/// request is answered only once it is cleared (connected, not
+/// answered: an upstream slow to answer, or that hangs).
+fn stub_upstream_held(
+    files: Vec<(String, &'static str, Vec<u8>)>,
+) -> (
+    u16,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::io::{BufRead, Write};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let held = Arc::new(AtomicBool::new(false));
+    let (log2, held2, files) = (log.clone(), held.clone(), Arc::new(files));
+    std::thread::spawn(move || {
+        for mut c in l.incoming().flatten() {
+            let (log, held, files) = (log2.clone(), held2.clone(), files.clone());
+            std::thread::spawn(move || {
+                let mut r = std::io::BufReader::new(c.try_clone().unwrap());
+                let mut line = String::new();
+                if r.read_line(&mut line).is_err() {
+                    return;
+                }
+                loop {
+                    let mut h = String::new();
+                    if r.read_line(&mut h).is_err() || h.trim().is_empty() {
+                        break;
+                    }
+                }
+                let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
+                log.lock().unwrap().push(path.clone());
+                let t = Instant::now();
+                while held.load(Ordering::Relaxed) && t.elapsed() < Duration::from_secs(300) {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let (st, ct, body) = match files.iter().find(|(p, _, _)| *p == path) {
+                    Some((_, ct, b)) => ("200 OK", *ct, b.clone()),
+                    None => ("404 Not Found", "text/plain", Vec::new()),
+                };
+                let _ = c.write_all(
+                    format!(
+                        "HTTP/1.1 {st}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+                let _ = c.write_all(&body);
+            });
+        }
+    });
+    (port, log, held)
 }
 
 /// A Maven proxy of another pkgpod's repository, with mvn; a file whose
@@ -9763,6 +9955,150 @@ fn shared_caches_keep_only_what_anyone_may_read() {
     assert_eq!(r.cache, "no-cache");
 }
 
+/// A public group with a member that is not public answers a caller
+/// without credentials from its public members only, and others from
+/// all: the same URL gives each what they may read, so no cache in
+/// between keeps it. A group of public members is kept by any.
+#[test]
+fn groups_with_a_private_member_are_kept_by_clients_only() {
+    let s = Server::start();
+    for (name, public) in [("mpriv", false), ("mpub", true)] {
+        s.cli(&[
+            "repo",
+            "create",
+            name,
+            "-f",
+            "maven",
+            "-s",
+            &format!("public={public}"),
+        ])
+        .unwrap();
+    }
+    for (name, members) in [("mgrp", "mpriv,mpub"), ("mall", "mpub")] {
+        s.cli(&[
+            "repo",
+            "create",
+            name,
+            "-f",
+            "maven",
+            "-k",
+            "group",
+            "-s",
+            &format!("members={members}"),
+            "-s",
+            "public=true",
+        ])
+        .unwrap();
+    }
+    let pw = std::fs::read_to_string(s.dir.path().join("data/admin-password")).unwrap();
+    let pw = pw.trim();
+    let c = reqwest::blocking::Client::new();
+    let dir = "com/acme/x/1.0";
+    let pom = "<project><modelVersion>4.0.0</modelVersion><groupId>com.acme</groupId>\
+               <artifactId>x</artifactId><version>1.0</version></project>";
+    for (name, jar) in [("mpriv", "PRIVATE-BUILD"), ("mpub", "PUBLIC-SQUAT")] {
+        for (file, body) in [("x-1.0.pom", pom), ("x-1.0.jar", jar)] {
+            let r = c
+                .put(s.url(&format!("/{name}/{dir}/{file}")))
+                .basic_auth("admin", Some(pw))
+                .body(body)
+                .send()
+                .unwrap();
+            assert_eq!(r.status().as_u16(), 201, "{name} {file}");
+        }
+    }
+    let fetch = |path: &str, auth: bool| {
+        let mut r = c.get(s.url(path));
+        if auth {
+            r = r.basic_auth("admin", Some(pw));
+        }
+        seen(r.send().unwrap())
+    };
+    let jar = format!("/mgrp/{dir}/x-1.0.jar");
+    for (auth, body) in [(false, "PUBLIC-SQUAT"), (true, "PRIVATE-BUILD")] {
+        let r = fetch(&jar, auth);
+        assert_eq!((r.status, r.body.as_str()), (200, body), "{auth}");
+        assert!(r.cache.starts_with("private"), "{auth}: {}", r.cache);
+        assert!(r.vary.contains("Authorization"), "{auth}: {}", r.vary);
+    }
+    let r = fetch(&format!("/mall/{dir}/x-1.0.jar"), false);
+    assert_eq!(
+        (r.status, r.body.as_str(), r.cache.as_str(), r.vary.as_str()),
+        (200, "PUBLIC-SQUAT", "public, max-age=3600", "")
+    );
+}
+
+/// Search looks only through what the caller may read: neither what it
+/// lists nor whether the list was cut tells of a private repository's
+/// packages, and a private repository is answered as one not there.
+#[test]
+fn search_tells_nothing_of_private_repositories() {
+    let s = Server::start();
+    s.cli_in(&["user", "add", "dev", "--password-stdin"], "dev-password")
+        .unwrap();
+    s.cli(&["repo", "create", "hidden", "-f", "files"]).unwrap();
+    s.cli(&["repo", "create", "open", "-f", "files", "-s", "public=true"])
+        .unwrap();
+    let upload = |repo: &str, name: &str| {
+        let f = s.dir.path().join(name);
+        std::fs::write(&f, name).unwrap();
+        s.cli(&[
+            "upload",
+            repo,
+            f.to_str().unwrap(),
+            "-s",
+            &format!("path=lib/{name}"),
+        ])
+        .unwrap();
+    };
+    upload("hidden", "classified-tool.txt");
+    for n in 1..=5 {
+        upload("hidden", &format!("inner-{n}.txt"));
+    }
+    upload("open", "inner-z.txt");
+    let pw = std::fs::read_to_string(s.dir.path().join("data/admin-password")).unwrap();
+    let c = reqwest::blocking::Client::new();
+    let search = |q: &str, who: Option<(&str, &str)>| {
+        let mut r = c.get(format!("{}/api/v1/search?{q}", s.api));
+        if let Some((u, p)) = who {
+            r = r.basic_auth(u, Some(p));
+        }
+        let r = r.send().unwrap();
+        let st = r.status().as_u16();
+        let more = r.headers().contains_key("x-pkgpod-more");
+        let v: Value = r.json().unwrap_or(Value::Null);
+        let repos: Vec<String> = v
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|h| h["repo"].as_str().unwrap_or("").to_string())
+            .collect();
+        (st, repos, more)
+    };
+    for who in [None, Some(("dev", "dev-password"))] {
+        assert_eq!(
+            search("q=classified&limit=0", who),
+            (200, vec![], false),
+            "{who:?}"
+        );
+        assert_eq!(search("q=classified", who), (200, vec![], false), "{who:?}");
+        // Five private matches come first: the public one is still found.
+        assert_eq!(
+            search("q=inner&limit=1", who),
+            (200, vec!["open".to_string()], false),
+            "{who:?}"
+        );
+        let hidden = search("q=&repo=hidden&limit=0", who);
+        assert_eq!(hidden, search("q=&repo=nosuch&limit=0", who), "{who:?}");
+        assert_ne!(hidden.0, 200, "{who:?}");
+    }
+    // Whoever may read them all is told there are more.
+    let admin = Some(("admin", pw.trim()));
+    let (st, repos, more) = search("q=inner&limit=1", admin);
+    assert_eq!((st, repos.len(), more), (200, 1, true));
+    assert_eq!(search("q=inner", admin).1.len(), 6);
+}
+
 /// Conditional requests as caches in front send them (a CDN that
 /// compresses marks the ETag weak), a directory's redirect never to
 /// another host, and a file its tree names but the store lost.
@@ -9921,6 +10257,59 @@ fn mirror_trees_hide_partial_files() {
     );
 }
 
+/// A mirror's pool file is asked again by caches in front (a sync may
+/// put other content at its name), cheaply by its ETag; its by-hash
+/// files are kept.
+#[test]
+fn mirror_pool_files_are_revalidated() {
+    let s = Server::start();
+    s.cli(&[
+        "repo",
+        "create",
+        "mir",
+        "-k",
+        "mirror",
+        "-s",
+        "source=http://127.0.0.1:9/",
+        "-s",
+        "dists=x",
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let tree = s.dir.path().join("data/storages/main/trees/mir");
+    let pool = tree.join("pool/main/f");
+    std::fs::create_dir_all(&pool).unwrap();
+    std::fs::write(pool.join("f_1_amd64.deb"), "one").unwrap();
+    let hash = "0".repeat(64);
+    let by_hash = tree.join("dists/x/main/binary-amd64/by-hash/SHA256");
+    std::fs::create_dir_all(&by_hash).unwrap();
+    std::fs::write(by_hash.join(&hash), "index").unwrap();
+    let c = reqwest::blocking::Client::new();
+    let fetch = |path: &str, inm: Option<&str>| {
+        let mut r = c.get(s.url(path));
+        if let Some(e) = inm {
+            r = r.header("if-none-match", e);
+        }
+        seen(r.send().unwrap())
+    };
+    let deb = "/mir/pool/main/f/f_1_amd64.deb";
+    let r = fetch(deb, None);
+    assert_eq!((r.status, r.cache.as_str()), (200, "no-cache"));
+    assert!(!r.etag.is_empty());
+    for inm in [r.etag.clone(), format!("W/{}", r.etag)] {
+        assert_eq!(fetch(deb, Some(&inm)).status, 304, "{inm}");
+    }
+    let r = fetch(
+        &format!("/mir/dists/x/main/binary-amd64/by-hash/SHA256/{hash}"),
+        None,
+    );
+    assert_eq!(
+        (r.status, r.cache.as_str()),
+        (200, "public, max-age=31536000, immutable")
+    );
+}
+
 /// What a tag names, and the tags list, change in place: asked again
 /// each time.
 #[test]
@@ -10037,6 +10426,37 @@ fn refusals_tell_nothing_of_what_is_there() {
     // A reader who may not write: refused.
     s.cli(&["grant", "set", "rb", "user:dev", "read"]).unwrap();
     assert_eq!(status(reqwest::Method::POST, "/rb/api/v1/gems", true), 403);
+    // Not there, whatever the method: twine's upload too.
+    for (name, format) in [
+        ("fpriv", "files"),
+        ("dpriv", "deb"),
+        ("rpriv", "rpm"),
+        ("mpriv", "maven"),
+        ("ppriv", "pypi"),
+    ] {
+        let mut args = vec!["repo", "create", name, "-f", format];
+        if format == "deb" {
+            args.extend(["-s", "sign=false"]);
+        }
+        s.cli(&args).unwrap();
+    }
+    s.cli(&["repo", "create", "fpub", "-f", "files", "-s", "public=true"])
+        .unwrap();
+    use reqwest::Method;
+    for m in [Method::DELETE, Method::POST, Method::PUT, Method::GET] {
+        for repo in ["nosuch", "fpriv", "dpriv", "rpriv", "mpriv", "ppriv"] {
+            for path in ["a/b.txt", "", "legacy/"] {
+                let path = format!("/{repo}/{path}");
+                assert_eq!(status(m.clone(), &path, true), 404, "{m} {path}");
+            }
+        }
+    }
+    // Without credentials they are asked for (twine sends them then); a
+    // public repository says what may not be done.
+    for path in ["/ppriv/", "/ppriv/legacy/", "/fpriv/a.txt"] {
+        assert_eq!(status(Method::POST, path, false), 401, "{path}");
+    }
+    assert_eq!(status(Method::DELETE, "/fpub/a.txt", false), 405);
 }
 
 /// The compact index's files have the MD5 of their content as ETag:
