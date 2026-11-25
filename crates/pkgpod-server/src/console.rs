@@ -4571,6 +4571,7 @@ struct SettingsPart {
     trust_users: Vec<String>,
     repo_names: Vec<String>,
     fixed_repo: String,
+    as_user: bool,
     trust_prefill: String,
     hook_prefill: String,
 }
@@ -4681,19 +4682,38 @@ async fn settings_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> R
     let cleanup = crate::cleanup::supported(&app, &r)
         && app.auth.role(&v.caller, &repo, public) >= Some(Role::Write);
     let server_admin = v.caller.is_admin();
-    let (hooks, trust, trust_users) = if server_admin {
-        (
-            hook_rows(&app, Some(&repo)).unwrap_or_default(),
-            trust_rows(&app, Some(&repo)).unwrap_or_default(),
-            app.auth
-                .users()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|u| u.name)
-                .collect(),
-        )
+    let hooks = if server_admin {
+        hook_rows(&app, Some(&repo)).unwrap_or_default()
     } else {
-        (Vec::new(), Vec::new(), Vec::new())
+        Vec::new()
+    };
+    // Trust rules: for this repository's admins too (those without a
+    // user, for repositories they admin, are theirs to change).
+    let trust = if can_admin {
+        let mut rows = trust_rows(&app, Some(&repo)).unwrap_or_default();
+        if !server_admin {
+            let all = crate::oidc::rules(&app).unwrap_or_default();
+            for row in &mut rows {
+                row.can_change = row.publisher
+                    && all
+                        .iter()
+                        .find(|r| r.name == row.name)
+                        .is_some_and(|r| api::admins_all(&app, &v.caller, &r.repos));
+            }
+        }
+        rows
+    } else {
+        Vec::new()
+    };
+    let trust_users = if server_admin {
+        app.auth
+            .users()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|u| u.name)
+            .collect()
+    } else {
+        Vec::new()
     };
     render(&SettingsPart {
         hooks,
@@ -4701,6 +4721,7 @@ async fn settings_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> R
         trust_users,
         repo_names: Vec::new(),
         fixed_repo: repo.clone(),
+        as_user: server_admin,
         trust_prefill: String::new(),
         hook_prefill: String::new(),
         cleanup,
@@ -5187,6 +5208,10 @@ pub struct HookRow {
 /// A trust rule as the Server page lists it.
 pub struct TrustRow {
     pub name: String,
+    /// No user: its tokens write to its repositories only.
+    pub publisher: bool,
+    /// The viewer may change or remove it (set where it is shown).
+    pub can_change: bool,
     /// The claims a line each (and the issuer, when not GitHub's).
     pub trusts: Vec<String>,
     pub user: String,
@@ -5227,6 +5252,8 @@ fn trust_rows(app: &App, repo: Option<&str>) -> Result<Vec<TrustRow>> {
         .into_iter()
         .filter(|r| repo.is_none_or(|x| r.repos.iter().any(|y| y == x)))
         .map(|r| TrustRow {
+            publisher: r.user.is_empty(),
+            can_change: true,
             trusts: (r.issuer != crate::oidc::GITHUB)
                 .then(|| format!("issuer {}", r.issuer))
                 .into_iter()
@@ -5390,6 +5417,8 @@ struct ServerPage {
     repo_names: Vec<String>,
     /// The forms' repositories: picked (empty), or this one.
     fixed_repo: String,
+    /// The trust rule form offers a user and other issuers (server admins).
+    as_user: bool,
     trust_prefill: String,
     hook_prefill: String,
     hooks: Vec<HookRow>,
@@ -5522,6 +5551,7 @@ async fn server_tab_page(app: Arc<App>, v: Viewer, tab: &'static str) -> Result<
         trust_users,
         repo_names,
         fixed_repo: String::new(),
+        as_user: true,
         trust_prefill: if publishing {
             trust_prefill(&app)?
         } else {

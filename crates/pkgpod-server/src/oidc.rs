@@ -47,7 +47,9 @@ pub struct Rule {
     pub audience: String,
     /// Claim -> pattern; all must match.
     pub claims: BTreeMap<String, String>,
-    /// The pkgpod user whose token is given.
+    /// The pkgpod user whose token is given; empty: none, a publisher
+    /// token (its repositories written to, or read, and nothing else).
+    #[serde(default)]
     pub user: String,
     /// What the token is limited to.
     pub repos: Vec<String>,
@@ -142,9 +144,9 @@ fn check_issuer(url: &str) -> Result<()> {
 pub fn rules(app: &App) -> Result<Vec<Rule>> {
     Ok(app.db.read(|c| {
         let mut st = c.prepare(
-            "SELECT r.name, r.issuer, r.audience, r.claims, u.name, r.repos, r.write, r.minutes,
-                    r.created, r.used
-             FROM trust_rules r JOIN users u ON u.id = r.user ORDER BY r.name",
+            "SELECT r.name, r.issuer, r.audience, r.claims, COALESCE(u.name, ''), r.repos, r.write,
+                    r.minutes, r.created, r.used
+             FROM trust_rules r LEFT JOIN users u ON u.id = r.user ORDER BY r.name",
         )?;
         st.query_map([], |r| {
             Ok(Rule {
@@ -227,10 +229,16 @@ pub fn put_rule(app: &App, mut r: Rule) -> Result<Rule> {
     if !(1..=60).contains(&r.minutes) {
         return Err(Error::Invalid("a token lasts 1 to 60 minutes".into()));
     }
-    let u = app.auth.user(&r.user)?;
-    if u.disabled {
-        return Err(Error::Invalid(format!("user {} is disabled", r.user)));
-    }
+    r.user = r.user.trim().to_string();
+    let uid = if r.user.is_empty() {
+        None
+    } else {
+        let u = app.auth.user(&r.user)?;
+        if u.disabled {
+            return Err(Error::Invalid(format!("user {} is disabled", r.user)));
+        }
+        Some(u.id)
+    };
     let now = pkgpod_base::now();
     app.db.write(|tx| {
         tx.execute(
@@ -243,7 +251,7 @@ pub fn put_rule(app: &App, mut r: Rule) -> Result<Rule> {
                 r.issuer,
                 r.audience.trim(),
                 serde_json::to_string(&r.claims).expect("map"),
-                u.id,
+                uid,
                 serde_json::to_string(&r.repos).expect("list"),
                 r.write,
                 r.minutes,
@@ -255,6 +263,29 @@ pub fn put_rule(app: &App, mut r: Rule) -> Result<Rule> {
         .into_iter()
         .find(|x| x.name == r.name)
         .ok_or_else(|| Error::Invalid("rule vanished".into()))
+}
+
+/// A repository deleted: rules without a user name it no more (one
+/// made again by that name gets no publisher), and those left with no
+/// repository go.
+pub fn forget_repo(app: &App, repo: &str) -> Result<()> {
+    for r in rules(app)?
+        .into_iter()
+        .filter(|r| r.user.is_empty() && r.repos.iter().any(|x| x == repo))
+    {
+        let left: Vec<&String> = r.repos.iter().filter(|x| *x != repo).collect();
+        app.db.write(|tx| {
+            if left.is_empty() {
+                tx.execute("DELETE FROM trust_rules WHERE name = ?1", [&r.name])
+            } else {
+                tx.execute(
+                    "UPDATE trust_rules SET repos = ?1 WHERE name = ?2",
+                    params![serde_json::to_string(&left).expect("list"), r.name],
+                )
+            }
+        })?;
+    }
+    Ok(())
 }
 
 pub fn remove_rule(app: &App, name: &str) -> Result<()> {
@@ -546,22 +577,35 @@ pub async fn exchange(app: &Arc<App>, jwt: &str, rule: Option<&str>) -> Result<V
                 params![now, r2.name],
             )
         })?;
+        let expires = now + r2.minutes * 60;
+        if r2.user.is_empty() {
+            // A publisher token: checked against its rule when used.
+            let id: i64 = app2.db.read(|c| {
+                c.query_row("SELECT id FROM trust_rules WHERE name = ?1", [&r2.name], |r| {
+                    r.get(0)
+                })
+            })?;
+            let token = app2.auth.create_publisher_token(id, expires)?;
+            return Ok((token, Some(expires)));
+        }
         let mut name = format!("trust:{} {who2}", r2.name);
         name.truncate(200);
-        app2.auth.create_token(
-            &r2.user,
-            &name,
-            &r2.repos,
-            r2.write,
-            Some(now + r2.minutes * 60),
-        )
+        let (token, info) =
+            app2.auth
+                .create_token(&r2.user, &name, &r2.repos, r2.write, Some(expires))?;
+        Ok((token, info.expires))
     })
     .await?;
-    app.auth.audit(&r.user, "trust token", &r.name, &who);
+    let actor = if r.user.is_empty() {
+        format!("trust:{}", r.name)
+    } else {
+        r.user.clone()
+    };
+    app.auth.audit(&actor, "trust token", &r.name, &who);
     Ok(json!({
         "token": token,
-        "expires": info.expires,
-        "user": r.user,
+        "expires": info,
+        "user": (!r.user.is_empty()).then_some(&r.user),
         "repos": r.repos,
         "write": r.write,
         "rule": r.name,

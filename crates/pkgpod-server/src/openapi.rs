@@ -596,7 +596,12 @@ fn schemas() -> Value {
                         "claims",
                         json!({"type": "object", "additionalProperties": {"type": "string"}, "description": "Claim -> pattern (* matches any run of characters); all must match."}),
                     ),
-                    ("user", text("The pkgpod user whose token is given.")),
+                    (
+                        "user",
+                        text(
+                            "The pkgpod user whose token is given; empty: none, a publisher token that writes (or reads) the rule's repositories only, as trust:<rule>. Rules with a user, or of another issuer than GitHub's, are server admins'; a repository's admins make rules without one for repositories they admin.",
+                        ),
+                    ),
                     ("repos", strings()),
                     ("write", boolean()),
                     (
@@ -609,7 +614,7 @@ fn schemas() -> Value {
                         nullable("integer", "When a token was last given by it."),
                     ),
                 ],
-                &["name", "claims", "user", "repos"],
+                &["name", "claims", "repos"],
             ),
         ),
         (
@@ -914,7 +919,13 @@ fn schemas() -> Value {
                         text("A pkgpod token, as a bearer or Basic password."),
                     ),
                     ("expires", integer()),
-                    ("user", string()),
+                    (
+                        "user",
+                        nullable(
+                            "string",
+                            "Whose rights the token has; null: a publisher token (trust:<rule>).",
+                        ),
+                    ),
                     ("repos", strings()),
                     ("write", boolean()),
                     ("rule", string()),
@@ -1613,12 +1624,12 @@ fn ops() -> Vec<Op> {
             .reply(201, "The token and its description.", sref("TokenCreated")),
         op("delete", "/api/v1/tokens/{id}", "token_delete", "Delete a token.")
             .empty(204, "Deleted."),
-        op("get", "/api/v1/trust", "trust_rules", "Trust rules for CI jobs' OIDC tokens (server admin).")
+        op("get", "/api/v1/trust", "trust_rules", "Trust rules for CI jobs' OIDC tokens: all (server admin), or those naming a repository the caller admins.")
             .reply(200, "The rules.", array(sref("TrustRule"))),
-        op("post", "/api/v1/trust", "trust_put", "Add a trust rule, or replace the one of the same name (server admin).")
+        op("post", "/api/v1/trust", "trust_put", "Add a trust rule, or replace the one of the same name: server admins any; a repository's admins one without a user, of GitHub's issuer, for repositories they admin. Not with a token a rule gave.")
             .body("TrustRule")
             .reply(201, "The rule.", sref("TrustRule")),
-        op("delete", "/api/v1/trust/{name}", "trust_delete", "Remove a trust rule (server admin).")
+        op("delete", "/api/v1/trust/{name}", "trust_delete", "Remove a trust rule: server admins any; a repository's admins one without a user for repositories they admin.")
             .empty(204, "Removed."),
         op("post", "/api/v1/oidc/token", "oidc_token", "A CI job's OIDC token for a short-lived pkgpod token, as a trust rule allows; no other credential.")
             .body("OidcExchange")

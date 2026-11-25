@@ -243,10 +243,25 @@ pkgpod trust remove release
 `--environment` narrow it (`*` matches any run of characters). Any
 other OIDC issuer (GitLab, a Gitea or Forgejo runner) works with
 `--issuer <https URL>` and `--claim name=pattern` for its claims.
+A rule without `--user` gives a **publisher token** instead: it writes
+to the rule's repositories (reads, with `--read-only`) and nothing else,
+as `trust:<rule>` in the history, whoever is granted what; it can do
+what a writer can there (upload, sync, remove, roll back), not change
+settings, rights or rules. A repository's admins may make such rules
+themselves, for repositories they admin, trusting GitHub Actions; rules
+that act as a user, or trust another CI, are made by server admins. A
+token a rule gave changes no rule, and removing or narrowing a rule
+takes its publisher tokens' rights at once.
+
+```sh
+pkgpod trust add release --github org/app --workflow release.yml --repos ppa
+```
+
 `--read-only` gives a token that only reads. In the console: Server,
 CI & webhooks (the repositories ticked from a list; picking a rule's
 name fills the form to change it), and a repository's Settings tab
-lists the rules for it and adds one for it alone.
+lists the rules for it and adds one for it alone (its admins: one
+without a user).
 
 In the workflow, the job asks GitHub for its token and exchanges it.
 pkgpod's own action does all of it: it installs the `pkgpod` command

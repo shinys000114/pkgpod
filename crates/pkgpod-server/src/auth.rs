@@ -92,10 +92,17 @@ pub struct TokenInfo {
 }
 
 /// What a token limits its user to.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Scope {
     pub repos: Vec<String>,
     pub write: bool,
+    /// Given for a CI job's OIDC token (a trust rule): it changes no
+    /// trust rule, whatever its user may.
+    pub exchanged: bool,
+    /// A publisher token, of a trust rule without a user ("trust:<rule>"):
+    /// it writes (or reads) its repositories and nothing else, whoever
+    /// is granted what.
+    pub publisher: Option<String>,
 }
 
 /// Who makes a request.
@@ -111,7 +118,16 @@ impl Caller {
     }
 
     pub fn name(&self) -> &str {
-        self.user.as_ref().map_or("anonymous", |u| u.name.as_str())
+        match (&self.user, &self.scope) {
+            (Some(u), _) => u.name.as_str(),
+            (
+                None,
+                Some(Scope {
+                    publisher: Some(p), ..
+                }),
+            ) => p.as_str(),
+            _ => "anonymous",
+        }
     }
 
     /// A server admin, not limited by a token.
@@ -363,9 +379,9 @@ impl Auth {
     pub fn login(&self, name: &str, password: &str) -> Option<Caller> {
         if password.starts_with(TOKEN_PREFIX) {
             let c = self.token(password)?;
-            let owner = c.user.as_ref()?;
-            // "__token__" as PyPI clients (twine, uv) send it.
-            if name.is_empty() || name == owner.name || name == "token" || name == "__token__" {
+            // "__token__" as PyPI clients (twine, uv) send it; a publisher
+            // token by its name (trust:<rule>) too.
+            if name.is_empty() || name == c.name() || name == "token" || name == "__token__" {
                 return Some(c);
             }
             return None;
@@ -434,7 +450,9 @@ impl Auth {
                 .optional()
             })
             .ok()?;
-        let (user, repos, write, expires, id, used) = found?;
+        let Some((user, repos, write, expires, id, used)) = found else {
+            return self.publisher_token(&h, t);
+        };
         if user.disabled || expires.is_some_and(|e| e <= t) {
             return None;
         }
@@ -444,13 +462,67 @@ impl Auth {
                 tx.execute("UPDATE tokens SET used = ?1 WHERE id = ?2", params![t, id])
             });
         }
+        let exchanged = self
+            .db
+            .read(|c| {
+                c.query_row(
+                    "SELECT name LIKE 'trust:%' FROM tokens WHERE id = ?1",
+                    [id],
+                    |r| r.get::<_, bool>(0),
+                )
+            })
+            .unwrap_or(false);
         Some(Caller {
             user: Some(user),
             scope: Some(Scope {
                 repos: serde_json::from_str(&repos).unwrap_or_default(),
                 write,
+                exchanged,
+                publisher: None,
             }),
         })
+    }
+
+    /// A publisher token: what its rule gives now (a rule removed or
+    /// changed takes its tokens' rights with it).
+    fn publisher_token(&self, hash: &[u8], t: i64) -> Option<Caller> {
+        let (rule, repos, write): (String, String, bool) = self
+            .db
+            .read(|c| {
+                c.query_row(
+                    "SELECT r.name, r.repos, r.write FROM publish_tokens p
+                     JOIN trust_rules r ON r.id = p.rule
+                     WHERE p.hash = ?1 AND p.expires > ?2 AND r.user IS NULL",
+                    params![hash, t],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()
+            })
+            .ok()??;
+        Some(Caller {
+            user: None,
+            scope: Some(Scope {
+                repos: serde_json::from_str(&repos).unwrap_or_default(),
+                write,
+                exchanged: true,
+                publisher: Some(format!("trust:{rule}")),
+            }),
+        })
+    }
+
+    /// Makes a publisher token for a rule without a user; returns it
+    /// (shown once).
+    pub fn create_publisher_token(&self, rule_id: i64, expires: i64) -> Result<String> {
+        let token = format!("{TOKEN_PREFIX}{}", random_hex(20));
+        let now = now();
+        self.db.write(|tx| {
+            tx.execute("DELETE FROM publish_tokens WHERE expires < ?1", [now])?;
+            tx.execute(
+                "INSERT INTO publish_tokens (hash, rule, expires, created) VALUES (?1, ?2, ?3, ?4)",
+                params![sha(&token), rule_id, expires, now],
+            )
+        })?;
+        Ok(token)
     }
 
     // ---- tokens ----
@@ -732,6 +804,13 @@ impl Auth {
     /// The role `c` has on `repo` (`public`: anyone may read it).
     pub fn role(&self, c: &Caller, repo: &str, public: bool) -> Option<Role> {
         let floor = public.then_some(Role::Read);
+        // A publisher token: its rule's repositories, never more than
+        // write; no grant counts (an empty list is none).
+        if let Some(s) = c.scope.as_ref().filter(|s| s.publisher.is_some()) {
+            let mine = s.repos.iter().any(|r| r == repo);
+            let role = mine.then_some(if s.write { Role::Write } else { Role::Read });
+            return role.max(floor);
+        }
         let Some(u) = &c.user else {
             return floor;
         };

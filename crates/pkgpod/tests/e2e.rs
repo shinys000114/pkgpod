@@ -7109,6 +7109,235 @@ fn fake_issuer(
 
 /// Trusted publishing: a CI job's OIDC token, as a rule allows, for a
 /// short-lived token of the rule's user, limited to its repositories.
+/// Trust rules without a user: their tokens write to their repositories
+/// and nothing else; a repository's admins make such rules for it.
+#[test]
+fn trusted_publishing_without_a_user() {
+    let s = Server::start();
+    for r in ["out", "mine", "theirs"] {
+        s.cli(&["repo", "create", r, "-f", "files"]).unwrap();
+    }
+    let (issuer, iss) = fake_issuer(json!({"repository": "org/app"}));
+    // A server admin's rule, no user (the fake issuer is not GitHub's).
+    let out = s
+        .cli(&[
+            "trust",
+            "add",
+            "pub",
+            "--issuer",
+            &issuer,
+            "--claim",
+            "repository=org/app",
+            "--repos",
+            "out",
+        ])
+        .unwrap();
+    assert!(out.contains("token of trust:pub for out"), "{out}");
+    let api = reqwest::blocking::Client::new();
+    let r = api
+        .post(format!("{}/api/v1/oidc/token", s.api))
+        .json(&json!({"token": iss.token(json!({"aud": "pkgpod", "repository": "org/app", "jti": "p1"}))}))
+        .send()
+        .unwrap();
+    let v: Value = r.json().unwrap();
+    assert!(v["user"].is_null() && v["rule"] == "pub", "{v}");
+    let tok = v["token"].as_str().unwrap().to_string();
+    let put = |repo: &str| {
+        api.put(s.url(&format!("/{repo}/app-1.0.tar.gz")))
+            .basic_auth("token", Some(&tok))
+            .body("app")
+            .send()
+            .unwrap()
+            .status()
+            .as_u16()
+    };
+    // Its repository, written to; another not; its settings, grants and
+    // rules not; nothing that needs a user.
+    assert_eq!(put("out"), 201);
+    assert!(matches!(put("theirs"), 401 | 403 | 404));
+    let call = |m: reqwest::Method, p: &str, body: Value| {
+        api.request(m, format!("{}{p}", s.api))
+            .bearer_auth(&tok)
+            .json(&body)
+            .send()
+            .unwrap()
+            .status()
+            .as_u16()
+    };
+    assert_eq!(
+        call(
+            reqwest::Method::PATCH,
+            "/api/v1/repos/out",
+            json!({"settings": {"description": "x"}})
+        ),
+        403
+    );
+    assert_eq!(
+        call(
+            reqwest::Method::PUT,
+            "/api/v1/repos/out/grants",
+            json!({"subject": "user:x", "role": "read"})
+        ),
+        403
+    );
+    assert_eq!(
+        call(
+            reqwest::Method::POST,
+            "/api/v1/trust",
+            json!({"name": "more", "claims": {"repository": "org/app"}, "repos": ["out"]})
+        ),
+        403
+    );
+    assert_eq!(
+        call(reqwest::Method::GET, "/api/v1/tokens", Value::Null),
+        401
+    );
+    let log = s.json(&["versions", "out"]);
+    assert_eq!(log[0]["actor"], "trust:pub", "{log}");
+    // The rule removed takes its tokens' rights with it.
+    s.cli(&["trust", "remove", "pub"]).unwrap();
+    assert!(matches!(put("out"), 401 | 403));
+
+    // A repository's admin: rules without a user, GitHub's, for what they
+    // admin; nothing else, nor others' rules.
+    s.cli_in(
+        &["user", "add", "lead", "--password-stdin"],
+        "lead-password",
+    )
+    .unwrap();
+    s.cli(&["grant", "set", "mine", "user:lead", "admin"])
+        .unwrap();
+    s.cli(&["grant", "set", "theirs", "user:lead", "write"])
+        .unwrap();
+    s.cli_in(&["user", "add", "ci", "--password-stdin"], "ci-password-1")
+        .unwrap();
+    let as_lead = |m: reqwest::Method, p: &str, body: Value| {
+        let r = api
+            .request(m, format!("{}{p}", s.api))
+            .basic_auth("lead", Some("lead-password"))
+            .json(&body)
+            .send()
+            .unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    let rule = |name: &str, extra: Value| {
+        let mut b = json!({"name": name, "claims": {"repository": "org/app"}, "repos": ["mine"]});
+        for (k, v) in extra.as_object().unwrap() {
+            b[k] = v.clone();
+        }
+        b
+    };
+    let (st, t) = as_lead(
+        reqwest::Method::POST,
+        "/api/v1/trust",
+        rule("lead-pub", json!({})),
+    );
+    assert_eq!(st, 201, "{t}");
+    for (extra, why) in [
+        (json!({"user": "ci"}), "server admins"),
+        (json!({"issuer": issuer}), "other issuers"),
+        (
+            json!({"repos": ["mine", "theirs"]}),
+            "repositories you admin",
+        ),
+    ] {
+        let (st, t) = as_lead(
+            reqwest::Method::POST,
+            "/api/v1/trust",
+            rule("x", extra.clone()),
+        );
+        assert_eq!(st, 403, "{extra} {t}");
+        assert!(t.contains(why), "{extra} {t}");
+    }
+    // Others' rules: one with a user, one for a repository they do not
+    // admin; neither replaced nor removed.
+    s.cli(&[
+        "trust", "add", "admins", "--github", "org/app", "--user", "ci", "--repos", "mine",
+    ])
+    .unwrap();
+    s.cli(&[
+        "trust",
+        "add",
+        "elsewhere",
+        "--github",
+        "org/app",
+        "--repos",
+        "theirs",
+    ])
+    .unwrap();
+    for name in ["admins", "elsewhere"] {
+        let (st, t) = as_lead(
+            reqwest::Method::POST,
+            "/api/v1/trust",
+            rule(name, json!({})),
+        );
+        assert_eq!(st, 403, "{name} {t}");
+        let (st, t) = as_lead(
+            reqwest::Method::DELETE,
+            &format!("/api/v1/trust/{name}"),
+            Value::Null,
+        );
+        assert_eq!(st, 403, "{name} {t}");
+    }
+    let (st, t) = as_lead(reqwest::Method::GET, "/api/v1/trust", Value::Null);
+    assert_eq!(st, 200);
+    let names: Vec<String> = serde_json::from_str::<Value>(&t)
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        names,
+        ["admins", "lead-pub"],
+        "only those naming a repository they admin"
+    );
+    let (st, _) = as_lead(
+        reqwest::Method::DELETE,
+        "/api/v1/trust/lead-pub",
+        Value::Null,
+    );
+    assert_eq!(st, 204);
+    // A writer makes none.
+    s.cli_in(&["user", "add", "dev", "--password-stdin"], "dev-password")
+        .unwrap();
+    s.cli(&["grant", "set", "mine", "user:dev", "write"])
+        .unwrap();
+    let r = api
+        .post(format!("{}/api/v1/trust", s.api))
+        .basic_auth("dev", Some("dev-password"))
+        .json(&rule("dev-pub", json!({})))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 403);
+    // The console: the card for the repository's admin, without a user.
+    let (c, sid, _) = console_login(&s, "lead", "lead-password");
+    let st = c
+        .get(format!("{}/r/mine/settings", s.api))
+        .header("cookie", format!("pkgpod_session={sid}"))
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(
+        st.contains(r#"id="repo-trust""#) && !st.contains(r#"name="user""#),
+        "{st}"
+    );
+    assert!(
+        !st.contains(r#"id="repo-webhooks""#),
+        "webhooks stay with server admins"
+    );
+    // A repository deleted: rules without a user name it no more, and
+    // go when they name nothing.
+    s.cli(&["repo", "delete", "theirs", "-y"]).unwrap();
+    let rules = s.cli(&["trust", "list"]).unwrap();
+    assert!(
+        !rules.contains("elsewhere") && rules.contains("admins"),
+        "{rules}"
+    );
+}
+
 #[test]
 fn trusted_publishing() {
     let s = Server::start();
@@ -7347,10 +7576,18 @@ fn trusted_publishing() {
     s.cli(&["trust", "remove", "release"]).unwrap();
     let (st, _) = exchange(&iss.token(claims(json!({"jti": "9"}))));
     assert_eq!(st, 403);
-    // Only server admins manage rules.
+    // Others see the rules for repositories they admin (none here) and
+    // make none.
     let r = reqwest::blocking::Client::new()
         .get(format!("{}/api/v1/trust", s.api))
         .basic_auth("ci", Some("ci-password-1234"))
+        .send()
+        .unwrap();
+    assert_eq!(r.json::<Value>().unwrap(), json!([]));
+    let r = reqwest::blocking::Client::new()
+        .post(format!("{}/api/v1/trust", s.api))
+        .basic_auth("ci", Some("ci-password-1234"))
+        .json(&json!({"name": "x", "claims": {"repository": "org/app"}, "repos": ["out"]}))
         .send()
         .unwrap();
     assert_eq!(r.status().as_u16(), 403);

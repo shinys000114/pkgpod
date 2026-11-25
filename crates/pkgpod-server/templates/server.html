@@ -124,7 +124,7 @@
   <div class="card-head"><h2>Trusted publishing</h2><span class="hint">CI jobs that log in with their OIDC token (GitHub Actions, …) and get a short-lived token, instead of a stored secret</span></div>
   {% if trust.is_empty() %}<p class="empty">No trust rules: CI jobs need a token kept as a secret.</p>{% else %}
   <div class="table-wrap"><table><thead><tr><th>Name</th><th>Trusts</th><th>As user</th><th>For</th><th>Token</th><th>Used</th><th></th></tr></thead><tbody>
-  {% for r in trust %}<tr><td><b>{{ r.name }}</b></td><td class="mono small claims">{% for c in r.trusts %}<div>{{ c }}</div>{% endfor %}</td><td>{{ r.user }}</td><td class="wrap">{{ r.repos }}</td><td class="nowrap">{{ r.token }}</td><td class="nowrap muted">{{ r.used }}</td>
+  {% for r in trust %}<tr><td><b>{{ r.name }}</b></td><td class="mono small claims">{% for c in r.trusts %}<div>{{ c }}</div>{% endfor %}</td><td>{% if r.publisher %}<span class="muted">none: trust:{{ r.name }}</span>{% else %}{{ r.user }}{% endif %}</td><td class="wrap">{{ r.repos }}</td><td class="nowrap">{{ r.token }}</td><td class="nowrap muted">{{ r.used }}</td>
     <td class="acts nowrap"><button class="link fill" type="button" data-for="trust-name" data-value="{{ r.name }}">change…</button> <button class="link danger" hx-post="/c/trust/{{ r.name|urlencode }}/delete" hx-target="#server-result" hx-confirm="Remove trust rule {{ r.name }}? Jobs it trusts cannot log in any more.">remove</button></td></tr>{% endfor %}
   </tbody></table></div>
   {% endif %}
