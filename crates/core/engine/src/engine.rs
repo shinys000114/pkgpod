@@ -63,6 +63,11 @@ pub struct Plan {
     pub root: Digest,
     pub summary: String,
     pub changes: Vec<Change>,
+    /// The repository it was computed on (its id, when it was made and
+    /// its format), so it is not applied to another made since under the
+    /// same name (which may get the same id).
+    #[serde(skip)]
+    pub(crate) origin: (i64, i64, String),
 }
 
 /// What an applied change did.
@@ -86,6 +91,8 @@ pub struct Engine {
     /// Bumped by every change to repositories, versions or labels, so
     /// readers can cache what they looked up.
     generation: AtomicU64,
+    /// Proxy cache rows served, not written yet.
+    pub(crate) used: Mutex<crate::cache::Used>,
 }
 
 const REPO_COLS: &str =
@@ -115,6 +122,7 @@ impl Engine {
             locks: Mutex::new(HashMap::new()),
             gc_lock: RwLock::new(()),
             generation: AtomicU64::new(1),
+            used: Mutex::new(crate::cache::Used::new()),
         })
     }
 
@@ -144,9 +152,10 @@ impl Engine {
     }
 
     pub fn format(&self, id: &str) -> Result<&Arc<dyn Format>> {
-        self.formats
-            .get(id)
-            .ok_or_else(|| Error::Invalid(format!("unknown format {id:?}")))
+        self.formats.get(id).ok_or_else(|| {
+            let ids: Vec<&str> = self.formats.keys().copied().collect();
+            Error::Invalid(format!("unknown format {id:?}: {}", ids.join(", ")))
+        })
     }
 
     /// Common settings and the format's, in that order.
@@ -322,13 +331,24 @@ impl Engine {
         let f = self.format(&n.format)?.clone();
         let group = (n.kind == Kind::Group && f.groups()) || (n.kind == Kind::Proxy && f.proxy());
         if !f.kinds().contains(&n.kind) && !group {
+            let mut kinds: Vec<&str> = f.kinds().iter().map(Kind::as_str).collect();
+            if f.groups() {
+                kinds.push("group");
+            }
+            if f.proxy() {
+                kinds.push("proxy");
+            }
             return Err(Error::Invalid(format!(
-                "{} repositories cannot be of kind {}",
+                "{} repositories cannot be of kind {}: {}",
                 f.id(),
-                n.kind.as_str()
+                n.kind.as_str(),
+                kinds.join(", ")
             )));
         }
-        let settings = settings::check(&self.fields(&n.format, n.kind)?, &n.settings)?;
+        let fields = self.fields(&n.format, n.kind)?;
+        mirror_only(&fields, n.kind, &n.settings)?;
+        let settings = settings::check(&fields, &n.settings)?;
+        settings::check_no_credentials(n.kind, &settings)?;
         if !matches!(n.kind, Kind::Group | Kind::Proxy) {
             f.check_settings(n.kind, &settings)?;
         }
@@ -401,8 +421,11 @@ impl Engine {
     /// Changes settings: fields in `patch` replace the stored ones.
     pub fn update_settings(&self, name: &str, patch: &Value) -> Result<RepoInfo> {
         let r = self.repo(name)?;
+        let fields = self.fields(&r.format, r.kind)?;
+        mirror_only(&fields, r.kind, patch)?;
         let merged = settings::merge(&r.settings, patch);
-        let s = settings::check(&self.fields(&r.format, r.kind)?, &merged)?;
+        let s = settings::check(&fields, &merged)?;
+        settings::check_no_credentials(r.kind, &s)?;
         if !matches!(r.kind, Kind::Group | Kind::Proxy) {
             self.format(&r.format)?.check_settings(r.kind, &s)?;
         }
@@ -567,7 +590,16 @@ impl Engine {
         force: bool,
     ) -> Result<Option<Version>> {
         // Re-read under the lock.
-        let r = &self.repo(&r.name)?;
+        let r = &{
+            let now = self.repo(&r.name)?;
+            if origin(&now) != origin(r) {
+                return Err(Error::Conflict(format!(
+                    "{} was deleted and made again meanwhile; compute the change again",
+                    r.name
+                )));
+            }
+            now
+        };
         let cur = self.current(r)?;
         if cur.as_ref().map(|v| v.seq) != base {
             return Err(Error::Conflict(format!(
@@ -580,9 +612,18 @@ impl Engine {
         if !force && cur.is_some() && prev_root == root {
             return Ok(None);
         }
+        let store = r.store();
+        // A plan computed before a garbage collection may name what it
+        // has removed since (kept by no version, older than its grace
+        // period). Collections wait for this commit: what is there stays.
+        if let Some(what) = self.objects.missing(&prev_root, &root, &|d| store.has(d))? {
+            return Err(Error::Conflict(format!(
+                "{}: the change names {what}, which garbage collection has removed since; compute the change again",
+                r.name
+            )));
+        }
         let seq = cur.as_ref().map(|v| v.seq).unwrap_or(0) + 1;
         let created = now();
-        let store = r.store();
         let signer = self
             .signer
             .read()
@@ -684,12 +725,19 @@ impl Engine {
             root: new,
             summary,
             changes: self.objects.diff(&root, &new)?,
+            origin: origin(&r),
         })
     }
 
     /// Applies a plan, if the repository has not changed since.
     pub fn apply(&self, plan: &Plan, actor: &str) -> Result<Outcome> {
         let r = self.repo(&plan.repo)?;
+        if origin(&r) != plan.origin {
+            return Err(Error::Conflict(format!(
+                "{} was deleted and made again since the change was computed; compute it again",
+                plan.repo
+            )));
+        }
         let v = self.commit(&r, plan.base, plan.root, &plan.summary, actor, false)?;
         Ok(Outcome {
             version: v,
@@ -742,6 +790,9 @@ impl Engine {
     ) -> Result<(Plan, Option<Outcome>)> {
         let r = self.repo(name)?;
         let f = self.format(&r.format)?.clone();
+        if let Some(spec) = f.ops().into_iter().find(|o| o.name == op) {
+            settings::check_params(&format!("the operation {op}"), &spec.params, &[], params)?;
+        }
         if apply {
             let out = self.change(name, actor, |cx, e| f.op(cx, op, params, e))?;
             let plan = Plan {
@@ -754,6 +805,7 @@ impl Engine {
                     .unwrap_or_else(tree::empty),
                 summary: out.summary.clone(),
                 changes: out.changes.clone(),
+                origin: origin(&r),
             };
             return Ok((plan, Some(out)));
         }
@@ -768,7 +820,8 @@ impl Engine {
         self.change(name, actor, |cx, e| f.ingest(cx, up, params, e))
     }
 
-    /// Takes in several files as one upload and one version.
+    /// Takes in several files as one upload and one version; `params`
+    /// are a client's, checked by [`Engine::check_upload`].
     pub fn upload_batch(
         &self,
         name: &str,
@@ -776,9 +829,24 @@ impl Engine {
         params: &Value,
         actor: &str,
     ) -> Result<Outcome> {
+        self.check_upload(name, params)?;
         let r = self.repo(name)?;
         let f = self.format(&r.format)?.clone();
         self.change(name, actor, |cx, e| f.ingest_batch(cx, ups, params, e))
+    }
+
+    /// Checks a client's upload parameters: the format's upload fields
+    /// and the file's name. (Its own protocols pass it others.)
+    pub fn check_upload(&self, name: &str, params: &Value) -> Result<()> {
+        let r = self.repo(name)?;
+        let f = self.format(&r.format)?;
+        let (_, root) = self.current_root(&r)?;
+        settings::check_params(
+            "an upload",
+            &f.upload_fields(&self.objects, &root),
+            &["filename"],
+            params,
+        )
     }
 
     /// Plans removing paths (whole subtrees for directories).
@@ -1095,31 +1163,53 @@ impl Engine {
     /// Deletes versions retention does not keep: not current, not
     /// labelled, beyond `keep_versions` and older than `keep_days`.
     pub fn prune(&self, r: &RepoInfo) -> Result<usize> {
-        let keep = r
-            .settings
-            .get("keep_versions")
-            .and_then(Value::as_i64)
-            .unwrap_or(50)
-            .max(0);
-        let days = r
-            .settings
-            .get("keep_days")
-            .and_then(Value::as_i64)
-            .unwrap_or(30)
-            .max(0);
-        let before = now() - days * 86400;
+        let (keep, before) = retention(r);
         let n = self.db.write(|tx| {
             tx.execute(
-                "DELETE FROM versions WHERE repo = ?1
-                   AND id NOT IN (SELECT version FROM labels WHERE repo = ?1)
-                   AND id IS NOT (SELECT current FROM repos WHERE id = ?1)
-                   AND created <= ?2
-                   AND id NOT IN (SELECT id FROM versions WHERE repo = ?1 ORDER BY seq DESC LIMIT ?3)",
-                params![r.id, before, keep + 1],
+                &format!("DELETE FROM versions WHERE {PRUNABLE}"),
+                params![r.id, before, keep],
             )
         })?;
         Ok(n)
     }
+
+    /// The ids of the versions [`Engine::prune`] would delete now.
+    pub(crate) fn prunable(&self, r: &RepoInfo) -> Result<Vec<i64>> {
+        let (keep, before) = retention(r);
+        Ok(self.db.read(|c| {
+            let mut st = c.prepare(&format!("SELECT id FROM versions WHERE {PRUNABLE}"))?;
+            st.query_map(params![r.id, before, keep], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<i64>>>()
+        })?)
+    }
+}
+
+/// Which repository `r` is, beyond its name: see [`Plan`].
+fn origin(r: &RepoInfo) -> (i64, i64, String) {
+    (r.id, r.created, r.format.clone())
+}
+
+/// Versions of repository ?1 that retention does not keep, made before
+/// ?2, beyond the newest ?3.
+const PRUNABLE: &str = "repo = ?1
+   AND id NOT IN (SELECT version FROM labels WHERE repo = ?1)
+   AND id IS NOT (SELECT current FROM repos WHERE id = ?1)
+   AND created <= ?2
+   AND id NOT IN (SELECT id FROM versions WHERE repo = ?1 ORDER BY seq DESC LIMIT ?3)";
+
+/// What retention keeps of a repository: how many newest versions (the
+/// current one and `keep_versions` more), and since when (`keep_days`).
+fn retention(r: &RepoInfo) -> (i64, i64) {
+    let int = |name: &str, default: i64| {
+        r.settings
+            .get(name)
+            .and_then(Value::as_i64)
+            .unwrap_or(default)
+            .max(0)
+    };
+    let keep = int("keep_versions", 50).saturating_add(1);
+    let before = now().saturating_sub(int("keep_days", 30).saturating_mul(86400));
+    (keep, before)
 }
 
 /// A catalog row of a current version.
@@ -1143,6 +1233,31 @@ pub struct Found {
     pub version: String,
     pub extra: String,
     pub size: u64,
+}
+
+/// A mirror's setting that a repository of another kind does not have
+/// (not one of its `fields`): refused as that, not as an unknown one.
+fn mirror_only(fields: &[Field], kind: Kind, given: &Value) -> Result<()> {
+    if kind == Kind::Mirror {
+        return Ok(());
+    }
+    let mirrors: Vec<&str> = settings::mirror_common()
+        .iter()
+        .map(|f| f.name)
+        .chain(["source"])
+        .collect();
+    if let Some(k) = given
+        .as_object()
+        .into_iter()
+        .flat_map(|m| m.keys())
+        .find(|k| mirrors.contains(&k.as_str()) && !fields.iter().any(|f| f.name == k.as_str()))
+    {
+        return Err(Error::Invalid(format!(
+            "{k} is a setting of mirrors, not of a {} repository",
+            kind.as_str()
+        )));
+    }
+    Ok(())
 }
 
 /// Whether two storage paths name one directory: the same directory

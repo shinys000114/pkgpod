@@ -1853,7 +1853,11 @@ async fn put(
     let name = repo.name.clone();
     let actor = caller.name().to_string();
     let e = app.engine.clone();
-    let res = tokio::task::spawn_blocking(move || e.upload(&name, &up, &params, &actor)).await;
+    let res = tokio::task::spawn_blocking(move || {
+        e.check_upload(&name, &params)?;
+        e.upload(&name, &up, &params, &actor)
+    })
+    .await;
     match res {
         Ok(Ok(out)) => {
             app.auth

@@ -18,7 +18,9 @@ cargo build --release            # target/release/pkgpod (thin LTO, stripped)
 The debug profile optimizes argon2, blake2 and the RSA crates: password
 hashing and making an RSA key are far too slow otherwise (tests, debug
 servers). `PKGPOD_COMMIT` set at build time adds a commit to the version
-`pkgpod --version` prints.
+`pkgpod --version` prints; without it, a release build in a git checkout
+adds its HEAD (debug builds do not look, or every commit would rebuild
+every crate).
 
 The workspace, in brief:
 

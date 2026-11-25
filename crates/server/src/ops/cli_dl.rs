@@ -142,7 +142,7 @@ pub(crate) async fn cli_info(State(app): State<Arc<App>>, h: HeaderMap) -> Respo
     let b = console_base(&app, &h);
     let d = tokio::task::spawn_blocking(digest).await.ok().flatten();
     let v: Value = json!({
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": pkgpod_base::version(),
         "platform": platform(),
         "sha256": d.as_ref().map(|x| x.0.clone()),
         "size": d.as_ref().map(|x| x.1),
@@ -236,7 +236,7 @@ trap - EXIT
 echo "pkgpod {version} installed as $dir/pkgpod"
 case ":$PATH:" in *":$dir:"*) ;; *) echo "(add $dir to PATH)" ;; esac
 "#,
-        version = env!("CARGO_PKG_VERSION"),
+        version = pkgpod_base::version(),
         platform = platform(),
     );
     (

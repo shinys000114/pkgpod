@@ -98,8 +98,7 @@ pub struct Package {
 /// `S:`, `C:`).
 pub fn parse_index(data: &[u8]) -> Result<Vec<Package>, Error> {
     let mut tar = Vec::new();
-    flate2::read::MultiGzDecoder::new(data)
-        .read_to_end(&mut tar)
+    crate::pkgs::read_index(flate2::read::MultiGzDecoder::new(data), &mut tar)
         .map_err(|e| Error::Upstream(format!("APKINDEX.tar.gz: {e}")))?;
     let mut a = tar::Archive::new(&tar[..]);
     let mut text = None;

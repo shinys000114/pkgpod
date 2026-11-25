@@ -38,6 +38,12 @@ pub struct Field {
     pub kind: FieldKind,
     pub help: &'static str,
     pub default: Value,
+    /// The range of an integer (counts, sizes and times: none is below
+    /// zero; a bound above keeps the arithmetic on it in range).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max: Option<i64>,
 }
 
 impl Field {
@@ -47,6 +53,8 @@ impl Field {
             kind: FieldKind::Text,
             help,
             default: json!(default),
+            min: None,
+            max: None,
         }
     }
     pub fn bool(name: &'static str, default: bool, help: &'static str) -> Field {
@@ -55,6 +63,8 @@ impl Field {
             kind: FieldKind::Bool,
             help,
             default: json!(default),
+            min: None,
+            max: None,
         }
     }
     pub fn int(name: &'static str, default: i64, help: &'static str) -> Field {
@@ -63,6 +73,16 @@ impl Field {
             kind: FieldKind::Integer,
             help,
             default: json!(default),
+            min: Some(0),
+            max: None,
+        }
+    }
+
+    /// An integer field taking at most `max`.
+    pub fn at_most(self, max: i64) -> Field {
+        Field {
+            max: Some(max),
+            ..self
         }
     }
     pub fn list(name: &'static str, help: &'static str) -> Field {
@@ -71,6 +91,8 @@ impl Field {
             kind: FieldKind::List,
             help,
             default: json!([]),
+            min: None,
+            max: None,
         }
     }
     pub fn choice(
@@ -86,6 +108,8 @@ impl Field {
             },
             help,
             default: json!(default),
+            min: None,
+            max: None,
         }
     }
     pub fn multi(name: &'static str, choices: Vec<String>, help: &'static str) -> Field {
@@ -94,6 +118,8 @@ impl Field {
             kind: FieldKind::Multi { choices },
             help,
             default: json!([]),
+            min: None,
+            max: None,
         }
     }
     pub fn long(name: &'static str, help: &'static str) -> Field {
@@ -102,6 +128,8 @@ impl Field {
             kind: FieldKind::Long,
             help,
             default: json!(""),
+            min: None,
+            max: None,
         }
     }
     pub fn json(name: &'static str, default: Value, help: &'static str) -> Field {
@@ -110,9 +138,14 @@ impl Field {
             kind: FieldKind::Json,
             help,
             default,
+            min: None,
+            max: None,
         }
     }
 }
+
+/// Days a setting counts at most: a hundred years.
+pub const DAYS: i64 = 36_500;
 
 /// The signing key setting, for formats that sign with the server's
 /// OpenPGP keys (others have none to choose).
@@ -143,8 +176,8 @@ pub fn mirror_common() -> Vec<Field> {
             10000,
             "Delete nothing when more files than this would go.",
         ),
-        Field::int("bwlimit", 0, "Bandwidth limit in KiB/s; 0: none."),
-        Field::int("parallel", 8, "Parallel downloads (http)."),
+        Field::int("bwlimit", 0, "Bandwidth limit in KiB/s; 0: none.").at_most(u32::MAX as i64),
+        Field::int("parallel", 8, "Parallel downloads (http).").at_most(1000),
     ]
 }
 
@@ -160,6 +193,38 @@ pub fn check_mirror_source(settings: &Value) -> Result<String> {
         )));
     }
     Ok(s)
+}
+
+/// Refuses a mirror's source or a proxy's upstream with a user or a
+/// password in its address: settings are shown to every reader of the
+/// repository (anyone, for a public one), so the secret would be too.
+pub fn check_no_credentials(kind: crate::Kind, settings: &Value) -> Result<()> {
+    let name = match kind {
+        crate::Kind::Mirror => "source",
+        crate::Kind::Proxy => "upstream",
+        _ => return Ok(()),
+    };
+    let s = settings[name].as_str().unwrap_or("").trim();
+    let rest = match s.split_once("://") {
+        Some((scheme, rest))
+            if matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") =>
+        {
+            rest
+        }
+        // A registry named by its host alone (docker.io, ghcr.io/team).
+        None if name == "upstream" => s,
+        _ => return Ok(()),
+    };
+    // Up to the path, as routes take an address apart: a password may
+    // hold a ? or a #.
+    let authority = rest.split('/').next().unwrap_or("");
+    if authority.contains('@') {
+        // Not echoed: the error goes into logs and replies.
+        return Err(Error::Invalid(format!(
+            "{name}: an address takes no user or password (settings are shown to every reader)"
+        )));
+    }
+    Ok(())
 }
 
 /// Settings every repository of a kind has, whatever its format.
@@ -180,7 +245,8 @@ pub fn common(kind: crate::Kind) -> Vec<Field> {
             "keep_days",
             30,
             "Versions younger than this many days are kept too.",
-        ),
+        )
+        .at_most(DAYS),
     ];
     if !kind.versioned() {
         // Mirrors and groups have no versions to keep.
@@ -196,16 +262,22 @@ pub fn common(kind: crate::Kind) -> Vec<Field> {
                 "The registry it fetches from (its base URL, as clients would use it).",
             ),
         );
-        v.push(Field::int(
-            "metadata_minutes",
-            30,
-            "How long a document that changes upstream (a package's version list) is used before it is asked for again; when the upstream is not there, the last one is used.",
-        ));
-        v.push(Field::int(
-            "max_mib",
-            0,
-            "Files kept at most, in MiB (0: no limit): the least recently used unpinned ones go first.",
-        ));
+        v.push(
+            Field::int(
+                "metadata_minutes",
+                30,
+                "How long a document that changes upstream (a package's version list) is used before it is asked for again; when the upstream is not there, the last one is used.",
+            )
+            .at_most(DAYS * 24 * 60),
+        );
+        v.push(
+            Field::int(
+                "max_mib",
+                0,
+                "Files kept at most, in MiB (0: no limit): the least recently used unpinned ones go first.",
+            )
+            .at_most(1 << 40),
+        );
         v.push(Field::list(
             "exclude",
             "Names never asked for upstream (a * at the end matches the rest): your own packages' names, so they are not looked up in a public registry.",
@@ -232,12 +304,14 @@ pub fn cleanup_fields() -> Vec<Field> {
             "cleanup_prerelease_days",
             0,
             "Cleanup: remove pre-releases in for longer than this many days (0: never).",
-        ),
+        )
+        .at_most(DAYS),
         Field::int(
             "cleanup_unused_days",
             0,
             "Cleanup: remove versions in and not downloaded for this many days (0: never; needs download counts kept at least as long).",
-        ),
+        )
+        .at_most(DAYS),
         Field::int(
             "cleanup_max",
             50,
@@ -258,7 +332,11 @@ pub fn check(fields: &[Field], v: &Value) -> Result<Value> {
     };
     for k in given.keys() {
         if !fields.iter().any(|f| f.name == k) {
-            return Err(Error::Invalid(format!("unknown setting {k:?}")));
+            let names: Vec<&str> = fields.iter().map(|f| f.name).collect();
+            return Err(Error::Invalid(format!(
+                "unknown setting {k:?}; the settings here: {}",
+                names.join(", ")
+            )));
         }
     }
     let mut out = Map::new();
@@ -272,6 +350,44 @@ pub fn check(fields: &[Field], v: &Value) -> Result<Value> {
     Ok(Value::Object(out))
 }
 
+/// Checks the parameters of an operation or an upload (`what`) against
+/// its fields and the `extra` names it also takes: a name it does not
+/// take is refused, not ignored (a misspelt one would widen what is
+/// done), and a yes/no or a number must read as one. The values are
+/// left as given.
+pub fn check_params(what: &str, fields: &[Field], extra: &[&str], v: &Value) -> Result<()> {
+    let empty = Map::new();
+    let given = match v {
+        Value::Object(m) => m,
+        Value::Null => &empty,
+        _ => return Err(Error::Invalid(format!("{what}: parameters are an object"))),
+    };
+    for (k, x) in given {
+        let Some(f) = fields.iter().find(|f| f.name == k) else {
+            if extra.contains(&k.as_str()) {
+                continue;
+            }
+            let names: Vec<&str> = fields
+                .iter()
+                .map(|f| f.name)
+                .chain(extra.iter().copied())
+                .collect();
+            return Err(Error::Invalid(format!(
+                "{what} takes no parameter {k:?}; {}",
+                if names.is_empty() {
+                    "it takes none".to_string()
+                } else {
+                    format!("it takes {}", names.join(", "))
+                }
+            )));
+        };
+        if matches!(f.kind, FieldKind::Bool | FieldKind::Integer) && !x.is_null() {
+            coerce(f, x)?;
+        }
+    }
+    Ok(())
+}
+
 fn coerce(f: &Field, x: &Value) -> Result<Value> {
     let bad = |want: &str| Error::Invalid(format!("setting {}: expected {want}, got {x}", f.name));
     Ok(match (&f.kind, x) {
@@ -282,9 +398,11 @@ fn coerce(f: &Field, x: &Value) -> Result<Value> {
             "false" | "no" | "off" | "0" => json!(false),
             _ => return Err(bad("true or false")),
         },
-        (FieldKind::Integer, Value::Number(n)) if n.is_i64() => x.clone(),
+        (FieldKind::Integer, Value::Number(n)) if n.is_i64() => {
+            in_range(f, n.as_i64().expect("an i64"))?
+        }
         (FieldKind::Integer, Value::String(s)) => {
-            json!(s.trim().parse::<i64>().map_err(|_| bad("an integer"))?)
+            in_range(f, s.trim().parse::<i64>().map_err(|_| bad("an integer"))?)?
         }
         (FieldKind::List, Value::Array(a)) => {
             if a.iter().all(Value::is_string) {
@@ -336,6 +454,22 @@ fn coerce(f: &Field, x: &Value) -> Result<Value> {
     })
 }
 
+fn in_range(f: &Field, n: i64) -> Result<Value> {
+    if let Some(min) = f.min.filter(|m| n < *m) {
+        return Err(Error::Invalid(format!(
+            "setting {}: at least {min}, got {n}",
+            f.name
+        )));
+    }
+    if let Some(max) = f.max.filter(|m| n > *m) {
+        return Err(Error::Invalid(format!(
+            "setting {}: at most {max}, got {n}",
+            f.name
+        )));
+    }
+    Ok(json!(n))
+}
+
 fn bad_choice(f: &Field, v: &str, choices: &[String]) -> Error {
     Error::Invalid(format!(
         "setting {}: {v:?} is not one of {}",
@@ -374,5 +508,26 @@ mod tests {
         assert_eq!(v["keep_days"], json!(30));
         assert!(check(&f, &json!({"nope": 1})).is_err());
         assert!(check(&f, &json!({"public": "maybe"})).is_err());
+    }
+
+    #[test]
+    fn numbers_out_of_range_are_refused() {
+        let f = common(crate::Kind::Hosted);
+        for bad in [
+            json!({"keep_versions": -1}),
+            json!({"keep_days": "-5"}),
+            json!({"keep_days": 1_000_000_000_000_000i64}),
+        ] {
+            let e = check(&f, &bad).unwrap_err().to_string();
+            assert!(e.contains("at least") || e.contains("at most"), "{e}");
+        }
+        assert_eq!(
+            check(&f, &json!({"keep_days": 36500})).unwrap()["keep_days"],
+            json!(36500)
+        );
+        let p = common(crate::Kind::Proxy);
+        assert!(check(&p, &json!({"metadata_minutes": -1})).is_err());
+        assert!(check(&cleanup_fields(), &json!({"cleanup_unused_days": -1})).is_err());
+        assert!(check(&mirror_common(), &json!({"bwlimit": -1})).is_err());
     }
 }

@@ -103,8 +103,8 @@ pub fn mirror_settings() -> Vec<Field> {
             10000,
             "Delete nothing when more files than this would go.",
         ),
-        Field::int("bwlimit", 0, "Bandwidth limit in KiB/s; 0: none."),
-        Field::int("parallel", 4, "Listings and downloads at once (http)."),
+        Field::int("bwlimit", 0, "Bandwidth limit in KiB/s; 0: none.").at_most(u32::MAX as i64),
+        Field::int("parallel", 4, "Listings and downloads at once (http).").at_most(1000),
     ]
 }
 
@@ -214,7 +214,8 @@ impl Format for Files {
                 "cleanup_older_days",
                 0,
                 "Cleanup: remove subdirectories in for longer than this many days (0: never); the newest is always kept, and one a link points at.",
-            ),
+            )
+            .at_most(pkgpod_engine::settings::DAYS),
             Field::int(
                 "cleanup_max",
                 50,
@@ -468,6 +469,25 @@ fn link(e: &mut Edit, path: &str, to: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numbers_out_of_range_are_refused() {
+        // Too many days would overflow the cleanup's cutoff, and every
+        // subdirectory would look old enough to go.
+        use pkgpod_engine::settings::check;
+        let hosted = Files.settings(Kind::Hosted);
+        assert!(
+            check(
+                &hosted,
+                &json!({"cleanup_older_days": 1_000_000_000_000_000i64})
+            )
+            .is_err()
+        );
+        assert!(check(&hosted, &json!({"cleanup_older_days": 36500})).is_ok());
+        let mirror = Files.settings(Kind::Mirror);
+        assert!(check(&mirror, &json!({"bwlimit": -1})).is_err());
+        assert!(check(&mirror, &json!({"parallel": 1_000_000})).is_err());
+    }
 
     #[test]
     fn paths() {

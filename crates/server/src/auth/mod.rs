@@ -599,9 +599,11 @@ impl Auth {
         if user.disabled || expires.is_some_and(|e| e <= t) {
             return None;
         }
-        // "Last used" to the minute: no write on every request apt makes.
+        // "Last used" to the minute: no write on every request apt makes,
+        // and none while another write holds the database (the request
+        // would wait for it).
         if used.is_none_or(|u| u < t - 60) {
-            let _ = self.db.write(|tx| {
+            let _ = self.db.try_write(|tx| {
                 tx.execute("UPDATE tokens SET used = ?1 WHERE id = ?2", params![t, id])
             });
         }

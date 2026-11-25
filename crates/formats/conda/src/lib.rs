@@ -38,6 +38,9 @@ pub struct Conda;
 /// Largest package taken in, and largest info/index.json.
 pub const MAX_PKG: u64 = 2 << 30;
 const MAX_INDEX: u64 = 1 << 20;
+/// A .conda's info-*.tar.zst at most: index.json, paths.json and the
+/// like, compressed (it is read whole into memory).
+const MAX_INFO: u64 = 64 << 20;
 
 /// Subdirs that always have a repodata.json.
 pub const SUBDIRS: &[&str] = &[
@@ -137,7 +140,7 @@ pub fn read_package(data: &[u8]) -> Result<Package> {
             .iter()
             .find(|m| m.name.starts_with("info-") && m.name.ends_with(".tar.zst"))
             .ok_or_else(|| invalid("the .conda has no info-*.tar.zst"))?;
-        let zst = zip::read(data, info, MAX_PKG).map_err(|e| invalid(e.to_string()))?;
+        let zst = zip::read(data, info, MAX_INFO).map_err(|e| invalid(e.to_string()))?;
         let dec = zstd::stream::read::Decoder::new(&zst[..])?;
         (index_in_tar(dec)?, ".conda")
     } else if data.starts_with(b"BZh") {
@@ -340,5 +343,15 @@ mod tests {
         assert_eq!(r["info"]["subdir"], "noarch");
         assert!(read_package(b"nothing").is_err());
         assert!(read_package(&zip::make(&[("x", b"", false)])).is_err());
+    }
+
+    #[test]
+    fn a_large_info_member_is_refused_unread() {
+        // Its directory entry says 100 MiB: not read into memory at all.
+        let mut conda = zip::make(&[("info-x-1-0.tar.zst", b"small", true)]);
+        let cd = conda.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        conda[cd + 24..cd + 28].copy_from_slice(&(100u32 << 20).to_le_bytes());
+        let e = read_package(&conda).unwrap_err().to_string();
+        assert!(e.contains("larger than"), "{e}");
     }
 }
