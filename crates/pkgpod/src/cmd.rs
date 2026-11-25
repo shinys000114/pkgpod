@@ -1856,6 +1856,7 @@ pub fn run(
                 println!("downloads_days = {}", s(&v["downloads_days"]));
                 println!("syncs_per_storage = {}", s(&v["syncs_per_storage"]));
                 println!("jobs_days = {}", s(&v["jobs_days"]));
+                println!("schedules_paused = {}", v["schedules_paused"] == true);
             });
         }
         Cmd::Gc {

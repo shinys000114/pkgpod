@@ -13293,6 +13293,8 @@ fn mirror_schedules_on_one_page() {
         "0 */6 * * *"
     );
     assert!(page().contains("Schedules are paused"));
+    let st = s.cli(&["settings"]).unwrap();
+    assert!(st.contains("schedules_paused = true"), "{st}");
     let st = api
         .get(format!("{}/api/v1/repos/open/status", s.api))
         .send()
