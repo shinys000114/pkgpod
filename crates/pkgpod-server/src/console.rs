@@ -56,6 +56,7 @@ fn js_path() -> &'static str {
 pub fn router() -> Router<Arc<App>> {
     Router::new()
         .route("/", get(index))
+        .route("/new", get(new_repo_page))
         .route("/login", get(login_page).post(login))
         .route("/logout", post(logout))
         .route("/r/{repo}", get(repo_page))
@@ -858,14 +859,9 @@ struct IndexPage {
     s: Shell,
     /// Formats in the list (id, title), for its filter.
     present: Vec<(String, String)>,
+    /// Kinds in the list, for its filter.
+    kinds: Vec<String>,
     repos: Vec<RepoRow>,
-    /// The new-repository choices, by kind.
-    kinds: Vec<KindChoices>,
-    storages: Vec<String>,
-    /// A signing key exists (signed Debian repositories need one).
-    has_key: bool,
-    /// The user id offered for a first key.
-    key_uid: String,
 }
 
 pub(crate) fn when(t: Option<i64>) -> String {
@@ -977,6 +973,41 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
             }
         })
         .collect();
+    // The formats and kinds in the list, for its filters.
+    let mut present: Vec<(String, String)> = repos
+        .iter()
+        .map(|r: &RepoRow| (r.format.clone(), r.format_title.clone()))
+        .collect();
+    present.sort_by_key(|a| a.1.to_lowercase());
+    present.dedup();
+    let mut kinds: Vec<String> = repos.iter().map(|r| r.kind.clone()).collect();
+    kinds.sort_by_key(|k| kind_rank(k));
+    kinds.dedup();
+    Ok(render(&IndexPage {
+        s: v.shell("repos"),
+        present,
+        kinds,
+        repos,
+    }))
+}
+
+#[derive(Template)]
+#[template(path = "new_repo.html")]
+struct NewRepoPage {
+    s: Shell,
+    /// The new-repository choices, by kind.
+    kinds: Vec<KindChoices>,
+    storages: Vec<String>,
+    /// A signing key exists (signed Debian repositories need one).
+    has_key: bool,
+    /// The user id offered for a first key.
+    key_uid: String,
+}
+
+/// A new repository: what it holds, then its name and settings.
+async fn new_repo_page(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response> {
+    app.require_admin(&v.caller)?;
+    let host = host_of(&headers);
     let hints = settings_hints(&app);
     let formats: Vec<FormatChoice> = app
         .engine
@@ -1085,17 +1116,8 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
         vec![]
     };
     let host = crate::routes::host_name(&host);
-    // The formats in the list, for its filter.
-    let mut present: Vec<(String, String)> = repos
-        .iter()
-        .map(|r: &RepoRow| (r.format.clone(), r.format_title.clone()))
-        .collect();
-    present.sort_by_key(|a| a.1.to_lowercase());
-    present.dedup();
-    Ok(render(&IndexPage {
+    Ok(render(&NewRepoPage {
         s: v.shell("repos"),
-        present,
-        repos,
         kinds,
         storages,
         has_key: !app.keys.list()?.is_empty(),

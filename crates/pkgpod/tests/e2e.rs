@@ -1134,6 +1134,7 @@ fn console_login_pages_and_csrf() {
         "/account",
         "/admin/people",
         "/admin/server",
+        "/new",
     ] {
         let (st, body) = page(p);
         assert_eq!(st, 200, "{p}: {body}");
@@ -1315,10 +1316,16 @@ fn console_login_pages_and_csrf() {
     assert!(r.contains("needs the dists to mirror"), "{r}");
     // Without a signing key, signed formats say so when made, as their
     // first upload would fail.
-    let (_, home) = page("/");
+    let (_, home) = page("/new");
     for says in ["apt checks", "dnf checks", "pacman checks"] {
         assert!(home.contains(says), "{says}");
     }
+    // The list is the list; making one is a page of its own.
+    let (_, list) = page("/");
+    assert!(
+        list.contains(r#"href="/new""#) && !list.contains("apt checks"),
+        "{list}"
+    );
     let rpm = std::fs::read(
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../pkgpod-rpm/tests/fixtures/hello-rpm-1.0-1.noarch.rpm"),

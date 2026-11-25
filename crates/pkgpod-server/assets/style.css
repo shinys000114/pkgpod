@@ -246,7 +246,7 @@ input, select, textarea {
   background: var(--surface); border: 1px solid var(--line-strong); border-radius: 7px;
   padding: .45rem .65rem; min-width: 0; width: 100%;
 }
-input[type="checkbox"] { width: auto; accent-color: var(--accent); }
+input[type="checkbox"] { width: 1rem; height: 1rem; flex: none; margin: 0; accent-color: var(--accent); }
 input:focus, select:focus, textarea:focus, button:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: 1px; border-color: var(--accent);
 }
@@ -591,7 +591,8 @@ td.claims div { overflow-wrap: anywhere; min-width: 14rem; }
 /* A field of several checkboxes (a webhook's events): no frame of its own. */
 fieldset.field { border: 0; padding: 0; margin: 0; min-width: 0; }
 fieldset.field > span { display: block; margin-bottom: .25rem; }
-fieldset.field .check-line { display: flex; gap: .4rem; align-items: baseline; margin: .15rem 0; }
+fieldset.field .check-line { display: flex; gap: .45rem; align-items: flex-start; margin: .15rem 0; }
+fieldset.field .check-line input[type="checkbox"] { margin-top: .2rem; }
 /* Host pages: one collapsed editor per host. */
 .host-pages details.host { border-bottom: 1px solid var(--line); padding: .5rem 0; }
 .host-pages details.host:last-child { border-bottom: 0; }
@@ -624,3 +625,10 @@ table.changes td.detail > div { display: -webkit-box; -webkit-line-clamp: 2; -we
 .stats.glance { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); }
 fieldset.repo-pick .pick-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); gap: .1rem .8rem; max-height: 12rem; overflow-y: auto; padding: .3rem 0; }
 fieldset.repo-pick .every { margin-bottom: .2rem; }
+
+/* Repository list */
+table.repos td.repo-cell { min-width: 13rem; }
+table.repos .repo-meta { margin-top: .2rem; display: flex; gap: .3rem; flex-wrap: wrap; align-items: center; }
+table.repos td.addr { min-width: 12rem; }
+table.repos details.addr-more > summary { cursor: pointer; color: var(--muted); font-family: var(--sans, inherit); font-size: 12px; margin-top: .15rem; }
+table.repos details.addr-more > span { display: block; overflow-wrap: break-word; }
