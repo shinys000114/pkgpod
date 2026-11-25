@@ -223,6 +223,18 @@ fn list_of(r: &RepoInfo, k: &str) -> Vec<String> {
     r.setting_list(k)
 }
 
+/// The host a Debian-style mirror names in `project/trace/<host>` after
+/// a sync, as mirror checkers expect: that of the repository's first
+/// address.
+fn trace_host(r: &RepoInfo) -> Option<String> {
+    list_of(r, "urls").iter().find_map(|u| {
+        reqwest::Url::parse(u)
+            .ok()?
+            .host_str()
+            .map(str::to_ascii_lowercase)
+    })
+}
+
 fn int_of(r: &RepoInfo, k: &str, d: i64) -> i64 {
     r.settings.get(k).and_then(Value::as_i64).unwrap_or(d)
 }
@@ -355,6 +367,7 @@ fn sync(
         m.delete = r.setting_bool("prune");
         m.max_delete = int_of(r, "max_delete", 10_000).max(0) as usize;
         m.bwlimit = bwlimit;
+        m.trace_host = trace_host(r);
         let ctx = pkgpod_mirror::rsync::Ctx {
             dest: &dest,
             cancel,
@@ -483,4 +496,37 @@ pub fn next_run(r: &RepoInfo) -> Option<String> {
     let now = jiff::Timestamp::now().to_zoned_datetime(jiff::tz::TimeZone::system());
     c.next_after(&now)
         .map(|t| t.strftime("%Y-%m-%d %H:%M").to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo(urls: Value) -> RepoInfo {
+        RepoInfo {
+            id: 1,
+            name: "debian".into(),
+            format: "deb".into(),
+            kind: Kind::Mirror,
+            storage: "main".into(),
+            storage_path: Default::default(),
+            settings: json!({ "urls": urls }),
+            current: None,
+            created: 0,
+        }
+    }
+
+    #[test]
+    fn the_trace_names_the_first_address_host() {
+        let r = repo(json!([
+            "https://Mirror.Example.org/debian/",
+            "http://deb.debian.org/debian/"
+        ]));
+        assert_eq!(trace_host(&r).as_deref(), Some("mirror.example.org"));
+        assert_eq!(trace_host(&repo(json!([]))), None);
+        assert_eq!(
+            trace_host(&repo(json!(["not a url", "http://b.example/"]))).as_deref(),
+            Some("b.example")
+        );
+    }
 }
