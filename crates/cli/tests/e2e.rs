@@ -9231,7 +9231,8 @@ fn trusted_publishing() {
         c
     };
     // Matching: a token of ci, for out only, that writes and expires.
-    let (st, v) = exchange(&iss.token(claims(json!({"jti": "one"}))));
+    let first = iss.token(claims(json!({"jti": "one"})));
+    let (st, v) = exchange(&first);
     assert_eq!(st, 200, "{v}");
     assert_eq!(
         (v["user"].as_str(), v["rule"].as_str()),
@@ -9254,10 +9255,13 @@ fn trusted_publishing() {
     // Limited to the rule's repositories (another, private, is not even
     // there for it).
     assert!(matches!(put("other"), 403 | 404));
-    // Used once only.
-    let (st, v) = exchange(&iss.token(claims(json!({"jti": "one"}))));
-    assert_eq!(st, 403, "{v}");
-    assert!(v.to_string().contains("exchanged already"), "{v}");
+    // Used once only: the same token, and another one with its jti
+    // (issued at another second, say).
+    for again in [first, iss.token(claims(json!({"jti": "one", "run": 2})))] {
+        let (st, v) = exchange(&again);
+        assert_eq!(st, 403, "{v}");
+        assert!(v.to_string().contains("exchanged already"), "{v}");
+    }
     // What does not match is refused, and says what it was.
     for (extra, why) in [
         (
