@@ -162,7 +162,21 @@ fn glob(pattern: &str, name: &str) -> bool {
 pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
     let method = req.method().clone();
     let r: Vec<&str> = a.rel.iter().map(String::as_str).collect();
-    // Pinging and logging in come before rights.
+    if a.role.is_none() {
+        // Logged in without a right: as if it were not there, pinging
+        // and logging in too (they would tell a private repository from
+        // one that is not there). Logging in, conan pings with the
+        // credentials it logs in with, or not at all.
+        return if a.caller.user.is_none() {
+            text(
+                StatusCode::UNAUTHORIZED,
+                "log in: conan remote login <remote> token -p <token>",
+            )
+        } else {
+            text(StatusCode::NOT_FOUND, "not found")
+        };
+    }
+    // Pinging and logging in come before the rest.
     match (&method, r.as_slice()) {
         (&Method::GET, ["v1", "ping"]) => {
             let mut resp = StatusCode::OK.into_response();
@@ -189,17 +203,6 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
             };
         }
         _ => {}
-    }
-    if a.role.is_none() {
-        // Logged in without a right: as if it were not there.
-        return if a.caller.user.is_none() {
-            text(
-                StatusCode::UNAUTHORIZED,
-                "log in: conan remote login <remote> token -p <token>",
-            )
-        } else {
-            text(StatusCode::NOT_FOUND, "not found")
-        };
     }
     let writing = matches!(method, Method::PUT | Method::DELETE);
     if writing {

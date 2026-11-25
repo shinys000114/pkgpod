@@ -217,7 +217,13 @@ pub fn claims(table: &crate::routes::Table, host: &str, rest: &[String]) -> bool
                 crate::routes::Hit::Repo { repo, .. } if !table.is_oci(&repo)
             );
     }
-    parse_target(rest).is_some_and(|(name, _)| table.registry(host, &name).is_some())
+    claimed(table, host, rest).is_some()
+}
+
+/// The repository `/v2/<rest>` on `host` goes to, if any.
+pub fn claimed(table: &crate::routes::Table, host: &str, rest: &[String]) -> Option<String> {
+    let (name, _) = parse_target(rest)?;
+    table.registry(host, &name).map(|(repo, _)| repo)
 }
 
 /// Handles `/v2/<rest>`, which [`claims`] said is the registry's.
@@ -602,23 +608,29 @@ async fn proxy(
                 .flatten()
         }
     };
-    let row = |path: String, kind, sha: Digest, size: u64, ct: String, version: String| CacheRow {
-        path,
-        kind,
-        sha256: Some(sha),
-        size,
-        content_type: ct,
-        etag: String::new(),
-        last_modified: String::new(),
-        fetched: now,
-        used: now,
-        pinned: false,
-        name: image.to_string(),
-        version,
-    };
-    let put = |rw: CacheRow| {
-        let (app2, r2) = (app.clone(), r.clone());
-        blocking(move || crate::serving::proxy::keep(&app2, &r2, &rw))
+    // Owning what they use: a tag's fetch may outlive the request.
+    let named = image.to_string();
+    let row =
+        move |path: String, kind, sha: Digest, size: u64, ct: String, version: String| CacheRow {
+            path,
+            kind,
+            sha256: Some(sha),
+            size,
+            content_type: ct,
+            etag: String::new(),
+            last_modified: String::new(),
+            fetched: now,
+            used: now,
+            pinned: false,
+            name: named.clone(),
+            version,
+        };
+    let put = {
+        let (app, r) = (app.clone(), r.clone());
+        move |rw: CacheRow| {
+            let (app2, r2) = (app.clone(), r.clone());
+            blocking(move || crate::serving::proxy::keep(&app2, &r2, &rw))
+        }
     };
     match target {
         Target::Manifest(re) => {
@@ -630,64 +642,79 @@ async fn proxy(
                 .is_some_and(|h| !by_tag || now - h.fetched < ttl);
             // While the upstream did not answer in time: what a tag
             // named is kept, without asking it.
-            let quiet = have.is_some() && crate::serving::proxy::is_quiet(&r.name);
+            let quiet = have.is_some() && crate::serving::proxy::is_quiet(&r.name, &path);
             let got = if fresh || quiet {
                 have.clone()
             } else {
-                let (reg2, up2, re2) = (reg.clone(), up.clone(), re.clone());
-                let fetch = blocking(move || reg2.manifest(&up2, &re2));
+                // Fetched and kept by a task of its own: what a tag names,
+                // sent after the wait below, is kept all the same.
+                let (app2, r2, reg2, up2) = (app.clone(), r.clone(), reg.clone(), up.clone());
+                let (re2, path2, image2) = (re.clone(), path.clone(), image.to_string());
+                let (row, put) = (row.clone(), put.clone());
+                let fetch = async move {
+                    let re3 = re2.clone();
+                    let Some(Ok((body, mt, digest))) =
+                        blocking(move || reg2.manifest(&up2, &re3)).await
+                    else {
+                        // The upstream not there.
+                        return Err(None);
+                    };
+                    let store = r2.store();
+                    let stored = blocking(move || {
+                        let mut inc = store.incoming()?;
+                        std::io::Write::write_all(&mut inc, &body)?;
+                        store.commit(inc, None)
+                    })
+                    .await;
+                    let Some(Ok((sha, size))) = stored else {
+                        return Err(Some(oci_err(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "UNKNOWN",
+                            "storing the manifest",
+                        )));
+                    };
+                    if format!("sha256:{}", sha.hex()) != digest {
+                        return Err(Some(oci_err(
+                            StatusCode::BAD_GATEWAY,
+                            "UNKNOWN",
+                            "the manifest is not its digest",
+                        )));
+                    }
+                    let kind = if by_tag {
+                        CacheKind::Meta
+                    } else {
+                        CacheKind::File
+                    };
+                    let tagged = row(path2, kind, sha, size, mt.clone(), re2.clone());
+                    let _ = put(tagged.clone()).await;
+                    if by_tag {
+                        let _ = put(row(
+                            format!("{image2}/manifests/{digest}"),
+                            CacheKind::File,
+                            sha,
+                            size,
+                            mt,
+                            re2,
+                        ))
+                        .await;
+                    }
+                    shrink(&app2, &r2).await;
+                    Ok(tagged)
+                };
                 let fetched = match &have {
                     // What a tag named is kept: not waited for long.
-                    Some(_) => crate::serving::proxy::waited(&r.name, fetch)
-                        .await
-                        .flatten(),
-                    None => fetch.await,
+                    Some(_) => {
+                        let then = |got: Result<CacheRow, Option<Response>>| async move {
+                            !matches!(got, Err(None))
+                        };
+                        crate::serving::proxy::waited(&r.name, &path, fetch, then).await
+                    }
+                    None => Some(fetch.await),
                 };
                 match fetched {
-                    Some(Ok((body, mt, digest))) => {
-                        let store = r.store();
-                        let stored = blocking(move || {
-                            let mut inc = store.incoming()?;
-                            std::io::Write::write_all(&mut inc, &body)?;
-                            store.commit(inc, None)
-                        })
-                        .await;
-                        let Some(Ok((sha, size))) = stored else {
-                            return oci_err(
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                "UNKNOWN",
-                                "storing the manifest",
-                            );
-                        };
-                        if format!("sha256:{}", sha.hex()) != digest {
-                            return oci_err(
-                                StatusCode::BAD_GATEWAY,
-                                "UNKNOWN",
-                                "the manifest is not its digest",
-                            );
-                        }
-                        let kind = if by_tag {
-                            CacheKind::Meta
-                        } else {
-                            CacheKind::File
-                        };
-                        let tagged = row(path.clone(), kind, sha, size, mt.clone(), re.clone());
-                        let _ = put(tagged.clone()).await;
-                        if by_tag {
-                            let _ = put(row(
-                                format!("{image}/manifests/{digest}"),
-                                CacheKind::File,
-                                sha,
-                                size,
-                                mt,
-                                re.clone(),
-                            ))
-                            .await;
-                        }
-                        shrink(app, r).await;
-                        Some(tagged)
-                    }
-                    // The upstream not there: as it was.
+                    Some(Ok(tagged)) => Some(tagged),
+                    Some(Err(Some(e))) => return e,
+                    // The upstream not there, or not in time: as it was.
                     _ if have.is_some() => have.clone(),
                     _ => None,
                 }

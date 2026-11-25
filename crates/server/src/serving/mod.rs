@@ -447,8 +447,19 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
             r.headers_mut()
                 .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
         }
-        // Without credentials only a public repository answers.
-        if authorized {
+        // Without credentials only a public repository answers; a group
+        // with a member that is not public answers those from its public
+        // members only, as other groups do (below).
+        let shared = || {
+            crate::protocols::oci::claimed(&table, &host, &rest)
+                .and_then(|repo| app.served(&repo).ok())
+                .is_none_or(|s| {
+                    s.repo.setting_bool("public")
+                        && (s.repo.kind != Kind::Group
+                            || crate::serving::group::all_public(&app, &s.repo))
+                })
+        };
+        if authorized || !shared() {
             private(&mut r);
         }
         return r;
@@ -1223,7 +1234,7 @@ async fn get(
             };
             let counts = crate::serving::stats::counts(req.method(), req.headers());
             let file = s.repo.store().path(&sha256);
-            let r = serve_tagged(&file, &etag, &rel_s, mtime, files, req).await;
+            let r = serve_tagged(&file, &etag, &rel_s, mtime, files, true, req).await;
             app.stats
                 .file(counts, &r, &s.repo.name, &rel_s, Some(&sha256));
             r
@@ -1338,15 +1349,23 @@ pub fn cache_control(rel: &str) -> &'static str {
 }
 
 /// [`cache_control`] for a file of a stored version (not a mirror's
-/// received tree): a pool file is revalidated (by its ETag), as a
-/// replace, a removal and a new upload, or a rollback put other content
-/// at its name; what is under by-hash is still kept.
+/// received tree): revalidated (by its ETag), as a replace, a removal
+/// and a new upload, or a rollback put other content at its name, in
+/// any format; only what is named by its content is still kept: what is
+/// under by-hash, and rpm's repodata files (`<sha256>-primary.xml.gz`).
 fn stored_cache_control(rel: &str) -> &'static str {
     let rel = rel.trim_start_matches('/');
-    if rel.starts_with("pool/") && !rel.split('/').any(|s| s == "by-hash") {
-        "no-cache"
-    } else {
+    let mut up = rel.rsplit('/');
+    let repodata = match (up.next(), up.next()) {
+        (Some(f), Some("repodata")) => f
+            .split_once('-')
+            .is_some_and(|(h, _)| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit())),
+        _ => false,
+    };
+    if rel.split('/').any(|s| s == "by-hash") || repodata {
         cache_control(rel)
+    } else {
+        "no-cache"
     }
 }
 
@@ -1354,8 +1373,9 @@ fn stored_cache_control(rel: &str) -> &'static str {
 /// its Last-Modified, not the store file's, which a re-upload touches;
 /// `files`: a files repository's, served sandboxed (anyone may have
 /// uploaded the HTML).
-/// [`serve_blob`] for a repository's file, counted as a download when
-/// it is one (`path`: where its catalog row would be, if it is known).
+/// [`serve_blob`] for a file of a repository's stored version (its
+/// lifetime by [`stored_cache_control`]), counted as a download when it
+/// is one (`path`: where its catalog row would be, if it is known).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn serve_counted(
     app: &App,
@@ -1369,7 +1389,8 @@ pub(crate) async fn serve_counted(
     req: Request,
 ) -> Response {
     let counts = crate::serving::stats::counts(req.method(), req.headers());
-    let r = serve_blob(file, sha, rel, mtime, files, req).await;
+    let etag = format!("\"{}\"", sha.hex());
+    let r = serve_tagged(file, &etag, rel, mtime, files, true, req).await;
     app.stats.file(counts, &r, repo, path, Some(sha));
     r
 }
@@ -1382,16 +1403,19 @@ pub(crate) async fn serve_blob(
     files: bool,
     req: Request,
 ) -> Response {
-    serve_tagged(file, &format!("\"{}\"", sha.hex()), rel, mtime, files, req).await
+    let etag = format!("\"{}\"", sha.hex());
+    serve_tagged(file, &etag, rel, mtime, files, false, req).await
 }
 
-/// [`serve_blob`] with its ETag given (quoted).
+/// [`serve_blob`] with its ETag given (quoted); `stored`: a file of a
+/// stored version, kept as [`stored_cache_control`] says.
 async fn serve_tagged(
     file: &std::path::Path,
     etag: &str,
     rel: &str,
     mtime: Option<i64>,
     files: bool,
+    stored: bool,
     mut req: Request,
 ) -> Response {
     // Within what an HTTP date can say, for a time stored before that
@@ -1476,8 +1500,10 @@ async fn serve_tagged(
         header::CACHE_CONTROL,
         HeaderValue::from_static(if files {
             "no-cache"
-        } else {
+        } else if stored {
             stored_cache_control(rel)
+        } else {
+            cache_control(rel)
         }),
     );
     if let Ok(v) = HeaderValue::from_str(etag) {
@@ -2224,6 +2250,23 @@ mod tests {
                 .contains("immutable")
         );
         assert_eq!(stored_cache_control("dists/noble/InRelease"), "no-cache");
+        // So may any other package file (a replace, a rollback): only
+        // what is named by its content is still kept.
+        for file in [
+            "pk/x86_64/hello-1.0-1-x86_64.pkg.tar.zst",
+            "x86_64/hello_1.0_x86_64.ipk",
+            "el9/hello-1.0-1.noarch.rpm",
+            "v3.22/main/x86_64/hello-1.0-r0.apk",
+            "charts/hello-1.0.0.tgz",
+            "com/acme/x/1.0/x-1.0.jar",
+            "hello-1.0.0.crate",
+            "el9/repodata/repomd.xml",
+            "el9/repodata/primary.xml.gz",
+        ] {
+            assert_eq!(stored_cache_control(file), "no-cache", "{file}");
+        }
+        let primary = format!("el9/repodata/{}-primary.xml.gz", "ab".repeat(32));
+        assert!(stored_cache_control(&primary).contains("3600"));
     }
 
     #[test]
@@ -2354,7 +2397,7 @@ mod tests {
                     req.headers_mut()
                         .insert(header::IF_MODIFIED_SINCE, HeaderValue::from_static(v));
                 }
-                let r = serve_tagged(&file, "\"e\"", "f", Some(t), true, req).await;
+                let r = serve_tagged(&file, "\"e\"", "f", Some(t), true, false, req).await;
                 assert_eq!(
                     r.status(),
                     if since.is_some() {

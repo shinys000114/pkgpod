@@ -299,9 +299,10 @@ own. With Cloudflare:
   keep old ones.
 - Do not cache the hosts of private repositories: no cache-everything
   rule and no edge lifetime that overrides the origin's. pkgpod marks
-  what only some may read `Cache-Control: private` with `Vary:
-  Authorization`, but Cloudflare's cache key leaves Authorization out,
-  so a rule that caches it anyway hands a reader's file to anyone.
+  what only some may read `Vary: Authorization` (with `Cache-Control:
+  private`, or `no-cache`), but Cloudflare's cache key leaves
+  Authorization out, so a rule that caches it anyway hands a reader's
+  file to anyone.
 - Leave bot challenges off for these hosts: apt, pip, the CLI and CI
   jobs cannot answer them.
 - What it serves from its cache does not reach pkgpod and is not

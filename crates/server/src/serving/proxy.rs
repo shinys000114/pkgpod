@@ -16,7 +16,7 @@
 //! not looked up in a public registry. Downloads count by package and
 //! version, as for hosted repositories.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -694,6 +694,7 @@ fn name_doc(format: &str, name: &str) -> Option<String> {
 }
 
 /// A proxy's settings.
+#[derive(Clone)]
 struct Upstream {
     base: String,
     ttl: i64,
@@ -780,39 +781,112 @@ const STALE_WAIT: Duration = Duration::from_secs(5);
 
 /// For how long, after the upstream did not answer in time, what a
 /// proxy keeps is served without asking it, so that not every request
-/// waits during an outage.
+/// waits during an outage (or until the late answer comes).
 const QUIET_SECS: i64 = 60;
 
-/// Proxies whose upstream did not answer in time, and until when.
+/// Proxies whose upstream did not answer in time, and until when. One
+/// that ended is remembered for as long again, so that an upstream slow
+/// for a while is told in the log once.
 fn quiet() -> &'static Mutex<HashMap<String, i64>> {
     static Q: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
     Q.get_or_init(Default::default)
 }
 
-/// Whether proxy `repo`'s upstream did not answer in time a moment
-/// ago: what it keeps is then served without asking.
-pub(crate) fn is_quiet(repo: &str) -> bool {
+/// What proxies asked their upstream again for and still wait for,
+/// after [`STALE_WAIT`]: by repository and path.
+fn late() -> &'static Mutex<HashSet<(String, String)>> {
+    static L: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new();
+    L.get_or_init(Default::default)
+}
+
+/// Whether what proxy `repo` keeps at `path` is served without asking
+/// its upstream: it did not answer in time a moment ago, or is still
+/// answering an earlier request for it.
+pub(crate) fn is_quiet(repo: &str, path: &str) -> bool {
+    let now = pkgpod_base::now();
     quiet()
         .lock()
         .unwrap()
         .get(repo)
-        .is_some_and(|until| pkgpod_base::now() < *until)
+        .is_some_and(|until| now < *until)
+        || late()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&(repo.to_string(), path.to_string()))
 }
 
-/// `f`, the upstream asked again for what is kept, waited for
-/// [`STALE_WAIT`] at most: `None` when it did not answer in time, and
-/// `repo` is then quiet for [`QUIET_SECS`].
-pub(crate) async fn waited<T>(repo: &str, f: impl std::future::Future<Output = T>) -> Option<T> {
-    match tokio::time::timeout(STALE_WAIT, f).await {
-        Ok(v) => Some(v),
-        Err(_) => {
-            let now = pkgpod_base::now();
-            let mut q = quiet().lock().unwrap();
-            q.retain(|_, until| now < *until);
-            q.insert(repo.to_string(), now + QUIET_SECS);
-            None
+/// `f`, the upstream asked again for what proxy `repo` keeps at `path`,
+/// run as a task of its own and waited for [`STALE_WAIT`] at most:
+/// `None` when it did not answer in time. `repo` is then quiet for
+/// [`QUIET_SECS`], and `f` goes on: `then` gets what it brings in that
+/// time, to keep it (so a slow upstream still renews what is kept), and
+/// says whether the upstream answered, which ends the quiet.
+pub(crate) async fn waited<T, F>(
+    repo: &str,
+    path: &str,
+    f: impl std::future::Future<Output = T> + Send + 'static,
+    then: impl FnOnce(T) -> F + Send + 'static,
+) -> Option<T>
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = bool> + Send,
+{
+    let mut task = tokio::spawn(f);
+    if let Ok(done) = tokio::time::timeout(STALE_WAIT, &mut task).await {
+        return done.ok();
+    }
+    let now = pkgpod_base::now();
+    {
+        let mut q = quiet().lock().unwrap();
+        q.retain(|_, until| now < *until + QUIET_SECS);
+        if q.insert(repo.to_string(), now + QUIET_SECS).is_none() {
+            tracing::warn!(
+                "{repo}: the upstream did not answer in {} s; what is kept is served meanwhile",
+                STALE_WAIT.as_secs()
+            );
         }
     }
+    /// The path off [`late`] however the task ends.
+    struct Late((String, String));
+    impl Drop for Late {
+        fn drop(&mut self) {
+            late()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&self.0);
+        }
+    }
+    let key = (repo.to_string(), path.to_string());
+    if !late()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key.clone())
+    {
+        // Asked for by another request a moment before: that one keeps
+        // what comes.
+        task.abort();
+        return None;
+    }
+    let (held, repo) = (Late(key), repo.to_string());
+    tokio::spawn(async move {
+        // The path is held while its answer is waited for, a minute at
+        // most (an image's fetch may take an hour to fail): then it is
+        // asked again, and what this one brings later is not waited for.
+        let wait = Duration::from_secs(QUIET_SECS as u64);
+        let answered = match tokio::time::timeout(wait, task).await {
+            Ok(Ok(v)) => then(v).await,
+            _ => false,
+        };
+        drop(held);
+        if answered {
+            // Slow, but there: asked again from now on.
+            let now = pkgpod_base::now();
+            if let Some(until) = quiet().lock().unwrap().get_mut(&repo) {
+                *until = (*until).min(now);
+            }
+        }
+    });
+    None
 }
 
 /// Held while a fetched row is kept, and while a proxy's rows are
@@ -855,6 +929,21 @@ enum Got {
     Moved(String),
 }
 
+/// Whether the upstream answered for what it has (it or a gateway in
+/// front failing is no answer): a late one that did ends the quiet.
+fn answered(sent: &reqwest::Result<reqwest::Response>) -> bool {
+    sent.as_ref().is_ok_and(|resp| {
+        let st = resp.status();
+        st.is_success() || matches!(st.as_u16(), 304 | 404 | 410)
+    })
+}
+
+/// What is asked for again when old: metadata, and a file server's
+/// files.
+fn renews(r: &RepoInfo, row: &CacheRow) -> bool {
+    row.kind == CacheKind::Meta || (r.format == "files" && row.kind == CacheKind::File)
+}
+
 /// The cache row for `a`, fetched from the upstream when it is not
 /// there (or, for metadata, too old).
 async fn get(app: &Arc<App>, r: &RepoInfo, up: &Upstream, a: &Asked) -> Result<Got> {
@@ -863,15 +952,10 @@ async fn get(app: &Arc<App>, r: &RepoInfo, up: &Upstream, a: &Asked) -> Result<G
         .await
         .map_err(|e| Error::Invalid(e.to_string()))??;
     let now = pkgpod_base::now();
-    // What is asked for again when old: metadata, and a file server's
-    // files.
-    let renews = |row: &CacheRow| {
-        row.kind == CacheKind::Meta || (r.format == "files" && row.kind == CacheKind::File)
-    };
     if let Some(row) = &have {
         let fresh = now - row.fetched < up.ttl;
         match row.kind {
-            CacheKind::File if fresh || !renews(row) => {
+            CacheKind::File if fresh || !renews(r, row) => {
                 return Ok(Got::Row(Box::new(row.clone())));
             }
             CacheKind::Meta if fresh => return Ok(Got::Row(Box::new(row.clone()))),
@@ -879,9 +963,9 @@ async fn get(app: &Arc<App>, r: &RepoInfo, up: &Upstream, a: &Asked) -> Result<G
             _ => {}
         }
     }
-    let stale = have.clone().filter(|row| renews(row));
+    let stale = have.clone().filter(|row| renews(r, row));
     if let Some(row) = &stale
-        && is_quiet(&r.name)
+        && is_quiet(&r.name, &a.path)
     {
         return Ok(Got::Row(Box::new(row.clone())));
     }
@@ -893,7 +977,7 @@ async fn get(app: &Arc<App>, r: &RepoInfo, up: &Upstream, a: &Asked) -> Result<G
     if let Some(a) = accept(&r.format, a) {
         req = req.header(header::ACCEPT, a);
     }
-    if let Some(row) = have.as_ref().filter(|r| renews(r)) {
+    if let Some(row) = &stale {
         if !row.etag.is_empty() {
             req = req.header(header::IF_NONE_MATCH, &row.etag);
         }
@@ -902,19 +986,44 @@ async fn get(app: &Arc<App>, r: &RepoInfo, up: &Upstream, a: &Asked) -> Result<G
         }
     }
     let sent = match &stale {
-        // A copy to serve: not waited for long.
-        Some(row) => match waited(&r.name, req.send()).await {
-            Some(sent) => sent,
-            None => return Ok(Got::Row(Box::new(row.clone()))),
-        },
+        // A copy to serve: not waited for long (what comes later is
+        // still kept).
+        Some(row) => {
+            let (app2, r2, up2, a2) = (app.clone(), r.clone(), up.clone(), a.clone());
+            let (have2, url2) = (have.clone(), url.clone());
+            let then = move |sent: reqwest::Result<reqwest::Response>| async move {
+                let answered = answered(&sent);
+                let _ = got(&app2, &r2, &up2, &a2, have2, &url2, sent).await;
+                answered
+            };
+            match waited(&r.name, &a.path, req.send(), then).await {
+                Some(sent) => sent,
+                None => return Ok(Got::Row(Box::new(row.clone()))),
+            }
+        }
         None => req.send().await,
     };
+    got(app, r, up, a, have, &url, sent).await
+}
+
+/// What the upstream sent for `a` at `url` (`have`: what was kept),
+/// kept: [`get`]'s answer.
+async fn got(
+    app: &Arc<App>,
+    r: &RepoInfo,
+    up: &Upstream,
+    a: &Asked,
+    have: Option<CacheRow>,
+    url: &str,
+    sent: reqwest::Result<reqwest::Response>,
+) -> Result<Got> {
+    let now = pkgpod_base::now();
     let resp = match sent {
         Ok(r) => r,
         Err(e) => {
             // Not there: the metadata as it was.
             return match have {
-                Some(row) if renews(&row) => Ok(Got::Row(Box::new(row))),
+                Some(row) if renews(r, &row) => Ok(Got::Row(Box::new(row))),
                 _ => Err(Error::Invalid(format!("the upstream: {e}"))),
             };
         }
@@ -928,7 +1037,7 @@ async fn get(app: &Arc<App>, r: &RepoInfo, up: &Upstream, a: &Asked) -> Result<G
         tokio::task::spawn_blocking(move || keep(&app2, &r2, &row))
     };
     if st == reqwest::StatusCode::NOT_MODIFIED
-        && let Some(row) = have.clone().filter(|r| renews(r))
+        && let Some(row) = have.clone().filter(|row| renews(r, row))
     {
         let (app2, name, path) = (app.clone(), r.name.clone(), a.path.clone());
         let _ = tokio::task::spawn_blocking(move || app2.engine.cache_fresh(&name, &path)).await;
@@ -954,7 +1063,7 @@ async fn get(app: &Arc<App>, r: &RepoInfo, up: &Upstream, a: &Asked) -> Result<G
     }
     if !st.is_success() {
         return match have {
-            Some(row) if renews(&row) => Ok(Got::Row(Box::new(row))),
+            Some(row) if renews(r, &row) => Ok(Got::Row(Box::new(row))),
             _ => Err(Error::Invalid(format!(
                 "the upstream answered {st} for {url}"
             ))),
@@ -1409,7 +1518,7 @@ async fn files_serve(app: Arc<App>, at: At, req: Request) -> Response {
     }
     // While the upstream did not answer in time: what is kept, without
     // asking it.
-    if have.is_some() && is_quiet(&r.name) {
+    if have.is_some() && is_quiet(&r.name, &a.path) {
         return files_kept(&app, &r, &a, have, req).await;
     }
     // The first to fetch it leads; one that came a moment later follows.
@@ -1427,11 +1536,18 @@ async fn files_serve(app: Arc<App>, at: At, req: Request) -> Response {
         }
     }
     let sent = match &have {
-        // A copy to serve: not waited for long.
-        Some(_) => match waited(&r.name, q.send()).await {
-            Some(sent) => sent,
-            None => return files_kept(&app, &r, &a, have, req).await,
-        },
+        // A copy to serve: not waited for long (what comes later is
+        // still kept).
+        Some(row) => {
+            let (app2, r2, up2, a2) = (app.clone(), r.clone(), up.clone(), a.clone());
+            let pinned = row.pinned;
+            let then =
+                move |sent| async move { files_late(&app2, &r2, &up2, &a2, pinned, sent).await };
+            match waited(&r.name, &a.path, q.send(), then).await {
+                Some(sent) => sent,
+                None => return files_kept(&app, &r, &a, have, req).await,
+            }
+        }
         None => q.send().await,
     };
     let resp = match sent {
@@ -1448,23 +1564,7 @@ async fn files_serve(app: Arc<App>, at: At, req: Request) -> Response {
     }
     if st == reqwest::StatusCode::NOT_FOUND || st == reqwest::StatusCode::GONE {
         // Gone upstream: so here, from now on.
-        let now = pkgpod_base::now();
-        let row = CacheRow {
-            path: a.path.clone(),
-            kind: CacheKind::Miss,
-            sha256: None,
-            size: 0,
-            content_type: String::new(),
-            etag: String::new(),
-            last_modified: String::new(),
-            fetched: now,
-            used: now,
-            pinned: false,
-            name: a.name.clone(),
-            version: String::new(),
-        };
-        let (app2, r2) = (app.clone(), r.clone());
-        let _ = tokio::task::spawn_blocking(move || keep(&app2, &r2, &row)).await;
+        files_gone(&app, &r, &a).await;
         return status(StatusCode::NOT_FOUND);
     }
     if !st.is_success() {
@@ -1493,6 +1593,61 @@ async fn files_serve(app: Arc<App>, at: At, req: Request) -> Response {
     .await;
     app.stats.named(counts, &resp, &r.name, &a.name, "");
     resp
+}
+
+/// Keeps that the upstream has nothing at `a` (404, 410).
+async fn files_gone(app: &Arc<App>, r: &RepoInfo, a: &Asked) {
+    let now = pkgpod_base::now();
+    let row = CacheRow {
+        path: a.path.clone(),
+        kind: CacheKind::Miss,
+        sha256: None,
+        size: 0,
+        content_type: String::new(),
+        etag: String::new(),
+        last_modified: String::new(),
+        fetched: now,
+        used: now,
+        pinned: false,
+        name: a.name.clone(),
+        version: String::new(),
+    };
+    let (app2, r2) = (app.clone(), r.clone());
+    let _ = tokio::task::spawn_blocking(move || keep(&app2, &r2, &row)).await;
+}
+
+/// What the upstream sent for a kept file after its client was served
+/// the kept copy: kept as for a client (not changed: fresh again; gone;
+/// changed: read whole, into the store), no download counted. Whether
+/// the upstream answered.
+async fn files_late(
+    app: &Arc<App>,
+    r: &RepoInfo,
+    up: &Upstream,
+    a: &Asked,
+    pinned: bool,
+    sent: reqwest::Result<reqwest::Response>,
+) -> bool {
+    use futures_util::StreamExt;
+    let answered = answered(&sent);
+    let Ok(resp) = sent else {
+        return false;
+    };
+    let st = resp.status();
+    if st == reqwest::StatusCode::NOT_MODIFIED {
+        let (app2, name, path) = (app.clone(), r.name.clone(), a.path.clone());
+        let _ = tokio::task::spawn_blocking(move || app2.engine.cache_fresh(&name, &path)).await;
+    } else if st == reqwest::StatusCode::NOT_FOUND || st == reqwest::StatusCode::GONE {
+        files_gone(app, r, a).await;
+    } else if st.is_success() {
+        // Kept once its last byte is read.
+        let mut body = files_stream(app, r, up, a, pinned, resp, None)
+            .await
+            .into_body()
+            .into_data_stream();
+        while let Some(Ok(_)) = body.next().await {}
+    }
+    answered
 }
 
 /// Serves a file another request is fetching: from the file as it

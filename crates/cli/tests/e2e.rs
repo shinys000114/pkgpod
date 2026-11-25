@@ -1894,6 +1894,19 @@ fn private_repositories_of_every_format() {
             assert_eq!(ask("GET", &path, None), 401, "{path}: anonymous");
             assert_eq!(ask("GET", &path, Some("outsider")), 404, "{path}: no grant");
         }
+        // Conan's ping and login, which clients ask first: as the rest.
+        if p.format == "conan" {
+            for path in [
+                "v1/ping",
+                "v2/users/check_credentials",
+                "v2/users/authenticate",
+            ] {
+                let path = format!("/{r}/{path}");
+                assert_eq!(ask("GET", &path, None), 401, "{path}: anonymous");
+                assert_eq!(ask("GET", &path, Some("outsider")), 404, "{path}: no grant");
+            }
+            assert_eq!(ask("GET", &format!("/{r}/v1/ping"), Some("reader")), 200);
+        }
         assert_eq!(ask("GET", &format!("/{r}/"), Some("reader")), 200, "{r}");
         assert_eq!(ask("GET", &index, Some("reader")), p.reads, "{index}");
         assert_eq!(ask(p.method, &upload, None), 401, "{upload}: anonymous");
@@ -8134,6 +8147,180 @@ fn proxies_serve_kept_files_and_tags_soon_while_their_upstream_hangs() {
     }
 }
 
+/// A stand-in upstream that answers each path with its content type and
+/// body as they are now (and 404), with the body's SHA-256 as its ETag
+/// (304 when asked with it), each after the delay set (milliseconds).
+#[allow(clippy::type_complexity)]
+fn stub_upstream_slow(
+    files: Vec<(String, &'static str, Vec<u8>)>,
+) -> (
+    u16,
+    std::sync::Arc<std::sync::Mutex<Vec<(String, &'static str, Vec<u8>)>>>,
+    std::sync::Arc<std::sync::atomic::AtomicU64>,
+) {
+    use std::io::{BufRead, Write};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let files = Arc::new(Mutex::new(files));
+    let delay = Arc::new(AtomicU64::new(0));
+    let (files2, delay2) = (files.clone(), delay.clone());
+    std::thread::spawn(move || {
+        for mut c in l.incoming().flatten() {
+            let (files, delay) = (files2.clone(), delay2.clone());
+            std::thread::spawn(move || {
+                let mut r = std::io::BufReader::new(c.try_clone().unwrap());
+                let mut line = String::new();
+                if r.read_line(&mut line).is_err() {
+                    return;
+                }
+                let mut inm = String::new();
+                loop {
+                    let mut h = String::new();
+                    if r.read_line(&mut h).is_err() || h.trim().is_empty() {
+                        break;
+                    }
+                    if let Some((k, v)) = h.split_once(':')
+                        && k.eq_ignore_ascii_case("if-none-match")
+                    {
+                        inm = v.trim().to_string();
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(delay.load(Ordering::Relaxed)));
+                let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
+                let found = files
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|(p, _, _)| *p == path)
+                    .map(|(_, ct, b)| (*ct, b.clone()));
+                let (head, body) = match found {
+                    Some((ct, b)) => {
+                        let tag = format!("\"{}\"", pkgpod_deb::hash::hash_bytes(&b).sha256);
+                        if inm == tag {
+                            (format!("304 Not Modified\r\nETag: {tag}"), Vec::new())
+                        } else {
+                            (format!("200 OK\r\nETag: {tag}\r\nContent-Type: {ct}"), b)
+                        }
+                    }
+                    None => ("404 Not Found".to_string(), Vec::new()),
+                };
+                let _ = c.write_all(
+                    format!(
+                        "HTTP/1.1 {head}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+                let _ = c.write_all(&body);
+            });
+        }
+    });
+    (port, files, delay)
+}
+
+/// An upstream slower to answer than a proxy waits for what it keeps:
+/// the kept copy is served meanwhile, and what the upstream sends late
+/// is kept all the same, for metadata, for a file server's file and for
+/// what an image proxy keeps of a tag.
+#[test]
+fn proxies_keep_what_a_slow_upstream_sends_late() {
+    use std::sync::atomic::Ordering;
+    let manifest = |config: char| {
+        json!({
+            "schemaVersion": 2,
+            "mediaType": OCI_M,
+            "config": {"mediaType": "application/vnd.oci.image.config.v1+json",
+                       "digest": format!("sha256:{}", config.to_string().repeat(64)), "size": 2},
+            "layers": [],
+        })
+        .to_string()
+    };
+    let (tag, list) = ("/v2/x/app/manifests/1.0", "/example.com/m/@v/list");
+    let (port, files, delay) = stub_upstream_slow(vec![
+        (list.into(), "text/plain", b"v1.0.0\n".to_vec()),
+        ("/f.txt".into(), "text/plain", b"OLD".to_vec()),
+        (tag.into(), OCI_M, manifest('0').into_bytes()),
+    ]);
+    let s = Server::start();
+    for (name, format, upstream) in [
+        ("gprox", "go", format!("http://127.0.0.1:{port}/")),
+        ("fprox", "files", format!("http://127.0.0.1:{port}/")),
+        ("oprox", "oci", format!("http://127.0.0.1:{port}/x")),
+    ] {
+        s.cli(&[
+            "repo",
+            "create",
+            name,
+            "-f",
+            format,
+            "-k",
+            "proxy",
+            "-s",
+            &format!("upstream={upstream}"),
+            "-s",
+            "metadata_minutes=0",
+            "-s",
+            "public=true",
+        ])
+        .unwrap();
+    }
+    let c = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(90))
+        .build()
+        .unwrap();
+    for (path, up, old, new) in [
+        (
+            "/gprox/example.com/m/@v/list",
+            list,
+            "v1.0.0\n".to_string(),
+            "v1.0.0\nv1.1.0\n".to_string(),
+        ),
+        (
+            "/fprox/f.txt",
+            "/f.txt",
+            "OLD".to_string(),
+            "NEW".to_string(),
+        ),
+        (
+            "/v2/oprox/app/manifests/1.0",
+            tag,
+            manifest('0'),
+            manifest('1'),
+        ),
+    ] {
+        delay.store(0, Ordering::Relaxed);
+        let get = || {
+            let t = Instant::now();
+            let body = c.get(s.url(path)).send().unwrap().text().unwrap();
+            (body, t.elapsed())
+        };
+        assert_eq!(get().0, old, "{path}");
+        for f in files.lock().unwrap().iter_mut().filter(|f| f.0 == up) {
+            f.2 = new.clone().into_bytes();
+        }
+        delay.store(8000, Ordering::Relaxed);
+        let (body, took) = get();
+        assert_eq!(body, old, "{path}: before the upstream answered");
+        assert!(took < Duration::from_secs(8), "{path}: {took:?}");
+        let t = Instant::now();
+        loop {
+            let (body, took) = get();
+            if body == new {
+                break;
+            }
+            assert_eq!(body, old, "{path}");
+            assert!(took < Duration::from_secs(8), "{path}: {took:?}");
+            assert!(
+                t.elapsed() < Duration::from_secs(30),
+                "{path}: what the upstream sent late was not kept"
+            );
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+}
+
 /// A fetch from a proxy's old upstream that ends after the upstream was
 /// changed reaches its client, but is not kept: the next request asks
 /// the new upstream.
@@ -10089,7 +10276,8 @@ fn shared_caches_keep_only_what_anyone_may_read() {
 /// A public group with a member that is not public answers a caller
 /// without credentials from its public members only, and others from
 /// all: the same URL gives each what they may read, so no cache in
-/// between keeps it. A group of public members is kept by any.
+/// between hands one's answer to another. A group of public members
+/// answers all alike.
 #[test]
 fn groups_with_a_private_member_are_kept_by_clients_only() {
     let s = Server::start();
@@ -10149,14 +10337,158 @@ fn groups_with_a_private_member_are_kept_by_clients_only() {
     for (auth, body) in [(false, "PUBLIC-SQUAT"), (true, "PRIVATE-BUILD")] {
         let r = fetch(&jar, auth);
         assert_eq!((r.status, r.body.as_str()), (200, body), "{auth}");
-        assert!(r.cache.starts_with("private"), "{auth}: {}", r.cache);
+        // Asked again each time (a rollback may change it), and kept
+        // apart by Authorization.
+        assert_eq!(r.cache, "no-cache", "{auth}");
         assert!(r.vary.contains("Authorization"), "{auth}: {}", r.vary);
     }
     let r = fetch(&format!("/mall/{dir}/x-1.0.jar"), false);
     assert_eq!(
         (r.status, r.body.as_str(), r.cache.as_str(), r.vary.as_str()),
-        (200, "PUBLIC-SQUAT", "public, max-age=3600", "")
+        (200, "PUBLIC-SQUAT", "no-cache", "")
     );
+}
+
+/// [`groups_with_a_private_member_are_kept_by_clients_only`] for a group
+/// of registries: what a tag names, the tags list and a blob there are
+/// each caller's own, varying by Authorization; a group of public
+/// members is kept by any.
+#[test]
+fn oci_groups_with_a_private_member_are_kept_by_clients_only() {
+    let s = Server::start();
+    for (name, public) in [("opriv", false), ("opub", true)] {
+        s.cli(&[
+            "repo",
+            "create",
+            name,
+            "-f",
+            "oci",
+            "-s",
+            &format!("public={public}"),
+        ])
+        .unwrap();
+    }
+    for (name, members) in [("ogrp", "opriv,opub"), ("oall", "opub")] {
+        s.cli(&[
+            "repo",
+            "create",
+            name,
+            "-f",
+            "oci",
+            "-k",
+            "group",
+            "-s",
+            &format!("members={members}"),
+            "-s",
+            "public=true",
+        ])
+        .unwrap();
+    }
+    let tok = s
+        .cli(&[
+            "token",
+            "create",
+            "ci",
+            "--repos",
+            "opriv,opub,ogrp",
+            "--write",
+        ])
+        .unwrap()
+        .trim()
+        .to_string();
+    let reg = Reg {
+        c: reqwest::blocking::Client::new(),
+        base: s.url(""),
+        tok: Some(&tok),
+        host: None,
+    };
+    let anon = Reg {
+        tok: None,
+        c: reqwest::blocking::Client::new(),
+        base: s.url(""),
+        host: None,
+    };
+    let mut layers = Vec::new();
+    for (name, layer) in [("opriv", b"PRIVATE-LAYER"), ("opub", b"PUBLIC-SQUAT!")] {
+        let cfg = reg.blob(&format!("{name}/app"), b"{}");
+        let layer = reg.blob(&format!("{name}/app"), layer);
+        let m = image_manifest(&cfg, &[(&layer, 13)], None);
+        let (st, digest) = reg.manifest(&format!("{name}/app"), "1", OCI_M, &m);
+        assert_eq!(st, 201, "{name}: {digest}");
+        layers.push(layer);
+    }
+    let private_layer = format!("/v2/ogrp/app/blobs/{}", layers[0]);
+    for (m, path) in [
+        (reqwest::Method::GET, "/v2/ogrp/app/manifests/1"),
+        (reqwest::Method::HEAD, "/v2/ogrp/app/manifests/1"),
+        (reqwest::Method::GET, "/v2/ogrp/app/tags/list"),
+        (reqwest::Method::GET, private_layer.as_str()),
+    ] {
+        for who in [&anon, &reg] {
+            let r = seen(who.req(m.clone(), path).send().unwrap());
+            let auth = who.tok.is_some();
+            assert!(
+                r.vary.contains("Authorization"),
+                "{m} {path} {auth}: {} {}",
+                r.status,
+                r.vary
+            );
+            if r.status == 200 {
+                assert!(
+                    r.cache == "no-cache" || r.cache.starts_with("private"),
+                    "{m} {path} {auth}: {}",
+                    r.cache
+                );
+            }
+        }
+    }
+    let r = seen(
+        anon.req(reqwest::Method::GET, "/v2/oall/app/manifests/1")
+            .send()
+            .unwrap(),
+    );
+    assert_eq!(
+        (r.status, r.cache.as_str(), r.vary.as_str()),
+        (200, "no-cache", "")
+    );
+}
+
+/// A hosted repository's files are asked again each time in every
+/// format, as deb's pool files are (a replace or a rollback puts other
+/// content at a name): here one a format's own protocol serves.
+#[test]
+fn hosted_package_files_are_revalidated() {
+    let s = Server::start();
+    s.cli(&["repo", "create", "cpp", "-f", "conan", "-s", "public=true"])
+        .unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "cpp", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let c = reqwest::blocking::Client::new();
+    let rev = "/cpp/v2/conans/hello/1.0/_/_/revisions/0123abcd/files";
+    for (file, body) in [
+        ("conanfile.py", "from conan import ConanFile\n"),
+        ("conanmanifest.txt", "1\n"),
+    ] {
+        let r = c
+            .put(s.url(&format!("{rev}/{file}")))
+            .bearer_auth(&tok)
+            .body(body)
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 201, "{file}");
+    }
+    let file = s.url(&format!("{rev}/conanfile.py"));
+    let r = seen(c.get(&file).send().unwrap());
+    assert_eq!((r.status, r.cache.as_str()), (200, "no-cache"));
+    let r = c
+        .get(&file)
+        .header("if-none-match", &r.etag)
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 304);
 }
 
 /// Search looks only through what the caller may read: neither what it

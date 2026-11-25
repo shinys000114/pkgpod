@@ -241,13 +241,15 @@ The API and the CLI:
   read as words (`1 download`, `2 versions`); every command and option
   has its help.
 
-Caching: answers of a repository that is not public, of a public group
-with a member that is not (its answers depend on who asks), and
-answers to a request with credentials, are `Cache-Control: private`
-with `Vary: Authorization` (serving listeners, registry protocols and
-the console's download). What changes under one name is `no-cache`,
-revalidated by its ETag: indexes, pool files, hosted or mirrored (a
-replace, or a sync of a file upstream rebuilt, puts other content at a
+Caching: answers of a repository that is not public (or of a public
+group with a member that is not public: its answers depend on who
+asks), and answers to a request with credentials, have `Vary:
+Authorization`, and are `Cache-Control: private` where they are not
+`no-cache` (serving listeners, registry protocols and the console's
+download). What changes under one name is `no-cache`, revalidated by
+its ETag: indexes, every file of a hosted repository but what is named
+by its content (`by-hash`, rpm's `repodata/<sha256>-*`), a mirror's
+pool files (a sync of a file upstream rebuilt puts other content at a
 pool name), an ipk feed's Packages, Packages.gz, Packages.sig and
 key.pub, OCI manifests by tag, the tag and referrer lists and the
 catalog; `by-hash` files are kept for a year. `If-None-Match` matches
@@ -408,7 +410,8 @@ Operations:
   files fetched when asked for and kept (garbage collection keeps them),
   its metadata asked for again after `metadata_minutes` and served as it
   was while the upstream is not there (after waiting 5 s for it, then
-  without asking it for a minute); names in `exclude` are never asked
+  without asking it for a minute or until its late answer, which is
+  kept all the same); names in `exclude` are never asked
   upstream; only the upstream and URLs its own metadata named are
   fetched, and a file whose digest is not the one its metadata gives is
   refused and not kept. The cache is managed by hand (`pkgpod cache

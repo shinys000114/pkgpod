@@ -31,6 +31,14 @@ longest matching path. A repository without addresses is reached at
 `/<name>/` on every serving listener. A reverse proxy in front only
 provides certificates.
 
+Caches in front (a CDN, a caching proxy) are told what they may keep.
+Indexes, and every file of a hosted repository, are asked again each
+time (`Cache-Control: no-cache`; the answer is a short 304 while the
+ETag, the file's SHA-256, is the same): a replace, a rollback, or a
+removal and a new upload put other content at the same name. What is
+named by its content is kept longer: apt's `by-hash/` indexes, rpm's
+`repodata/<sha256>-*` files and image blobs.
+
 ## Repositories
 
 A repository has a name (lowercase letters, digits, `.`, `_`, `-`), a
@@ -59,10 +67,10 @@ a later member's package of the same name. What names no package
 directory listings show every member's. Its readers read the members
 through it (a token for the group alone is enough; anonymous readers of
 a public group read only its public members, so while it has a member
-that is not public, its answers are kept by clients only, not by caches
-in front), and downloads count on the member. Nothing is uploaded to a
-group: publish to a member. A group cannot be a member, and whoever
-sets the members must be able to read them.
+that is not public, its answers vary by Authorization and caches in
+front do not keep them for others), and downloads count on the member.
+Nothing is uploaded to a group: publish to a member. A group cannot be
+a member, and whoever sets the members must be able to read them.
 
 A **proxy** fetches a file the first time it is asked for and keeps it
 until it is evicted (by hand, or for the size limit `max_mib`, unless
@@ -70,9 +78,10 @@ pinned). Documents that change upstream (a package's version list) are
 asked for again when older than `metadata_minutes`; while the upstream
 is not there, the last one is served (an upstream that does not answer
 is waited for 5 seconds, and then not asked again for what is kept for
-a minute). Names in `exclude` are never
-asked for upstream, so your own packages' names are not looked up in a
-public registry. A proxy is usable as the last member of a group.
+a minute, or until its late answer comes, which is kept all the same).
+Names in `exclude` are never asked for upstream, so your own packages'
+names are not looked up in a public registry. A proxy is usable as the
+last member of a group.
 `pkgpod cache <repo> [list|pin|unpin|evict|prefetch] [paths]` and the
 console's Cache tab manage what is kept.
 
