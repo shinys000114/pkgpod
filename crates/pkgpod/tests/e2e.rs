@@ -121,11 +121,13 @@ impl Server {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut ch = c.spawn().unwrap();
-        ch.stdin
+        // A command that reads nothing may be gone before this is
+        // written (a broken pipe, then): its output says how it went.
+        let _ = ch
+            .stdin
             .take()
             .unwrap()
-            .write_all(format!("{stdin}\n").as_bytes())
-            .unwrap();
+            .write_all(format!("{stdin}\n").as_bytes());
         let out = ch.wait_with_output().unwrap();
         let text = String::from_utf8_lossy(&out.stdout).to_string();
         if out.status.success() {
