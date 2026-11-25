@@ -280,11 +280,21 @@ pub async fn bind(
     }
 }
 
-/// How long a client has for the TLS handshake, and for each request's
-/// headers (an idle kept-alive connection too): connections that send
-/// nothing would otherwise hold their file descriptors for ever.
+/// How long a client has for the TLS handshake, for its first bytes
+/// (and an HTTP/2 client to answer a ping), and for each request's
+/// headers: connections that send nothing would otherwise hold their
+/// file descriptors for ever.
+///
+/// hyper times an idle kept-alive HTTP/1 connection's wait for its next
+/// request as part of that request's headers. A reverse proxy keeps
+/// idle connections to its upstream (Caddy two minutes, nginx one) and
+/// takes one for the next request; one this server closes at that
+/// moment fails, and a request with a body is not sent again but
+/// answered 502. So the headers have longer than proxies keep idle.
 const HANDSHAKE: Duration = Duration::from_secs(10);
-const HEADERS: Duration = Duration::from_secs(30);
+const FIRST: Duration = Duration::from_secs(30);
+const HEADERS: Duration = Duration::from_secs(180);
+const _: () = assert!(HEADERS.as_secs() > 120, "longer than Caddy keeps idle");
 
 /// Serves `router` on `addr` until `stop` turns true; then accepts no
 /// more connections, closes idle ones and returns once the requests in
@@ -312,8 +322,21 @@ pub async fn serve_router(
             .map_or(addr.to_string(), |a| a.to_string()),
         if tls.is_some() { " (TLS)" } else { "" }
     );
-    serve_on(listener, tls, router, stop, HANDSHAKE, HEADERS).await;
+    let limits = Limits {
+        handshake: HANDSHAKE,
+        first: FIRST,
+        headers: HEADERS,
+    };
+    serve_on(listener, tls, router, stop, limits).await;
     Ok(())
+}
+
+/// See [`HANDSHAKE`], [`FIRST`] and [`HEADERS`].
+#[derive(Clone, Copy)]
+struct Limits {
+    handshake: Duration,
+    first: Duration,
+    headers: Duration,
 }
 
 async fn serve_on(
@@ -321,9 +344,13 @@ async fn serve_on(
     tls: Option<tokio_rustls::TlsAcceptor>,
     router: Router,
     mut stop: watch::Receiver<bool>,
-    handshake: Duration,
-    headers: Duration,
+    limits: Limits,
 ) {
+    let Limits {
+        handshake,
+        first,
+        headers,
+    } = limits;
     let addr = listener
         .local_addr()
         .map_or_else(|_| "?".to_string(), |a| a.to_string());
@@ -340,8 +367,8 @@ async fn serve_on(
     builder
         .http2()
         .timer(hyper_util::rt::TokioTimer::new())
-        .keep_alive_interval(headers)
-        .keep_alive_timeout(headers);
+        .keep_alive_interval(first)
+        .keep_alive_timeout(first);
     let graceful = hyper_util::server::graceful::GracefulShutdown::new();
     let mut warned: Option<tokio::time::Instant> = None;
     loop {
@@ -392,11 +419,11 @@ async fn serve_on(
                     let Ok(Ok(tls)) = tokio::time::timeout(handshake, a.accept(tcp)).await else {
                         return;
                     };
-                    let io = hyper_util::rt::TokioIo::new(FirstBytes::new(tls, headers));
+                    let io = hyper_util::rt::TokioIo::new(FirstBytes::new(tls, first));
                     let _ = watcher.watch(builder.serve_connection(io, service)).await;
                 }
                 None => {
-                    let io = hyper_util::rt::TokioIo::new(FirstBytes::new(tcp, headers));
+                    let io = hyper_util::rt::TokioIo::new(FirstBytes::new(tcp, first));
                     let _ = watcher.watch(builder.serve_connection(io, service)).await;
                 }
             }
@@ -538,6 +565,17 @@ mod tests {
     async fn serve(
         tls: Option<tokio_rustls::TlsAcceptor>,
     ) -> (std::net::SocketAddr, watch::Sender<bool>) {
+        let t = Duration::from_millis(300);
+        serve_with(tls, t, t).await
+    }
+
+    /// The same, with `first` for the first bytes and `headers` for
+    /// each request's headers.
+    async fn serve_with(
+        tls: Option<tokio_rustls::TlsAcceptor>,
+        first: Duration,
+        headers: Duration,
+    ) -> (std::net::SocketAddr, watch::Sender<bool>) {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let a = l.local_addr().unwrap();
         let (tx, rx) = watch::channel(false);
@@ -566,8 +604,12 @@ mod tests {
             .route("/slow", axum::routing::get(slowly))
             .route("/stream", axum::routing::get(streamed))
             .route("/upload", axum::routing::post(|b: String| async move { b }));
-        let t = Duration::from_millis(300);
-        tokio::spawn(serve_on(l, tls, router, rx, t, t));
+        let limits = Limits {
+            handshake: first,
+            first,
+            headers,
+        };
+        tokio::spawn(serve_on(l, tls, router, rx, limits));
         (a, tx)
     }
 
@@ -614,6 +656,29 @@ mod tests {
             let mut c = std::net::TcpStream::connect(a).unwrap();
             c.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n").unwrap();
             assert!(closed_after(&mut c), "HTTP/2, idle");
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn kept_alive_longer_than_the_first_bytes_have() {
+        // As a reverse proxy does: a request, a while idle, then the next
+        // with a body on the same connection.
+        let (a, _stop) = serve_with(None, Duration::from_millis(300), Duration::from_secs(5)).await;
+        tokio::task::spawn_blocking(move || {
+            let mut c = std::net::TcpStream::connect(a).unwrap();
+            c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut buf = [0u8; 512];
+            c.write_all(b"GET / HTTP/1.1\r\nhost: x\r\n\r\n").unwrap();
+            let n = c.read(&mut buf).unwrap();
+            assert!(buf[..n].starts_with(b"HTTP/1.1 200"), "{:?}", &buf[..n]);
+            std::thread::sleep(Duration::from_secs(1));
+            c.write_all(b"POST /upload HTTP/1.1\r\nhost: x\r\ncontent-length: 4\r\n\r\nbody")
+                .unwrap();
+            let n = c.read(&mut buf).unwrap();
+            let r = String::from_utf8_lossy(&buf[..n]);
+            assert!(r.starts_with("HTTP/1.1 200") && r.ends_with("body"), "{r}");
         })
         .await
         .unwrap();

@@ -205,6 +205,10 @@ repository itself.
 - Pass the path unchanged (no prefix stripped), and the whole host when
   OCI, Terraform or badges are used: those are at the host's root.
 - Uploads may be up to 8 GiB; raise the proxy's limit on request bodies.
+- pkgpod closes a connection that has been idle for 3 minutes; keep the
+  proxy's idle connections to it shorter than that (Caddy keeps them 2
+  minutes and nginx 1 by default), or an upload sent on one being closed
+  is answered 502.
 - A job's log in the console streams (Server-Sent Events,
   `/jobs/<id>/stream`): do not buffer the console's responses.
 
