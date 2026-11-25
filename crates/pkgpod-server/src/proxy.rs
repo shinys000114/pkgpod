@@ -1234,6 +1234,13 @@ async fn files_serve(app: Arc<App>, at: At, req: Request) -> Response {
     if up.excluded(&a.name) {
         return status(StatusCode::NOT_FOUND);
     }
+    // Being fetched for another client: this one reads the same file.
+    let key = (r.name.clone(), a.path.clone());
+    if req.method() != Method::HEAD
+        && let Some(f) = flights::current(&key)
+    {
+        return follow(&app, &r, &up, &a, f, req).await;
+    }
     let have = {
         let (app2, name, path) = (app.clone(), r.name.clone(), a.path.clone());
         tokio::task::spawn_blocking(move || app2.engine.cache_get(&name, &path))
@@ -1280,6 +1287,11 @@ async fn files_serve(app: Arc<App>, at: At, req: Request) -> Response {
             Err(e) => text(StatusCode::BAD_GATEWAY, format!("the upstream: {e}")),
         };
     }
+    // The first to fetch it leads; one that came a moment later follows.
+    let lead = match flights::claim(&key) {
+        flights::Claim::Follow(f) => return follow(&app, &r, &up, &a, f, req).await,
+        flights::Claim::Lead(l) => Some(l),
+    };
     let mut q = client().get(&url);
     if let Some(row) = &have {
         if !row.etag.is_empty() {
@@ -1336,9 +1348,260 @@ async fn files_serve(app: Arc<App>, at: At, req: Request) -> Response {
         return files_cached(&app, &r, &up, &a, req).await;
     }
     let counts = crate::stats::counts(req.method(), req.headers());
-    let resp = files_stream(&app, &r, &up, &a, have.is_some_and(|h| h.pinned), resp).await;
+    let resp = files_stream(
+        &app,
+        &r,
+        &up,
+        &a,
+        have.is_some_and(|h| h.pinned),
+        resp,
+        lead,
+    )
+    .await;
     app.stats.named(counts, &resp, &r.name, &a.name, "");
     resp
+}
+
+/// Serves a file another request is fetching: from the file as it
+/// grows, or (once it is kept, or when that fetch failed) as any.
+async fn follow(
+    app: &Arc<App>,
+    r: &RepoInfo,
+    up: &Upstream,
+    a: &Asked,
+    f: Arc<flights::Flight>,
+    req: Request,
+) -> Response {
+    let mut rx = f.watch();
+    // Until the other request has its answer from the upstream.
+    loop {
+        if !matches!(*rx.borrow(), flights::State::Starting) {
+            break;
+        }
+        if rx.changed().await.is_err() {
+            break;
+        }
+    }
+    let now = rx.borrow().clone();
+    let ranged = req.headers().contains_key(header::RANGE);
+    let flights::State::Streaming {
+        path,
+        length,
+        content_type,
+        last_modified,
+        ..
+    } = now
+    else {
+        return files_cached(app, r, up, a, req).await;
+    };
+    if ranged {
+        // A part: once it is all here.
+        while matches!(*rx.borrow(), flights::State::Streaming { .. }) {
+            if rx.changed().await.is_err() {
+                break;
+            }
+        }
+        return files_cached(app, r, up, a, req).await;
+    }
+    let Ok(file) = tokio::fs::File::open(&path).await else {
+        // Kept already (moved into the store): as any.
+        return files_cached(app, r, up, a, req).await;
+    };
+    let counts = crate::stats::counts(req.method(), req.headers());
+    let body =
+        futures_util::stream::unfold((file, rx, 0u64), |(mut file, mut rx, sent)| async move {
+            use tokio::io::AsyncReadExt;
+            loop {
+                let (written, end) = match &*rx.borrow() {
+                    flights::State::Streaming { written, .. } => (*written, false),
+                    flights::State::Done { written } => (*written, true),
+                    _ => (0, true),
+                };
+                if sent < written {
+                    let want = (written - sent).min(256 << 10) as usize;
+                    let mut buf = vec![0u8; want];
+                    return match file.read(&mut buf).await {
+                        Ok(0) | Err(_) => Some((
+                            Err(std::io::Error::other("the file being fetched went away")),
+                            (file, rx, u64::MAX),
+                        )),
+                        Ok(n) => {
+                            buf.truncate(n);
+                            Some((
+                                Ok(axum::body::Bytes::from(buf)),
+                                (file, rx, sent + n as u64),
+                            ))
+                        }
+                    };
+                }
+                if end {
+                    if sent == written && written > 0
+                        || matches!(*rx.borrow(), flights::State::Done { .. })
+                    {
+                        return None;
+                    }
+                    return if sent == u64::MAX {
+                        None
+                    } else {
+                        Some((
+                            Err(std::io::Error::other("the upstream broke off")),
+                            (file, rx, u64::MAX),
+                        ))
+                    };
+                }
+                if rx.changed().await.is_err() {
+                    return None;
+                }
+            }
+        });
+    let mut out = Response::new(Body::from_stream(body));
+    let hs = out.headers_mut();
+    if let Some(n) = length {
+        hs.insert(header::CONTENT_LENGTH, HeaderValue::from(n));
+    }
+    if let Ok(v) = HeaderValue::from_str(if content_type.is_empty() {
+        "application/octet-stream"
+    } else {
+        &content_type
+    }) {
+        hs.insert(header::CONTENT_TYPE, v);
+    }
+    if !last_modified.is_empty()
+        && let Ok(v) = HeaderValue::from_str(&last_modified)
+    {
+        hs.insert(header::LAST_MODIFIED, v);
+    }
+    hs.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    crate::serve::sandbox(hs);
+    app.stats.named(counts, &out, &r.name, &a.name, "");
+    out
+}
+
+/// Files a proxy is fetching now, by (repository, path): requests for
+/// one meanwhile follow the first instead of asking the upstream again.
+mod flights {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    #[derive(Debug, Clone)]
+    pub enum State {
+        /// Asking the upstream.
+        Starting,
+        /// Being written to `path`; `written` bytes so far.
+        Streaming {
+            path: PathBuf,
+            length: Option<u64>,
+            content_type: String,
+            last_modified: String,
+            written: u64,
+        },
+        /// All written, and kept.
+        Done { written: u64 },
+        /// Not streamed (the upstream said it had not changed, or had it
+        /// not, or failed): ask as any request does.
+        Over,
+    }
+
+    pub struct Flight {
+        tx: tokio::sync::watch::Sender<State>,
+    }
+
+    impl Flight {
+        pub fn watch(&self) -> tokio::sync::watch::Receiver<State> {
+            self.tx.subscribe()
+        }
+    }
+
+    type Key = (String, String);
+
+    fn all() -> &'static Mutex<HashMap<Key, Arc<Flight>>> {
+        static M: OnceLock<Mutex<HashMap<Key, Arc<Flight>>>> = OnceLock::new();
+        M.get_or_init(Default::default)
+    }
+
+    pub enum Claim {
+        Lead(Lead),
+        Follow(Arc<Flight>),
+    }
+
+    /// The flight fetching this file now, if any.
+    pub fn current(key: &Key) -> Option<Arc<Flight>> {
+        all()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+            .cloned()
+    }
+
+    /// The first asking for a file leads its fetch; the others follow.
+    pub fn claim(key: &Key) -> Claim {
+        let mut m = all().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(f) = m.get(key) {
+            return Claim::Follow(f.clone());
+        }
+        let (tx, _) = tokio::sync::watch::channel(State::Starting);
+        let f = Arc::new(Flight { tx });
+        m.insert(key.clone(), f.clone());
+        Claim::Lead(Lead {
+            key: key.clone(),
+            flight: f,
+            over: false,
+        })
+    }
+
+    /// The leading request's hold on a flight: ended (Over, unless Done)
+    /// and forgotten when dropped, however the request ends.
+    pub struct Lead {
+        key: Key,
+        flight: Arc<Flight>,
+        over: bool,
+    }
+
+    impl Lead {
+        pub fn streaming(
+            &self,
+            path: PathBuf,
+            length: Option<u64>,
+            content_type: &str,
+            last_modified: &str,
+        ) {
+            self.flight.tx.send_replace(State::Streaming {
+                path,
+                length,
+                content_type: content_type.to_string(),
+                last_modified: last_modified.to_string(),
+                written: 0,
+            });
+        }
+
+        pub fn wrote(&self, n: u64) {
+            self.flight.tx.send_modify(|s| {
+                if let State::Streaming { written, .. } = s {
+                    *written = n;
+                }
+            });
+        }
+
+        pub fn done(&mut self, n: u64) {
+            self.over = true;
+            self.flight.tx.send_replace(State::Done { written: n });
+        }
+    }
+
+    impl Drop for Lead {
+        fn drop(&mut self) {
+            if !self.over {
+                self.flight.tx.send_replace(State::Over);
+            }
+            let mut m = all().lock().unwrap_or_else(|e| e.into_inner());
+            if m.get(&self.key)
+                .is_some_and(|f| Arc::ptr_eq(f, &self.flight))
+            {
+                m.remove(&self.key);
+            }
+        }
+    }
 }
 
 /// Through the common proxy path: the cache row, fetched whole when
@@ -1401,6 +1664,7 @@ async fn files_stream(
     a: &Asked,
     pinned: bool,
     resp: reqwest::Response,
+    lead: Option<flights::Lead>,
 ) -> Response {
     use futures_util::StreamExt;
     use std::io::Write;
@@ -1427,6 +1691,14 @@ async fn files_stream(
             .ok()
             .and_then(|r| r.ok())
     };
+    // Others asking for it meanwhile read what is written.
+    let lead = match (lead, &inc) {
+        (Some(l), Some(i)) => {
+            l.streaming(i.path().to_path_buf(), length, &ct, &lm);
+            Some(l)
+        }
+        _ => None,
+    };
     let now = pkgpod_base::now();
     let row = CacheRow {
         path: a.path.clone(),
@@ -1451,6 +1723,7 @@ async fn files_stream(
         keep: Option<(Arc<App>, String, CacheRow, u64)>,
         store: pkgpod_base::store::Store,
         done: bool,
+        lead: Option<flights::Lead>,
     }
     impl Tee {
         /// Every byte is in: the file into the store and the cache.
@@ -1463,7 +1736,7 @@ async fn files_stream(
                 return;
             }
             let store = self.store.clone();
-            let _ = tokio::task::spawn_blocking(move || {
+            let kept = tokio::task::spawn_blocking(move || {
                 let (sha, size) = store.commit(inc, None).ok()?;
                 row.sha256 = Some(sha);
                 row.size = size;
@@ -1474,6 +1747,9 @@ async fn files_stream(
                 Some(())
             })
             .await;
+            if let (Ok(Some(())), Some(l)) = (kept, self.lead.as_mut()) {
+                l.done(self.n);
+            }
         }
     }
     let tee = Tee {
@@ -1484,6 +1760,7 @@ async fn files_stream(
         keep: Some((app.clone(), r.name.clone(), row, up.max)),
         store,
         done: false,
+        lead,
     };
     let body = futures_util::stream::unfold(tee, |mut t| async move {
         if t.done {
@@ -1496,6 +1773,11 @@ async fn files_stream(
                     && (t.n > MAX_FILE || inc.write_all(&b).is_err())
                 {
                     t.inc = None;
+                    // Not kept: those following stop here too.
+                    t.lead = None;
+                }
+                if let Some(l) = &t.lead {
+                    l.wrote(t.n);
                 }
                 // With a length the client stops reading at the last
                 // byte, before this stream would end: kept now.
@@ -1507,6 +1789,7 @@ async fn files_stream(
             Some(Err(e)) => {
                 t.done = true;
                 t.inc = None;
+                t.lead = None;
                 Some((Err(std::io::Error::other(e)), t))
             }
             None => {
@@ -1554,6 +1837,47 @@ async fn files_listing(
     } else {
         format!("{}/", joined(&at.rel))
     };
+    match files_entries(app, r, up, &at.rel).await {
+        Ok(entries) => {
+            crate::serve::listing(&at.raw_path, entries, query, head, &Default::default())
+        }
+        Err(Listed::Missing) => status(StatusCode::NOT_FOUND),
+        Err(Listed::Moved(to)) => {
+            // Within the upstream: the same place through here.
+            let mount = at.raw_path.strip_suffix(dir.as_str()).unwrap_or("");
+            match to.strip_prefix(up.base.as_str()) {
+                Some(rest) if mount.ends_with('/') => {
+                    axum::response::Redirect::temporary(&format!("{mount}{rest}")).into_response()
+                }
+                _ => text(
+                    StatusCode::BAD_GATEWAY,
+                    format!("the upstream moves {}{dir} out of itself, to {to}", up.base),
+                ),
+            }
+        }
+        Err(Listed::Failed(e)) => text(StatusCode::BAD_GATEWAY, e),
+    }
+}
+
+/// Why a files proxy has no listing for a directory.
+enum Listed {
+    Missing,
+    Moved(String),
+    Failed(String),
+}
+
+/// The entries of an upstream directory (`rel`) of a files proxy.
+async fn files_entries(
+    app: &Arc<App>,
+    r: &RepoInfo,
+    up: &Upstream,
+    rel: &[String],
+) -> std::result::Result<Vec<crate::serve::ListEntry>, Listed> {
+    let dir = if rel.is_empty() {
+        String::new()
+    } else {
+        format!("{}/", joined(rel))
+    };
     let url = format!("{}{dir}", up.base);
     let a = Asked {
         // The root's key: no path starts with a slash otherwise.
@@ -1571,24 +1895,12 @@ async fn files_listing(
     };
     let row = match get(app, r, up, &a).await {
         Ok(Got::Row(row)) => *row,
-        Ok(Got::Missing) => return status(StatusCode::NOT_FOUND),
-        Ok(Got::Moved(to)) => {
-            // Within the upstream: the same place through here.
-            let mount = at.raw_path.strip_suffix(dir.as_str()).unwrap_or("");
-            return match to.strip_prefix(up.base.as_str()) {
-                Some(rest) if mount.ends_with('/') => {
-                    axum::response::Redirect::temporary(&format!("{mount}{rest}")).into_response()
-                }
-                _ => text(
-                    StatusCode::BAD_GATEWAY,
-                    format!("the upstream moves {url} out of itself, to {to}"),
-                ),
-            };
-        }
-        Err(e) => return text(StatusCode::BAD_GATEWAY, e.to_string()),
+        Ok(Got::Missing) => return Err(Listed::Missing),
+        Ok(Got::Moved(to)) => return Err(Listed::Moved(to)),
+        Err(e) => return Err(Listed::Failed(e.to_string())),
     };
     let Some(sha) = row.sha256 else {
-        return status(StatusCode::NOT_FOUND);
+        return Err(Listed::Missing);
     };
     let (store, app2, name, prefix) = (r.store(), app.clone(), r.name.clone(), dir.clone());
     let read = tokio::task::spawn_blocking(move || {
@@ -1603,13 +1915,10 @@ async fn files_listing(
     .ok()
     .flatten();
     let Some((html, kept)) = read else {
-        return text(
-            StatusCode::BAD_GATEWAY,
-            "the upstream's listing is not here".into(),
-        );
+        return Err(Listed::Failed("the upstream's listing is not here".into()));
     };
     let Ok(base) = reqwest::Url::parse(&url) else {
-        return status(StatusCode::NOT_FOUND);
+        return Err(Listed::Missing);
     };
     let (found, _) = pkgpod_mirror::files::parse_listing(&base, &String::from_utf8_lossy(&html));
     let sizes: std::collections::HashMap<&str, u64> = kept
@@ -1618,7 +1927,7 @@ async fn files_listing(
         .filter_map(|k| Some((k.path.strip_prefix(dir.as_str())?, k.size)))
         .filter(|(rest, _)| !rest.contains('/'))
         .collect();
-    let entries = found
+    Ok(found
         .into_iter()
         .map(|(name, is_dir, _)| crate::serve::ListEntry {
             size: if is_dir {
@@ -1630,8 +1939,18 @@ async fn files_listing(
             dir: is_dir,
             modified: None,
         })
-        .collect();
-    crate::serve::listing(&at.raw_path, entries, query, head, &Default::default())
+        .collect())
+}
+
+/// A files proxy's entries for a group's listing (nothing when the
+/// upstream has none there).
+pub(crate) async fn group_entries(
+    app: &Arc<App>,
+    m: &Served,
+    rel: &[String],
+) -> Option<Vec<crate::serve::ListEntry>> {
+    let up = Upstream::of(&m.repo).ok()?;
+    files_entries(app, &m.repo, &up, rel).await.ok()
 }
 
 #[cfg(test)]
