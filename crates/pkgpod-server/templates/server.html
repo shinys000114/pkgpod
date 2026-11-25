@@ -133,22 +133,8 @@
   {% include "trust_form.html" %}
   </details>
   <details class="more"><summary>In a GitHub Actions workflow</summary>
-<pre class="code">permissions:
-  id-token: write   # the job may ask GitHub for its OIDC token
-  contents: read
-steps:
-  - uses: actions/checkout@v4
-  - uses: &lt;owner&gt;/pkgpod@master          # the pkgpod action
-    with:
-      url: &lt;this server&gt;
-      repository: ppa
-      files: dist/*.deb
-      params: dists=noble
-# or by hand:
-  - run: |
-      curl -fsSL &lt;this server&gt;/cli/install.sh | sh
-      pkgpod --url &lt;this server&gt; login --oidc
-      pkgpod upload ppa dist/*.deb -s dists=noble</pre>
+<p class="muted small">With this server's address as you reach it, for a repository here; the job needs a rule that trusts its GitHub repository and workflow.</p>
+<pre class="code">{{ ci_example }}</pre>
   </details>
   </div>
 </div>

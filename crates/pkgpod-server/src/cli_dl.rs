@@ -59,7 +59,7 @@ fn digest() -> Option<(String, u64)> {
 
 /// The address the request came to, as the client sees it (behind a
 /// proxy, its scheme).
-fn base(h: &HeaderMap) -> String {
+pub(crate) fn base(h: &HeaderMap) -> String {
     let host = h
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())

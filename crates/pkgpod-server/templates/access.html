@@ -41,6 +41,9 @@
   <details class="card-body more"><summary>Add one for {{ repo }}</summary>
   {% include "trust_form.html" %}
   </details>
+  <details class="card-body more"><summary>In a GitHub Actions workflow</summary>
+<pre class="code">{{ ci_example }}</pre>
+  </details>
 </div>
 {% endif %}
 {% if server_admin %}
