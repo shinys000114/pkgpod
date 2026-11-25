@@ -309,9 +309,9 @@ pub async fn bind(
 }
 
 /// How long a client has for the TLS handshake, for its first bytes
-/// (and an HTTP/2 client to answer a ping), and for each request's
-/// headers: connections that send nothing would otherwise hold their
-/// file descriptors for ever.
+/// (and an HTTP/2 client that sent nothing for as long is pinged), for
+/// each request's headers, and to answer a ping: connections that send
+/// nothing would otherwise hold their file descriptors for ever.
 ///
 /// hyper times an idle kept-alive HTTP/1 connection's wait for its next
 /// request as part of that request's headers. A reverse proxy keeps
@@ -323,6 +323,11 @@ const HANDSHAKE: Duration = Duration::from_secs(10);
 const FIRST: Duration = Duration::from_secs(30);
 const HEADERS: Duration = Duration::from_secs(180);
 const _: () = assert!(HEADERS.as_secs() > 120, "longer than Caddy keeps idle");
+/// An HTTP/2 client answers a ping once it has read what was sent before
+/// it: one reading a long download slowly may have several MB ahead of
+/// it (curl lets that much be sent), minutes at tens of kB/s. One slower
+/// still is cut.
+const PONG: Duration = Duration::from_secs(600);
 
 /// Serves `router` on `addr` until `stop` turns true; then accepts no
 /// more connections, closes idle ones and returns once the requests in
@@ -367,17 +372,19 @@ async fn serve(
         handshake: HANDSHAKE,
         first: FIRST,
         headers: HEADERS,
+        pong: PONG,
     };
     serve_on(listener, tls, router, stop, limits).await;
     Ok(())
 }
 
-/// See [`HANDSHAKE`], [`FIRST`] and [`HEADERS`].
+/// See [`HANDSHAKE`], [`FIRST`], [`HEADERS`] and [`PONG`].
 #[derive(Clone, Copy)]
 struct Limits {
     handshake: Duration,
     first: Duration,
     headers: Duration,
+    pong: Duration,
 }
 
 async fn serve_on(
@@ -391,6 +398,7 @@ async fn serve_on(
         handshake,
         first,
         headers,
+        pong,
     } = limits;
     let addr = listener
         .local_addr()
@@ -404,12 +412,12 @@ async fn serve_on(
     // HTTP/2 has no header timeout: past its preface, a connection that
     // sends nothing more would be held for ever. One that does not
     // answer a ping in time is closed (a client in the middle of a long
-    // download answers them).
+    // download answers them, once it has read what came before).
     builder
         .http2()
         .timer(hyper_util::rt::TokioTimer::new())
         .keep_alive_interval(first)
-        .keep_alive_timeout(first);
+        .keep_alive_timeout(pong);
     let graceful = hyper_util::server::graceful::GracefulShutdown::new();
     let mut warned: Option<tokio::time::Instant> = None;
     loop {
@@ -624,7 +632,7 @@ mod tests {
     }
 
     /// The same, with `first` for the first bytes and `headers` for
-    /// each request's headers.
+    /// each request's headers (and to answer a ping).
     async fn serve_with(
         tls: Option<tokio_rustls::TlsAcceptor>,
         first: Duration,
@@ -655,6 +663,7 @@ mod tests {
         };
         let router = Router::new()
             .route("/", axum::routing::get(|| async { "ok" }))
+            .route("/big", axum::routing::get(|| async { vec![0u8; BIG] }))
             .route("/slow", axum::routing::get(slowly))
             .route("/stream", axum::routing::get(streamed))
             .route("/upload", axum::routing::post(|b: String| async move { b }));
@@ -662,6 +671,7 @@ mod tests {
             handshake: first,
             first,
             headers,
+            pong: headers,
         };
         tokio::spawn(serve_on(l, tls, router, rx, limits));
         (a, tx)
@@ -791,6 +801,67 @@ mod tests {
             assert_eq!(r.version(), reqwest::Version::HTTP_2);
             assert_eq!(r.text().await.unwrap(), want);
         }
+    }
+
+    /// A download more than the socket buffers between hold.
+    const BIG: usize = 32 << 20;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_slow_http2_reader_is_not_cut() {
+        let (a, _stop) =
+            serve_with(None, Duration::from_millis(300), Duration::from_secs(10)).await;
+        tokio::task::spawn_blocking(move || {
+            let mut c = std::net::TcpStream::connect(a).unwrap();
+            c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            let frame = |kind: u8, flags: u8, payload: &[u8]| {
+                let mut f = (payload.len() as u32).to_be_bytes()[1..].to_vec();
+                f.extend([kind, flags]);
+                f.extend(u32::from(kind == 1).to_be_bytes());
+                f.extend(payload);
+                f
+            };
+            // Windows as large as curl's, so that the server sends on.
+            let window: u32 = 1 << 30;
+            let mut hello = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".to_vec();
+            hello.extend(frame(4, 0, &[&[0, 4][..], &window.to_be_bytes()].concat()));
+            hello.extend(frame(8, 0, &(window - 65535).to_be_bytes()));
+            // GET /big on stream 1 (:method, :scheme, :path, :authority).
+            hello.extend(frame(1, 5, b"\x82\x86\x44\x04/big\x41\x01x"));
+            c.write_all(&hello).unwrap();
+            // Read nothing a while, as a slow reader does: the server's
+            // ping waits behind what it sent before.
+            std::thread::sleep(Duration::from_millis(1500));
+            let mut got = 0;
+            loop {
+                let (mut head, mut payload) = ([0u8; 9], Vec::new());
+                let read = c.read_exact(&mut head).and_then(|()| {
+                    payload.resize(
+                        u32::from_be_bytes([0, head[0], head[1], head[2]]) as usize,
+                        0,
+                    );
+                    c.read_exact(&mut payload)
+                });
+                if let Err(e) = read {
+                    panic!("cut after {got} bytes: {e}");
+                }
+                match (head[3], head[4] & 1) {
+                    (0, end) => {
+                        got += payload.len();
+                        if end == 1 {
+                            break;
+                        }
+                    }
+                    // A ping and the server's settings, answered.
+                    (6, 0) => c.write_all(&frame(6, 1, &payload)).unwrap(),
+                    (4, 0) => c.write_all(&frame(4, 1, &[])).unwrap(),
+                    (7, _) => panic!("GOAWAY after {got} bytes"),
+                    _ => {}
+                }
+            }
+            assert_eq!(got, BIG);
+        })
+        .await
+        .unwrap();
     }
 
     #[test]

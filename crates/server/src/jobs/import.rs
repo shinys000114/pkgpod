@@ -97,6 +97,15 @@ fn local_dir(p: &std::path::Path) -> Result<std::path::PathBuf> {
 /// Starts an import job into a hosted deb repository.
 pub fn start(app: &Arc<App>, repo: &str, mut req: ImportReq, actor: &str) -> Result<i64> {
     let r = app.engine.repo(repo)?;
+    // The source goes into the job's log and summary and the version's,
+    // which every reader of the repository sees (anyone, for a public
+    // one): so would a secret in it. Not echoed.
+    if pkgpod_engine::settings::has_credentials(&req.source, r.format == "oci") {
+        return Err(Error::Invalid(
+            "the source's address takes no user or password: it is shown to every reader of the repository"
+                .into(),
+        ));
+    }
     let local = local_source(&req.source)
         .map(|p| local_dir(&p))
         .transpose()?;
@@ -187,25 +196,32 @@ pub fn start(app: &Arc<App>, repo: &str, mut req: ImportReq, actor: &str) -> Res
 }
 
 /// Where an import of `r` stages what it fetches, and what the fetch
-/// keeps between files.
+/// keeps between files. Beside mirrors' state, which is named after the
+/// mirror: no repository name starts with a '.'.
 fn staging(r: &RepoInfo) -> (std::path::PathBuf, std::path::PathBuf) {
     let state = r.storage_path.join("state");
     (
-        state.join(format!("{}.import", r.name)),
-        state.join(format!("{}.import-cache", r.name)),
+        state.join(format!(".{}.import", r.name)),
+        state.join(format!(".{}.import-cache", r.name)),
     )
 }
 
-/// Removes what an import of `r` left: the server stopped during it. A
-/// directory with a repository's name stays: it is a mirror's state.
+/// Removes what an import of `r` left: the server stopped during it.
 pub fn remove_staging(app: &App, r: &RepoInfo) {
     let (a, b) = staging(r);
-    for d in [a, b] {
-        let theirs = d
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| app.engine.repo(n).is_ok());
-        if !theirs && d.is_dir() {
+    let mut dirs = vec![a, b];
+    // Servers before named them without the '.', as a repository may be
+    // named: such a directory stays if one is, as it is a mirror's state.
+    for n in [
+        format!("{}.import", r.name),
+        format!("{}.import-cache", r.name),
+    ] {
+        if app.engine.repo(&n).is_err() {
+            dirs.push(r.storage_path.join("state").join(n));
+        }
+    }
+    for d in dirs {
+        if d.is_dir() {
             match std::fs::remove_dir_all(&d) {
                 Ok(()) => tracing::info!("removed {}, left by an import", d.display()),
                 Err(e) => tracing::warn!("{}: {e}", d.display()),

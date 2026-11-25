@@ -263,12 +263,15 @@ fn read_log(path: &std::path::Path, from: Option<u64>, max: u64) -> LogPart {
     }
     if behind {
         // From the first line that starts in it (a line longer than the
-        // whole tail: its end).
-        let cut = buf
-            .iter()
-            .position(|b| *b == b'\n')
-            .map_or(1, |i| i + 1)
-            .min(buf.len());
+        // whole tail: its end, from a character's start).
+        let cut = match buf.iter().position(|b| *b == b'\n') {
+            Some(i) if i + 1 < buf.len() => i + 1,
+            _ => {
+                let rest = buf.iter().skip(1).take(3);
+                1 + rest.take_while(|b| **b & 0xc0 == 0x80).count()
+            }
+        }
+        .min(buf.len());
         buf.drain(..cut);
         start += cut as u64;
     }
@@ -276,7 +279,15 @@ fn read_log(path: &std::path::Path, from: Option<u64>, max: u64) -> LogPart {
         Some(i) => buf.truncate(i + 1),
         // A line still being written.
         None if from.is_some() && (buf.len() as u64) < max => buf.clear(),
-        None => {}
+        // A piece of a longer line ends at a character's end, where the
+        // next starts: cut in one, both would show U+FFFD. (A character
+        // longer than the whole piece is cut, to move on.)
+        None => {
+            let end = char_end(&buf);
+            if end > 0 {
+                buf.truncate(end);
+            }
+        }
     }
     let next = start + buf.len() as u64;
     LogPart {
@@ -285,6 +296,24 @@ fn read_log(path: &std::path::Path, from: Option<u64>, max: u64) -> LogPart {
         next,
         size: size.max(next),
     }
+}
+
+/// How much of `b` ends at a character's end: all of it, or up to a
+/// character cut off at its end.
+fn char_end(b: &[u8]) -> usize {
+    let Some(i) = (b.len().saturating_sub(4)..b.len())
+        .rev()
+        .find(|&i| b[i] & 0xc0 != 0x80)
+    else {
+        return b.len();
+    };
+    let len = match b[i] {
+        0xf0.. => 4,
+        0xe0.. => 3,
+        0xc0.. => 2,
+        _ => 1,
+    };
+    if b.len() - i < len { i } else { b.len() }
 }
 
 /// Jobs that were running when the server stopped did not finish.
@@ -1174,6 +1203,31 @@ mod tests {
         let t = part(None, 14);
         assert_eq!((t.text.as_str(), t.from), ("two\nthree\n", 4));
         assert_eq!(part(None, 100).text, "one\ntwo\nthree\n");
+        // A last line longer than the tail: its end, from a character's
+        // start; pieces of it end at a character's end.
+        let line = format!("2026 {}\n", "é".repeat(20));
+        std::fs::write(&p, format!("one\n{line}")).unwrap();
+        let size = 4 + line.len() as u64;
+        for max in [10, 11, 30] {
+            let t = part(None, max);
+            assert!(!t.text.is_empty() && t.text.ends_with("éé\n"), "{t:?}");
+            assert!(!t.text.contains('\u{fffd}'), "{t:?}");
+            assert_eq!((t.from + t.text.len() as u64, t.next), (size, size));
+        }
+        let mut at = 4;
+        let mut whole = String::new();
+        while at < size {
+            let piece = part(Some(at), 6);
+            assert!(
+                piece.next > at && !piece.text.contains('\u{fffd}'),
+                "{piece:?}"
+            );
+            whole.push_str(&piece.text);
+            at = piece.next;
+        }
+        assert_eq!(whole, line);
+        // A character longer than a part still moves on.
+        assert_eq!(part(Some(9), 1).next, 10);
     }
 
     #[test]

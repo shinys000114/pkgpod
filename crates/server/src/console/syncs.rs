@@ -288,8 +288,10 @@ pub(crate) struct StreamQ {
 }
 
 /// A running job's log as it grows, as Server-Sent Events: `log` events
-/// carry the lines written after byte `from` (whole lines only), and an
-/// `end` event the job's final state, after which the stream ends.
+/// carry the lines written after byte `from` (whole lines only), `state`
+/// events the job's state, first and whenever it changes (a queued job
+/// starts), and an `end` event its final state, after which the stream
+/// ends.
 pub(crate) async fn job_stream(
     State(app): St,
     v: Viewer,
@@ -298,6 +300,7 @@ pub(crate) async fn job_stream(
     headers: HeaderMap,
 ) -> Response {
     use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures_util::stream::unfold;
     // A browser coming back says where it was.
     let from = headers
         .get("last-event-id")
@@ -310,8 +313,10 @@ pub(crate) async fn job_stream(
         return err_part(e);
     }
     let path = crate::jobs::log_path(&app, id);
-    let start = (app, path, from, false);
-    let stream = futures_util::stream::unfold(start, move |(app, path, from, done)| async move {
+    // The state last sent: none yet, as the page may have been drawn
+    // before the job started.
+    let start = (app, path, from, String::new(), false);
+    let stream = unfold(start, move |(app, path, from, sent, done)| async move {
         if done {
             return None;
         }
@@ -335,6 +340,15 @@ pub(crate) async fn job_stream(
             })
             .await
             .unwrap_or_default();
+            let on = state == "running" || state == "queued";
+            if on && state != sent {
+                // No id: a browser coming back says where it was in the log.
+                let ev = Event::default().event("state").data(&state);
+                return Some((
+                    Ok::<_, std::convert::Infallible>(ev),
+                    (app, path, from, state, false),
+                ));
+            }
             if !chunk.is_empty() {
                 let next = from + chunk.len() as u64;
                 let text = String::from_utf8_lossy(&chunk)
@@ -344,14 +358,11 @@ pub(crate) async fn job_stream(
                     .event("log")
                     .id(next.to_string())
                     .data(text);
-                return Some((
-                    Ok::<_, std::convert::Infallible>(ev),
-                    (app, path, next, false),
-                ));
+                return Some((Ok(ev), (app, path, next, sent, false)));
             }
-            if state != "running" && state != "queued" {
+            if !on {
                 let ev = Event::default().event("end").data(state);
-                return Some((Ok(ev), (app, path, from, true)));
+                return Some((Ok(ev), (app, path, from, sent, true)));
             }
             tokio::time::sleep(std::time::Duration::from_millis(700)).await;
         }

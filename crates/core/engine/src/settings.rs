@@ -202,27 +202,31 @@ pub fn check_no_credentials(kind: crate::Kind, settings: &Value) -> Result<()> {
         crate::Kind::Proxy => "upstream",
         _ => return Ok(()),
     };
-    let s = settings[name].as_str().unwrap_or("").trim();
-    let rest = match s.split_once("://") {
-        Some((scheme, rest))
-            if matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") =>
-        {
-            rest
-        }
-        // A registry named by its host alone (docker.io, ghcr.io/team).
-        None if name == "upstream" => s,
-        _ => return Ok(()),
-    };
-    // Up to the path, as routes take an address apart: a password may
-    // hold a ? or a #.
-    let authority = rest.split('/').next().unwrap_or("");
-    if authority.contains('@') {
+    if has_credentials(settings[name].as_str().unwrap_or(""), name == "upstream") {
         // Not echoed: the error goes into logs and replies.
         return Err(Error::Invalid(format!(
             "{name}: an address takes no user or password (settings are shown to every reader)"
         )));
     }
     Ok(())
+}
+
+/// Whether an http(s) address, or with `bare` a registry named by its
+/// host alone (docker.io, ghcr.io/team), holds a user or a password.
+pub fn has_credentials(address: &str, bare: bool) -> bool {
+    let s = address.trim();
+    let rest = match s.split_once("://") {
+        Some((scheme, rest))
+            if matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") =>
+        {
+            rest
+        }
+        None if bare => s,
+        _ => return false,
+    };
+    // Up to the path, as routes take an address apart: a password may
+    // hold a ? or a #.
+    rest.split('/').next().unwrap_or("").contains('@')
 }
 
 /// Settings every repository of a kind has, whatever its format.

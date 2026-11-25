@@ -2278,26 +2278,40 @@ fn yes() -> bool {
     true
 }
 
+/// The addresses binding `addr` may take: itself, or those a host name
+/// resolves to (none if it does not: binding it fails then).
+async fn addresses(addr: &str) -> Vec<std::net::SocketAddr> {
+    match addr.parse() {
+        Ok(a) => vec![a],
+        Err(_) => tokio::net::lookup_host(addr)
+            .await
+            .map(Iterator::collect)
+            .unwrap_or_default(),
+    }
+}
+
 /// Whose address `addr` is, if another's: the management listener's or
 /// another listener's. (One another program holds is found when the
 /// listener binds it: a listener just moved off it may still be closing
 /// its socket.)
-fn address_taken(app: &App, name: &str, addr: &str) -> Result<Option<String>> {
-    let Ok(want) = addr.parse::<std::net::SocketAddr>() else {
-        // A host name: bound (or refused) when the listener starts.
-        return Ok(None);
+async fn address_taken(app: &App, name: &str, addr: &str) -> Result<Option<String>> {
+    let want = addresses(addr).await;
+    let overlaps = |b: &[std::net::SocketAddr]| {
+        want.iter()
+            .any(|a| b.iter().any(|b| crate::ops::listeners::clash(*a, *b)))
     };
-    let overlaps = |a: &str| {
-        a.parse::<std::net::SocketAddr>()
-            .is_ok_and(|a| crate::ops::listeners::clash(want, a))
-    };
-    if overlaps(&app.cfg.listen) {
+    if overlaps(&addresses(&app.cfg.listen).await) {
         return Ok(Some(format!("{addr} is the management listener's address")));
     }
-    Ok(crate::ops::listeners::list(&app.db)?
-        .into_iter()
-        .find(|l| l.name != name && l.enabled && overlaps(&l.addr))
-        .map(|l| format!("{addr} is the address of listener {}", l.name)))
+    for l in crate::ops::listeners::list(&app.db)? {
+        if l.name != name && l.enabled && overlaps(&addresses(&l.addr).await) {
+            return Ok(Some(format!(
+                "{addr} is the address of listener {}",
+                l.name
+            )));
+        }
+    }
+    Ok(None)
 }
 
 pub(crate) async fn listener_set(
@@ -2308,7 +2322,7 @@ pub(crate) async fn listener_set(
 ) -> Result<StatusCode> {
     app.require_admin(&c)?;
     if req.enabled
-        && let Some(why) = address_taken(&app, &name, req.addr.trim())?
+        && let Some(why) = address_taken(&app, &name, req.addr.trim()).await?
     {
         return Err(Error::Conflict(format!("{why}: choose another")));
     }

@@ -2664,6 +2664,26 @@ fn changes_that_would_break_something() {
     let e = s.cli(&["listener", "set", "extra", &here]).unwrap_err();
     assert!(e.contains("default"), "{e}");
     s.cli(&["listener", "set", "default", &here]).unwrap();
+    // A host name, as the addresses binding it takes.
+    let e = s
+        .cli(&["listener", "set", "extra", &format!("localhost:{mport}")])
+        .unwrap_err();
+    assert!(e.contains("management listener"), "{e}");
+    let there = format!("localhost:{}", s.serve_port);
+    let e = s.cli(&["listener", "set", "extra", &there]).unwrap_err();
+    assert!(e.contains("default"), "{e}");
+    let named = format!("localhost:{}", free_port());
+    s.cli(&["listener", "set", "named", &named]).unwrap();
+    let e = s
+        .cli(&[
+            "listener",
+            "set",
+            "extra",
+            &named.replace("localhost", "0.0.0.0"),
+        ])
+        .unwrap_err();
+    assert!(e.contains("named"), "{e}");
+    s.cli(&["listener", "delete", "named"]).unwrap();
 
     // Lists cut at their limit say so.
     s.cli(&["repo", "create", "many", "-f", "files"]).unwrap();
@@ -3534,7 +3554,8 @@ fn one_server_per_data_directory() {
 
 /// What a server killed during an import or an upload left is removed
 /// when it starts again, and when its repository is deleted; a mirror's
-/// state that happens to be named so stays.
+/// state that happens to be named as imports were stays, and imports
+/// leave it alone.
 #[test]
 fn leftovers_of_a_killed_server_are_removed() {
     let mut s = Server::start();
@@ -3555,6 +3576,9 @@ fn leftovers_of_a_killed_server_are_removed() {
     let main = s.dir.path().join("data/storages/main");
     let state = main.join("state");
     let left = [
+        state.join(".k.import/pool/a.deb"),
+        state.join(".k.import-cache/hashes"),
+        // As servers before this one named them.
         state.join("k.import/pool/a.deb"),
         state.join("k.import-cache/hashes"),
         state.join("h.import/the-mirrors-own"),
@@ -3565,13 +3589,19 @@ fn leftovers_of_a_killed_server_are_removed() {
         std::fs::write(f, "x").unwrap();
     }
     s.restart();
-    assert!(!state.join("k.import").exists());
-    assert!(!state.join("k.import-cache").exists());
-    assert!(!left[3].exists());
-    assert!(left[2].exists(), "a mirror's state is its own");
-    std::fs::create_dir_all(state.join("k.import")).unwrap();
+    for d in [".k.import", ".k.import-cache", "k.import", "k.import-cache"] {
+        assert!(!state.join(d).exists(), "{d}");
+    }
+    assert!(!left[5].exists());
+    assert!(left[4].exists(), "a mirror's state is its own");
+    // An import stages elsewhere (and clears what it staged).
+    let _ = s.cli(&["import", "h", "http://127.0.0.1:9/", "--wait"]);
+    assert_eq!(s.json(&["jobs", "h"])[0]["state"], "failed");
+    assert!(left[4].exists(), "an import leaves a mirror's state alone");
+    assert!(!state.join(".h.import").exists());
+    std::fs::create_dir_all(state.join(".k.import")).unwrap();
     s.cli(&["repo", "delete", "k", "-y"]).unwrap();
-    assert!(!state.join("k.import").exists());
+    assert!(!state.join(".k.import").exists());
 }
 
 /// Files cleanup keeps a build that a link outside the cleaned
@@ -3625,6 +3655,63 @@ fn files_cleanup_keeps_builds_linked_from_anywhere() {
     assert_eq!(get(&s.url("/b/stable/app.bin"), None).1, "app b1");
     assert_eq!(get(&s.url("/b/docs/app.bin"), None).1, "app b2");
     assert_eq!(get(&s.url("/b/builds/b4/app.bin"), None).1, "app b4");
+}
+
+/// A link in a build that goes keeps nothing: not its own build, not
+/// another that goes too; one in a build that stays keeps its target.
+#[test]
+fn files_cleanup_ignores_links_in_the_builds_it_removes() {
+    let s = Server::start();
+    s.cli(&["repo", "create", "b", "-f", "files", "-s", "public=true"])
+        .unwrap();
+    let a = s.dir.path().join("app.bin");
+    let link = |path: &str, to: &str| {
+        s.cli(&[
+            "op",
+            "b",
+            "link",
+            &format!("path=builds/{path}"),
+            &format!("to=builds/{to}"),
+            "-y",
+        ])
+        .unwrap();
+    };
+    for run in ["b1", "b2", "b3", "b4"] {
+        std::fs::write(&a, format!("app {run}")).unwrap();
+        s.cli(&[
+            "upload",
+            "b",
+            a.to_str().unwrap(),
+            "-s",
+            &format!("path=builds/{run}/"),
+        ])
+        .unwrap();
+        link(&format!("{run}/current.bin"), &format!("{run}/app.bin"));
+    }
+    link("b1/next", "b2");
+    link("b2/prev", "b1");
+    link("b4/prev", "b3");
+    s.cli(&[
+        "repo",
+        "set",
+        "b",
+        "cleanup_dirs=builds",
+        "cleanup_keep_last=1",
+    ])
+    .unwrap();
+    let plan = s.cli(&["cleanup", "b"]).unwrap();
+    assert!(
+        plan.contains("builds/b1")
+            && plan.contains("builds/b2")
+            && !plan.contains("builds/b3")
+            && !plan.contains("builds/b4"),
+        "{plan}"
+    );
+    s.cli(&["cleanup", "b", "-y"]).unwrap();
+    assert_eq!(get(&s.url("/b/builds/b1/app.bin"), None).0, 404);
+    assert_eq!(get(&s.url("/b/builds/b2/app.bin"), None).0, 404);
+    assert_eq!(get(&s.url("/b/builds/b4/prev/app.bin"), None).1, "app b3");
+    assert_eq!(get(&s.url("/b/builds/b4/current.bin"), None).1, "app b4");
 }
 
 #[test]
@@ -4922,6 +5009,38 @@ fn deb_mirror_of_a_hosted_repository() {
     );
     s.cli(&["repo", "set", "mir", "schedule=0 */6 * * *"])
         .unwrap();
+}
+
+/// An import's source goes into its job's log and summary and the
+/// version's, which every reader sees: one with a user or a password in
+/// it is refused before any job, and not echoed.
+#[test]
+fn imports_from_addresses_with_secrets_are_refused() {
+    let s = Server::start();
+    s.cli(&["repo", "create", "d", "-s", "public=true"])
+        .unwrap();
+    s.cli(&["repo", "create", "f", "-f", "files"]).unwrap();
+    s.cli(&["repo", "create", "o", "-f", "oci"]).unwrap();
+    for (repo, source, more) in [
+        (
+            "d",
+            "http://u:secret@127.0.0.1:9/",
+            &["--dists", "stable"][..],
+        ),
+        ("d", "HTTPS://u:secret@127.0.0.1:9/", &["--dists", "stable"]),
+        ("f", "https://u:secret@127.0.0.1:9/d/", &[]),
+        ("o", "u:secret@127.0.0.1:9", &["--image", "app:1"]),
+        ("o", "https://u:secret@127.0.0.1:9", &["--image", "app:1"]),
+    ] {
+        let e = s
+            .cli(&[&["import", repo, source][..], more].concat())
+            .unwrap_err();
+        assert!(
+            e.contains("no user or password") && !e.contains("secret"),
+            "{source}: {e}"
+        );
+    }
+    assert!(s.json(&["jobs"]).as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -10995,6 +11114,17 @@ fn syncs_wait_for_a_slot_on_their_storage() {
         log.contains("waiting: 1 syncs run on storage main at once"),
         "{log}"
     );
+    // The console's stream of a waiting job says when it starts.
+    let (_, sid, _) = console_session(&s, "slots", "slots-password");
+    let url = format!("{}/jobs/{j2}/stream", s.api);
+    let follow = std::thread::spawn(move || {
+        let c = reqwest::blocking::Client::builder()
+            .timeout(None)
+            .build()
+            .unwrap();
+        let r = c.get(url).header("cookie", format!("pkgpod_session={sid}"));
+        r.send().unwrap().text().unwrap()
+    });
     // A queued job can be cancelled; the rest go one after another.
     s.cli(&["job", &j3.to_string(), "--cancel"]).unwrap();
     let t = Instant::now();
@@ -11019,6 +11149,16 @@ fn syncs_wait_for_a_slot_on_their_storage() {
             .unwrap()
     };
     assert!(f(j2, "started") >= f(j1, "finished"), "{jobs}");
+    let seen = follow.join().unwrap();
+    let at = |e: &str| seen.find(e).unwrap_or_else(|| panic!("{e}: {seen}"));
+    let (queued, running) = (
+        at("event: state\ndata: queued"),
+        at("event: state\ndata: running"),
+    );
+    assert!(
+        queued < running && running < at("event: end\ndata: ok"),
+        "{seen}"
+    );
     // 0: no limit.
     s.cli(&["settings", "--syncs-per-storage", "0"]).unwrap();
     let (a, b) = (job("m1"), job("m2"));

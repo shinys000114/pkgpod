@@ -104,7 +104,8 @@ pub fn supported(app: &App, r: &RepoInfo) -> bool {
 
 /// A files repository's rules: in each of `dirs`, its subdirectories
 /// (one a build) beyond the newest `keep_last`, or in for longer than
-/// `older_days`, go; the newest and any a link points at stay.
+/// `older_days`, go; the newest and any a link points at stay (a link in
+/// a build that goes keeps nothing).
 fn propose_files(app: &App, r: &RepoInfo, actor: &str) -> Result<Proposal> {
     let dirs: Vec<String> = r
         .setting_list("cleanup_dirs")
@@ -141,12 +142,13 @@ fn propose_files(app: &App, r: &RepoInfo, actor: &str) -> Result<Proposal> {
     let now = pkgpod_base::now();
     let mut removals = Vec::new();
     let plan = app.engine.preview(&r.name, actor, |_, e| {
-        // What links point at, wherever they are (a top-level `stable`).
-        let targets: Vec<String> = e
+        // Links and what they point at, wherever they are (a top-level
+        // `stable`).
+        let links: Vec<(String, String)> = e
             .walk("")?
             .into_iter()
-            .filter_map(|(_, entry)| match entry {
-                pkgpod_engine::tree::Entry::Ref { target } => Some(target),
+            .filter_map(|(path, entry)| match entry {
+                pkgpod_engine::tree::Entry::Ref { target } => Some((path, target)),
                 _ => None,
             })
             .collect();
@@ -158,17 +160,9 @@ fn propose_files(app: &App, r: &RepoInfo, actor: &str) -> Result<Proposal> {
                     builds.push(name);
                 }
             }
-            let linked: std::collections::HashSet<&str> = targets
-                .iter()
-                .filter_map(|t| t.strip_prefix(&format!("{d}/")))
-                .map(|child| child.split('/').next().unwrap_or(""))
-                .collect();
             let at = |b: &String| newest.get(&(d.clone(), b.clone())).copied().unwrap_or(0);
             builds.sort_by(|a, b| at(b).cmp(&at(a)).then(b.cmp(a)));
             for (i, b) in builds.iter().enumerate().skip(1) {
-                if linked.contains(b.as_str()) {
-                    continue;
-                }
                 let age = now - at(b);
                 let why = if keep_last > 0 && i as i64 >= keep_last {
                     format!("{i} newer builds (keeping {keep_last})")
@@ -186,6 +180,35 @@ fn propose_files(app: &App, r: &RepoInfo, actor: &str) -> Result<Proposal> {
                 });
             }
         }
+        // A build a link points into stays, unless the link is in a build
+        // that goes too (its own, say): then nothing would follow it. One
+        // that stays so keeps what its own links point into.
+        let into = |p: &str| -> Vec<usize> {
+            let within = |rm: &Removal| p == rm.name || p.starts_with(&format!("{}/", rm.name));
+            (0..removals.len())
+                .filter(|&i| within(&removals[i]))
+                .collect()
+        };
+        let links: Vec<(Vec<usize>, Vec<usize>)> = links
+            .iter()
+            .map(|(path, target)| (into(path), into(target)))
+            .filter(|(_, to)| !to.is_empty())
+            .collect();
+        let mut going = vec![true; removals.len()];
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for (inside, to) in &links {
+                if inside.iter().any(|&i| going[i]) {
+                    continue;
+                }
+                for &i in to {
+                    changed |= std::mem::replace(&mut going[i], false);
+                }
+            }
+        }
+        let mut going = going.into_iter();
+        removals.retain(|_| going.next().unwrap_or(true));
         for rm in &removals {
             e.remove(&rm.name)?;
         }

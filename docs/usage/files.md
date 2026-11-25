@@ -108,9 +108,10 @@ cleanup rules, a whole directory at a time:
 
 A build's age is when its newest file came in. The newest build of
 each directory is always kept, and so is one a link anywhere in the
-repository points at (`master/latest`, a top-level `stable`). Removing
-makes a version, so a rollback brings a build back while retention
-keeps the version before.
+repository points at (`master/latest`, a top-level `stable`), unless
+the link is in a build that goes too (its own, say). Removing makes a
+version, so a rollback brings a build back while retention keeps the
+version before.
 
 ```sh
 pkgpod repo set tools cleanup_dirs=master,nightly cleanup_keep_last=20

@@ -141,7 +141,8 @@
   // A running job's log: its new lines come as a stream (Server-Sent
   // Events) and are added to what is shown, which is never replaced, so
   // a selection or the place read stay; followed at the bottom only when
-  // the reader is there. The end gives the job's state.
+  // the reader is there. The stream says when the job's state changes (a
+  // queued job starts), and the end gives its final state.
   function streamLogs(root) {
     (root || document).querySelectorAll("[data-stream]").forEach(function (box) {
       if (box.dataset.streaming) return;
@@ -154,6 +155,10 @@
         if (pre.textContent && !/\n$/.test(pre.textContent)) text = "\n" + text;
         pre.appendChild(document.createTextNode(text));
         if (atBottom) pre.scrollTop = pre.scrollHeight;
+      });
+      es.addEventListener("state", function (ev) {
+        var badge = box.querySelector(".job-state");
+        if (badge) badge.textContent = ev.data;
       });
       es.addEventListener("end", function (ev) {
         es.close();
@@ -380,20 +385,30 @@
     form.querySelector(".upload-progress").hidden = true;
     form.querySelector(".upload-pct").textContent = "";
   });
+  // Whether a request is a poll's (hx-trigger every …), which nobody
+  // clicked.
+  function polled(elt) {
+    return !!(elt && elt.getAttribute && /\bevery\b/.test(elt.getAttribute("hx-trigger") || ""));
+  }
   // An answer htmx does not show (an error page from a proxy in front: a
   // restart, a body too large) or no answer at all: said where the
   // request's result goes, else in its card, else at the bottom of the
-  // page. Never in place of a tab.
+  // page. Never in place of a tab. A poll's is said only at the bottom,
+  // not over a result someone reads, and goes once a poll is answered.
   function failed(ev, text) {
+    var poll = polled(ev.detail.elt);
     var to = ev.detail.target;
-    var box = to && to.matches && to.matches(".result, .results, [id$='-result']") ? to : null;
-    var card = !box && ev.detail.elt && ev.detail.elt.closest && ev.detail.elt.closest(".card");
+    var box = !poll && to && to.matches && to.matches(".result, .results, [id$='-result']") ? to : null;
+    var card = !poll && !box && ev.detail.elt && ev.detail.elt.closest && ev.detail.elt.closest(".card");
     if (card) box = card.querySelector(".result, .results");
     // Not over what was clicked: a plan's Apply is in a result area, and
     // the plan must stay to be applied again.
     if (box && ev.detail.elt && box.contains(ev.detail.elt)) box = null;
     if (!box) {
       box = document.getElementById("answer-note");
+      // A poll's does not take the place of a click's, which would then
+      // go with the next poll answered, unread.
+      if (poll && box && !box.dataset.poll) return;
       if (!box) {
         box = document.createElement("div");
         box.id = "answer-note";
@@ -402,6 +417,8 @@
         box.addEventListener("click", function () { box.remove(); });
         document.body.appendChild(box);
       }
+      if (poll) box.dataset.poll = "1";
+      else delete box.dataset.poll;
     }
     var plan = document.createElement("div");
     plan.className = "plan";
@@ -418,6 +435,10 @@
   });
   document.addEventListener("htmx:sendError", function (ev) {
     failed(ev, "No answer from the server. Try again when it can be reached.");
+  });
+  document.addEventListener("htmx:afterRequest", function (ev) {
+    var note = document.getElementById("answer-note");
+    if (note && note.dataset.poll && ev.detail.successful && polled(ev.detail.elt)) note.remove();
   });
   document.addEventListener("click", function (ev) {
     var b = ev.target.closest("button.copy");
