@@ -27,9 +27,9 @@
       <td class="nowrap"><a class="repo-name" href="/r/{{ r.name }}">{{ r.name }}</a>{% if r.public %} <span class="tag">public</span>{% endif %}
         {% if !r.description.is_empty() %}<div class="muted small desc">{{ r.description }}</div>{% endif %}</td>
       <td class="nowrap"><span class="fmt fmt-{{ r.format }}">{{ r.format_title }}</span>{% if r.kind != "hosted" %} <span class="tag">{{ r.kind }}</span>{% endif %}</td>
-      <td class="nowrap{% if !r.state.is_empty() %} st-{{ r.state }}{% endif %}">{{ r.content }}</td>
+      <td class="{% if r.kind == "mirror" %}wrap{% else %}nowrap{% endif %}{% if !r.state.is_empty() %} st-{{ r.state }}{% endif %}"{% if r.kind == "mirror" %} data-sync="{{ r.name }}"{% endif %}>{% match r.job %}{% when Some with (id) %}<a href="/jobs/{{ id }}">{{ r.content }} <span class="nowrap">{{ r.content_when }}</span></a>{% when None %}{{ r.content }}{% endmatch %}</td>
       <td class="nowrap muted">{% if r.kind == "mirror" || r.kind == "group" || r.kind == "proxy" %}—{% else %}v{{ r.version }} · {{ r.updated }}{% endif %}</td>
-      <td class="mono small nowrap">{% for u in r.urls %}{{ u }}<br>{% endfor %}</td>
+      <td class="mono small addr">{% for u in r.urls %}<span>{% for p in u %}<span class="seg">{{ p }}</span><wbr>{% endfor %}</span>{% endfor %}</td>
     </tr>
     {% endfor %}
     </tbody>

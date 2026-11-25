@@ -268,6 +268,49 @@
   document.addEventListener("input", function (ev) {
     if (ev.target.id === "repo-q" || ev.target.id === "repo-format") filterRepos();
   });
+  // Mirrors' sync states on the list follow the jobs: every 10 s while
+  // one runs, every minute otherwise, not while the tab is hidden. Only
+  // a cell whose state changed is touched, so nothing flickers and the
+  // filter stays as it is.
+  document.addEventListener("DOMContentLoaded", function followSyncs() {
+    if (!document.querySelector("td[data-sync]")) return;
+    var timer = null;
+    function later() {
+      clearTimeout(timer);
+      var busy = document.querySelector("td[data-sync].st-run");
+      timer = setTimeout(poll, busy ? 10000 : 60000);
+    }
+    function poll() {
+      if (document.hidden) { later(); return; }
+      fetch("/c/repos/syncs", { credentials: "same-origin", cache: "no-store" })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (all) {
+          if (!all) return;
+          document.querySelectorAll("td[data-sync]").forEach(function (td) {
+            var st = all[td.getAttribute("data-sync")];
+            if (!st) return;
+            var key = [st.state, st.content, st.when, st.job].join("|");
+            if (td.getAttribute("data-shown") === key) return;
+            td.setAttribute("data-shown", key);
+            td.classList.remove("st-ok", "st-bad", "st-run");
+            if (st.state) td.classList.add("st-" + st.state);
+            var a = document.createElement("a");
+            a.href = "/jobs/" + st.job;
+            var at = document.createElement("span");
+            at.className = "nowrap";
+            at.textContent = st.when;
+            a.append(st.content + " ", at);
+            td.replaceChildren(a);
+          });
+        })
+        .catch(function () {})
+        .then(later);
+    }
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) poll();
+    });
+    later();
+  });
   document.addEventListener("change", function (ev) {
     if (ev.target.id === "repo-format") filterRepos();
   });

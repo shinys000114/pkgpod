@@ -1383,6 +1383,25 @@ fn deb_mirror_of_a_hosted_repository() {
         page.contains("1 file(s) gone upstream</h2>") && page.contains("Allow these"),
         "{page}"
     );
+    // The list names each mirror's last sync and links its job; the
+    // states it follows without reloading say the same.
+    let list = console_get("/");
+    assert!(
+        list.contains(&format!("<a href=\"/jobs/{failed}\">sync failed · ")),
+        "{list}"
+    );
+    assert!(
+        list.contains("<a href=\"/jobs/") && list.contains(">synced · "),
+        "{list}"
+    );
+    let syncs: Value = serde_json::from_str(&console_get("/c/repos/syncs")).unwrap();
+    assert_eq!(syncs["mir2"]["state"], "bad", "{syncs}");
+    assert_eq!(syncs["mir2"]["job"], failed, "{syncs}");
+    assert!(
+        syncs["mir"]["content"] == "synced ·" && syncs["mir"]["when"].as_str().unwrap().len() == 16,
+        "{syncs}"
+    );
+    assert!(syncs.get("ppa").is_none(), "{syncs}");
     let allowed = cc
         .post(format!("{}/c/jobs/{failed}/allow-missing", s.api))
         .header("cookie", format!("pkgpod_session={sid}"))

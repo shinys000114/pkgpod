@@ -81,6 +81,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/c/r/{repo}/use-token", post(use_token))
         .route("/r/{repo}/actions", get(actions_part))
         .route("/c/repos", post(repo_create))
+        .route("/c/repos/syncs", get(repo_syncs))
         .route("/c/r/{repo}/ops/{op}", post(op))
         .route(
             "/c/r/{repo}/upload",
@@ -695,13 +696,78 @@ pub struct RepoRow {
     pub kind: String,
     pub version: String,
     pub updated: String,
-    pub urls: Vec<String>,
+    /// Each address in pieces that end at a '/', where it may break.
+    pub urls: Vec<Vec<String>>,
     pub public: bool,
     pub description: String,
     /// "12 packages", "3 tags"; for mirrors their last sync.
     pub content: String,
+    /// When a mirror's last sync started or ended.
+    pub content_when: String,
     /// ok, bad, run: the state's colour; empty: none.
     pub state: String,
+    /// A mirror's last sync job.
+    pub job: Option<i64>,
+}
+
+/// An address cut after each '/' past the scheme, so a narrow column
+/// breaks it between path segments, never inside a host name.
+fn url_pieces(u: &str) -> Vec<String> {
+    let (head, rest) = match u.find("://") {
+        Some(i) => u.split_at(i + 3),
+        None => ("", u),
+    };
+    let mut out: Vec<String> = rest.split_inclusive('/').map(String::from).collect();
+    match out.first_mut() {
+        Some(f) => f.insert_str(0, head),
+        None => out.push(head.to_string()),
+    }
+    out
+}
+
+/// A mirror's last sync as the list shows it: (words, time, colour,
+/// job). The time is kept apart so it never breaks across lines.
+fn sync_state(j: Option<&crate::jobs::Job>) -> (String, String, String, Option<i64>) {
+    let Some(j) = j else {
+        return ("never synced".into(), String::new(), String::new(), None);
+    };
+    let (words, at, colour) = match j.state.as_str() {
+        "running" => ("syncing since", j.started, "run"),
+        "queued" => ("sync queued ·", Some(j.created), "run"),
+        "ok" => ("synced ·", j.finished, "ok"),
+        "cancelled" => ("sync cancelled ·", j.finished, "bad"),
+        _ => ("sync failed ·", j.finished, "bad"),
+    };
+    (words.into(), when(at), colour.into(), Some(j.id))
+}
+
+/// The mirrors' sync states the viewer may read, by name, for the
+/// repository list to follow without reloading the page.
+async fn repo_syncs(State(app): St, v: Viewer) -> Result<Response> {
+    let list = json_of(api::repos(State(app.clone()), v.who()).await)?;
+    let mirrors: HashSet<String> = list
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["kind"] == "mirror")
+        .map(|r| s(&r["name"]))
+        .collect();
+    let app2 = app.clone();
+    let jobs = api::blocking(&app, move |_| crate::jobs::list(&app2.db, None, 500)).await?;
+    let mut out = serde_json::Map::new();
+    for j in jobs.iter().filter(|j| j.kind == "sync") {
+        if mirrors.contains(&j.repo) && !out.contains_key(&j.repo) {
+            let (content, at, state, job) = sync_state(Some(j));
+            out.insert(
+                j.repo.clone(),
+                json!({"content": content, "when": at, "state": state, "job": job}),
+            );
+        }
+    }
+    let mut r = axum::Json(Value::Object(out)).into_response();
+    r.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(r)
 }
 
 /// A form to make a repository of a format and kind.
@@ -823,21 +889,10 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
             let kind = s(&r["kind"]);
             let n = counts.get(&name).copied().unwrap_or(0);
 
-            let (content, state) = if kind == "mirror" {
-                match syncs.get(&name) {
-                    Some(j) => (
-                        format!("synced {} · {}", j.state, when(j.finished.or(j.started))),
-                        match j.state.as_str() {
-                            "ok" => "ok",
-                            "running" | "queued" => "run",
-                            _ => "bad",
-                        }
-                        .to_string(),
-                    ),
-                    None => ("never synced".to_string(), String::new()),
-                }
+            let (content, content_when, state, job) = if kind == "mirror" {
+                sync_state(syncs.get(&name))
             } else {
-                (count_words(&format, n), String::new())
+                (count_words(&format, n), String::new(), String::new(), None)
             };
             RepoRow {
                 format_title: titles
@@ -858,11 +913,16 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                     } else {
                         u
                     }
+                    .iter()
+                    .map(|u| url_pieces(u))
+                    .collect()
                 },
                 public: r["settings"]["public"] == json!(true),
                 description: s(&r["settings"]["description"]),
                 content,
+                content_when,
                 state,
+                job,
                 format,
                 name,
             }
@@ -5552,6 +5612,17 @@ async fn import(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn addresses_break_between_path_segments() {
+        assert_eq!(
+            url_pieces("https://mirror.example.org/ubuntu-ports/"),
+            ["https://mirror.example.org/", "ubuntu-ports/"]
+        );
+        assert_eq!(url_pieces("http://h.example"), ["http://h.example"]);
+        assert_eq!(url_pieces("/team/ppa/"), ["/", "team/", "ppa/"]);
+        assert_eq!(url_pieces(""), [""]);
+    }
 
     #[test]
     fn progress_from_a_log() {

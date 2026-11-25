@@ -201,7 +201,7 @@ th {
 }
 tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, transparent); }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-td.nowrap, th.nowrap { white-space: nowrap; }
+td.nowrap, th.nowrap, span.nowrap { white-space: nowrap; }
 td.wrap { overflow-wrap: anywhere; min-width: 13rem; }
 td .mono { color: var(--muted); }
 td.acts { white-space: nowrap; text-align: right; }
@@ -541,6 +541,12 @@ button.link.small, a.small { font-size: 12px; }
 .dist-switch button.link.on { background: var(--accent-soft); color: var(--fg); }
 .login .first-login { margin: .6rem 0 0; line-height: 1.45; }
 .repos .desc { white-space: normal; max-width: 26rem; }
+/* Addresses break at their slashes and dots rather than run off the
+   card: whole when there is room, readable when there is not. */
+table.repos td.addr > span { display: block; overflow-wrap: break-word; }
+table.repos td.addr .seg { white-space: nowrap; }
+table.repos td.wrap { min-width: 9rem; }
+table.repos td[data-sync] a { color: inherit; }
 .token-fill { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; padding-bottom: 0; }
 .token-fill select { width: auto; }
 /* Packages: filters, chosen rows, details. */
