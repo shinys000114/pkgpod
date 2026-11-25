@@ -169,6 +169,10 @@ impl Store {
         let dir = to.parent().expect("blob path has a parent");
         fs::create_dir_all(dir).map_err(|e| Error::io(dir, e))?;
         set_mode(src, 0o644)?;
+        // New in the store, whatever time the staged copy has (an
+        // upstream's): garbage collection's grace period starts now. Set
+        // before the move, so there is no moment with the old time.
+        touch(src);
         if fs::rename(src, &to).is_err() {
             let (d2, n) = self.put_file(src)?;
             if d2 != d {
@@ -273,6 +277,27 @@ mod tests {
         fs::write(&src, b"moved").unwrap();
         assert_eq!(s.put_owned(&src).unwrap().0, d);
         assert!(!src.exists());
+    }
+
+    #[test]
+    fn owned_files_are_new_in_the_store() {
+        // A staged download keeps its upstream's time; in the store it
+        // is new, or garbage collection's grace period would not cover
+        // it until a version names it.
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::new(dir.path().join("store"));
+        let src = dir.path().join("staged");
+        fs::write(&src, b"old").unwrap();
+        let old = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+        fs::File::options()
+            .append(true)
+            .open(&src)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let (d, _) = s.put_owned(&src).unwrap();
+        let t = fs::metadata(s.path(&d)).unwrap().modified().unwrap();
+        assert!(t > SystemTime::now() - std::time::Duration::from_secs(60));
     }
 
     #[test]

@@ -332,6 +332,79 @@ fn retention_and_gc() {
     assert!(store.has(&Digest::of(b"young")));
 }
 
+fn hosted_on(e: &Engine, name: &str, storage: &str) {
+    e.create_repo(
+        NewRepo {
+            name: name.into(),
+            format: "toy".into(),
+            kind: Kind::Hosted,
+            storage: Some(storage.into()),
+            settings: json!({}),
+        },
+        "test",
+    )
+    .unwrap();
+}
+
+#[test]
+fn gc_keeps_a_subtree_shared_across_storages() {
+    // The same directory in repositories on two storages is one tree
+    // object; each storage still keeps its own copy of the blobs in it.
+    let (d, e) = engine();
+    e.set_storage("hdd", &d.path().join("hdd")).unwrap();
+    hosted(&e, "a");
+    hosted_on(&e, "b", "hdd");
+    upload(&e, "a", "f/x_1", "shared");
+    upload(&e, "b", "f/x_1", "shared");
+    let sha = Digest::of(b"shared");
+    let (sa, sb) = (e.repo("a").unwrap().store(), e.repo("b").unwrap().store());
+    assert!(sa.has(&sha) && sb.has(&sha));
+    e.gc(Duration::ZERO, false).unwrap();
+    assert!(sa.has(&sha), "main's copy went");
+    assert!(sb.has(&sha), "hdd's copy went");
+    // And the check looks at each storage's copy.
+    std::fs::remove_file(sb.path(&sha)).unwrap();
+    let rep = e.check(false).unwrap();
+    assert!(
+        rep.problems.iter().any(|p| p.starts_with("b ")),
+        "{:?}",
+        rep.problems
+    );
+}
+
+#[test]
+fn storages_naming_one_directory() {
+    let (d, e) = engine();
+    let main = d.path().join("main");
+    std::fs::create_dir_all(&main).unwrap();
+    // The same directory under another name, also through a link or
+    // with a trailing slash, is refused.
+    assert!(matches!(
+        e.set_storage("again", &main),
+        Err(Error::Conflict(_))
+    ));
+    std::os::unix::fs::symlink(&main, d.path().join("link")).unwrap();
+    assert!(matches!(
+        e.set_storage("link", &d.path().join("link")),
+        Err(Error::Conflict(_))
+    ));
+    let mut slash = main.clone().into_os_string();
+    slash.push("/");
+    assert!(matches!(
+        e.set_storage("slash", std::path::Path::new(&slash)),
+        Err(Error::Conflict(_))
+    ));
+    // One that becomes the same directory later (a mount, a link made
+    // afterwards): GC still keeps what the other storage's
+    // repositories name.
+    e.set_storage("later", &d.path().join("later")).unwrap();
+    std::os::unix::fs::symlink(&main, d.path().join("later")).unwrap();
+    hosted(&e, "r");
+    upload(&e, "r", "f/x_1", "kept");
+    e.gc(Duration::ZERO, false).unwrap();
+    assert!(e.repo("r").unwrap().store().has(&Digest::of(b"kept")));
+}
+
 #[test]
 fn parallel_uploads_queue_instead_of_conflicting() {
     let (_d, e) = engine();
