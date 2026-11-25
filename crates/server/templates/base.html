@@ -34,7 +34,7 @@
     <button hx-post="/logout">Log out</button>
     <button type="button" class="theme-switch" title="Light, dark, or as the system has it">Theme: system</button>
   </div>
-  <div class="muted ver">pkgpod {{ s.version }}</div>
+  <div class="muted ver">pkgpod {{ s.version }} · <a href="{{ env!("CARGO_PKG_REPOSITORY") }}">source</a></div>
 </aside>
 <main>
 {% block main %}{% endblock %}

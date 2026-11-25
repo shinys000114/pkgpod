@@ -12,6 +12,3 @@ publish = false
 pkgpod-base.workspace = true
 pkgpod-engine.workspace = true
 serde_json.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true

@@ -46,8 +46,9 @@ start it on install and restart it when the package is upgraded.
 ### The bare binary
 
 A release also has the static binaries (`pkgpod_<version>_linux_x86_64`,
-`pkgpod_<version>_linux_aarch64`) and `checksums.txt`. Set up what the
-package would:
+`pkgpod_<version>_linux_aarch64`), `THIRD-PARTY-NOTICES` (the licences
+of the crates they link, which go with a copy of the binary) and
+`checksums.txt`. Set up what the package would:
 
 ```sh
 install -m 0755 pkgpod_<version>_linux_x86_64 /usr/local/bin/pkgpod

@@ -7,8 +7,9 @@ and the conventions of the tree. How the parts fit together is in
 
 ## Building
 
-A Rust workspace (edition 2024), built with the current stable
-toolchain, as CI does. With the crates of `Cargo.lock` already fetched:
+A Rust workspace (edition 2024) that needs Rust 1.89 or newer
+(`rust-version` in `Cargo.toml`); CI builds with a pinned stable
+toolchain. With the crates of `Cargo.lock` already fetched:
 
 ```sh
 cargo build --offline            # target/debug/pkgpod
@@ -158,10 +159,15 @@ Both run in CI; a warning fails it. rustfmt runs with its defaults (no
 
 ## CI
 
-`.github/workflows/ci.yml`, on pushes to `master` and pull requests:
+`.github/workflows/ci.yml`, on pushes to `master` and pull requests
+(a newer push cancels the run before it), with the toolchain pinned in
+it and in `.github/actions/build`:
 
-- `check`: formatting, clippy with `-D warnings`, `cargo test
-  --workspace`.
+- `check`: formatting, clippy with `-D warnings` and `--locked`.
+- `msrv`: `cargo check` of every target with the `rust-version`
+  toolchain.
+- `deny`: `cargo deny check` (advisories, licences, bans, sources), as
+  `deny.toml` says; an advisory ignored there says why.
 - `e2e`: the host tools, the client images, and `cargo test --workspace
   --locked` with `PKGPOD_REQUIRE_TOOLS=1` and `PKGPOD_E2E=1`.
 - `debian`: the source package and, from it and without network, the
@@ -171,10 +177,16 @@ Both run in CI; a warning fails it. rustfmt runs with its defaults (no
   Ubuntu jammy and noble containers, and arm64 under emulation. The
   packages are kept as the run's artifact for 7 days.
 
-`.github/workflows/release.yml`, on tags `v*`: the tests, the same build
-with the tag's version, and a release with `dist/`: the `.deb` files,
-the source package, the bare binaries (`pkgpod_<version>_linux_x86_64`,
-`pkgpod_<version>_linux_aarch64`) and `checksums.txt`.
+`.github/workflows/release.yml`, on tags `v*`: all of `ci.yml` (it is
+called, with the packages built as the tag's version), then a release
+with the packages it tested: the `.deb` files, the source package, the
+bare binaries (`pkgpod_<version>_linux_x86_64`,
+`pkgpod_<version>_linux_aarch64`), `THIRD-PARTY-NOTICES` and
+`checksums.txt`. Only the job that makes the release may write to the
+repository. `.github/workflows/publish.yml` calls `ci.yml` the same way
+before it uploads master's packages. Dependabot
+(`.github/dependabot.yml`) proposes new versions of the crates and the
+actions.
 
 ## The Debian package
 
@@ -194,15 +206,21 @@ binary, for every Debian and Ubuntu release.
   Rust toolchain from rustup with the musl targets on `PATH` (Debian's
   rustc has no musl standard library). The test suite is not run in the
   package build (it needs dpkg-deb, gpg, rsync and apt): CI runs it.
+- `debian/third-party-notices.sh` writes `THIRD-PARTY-NOTICES`, the
+  licences of the crates the binary links (and of the C libraries they
+  bundle), from `cargo tree` and the crates' own licence files;
+  `debian/rules` installs it in `/usr/share/doc/pkgpod`, and the build
+  action puts it beside the bare binaries.
 - `debian/pkgpod.postinst` makes the user and the data directory;
   `debian/pkgpod.service` is the unit; `debian/pkgpod.toml` the
   configuration installed in `/etc/pkgpod/` (mode 0640).
 - `debian/pkgpod.lintian-overrides` lists the tags overridden, each with
   why: the static binary, the libyaml messages of the YAML parser, the
   configuration's mode, and those of a package not in the archive (no
-  bug closed, no manual page: `pkgpod --help` documents every command).
-  A new lintian finding is fixed, or overridden with a comment saying
-  why.
+  bug closed, no manual page: `pkgpod --help` documents every command);
+  `debian/source/lintian-overrides` those of the source package (the
+  console templates' long lines). A new lintian finding is fixed, or
+  overridden with a comment saying why.
 - `debian/missing-sources/htmx.js` is the source of the minified htmx
   the console ships (`crates/server/assets/htmx.min.js`).
 - `debian/tests/install-check` installs the package in a fresh system,

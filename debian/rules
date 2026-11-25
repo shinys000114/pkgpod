@@ -35,12 +35,16 @@ override_dh_auto_build:
 	env -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS \
 	cargo $(CARGO_BUILD) --release --locked $(VENDORED) \
 		--target $(RUST_TARGET) -p pkgpod
+	sh debian/third-party-notices.sh $(RUST_TARGET) $(VENDORED) \
+		>$(OUT)/THIRD-PARTY-NOTICES
 
 # The test suite needs dpkg-deb, gpg, rsync and apt; CI runs it.
 override_dh_auto_test:
 
 override_dh_auto_install:
 	install -D -m 0755 $(OUT)/pkgpod debian/pkgpod/usr/bin/pkgpod
+	install -D -m 0644 $(OUT)/THIRD-PARTY-NOTICES \
+		debian/pkgpod/usr/share/doc/pkgpod/THIRD-PARTY-NOTICES
 	install -D -m 0640 debian/pkgpod.toml debian/pkgpod/etc/pkgpod/pkgpod.toml
 
 override_dh_auto_clean:

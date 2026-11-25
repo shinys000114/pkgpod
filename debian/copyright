@@ -17,11 +17,15 @@ Files: vendor/*
 Copyright: 2014-2026 the authors of each crate (see its Cargo.toml)
 License: various
  The vendored Rust crates (the orig-vendor component) are distributed
- under their own licenses, mostly MIT, Apache-2.0, BSD-2-Clause,
- BSD-3-Clause, ISC, Zlib, Unicode-3.0 and MPL-2.0; each crate's
- directory holds its license files and its Cargo.toml names it. The
- binaries link them statically; NOTICE lists the third-party code
- pkgpod follows.
+ under their own licenses: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause,
+ ISC, Zlib and Unicode-3.0, CDLA-Permissive-2.0 (webpki-root-certs) and
+ bzip2-1.0.6 (libbz2-rs-sys), some with a choice that also offers
+ Unlicense, 0BSD, BSD-1-Clause, BSL-1.0, CC0-1.0, MIT-0 or
+ LGPL-2.1-or-later. SQLite, bundled by libsqlite3-sys, is in the public
+ domain. Each crate's directory holds its license files and its
+ Cargo.toml names it. The binaries link them statically;
+ THIRD-PARTY-NOTICES (in /usr/share/doc/pkgpod) has the license files of
+ the crates linked, and NOTICE lists the third-party code pkgpod follows.
 
 License: AGPL-3.0-only
  This program is free software: you can redistribute it and/or modify

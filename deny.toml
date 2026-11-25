@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# cargo deny check (ci.yml): advisories, licences, bans and sources of
+# the dependencies.
+
+[graph]
+# What the release binaries are built for, and the CI runner.
+targets = [
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-unknown-linux-gnu",
+]
+
+[advisories]
+ignore = [
+    # The Marvin attack on rsa, which has no fixed release. pkgpod uses an
+    # RSA private key only to sign what it publishes (apk indexes with the
+    # server's key; Debian indexes when an imported signing key is RSA),
+    # never to decrypt, and signs when a repository changes, not for each
+    # request; for OIDC tokens it only verifies.
+    { id = "RUSTSEC-2023-0071", reason = "no fixed rsa release; RSA private keys only sign pkgpod's own indexes, nothing is decrypted" },
+]
+
+[licenses]
+# Each crate's licence must be one of these (for a choice, one of its
+# terms): the ones the locked crates need, and pkgpod's own.
+allow = [
+    "AGPL-3.0-only",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+    "bzip2-1.0.6",
+]
+
+[bans]
+# Several versions of a crate are common in the graph (tower-http, sha2);
+# they make the binary bigger, not wrong.
+multiple-versions = "allow"
+
+[sources]
+# crates.io only.
+unknown-registry = "deny"
+unknown-git = "deny"

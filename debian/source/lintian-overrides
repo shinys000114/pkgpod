@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# The console's templates are their own source; a few have a line over
+# 512 characters (a form's attributes, an inline icon), which lintian
+# takes for minified code.
+pkgpod source: source-is-missing [crates/server/templates/*]

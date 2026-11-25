@@ -430,6 +430,19 @@ mod tests {
         assert_eq!(url_pieces(""), [""]);
     }
 
+    /// The AGPL asks a server used over a network to offer its source:
+    /// every console page links to it, beside the version.
+    #[test]
+    fn pages_link_to_the_source() {
+        let s = Shell {
+            user: "ann".into(),
+            ..Shell::anon()
+        };
+        let html = NotFoundPage { s }.render().unwrap();
+        let link = format!("<a href=\"{}\">", env!("CARGO_PKG_REPOSITORY"));
+        assert!(html.contains(&link), "no source link in:\n{html}");
+    }
+
     #[test]
     fn progress_from_a_log() {
         let log = "t sync started\nt pool: 10/400\nt noble: fetched\nt pool: 200/400\nt got x\n";

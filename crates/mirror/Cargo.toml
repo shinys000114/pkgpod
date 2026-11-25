@@ -33,7 +33,4 @@ tokio = { workspace = true, features = ["rt-multi-thread", "time", "macros"] }
 pkgpod-deb = { workspace = true, features = ["testutil"] }
 pkgpod-apk = { workspace = true, features = ["testutil"] }
 tempfile.workspace = true
-axum.workspace = true
-tower-http = { workspace = true, features = ["fs"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "fs", "io-util"] }
-futures-util.workspace = true

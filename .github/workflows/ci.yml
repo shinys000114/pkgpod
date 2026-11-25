@@ -5,40 +5,85 @@ on:
   push:
     branches: [master]
   pull_request:
+  # release.yml and publish.yml run these checks first and ship the
+  # packages they tested (the artifact "packages").
+  workflow_call:
+    inputs:
+      version:
+        description: the version to build the packages as (semver)
+        type: string
+        default: 0.0.0-ci
 
 permissions:
   contents: read
+
+# A newer push to the branch or pull request cancels the run before it.
+# The caller's workflow is in the name: publish.yml's run on master must
+# not cancel this workflow's own, nor this one publish's.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The toolchain is pinned, here and in .github/actions/build, so that a
+  # new release's lints do not fail CI on their own.
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99.1"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  # The oldest Rust that builds it: Cargo.toml's rust-version.
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.89"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets --locked
+
+  # Advisories, licences, bans and sources of the dependencies (deny.toml).
+  deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny check advisories licenses bans sources
 
   # Real tools and real apt: dpkg-deb fixtures, gpg signatures, rsync,
   # apt update and download against the server, apt in Debian and Ubuntu
   # containers against a mirror. Missing tools fail instead of skipping.
   e2e:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
       - uses: Swatinem/rust-cache@v2
       - name: Tools
         run: sudo apt-get update -qq && sudo apt-get install -y -qq apt-utils dpkg-dev gpg gpgv zstd rsync
       # Clients in containers: apk 2 (3.22) and apk 3 (3.23), dnf 5
       # (Fedora 43) and dnf 4 (Rocky 9), helm 3 and 4, Maven 3.9, Ruby 3.4,
-      # pacman (Arch), .NET 10, promtool (Prometheus 3.5).
+      # pacman (Arch), .NET 10, promtool (Prometheus 3.5); apt in Debian
+      # and Ubuntu (crates/mirror/tests/apt_mirror.rs).
       - name: Client images
         run: |
           for i in alpine:3.22 alpine:3.23 fedora:43 rockylinux:9 \
@@ -48,7 +93,8 @@ jobs:
                    r-base:latest dart:stable openwrt/rootfs:x86-64-openwrt-24.10 \
                    hashicorp/terraform:1.13 ghcr.io/opentofu/opentofu:1.10 \
                    alpine/ansible:2.21.0 alpine/ansible:2.18.6 python:3.12-slim swift:6.1 \
-                   prom/prometheus:v3.5.0; do
+                   prom/prometheus:v3.5.0 debian:bookworm debian:trixie \
+                   ubuntu:jammy ubuntu:noble; do
             docker pull -q "$i"
           done
       - name: Tests with real apt
@@ -62,14 +108,15 @@ jobs:
   # install tests (arm64 under emulation).
   debian:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/build
         with:
-          version: 0.0.0-ci
+          version: ${{ inputs.version || '0.0.0-ci' }}
       - name: lintian
         run: |
-          lintian --fail-on error dist/pkgpod_0.0.0~ci-1.dsc dist/*.deb
+          lintian --fail-on error dist/*.dsc dist/*.deb
       - uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64
