@@ -95,8 +95,117 @@ impl Proposal {
     }
 }
 
+/// Whether a repository has cleanup rules to set: package versions, or
+/// a files repository's build directories.
+pub fn supported(app: &App, r: &RepoInfo) -> bool {
+    r.kind.versioned()
+        && (r.format == "files" || app.engine.format(&r.format).is_ok_and(|f| f.cleanup()))
+}
+
+/// A files repository's rules: in each of `dirs`, its subdirectories
+/// (one a build) beyond the newest `keep_last`, or in for longer than
+/// `older_days`, go; the newest and any a link points at stay.
+fn propose_files(app: &App, r: &RepoInfo, actor: &str) -> Result<Proposal> {
+    let dirs: Vec<String> = r
+        .setting_list("cleanup_dirs")
+        .into_iter()
+        .map(|d| d.trim_matches('/').to_string())
+        .filter(|d| !d.is_empty())
+        .collect();
+    let n = |k: &str| {
+        r.settings
+            .get(k)
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .max(0)
+    };
+    let (keep_last, older_days) = (n("cleanup_keep_last"), n("cleanup_older_days"));
+    let mut notes = Vec::new();
+    if dirs.is_empty() || (keep_last == 0 && older_days == 0) {
+        notes.push(
+            "no cleanup rules are set (cleanup_dirs, and keep_last or older_days)".to_string(),
+        );
+    }
+    // When each build came in: its newest file.
+    let mut newest: HashMap<(String, String), i64> = HashMap::new();
+    for row in app.engine.catalog_rows(&r.name)? {
+        for d in &dirs {
+            if let Some(rest) = row.path.strip_prefix(&format!("{d}/"))
+                && let Some((child, _)) = rest.split_once('/')
+            {
+                let e = newest.entry((d.clone(), child.to_string())).or_insert(0);
+                *e = (*e).max(row.added);
+            }
+        }
+    }
+    let now = pkgpod_base::now();
+    let mut removals = Vec::new();
+    let plan = app.engine.preview(&r.name, actor, |_, e| {
+        for d in &dirs {
+            let mut builds = Vec::new();
+            let mut linked = std::collections::HashSet::new();
+            for (name, entry) in e.list(d)? {
+                match entry {
+                    // A directory (None: one this edit has open).
+                    None | Some(pkgpod_engine::tree::Entry::Dir { .. }) => builds.push(name),
+                    Some(pkgpod_engine::tree::Entry::Ref { target }) => {
+                        if let Some(child) = target.strip_prefix(&format!("{d}/")) {
+                            linked.insert(child.split('/').next().unwrap_or("").to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let at = |b: &String| newest.get(&(d.clone(), b.clone())).copied().unwrap_or(0);
+            builds.sort_by(|a, b| at(b).cmp(&at(a)).then(b.cmp(a)));
+            for (i, b) in builds.iter().enumerate().skip(1) {
+                if linked.contains(b) {
+                    continue;
+                }
+                let age = now - at(b);
+                let why = if keep_last > 0 && i as i64 >= keep_last {
+                    format!("{i} newer builds (keeping {keep_last})")
+                } else if older_days > 0 && age > older_days * DAY {
+                    format!("in for {} days", age / DAY)
+                } else {
+                    continue;
+                };
+                removals.push(Removal {
+                    name: format!("{d}/{b}"),
+                    version: String::new(),
+                    place: d.clone(),
+                    why,
+                    paths: vec![format!("{d}/{b}")],
+                });
+            }
+        }
+        for rm in &removals {
+            e.remove(&rm.name)?;
+        }
+        Ok(match removals.len() {
+            0 => "cleanup: nothing to remove".to_string(),
+            n => {
+                let mut names: Vec<String> =
+                    removals.iter().take(5).map(|r| r.name.clone()).collect();
+                if n > 5 {
+                    names.push(format!("{} more", n - 5));
+                }
+                format!("cleanup: removed {n} directories ({})", names.join(", "))
+            }
+        })
+    })?;
+    Ok(Proposal {
+        plan,
+        removals,
+        notes,
+    })
+}
+
 /// Works out what the rules remove now, as a plan.
 pub fn propose(app: &App, r: &RepoInfo, actor: &str) -> Result<Proposal> {
+    if r.format == "files" && r.kind.versioned() {
+        return propose_files(app, r, actor);
+    }
     let f = app.engine.format(&r.format)?.clone();
     if !r.kind.versioned() || !f.cleanup() {
         return Err(Error::Invalid(format!(
@@ -230,9 +339,24 @@ pub fn daily(app: &App) -> Vec<Value> {
     };
     let _ = app.stats.flush(app);
     for r in repos {
-        let has = app.engine.format(&r.format).is_ok_and(|f| f.cleanup());
         let rules = Rules::of(&r);
-        if !has || !r.kind.versioned() || !rules.any() {
+        let any = if r.format == "files" {
+            !r.setting_list("cleanup_dirs").is_empty()
+                && (r
+                    .settings
+                    .get("cleanup_keep_last")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0)
+                    > 0
+                    || r.settings
+                        .get("cleanup_older_days")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0)
+                        > 0)
+        } else {
+            rules.any()
+        };
+        if !supported(app, &r) || !any {
             continue;
         }
         let mut report = |state: &str, detail: String| {

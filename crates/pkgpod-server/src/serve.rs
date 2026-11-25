@@ -247,6 +247,53 @@ pub(crate) fn client_note(st: StatusCode, text: String) -> Response {
         .into_response()
 }
 
+/// A path of a files tree with its links followed (a link names another
+/// path of the same tree; at most 8 are followed): the entry it comes to.
+pub(crate) fn resolve_links(
+    objs: &pkgpod_engine::Objects,
+    root: &Digest,
+    path: &str,
+) -> pkgpod_engine::Result<Option<Entry>> {
+    let mut segs: Vec<String> = path
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+    let mut hops = 0;
+    'path: loop {
+        if segs.is_empty() {
+            return objs.resolve(root, "");
+        }
+        let mut at = String::new();
+        for (i, seg) in segs.iter().enumerate() {
+            if !at.is_empty() {
+                at.push('/');
+            }
+            at.push_str(seg);
+            match objs.resolve(root, &at)? {
+                Some(Entry::Ref { target }) => {
+                    hops += 1;
+                    if hops > 8 {
+                        return Ok(None);
+                    }
+                    let mut next: Vec<String> = target
+                        .split('/')
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                        .collect();
+                    next.extend(segs[i + 1..].iter().cloned());
+                    segs = next;
+                    continue 'path;
+                }
+                Some(e) if i + 1 == segs.len() => return Ok(Some(e)),
+                Some(Entry::Dir { .. }) => {}
+                _ => return Ok(None),
+            }
+        }
+        unreachable!("the last segment returns");
+    }
+}
+
 /// Reads (and drops) what a client sends with a request about to be
 /// refused, up to `DRAIN_BODY`: a refusal sent while the client is still
 /// uploading closes the connection under it, and the client then reports
@@ -970,7 +1017,12 @@ async fn get(
         return r;
     }
     let rel_s = rel.join("/");
-    let entry = match app.engine.objects().resolve(&version.served(), &rel_s) {
+    let followed = if s.repo.format == "files" {
+        resolve_links(app.engine.objects(), &version.served(), &rel_s)
+    } else {
+        app.engine.objects().resolve(&version.served(), &rel_s)
+    };
+    let entry = match followed {
         Ok(Some(e)) => e,
         Ok(None) if rel.iter().any(|s| s == "by-hash") => {
             // An index by hash from a version made a moment ago: a client
@@ -1041,6 +1093,27 @@ async fn get(
                             std::time::UNIX_EPOCH + std::time::Duration::from_secs(t.max(0) as u64)
                         }),
                     }),
+                    // A files link, as what it points at.
+                    Entry::Ref { target } if s.repo.format == "files" => {
+                        match resolve_links(app.engine.objects(), &version.served(), target) {
+                            Ok(Some(Entry::Dir { .. })) => Some(ListEntry {
+                                name: name.clone(),
+                                dir: true,
+                                size: Some(0),
+                                modified: None,
+                            }),
+                            Ok(Some(Entry::Blob { size, meta, .. })) => Some(ListEntry {
+                                name: name.clone(),
+                                dir: false,
+                                size: Some(size),
+                                modified: meta.get("mtime").and_then(Value::as_i64).map(|t| {
+                                    std::time::UNIX_EPOCH
+                                        + std::time::Duration::from_secs(t.max(0) as u64)
+                                }),
+                            }),
+                            _ => None,
+                        }
+                    }
                     _ => None,
                 })
                 .collect();

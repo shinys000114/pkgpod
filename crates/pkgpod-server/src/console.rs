@@ -4522,8 +4522,7 @@ async fn settings_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> R
         (vec![], vec![])
     };
     let public = r.setting_bool("public");
-    let cleanup = r.kind.versioned()
-        && app.engine.format(&r.format).is_ok_and(|f| f.cleanup())
+    let cleanup = crate::cleanup::supported(&app, &r)
         && app.auth.role(&v.caller, &repo, public) >= Some(Role::Write);
     render(&SettingsPart {
         cleanup,
