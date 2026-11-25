@@ -3,7 +3,8 @@
 # job logs in with its GitHub OIDC token, so no secret is kept here. It runs
 # only where the repository variables PKGPOD_URL (the server's console and
 # API address) and PKGPOD_REPO (a files repository there) are set, and the
-# server has a trust rule for this repository's publish.yml on master:
+# server has a trust rule for this repository's publish.yml on master
+# (master/latest/ then always serves the newest build):
 #
 #   pkgpod trust add publish --github <owner>/<name> --ref refs/heads/master \
 #     --workflow publish.yml --user <ci user> --repos <PKGPOD_REPO>
@@ -42,5 +43,5 @@ jobs:
           # (one request: a CDN in front may limit its size, 100 MB at
           # Cloudflare's free plan; this is about 66 MiB).
           "$p" upload "${{ vars.PKGPOD_REPO }}" dist/*.deb dist/pkgpod_0.0.0-ci_linux_* \
-            dist/checksums.txt -s "path=$at"
+            dist/checksums.txt -s "path=$at" -s link=master/latest
           echo "published to ${{ vars.PKGPOD_REPO }} at $at" >> "$GITHUB_STEP_SUMMARY"

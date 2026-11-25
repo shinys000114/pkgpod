@@ -195,11 +195,32 @@ impl Format for Files {
         if kind == Kind::Mirror {
             return mirror_settings();
         }
-        vec![Field::bool(
-            "overwrite",
-            false,
-            "An upload may replace a file at the same path with other content (otherwise only with replace).",
-        )]
+        vec![
+            Field::bool(
+                "overwrite",
+                false,
+                "An upload may replace a file at the same path with other content (otherwise only with replace).",
+            ),
+            Field::list(
+                "cleanup_dirs",
+                "Cleanup: directories whose subdirectories are builds (master, nightly): the rules below remove old ones, a whole subdirectory at a time.",
+            ),
+            Field::int(
+                "cleanup_keep_last",
+                0,
+                "Cleanup: keep this many newest subdirectories of each (0: all).",
+            ),
+            Field::int(
+                "cleanup_older_days",
+                0,
+                "Cleanup: remove subdirectories in for longer than this many days (0: never); the newest is always kept, and one a link points at.",
+            ),
+            Field::int(
+                "cleanup_max",
+                50,
+                "Cleanup: the daily run holds a cleanup that would remove more subdirectories than this, for review.",
+            ),
+        ]
     }
 
     fn check_settings(&self, kind: Kind, settings: &Value) -> Result<()> {
@@ -221,19 +242,34 @@ impl Format for Files {
     }
 
     fn ops(&self) -> Vec<OpSpec> {
-        vec![OpSpec {
-            name: "move",
-            help: "Move or rename a file or a directory.",
-            params: vec![
-                Field::text("from", "", "The path now."),
-                Field::text("to", "", "The new path (must not exist)."),
-            ],
-        }]
+        vec![
+            OpSpec {
+                name: "move",
+                help: "Move or rename a file or a directory.",
+                params: vec![
+                    Field::text("from", "", "The path now."),
+                    Field::text("to", "", "The new path (must not exist)."),
+                ],
+            },
+            OpSpec {
+                name: "link",
+                help: "A link: a path that serves another of this repository (master/latest for the newest build); an empty to removes it.",
+                params: vec![
+                    Field::text("path", "", "The link's path."),
+                    Field::text(
+                        "to",
+                        "",
+                        "The file or directory it serves; empty: remove the link.",
+                    ),
+                ],
+            },
+        ]
     }
 
     fn op(&self, _cx: &Cx, op: &str, p: &Value, e: &mut Edit) -> Result<String> {
         match op {
             "move" => self.move_op(p, e),
+            "link" => link(e, str_of(p, "path"), str_of(p, "to")),
             _ => Err(Error::Invalid(format!(
                 "files repositories have no operation {op}"
             ))),
@@ -251,6 +287,11 @@ impl Format for Files {
                 "replace",
                 false,
                 "Replace a file at the same path with other content.",
+            ),
+            Field::text(
+                "link",
+                "",
+                "Also point this link at what is uploaded (its directory, for a path ending in /): master/latest.",
             ),
         ]
     }
@@ -322,14 +363,38 @@ impl Format for Files {
                 prefix.push('/');
             }
             prefix.push_str(seg);
-            if let Some(Entry::Blob { .. }) = e.get(&prefix)? {
-                return Err(Error::Conflict(format!(
-                    "{prefix} is a file, not a directory"
-                )));
+            match e.get(&prefix)? {
+                Some(Entry::Blob { .. }) => {
+                    return Err(Error::Conflict(format!(
+                        "{prefix} is a file, not a directory"
+                    )));
+                }
+                Some(Entry::Ref { target }) => {
+                    return Err(Error::Conflict(format!(
+                        "{prefix} is a link (to {target}): upload to where it points"
+                    )));
+                }
+                _ => {}
             }
         }
         e.put(&t, Entry::blob(up.sha256, up.size, json!({"mtime": mtime})))?;
-        Ok(format!("added {t}"))
+        let to_link = str_of(p, "link");
+        if to_link.trim().is_empty() {
+            return Ok(format!("added {t}"));
+        }
+        // The upload's directory when it named one, else the file.
+        let path = str_of(p, "path").trim_start_matches('/');
+        let target = if path.ends_with('/') {
+            path.trim_end_matches('/')
+        } else {
+            t.as_str()
+        };
+        if target.is_empty() {
+            return Err(Error::Invalid(
+                "a link points at a directory or a file, not the top".into(),
+            ));
+        }
+        Ok(format!("added {t}; {}", link(e, to_link, target)?))
     }
 
     fn check_copy(&self, e: &mut Edit, paths: &[(String, Entry)]) -> Result<()> {
@@ -355,6 +420,49 @@ impl Format for Files {
             extra: path.to_string(),
         })
     }
+}
+
+/// Points the link at `path` to `to` (a path of the same tree), or
+/// removes it when `to` is empty. Only a link (or nothing) is at `path`.
+fn link(e: &mut Edit, path: &str, to: &str) -> Result<String> {
+    let path = path.trim().trim_matches('/');
+    let to = to.trim().trim_matches('/');
+    check_path(path)?;
+    match e.get(path)? {
+        Some(Entry::Ref { .. }) | None => {}
+        Some(_) => {
+            return Err(Error::Conflict(format!(
+                "{path} is a file or a directory, not a link"
+            )));
+        }
+    }
+    if to.is_empty() {
+        return if e.remove(path)? {
+            Ok(format!("removed link {path}"))
+        } else {
+            Err(Error::NotFound(format!("no link {path}")))
+        };
+    }
+    check_path(to)?;
+    if to == path || to.starts_with(&format!("{path}/")) {
+        return Err(Error::Invalid(format!("{path} cannot point into itself")));
+    }
+    match e.get(to)? {
+        Some(Entry::Blob { .. } | Entry::Dir { .. }) => {}
+        Some(Entry::Ref { .. }) => {
+            return Err(Error::Invalid(format!(
+                "{to} is a link itself: point at what it points at"
+            )));
+        }
+        _ => return Err(Error::NotFound(format!("{to} is not there"))),
+    }
+    e.put(
+        path,
+        Entry::Ref {
+            target: to.to_string(),
+        },
+    )?;
+    Ok(format!("linked {path} to {to}"))
 }
 
 #[cfg(test)]

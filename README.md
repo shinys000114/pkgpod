@@ -82,7 +82,9 @@ Status: in development, nothing released.
   answering for it.
 - Cleanup rules (keep the newest N, pre-releases after N days, not
   downloaded for N days) for Debian, npm, Cargo, Helm and Go
-  repositories, previewed as a plan and run daily.
+  repositories, and for build directories in files repositories,
+  previewed as a plan and run daily. Links in files repositories give
+  stable addresses (`master/latest`).
 
 ## Quick start
 

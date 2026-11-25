@@ -5659,6 +5659,130 @@ fn files_hosted() {
     );
 }
 
+/// Links in a files repository (a stable address for the newest build)
+/// and cleanup of old build directories.
+#[test]
+fn files_links_and_cleanup() {
+    let s = Server::start();
+    s.cli(&["repo", "create", "b", "-f", "files", "-s", "public=true"])
+        .unwrap();
+    let w = s.dir.path().join("w");
+    std::fs::create_dir_all(&w).unwrap();
+    let build = |run: &str| {
+        let (a, sums) = (w.join("app.bin"), w.join("SHA256SUMS"));
+        std::fs::write(&a, format!("app {run}")).unwrap();
+        std::fs::write(&sums, format!("sums {run}")).unwrap();
+        let out = s
+            .cli(&[
+                "upload",
+                "b",
+                a.to_str().unwrap(),
+                sums.to_str().unwrap(),
+                "-s",
+                &format!("path=master/{run}/"),
+                "-s",
+                "link=master/latest",
+            ])
+            .unwrap();
+        assert!(out.contains("linked master/latest to master/"), "{out}");
+    };
+    let n0 = s.json(&["versions", "b"]).as_array().unwrap().len();
+    build("r1");
+    assert_eq!(s.json(&["versions", "b"]).as_array().unwrap().len(), n0 + 1);
+    // The link serves what it points at, files and listings.
+    assert_eq!(get(&s.url("/b/master/latest/app.bin"), None).1, "app r1");
+    for r in ["r2", "r3", "r4"] {
+        build(r);
+    }
+    assert_eq!(get(&s.url("/b/master/latest/app.bin"), None).1, "app r4");
+    let (st, l) = get(&s.url("/b/master/"), None);
+    assert_eq!(st, 200);
+    assert!(
+        l.contains(r#"href="latest/""#) && l.contains(r#"href="r1/""#),
+        "{l}"
+    );
+    let (_, l) = get(&s.url("/b/master/latest/"), None);
+    assert!(l.contains(r#"href="SHA256SUMS""#), "{l}");
+    let r = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap()
+        .get(s.url("/b/master/latest"))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 308);
+    // Another link by hand; nothing is uploaded through a link.
+    s.cli(&[
+        "op",
+        "b",
+        "link",
+        "path=master/stable",
+        "to=master/r1",
+        "-y",
+    ])
+    .unwrap();
+    assert_eq!(get(&s.url("/b/master/stable/app.bin"), None).1, "app r1");
+    let e = s
+        .cli(&[
+            "upload",
+            "b",
+            w.join("app.bin").to_str().unwrap(),
+            "-s",
+            "path=master/latest/",
+        ])
+        .unwrap_err();
+    assert!(e.contains("is a link"), "{e}");
+    let e = s
+        .cli(&["op", "b", "link", "path=master/r2", "to=master/r1", "-y"])
+        .unwrap_err();
+    assert!(e.contains("not a link"), "{e}");
+    let e = s
+        .cli(&["op", "b", "link", "path=x", "to=nowhere", "-y"])
+        .unwrap_err();
+    assert!(e.contains("is not there"), "{e}");
+
+    // Cleanup keeps the newest two and what a link points at.
+    s.cli(&[
+        "repo",
+        "set",
+        "b",
+        "cleanup_dirs=master",
+        "cleanup_keep_last=2",
+    ])
+    .unwrap();
+    let plan = s.cli(&["cleanup", "b"]).unwrap();
+    assert!(
+        plan.contains("master/r2") && !plan.contains("master/r1") && !plan.contains("master/r3"),
+        "{plan}"
+    );
+    s.cli(&["cleanup", "b", "-y"]).unwrap();
+    assert_eq!(get(&s.url("/b/master/r2/app.bin"), None).0, 404);
+    assert_eq!(get(&s.url("/b/master/r3/app.bin"), None).1, "app r3");
+    assert_eq!(get(&s.url("/b/master/stable/app.bin"), None).1, "app r1");
+    assert_eq!(get(&s.url("/b/master/latest/app.bin"), None).1, "app r4");
+    // By age: older than a day goes, the newest stays whatever its age.
+    sql(
+        &s,
+        "UPDATE catalog SET added = added - 3 * 86400 WHERE path LIKE 'master/r3/%' OR path LIKE 'master/r4/%'",
+    );
+    s.cli(&[
+        "repo",
+        "set",
+        "b",
+        "cleanup_keep_last=0",
+        "cleanup_older_days=1",
+    ])
+    .unwrap();
+    s.cli(&["cleanup", "b", "-y"]).unwrap();
+    assert_eq!(get(&s.url("/b/master/r3/app.bin"), None).0, 404);
+    assert_eq!(get(&s.url("/b/master/latest/app.bin"), None).1, "app r4");
+    // A removed link stops serving; its target stays.
+    s.cli(&["op", "b", "link", "path=master/stable", "to=", "-y"])
+        .unwrap();
+    assert_eq!(get(&s.url("/b/master/stable/app.bin"), None).0, 404);
+    assert_eq!(get(&s.url("/b/master/r1/app.bin"), None).1, "app r1");
+}
+
 /// A fake OIDC issuer on the loopback: its discovery document, its keys,
 /// and GitHub Actions' token endpoint (`/gha`, which wants bearer
 /// `ci-secret` and makes a token with `claims` for the audience asked).

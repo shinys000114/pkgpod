@@ -77,6 +77,46 @@ the `overwrite` setting allows it. A file is never put over a
 directory, nor under a file; a `?path=` that differs from the URL is
 refused.
 
+## Links
+
+A link is a path that serves another path of the same repository, as
+a symbolic link would: `master/latest` for the newest build, `stable`
+for a release. Downloads and listings through it give what it points
+at; nothing is uploaded through a link.
+
+```sh
+pkgpod upload tools dist/* -s path=master/$SHA/ -s link=master/latest   # upload, then point the link
+pkgpod op tools link path=stable to=tool/1.0 -y                          # by hand
+pkgpod op tools link path=stable to= -y                                  # remove it
+```
+
+`link=` on an upload points the link at the upload's directory (for a
+`path` ending in `/`) or at the file. A link is part of the version,
+like a file: a labelled version keeps the links it had.
+
+## Cleanup
+
+Builds that pile up (a directory per CI run) are removed by the
+cleanup rules, a whole directory at a time:
+
+| Setting | Meaning |
+| --- | --- |
+| `cleanup_dirs` | Directories whose subdirectories are builds: `master`, `nightly`. |
+| `cleanup_keep_last` | Keep this many newest subdirectories of each (0: all). |
+| `cleanup_older_days` | Remove subdirectories in for longer than this (0: never). |
+| `cleanup_max` | The daily run holds a cleanup that would remove more than this, for review (default 50). |
+
+A build's age is when its newest file came in. The newest build of
+each directory is always kept, and so is one a link in the directory
+points at (`master/latest`). Removing makes a version, so a rollback
+brings a build back while retention keeps the version before.
+
+```sh
+pkgpod repo set tools cleanup_dirs=master,nightly cleanup_keep_last=20
+pkgpod cleanup tools        # what would go
+pkgpod cleanup tools -y     # now; otherwise daily
+```
+
 ## Operations
 
 | Operation | Parameters | What |
