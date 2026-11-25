@@ -26,7 +26,7 @@ pub(crate) async fn search_rows(State(app): St, v: Viewer, Query(q): Query<QQ>) 
     }
     let limit = 300;
     match json_of(
-        api::search(
+        api::search_list(
             State(app),
             v.who(),
             Query(api::SearchQ {

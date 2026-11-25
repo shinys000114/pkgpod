@@ -184,12 +184,17 @@ impl Table {
             .map(|r| path(std::slice::from_ref(r)))
     }
 
-    /// Another repository already has this address.
+    /// Another repository already has this address (a host without a
+    /// port is that host on every port).
     pub fn taken(&self, url: &str, by_other_than: &str) -> Option<String> {
         let (_, host, prefix) = parse_url(url).ok()?;
         self.routes
             .iter()
-            .find(|r| r.host == host && r.prefix == prefix && r.repo != by_other_than)
+            .find(|r| {
+                (host_matches(&r.host, &host) || host_matches(&host, &r.host))
+                    && r.prefix == prefix
+                    && r.repo != by_other_than
+            })
             .map(|r| r.repo.clone())
     }
 

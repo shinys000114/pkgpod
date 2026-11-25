@@ -188,6 +188,9 @@ pub(crate) enum Cmd {
         query: String,
         #[arg(long, short)]
         repo: Option<String>,
+        /// At most this many (the server's default: 200).
+        #[arg(long)]
+        limit: Option<usize>,
     },
     /// Apply a plan shown earlier.
     Apply { plan: String },
@@ -291,6 +294,12 @@ pub(crate) enum Cmd {
         /// Only syncs or imports (server admins).
         #[arg(long)]
         kind: Option<String>,
+        /// At most this many, the newest first.
+        #[arg(short = 'n', long)]
+        limit: Option<usize>,
+        /// Only jobs older than this one (the next page).
+        #[arg(long)]
+        before: Option<i64>,
     },
     /// The server's recent log, since it started (server admins).
     Logs {

@@ -807,6 +807,635 @@ fn rights_and_errors() {
     assert_eq!(r.status().as_u16(), 404);
 }
 
+/// Who calls the API in a test: a user and password, or a token.
+#[derive(Clone, Copy)]
+enum As<'a> {
+    User(&'a str, &'a str),
+    Token(&'a str),
+}
+
+/// An API request: its status, JSON reply (null for none) and headers.
+fn call(
+    s: &Server,
+    m: reqwest::Method,
+    path: &str,
+    who: As,
+    body: Value,
+) -> (u16, Value, reqwest::header::HeaderMap) {
+    let r = reqwest::blocking::Client::new()
+        .request(m, format!("{}{path}", s.api))
+        .json(&body);
+    let r = match who {
+        As::User(u, p) => r.basic_auth(u, Some(p)),
+        As::Token(t) => r.bearer_auth(t),
+    };
+    let r = r.send().unwrap();
+    let (st, h) = (r.status().as_u16(), r.headers().clone());
+    (st, r.json().unwrap_or(Value::Null), h)
+}
+
+/// A repository's admin, a limited token and a caller without rights
+/// keep to their own: no addresses of their choosing, no token that
+/// outlives the one making it, no other tokens, no writes from another
+/// site, no names they may not read. Failed logins are audited.
+#[test]
+fn repository_admins_and_tokens_keep_to_their_rights() {
+    use reqwest::Method;
+    let s = Server::start();
+    s.cli(&["repo", "create", "team", "-f", "files", "-s", "public=true"])
+        .unwrap();
+    s.cli(&["repo", "create", "bobs", "-f", "files"]).unwrap();
+    s.cli_in(&["user", "add", "bob", "--password-stdin"], "bob-password")
+        .unwrap();
+    s.cli(&["grant", "set", "bobs", "user:bob", "admin"])
+        .unwrap();
+    let bob = As::User("bob", "bob-password");
+    let patch = |who: As, settings: Value| {
+        let (st, v, _) = call(
+            &s,
+            Method::PATCH,
+            "/api/v1/repos/bobs",
+            who,
+            json!({ "settings": settings }),
+        );
+        (st, v)
+    };
+    // Its settings, and its addresses sent back as they are (the console
+    // sends every field), but no address of its own: one could take over
+    // another repository's paths.
+    let (st, v) = patch(bob, json!({"urls": s.url("/team/")}));
+    assert_eq!(st, 403, "{v}");
+    s.cli(&["repo", "create", "hidden", "-f", "files"]).unwrap();
+    s.cli(&["repo", "set", "hidden", "urls=http://secret.example.org/h/"])
+        .unwrap();
+    let (st, v) = patch(bob, json!({"urls": "http://secret.example.org/h/"}));
+    assert_eq!(st, 403, "{v}");
+    assert!(!v.to_string().contains("hidden"), "{v}");
+    s.cli(&["repo", "set", "bobs", "urls=http://pkg.example.org:8080/b/"])
+        .unwrap();
+    let (st, v) = patch(
+        bob,
+        json!({"urls": "http://pkg.example.org:8080/b/", "description": "Bob's"}),
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["settings"]["description"], "Bob's", "{v}");
+    // An address without a port is that address on every port.
+    let e = s
+        .cli(&["repo", "set", "team", "urls=http://pkg.example.org/b/"])
+        .unwrap_err();
+    assert!(e.contains("already the address of bobs"), "{e}");
+
+    // Writes from another site (a browser sends its cached credentials
+    // with them) are refused; from the same origin, and reads, are not.
+    let c = reqwest::blocking::Client::new();
+    let from = |m: Method, origin: Option<&str>, site: Option<&str>| {
+        let mut r = c
+            .request(m, format!("{}/api/v1/repos/bobs", s.api))
+            .basic_auth("bob", Some("bob-password"))
+            .json(&json!({"settings": {"description": "Bob's"}}));
+        if let Some(o) = origin {
+            r = r.header("origin", o);
+        }
+        if let Some(x) = site {
+            r = r.header("sec-fetch-site", x);
+        }
+        r.send().unwrap().status().as_u16()
+    };
+    assert_eq!(from(Method::PATCH, Some("https://evil.example"), None), 403);
+    assert_eq!(from(Method::PATCH, None, Some("cross-site")), 403);
+    assert_eq!(
+        from(Method::PATCH, Some(s.api.as_str()), Some("same-origin")),
+        200
+    );
+    assert_eq!(from(Method::GET, Some("https://evil.example"), None), 200);
+
+    // Tokens: a limited one neither lists nor deletes its user's others;
+    // none makes a token that outlives it, nor one named as trust rules
+    // name theirs.
+    let mk = |who: As, body: Value| {
+        let (st, v, _) = call(&s, Method::POST, "/api/v1/tokens", who, body);
+        assert_eq!(st, 201, "{v}");
+        v
+    };
+    let w = mk(bob, json!({"name": "w", "write": true}));
+    let ro = mk(bob, json!({"name": "ro", "repos": ["bobs"]}));
+    let ro = As::Token(ro["token"].as_str().unwrap());
+    assert_eq!(
+        call(&s, Method::GET, "/api/v1/tokens", ro, Value::Null).0,
+        403
+    );
+    let wid = w["info"]["id"].as_i64().unwrap();
+    let del = format!("/api/v1/tokens/{wid}");
+    assert_eq!(call(&s, Method::DELETE, &del, ro, Value::Null).0, 403);
+    let short = mk(
+        bob,
+        json!({"name": "short", "write": true, "expires_days": 1}),
+    );
+    let until = short["info"]["expires"].as_i64().unwrap();
+    let short_tok = As::Token(short["token"].as_str().unwrap());
+    for days in [None, Some(30)] {
+        let mut b = json!({"name": "child", "write": true});
+        if let Some(d) = days {
+            b["expires_days"] = json!(d);
+        }
+        let v = mk(short_tok, b);
+        assert!(
+            v["info"]["expires"].as_i64().is_some_and(|e| e <= until),
+            "{v}"
+        );
+    }
+    for name in ["trust:mine x", "Trust:mine"] {
+        let (code, v, _) = call(
+            &s,
+            Method::POST,
+            "/api/v1/tokens",
+            bob,
+            json!({"name": name}),
+        );
+        assert_eq!(code, 400, "{name}: {v}");
+    }
+    // A password that reads as a token is refused.
+    let e = s
+        .cli_in(
+            &["user", "add", "tok", "--password-stdin"],
+            "pkgpod_0123456789",
+        )
+        .unwrap_err();
+    assert!(e.contains("pkgpod_"), "{e}");
+
+    // Names: teams of others; a cargo registry's owners below write; a
+    // webhook or trust rule named in a form without the right to it.
+    s.cli(&["team", "add", "ops"]).unwrap();
+    s.cli(&["team", "add", "secret"]).unwrap();
+    s.cli(&["team", "join", "ops", "bob"]).unwrap();
+    let (_, v, _) = call(&s, Method::GET, "/api/v1/teams", bob, Value::Null);
+    assert_eq!(v.as_array().map(Vec::len), Some(1), "{v}");
+    assert_eq!(v[0]["name"], "ops", "{v}");
+    s.cli(&[
+        "webhook",
+        "add",
+        "secrethook",
+        "https://hooks.example.invalid/x",
+        "--events",
+        "version",
+    ])
+    .unwrap();
+    s.cli(&[
+        "trust",
+        "add",
+        "secretrule",
+        "--github",
+        "org/app",
+        "--repos",
+        "team",
+    ])
+    .unwrap();
+    let (cb, sid, csrf) = console_login(&s, "bob", "bob-password");
+    let post = |p: &str, form: &[(&str, &str)]| {
+        cb.post(format!("{}{p}", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .header("x-csrf-token", &csrf)
+            .form(form)
+            .send()
+            .unwrap()
+            .text()
+            .unwrap()
+    };
+    let t = post(
+        "/c/webhooks",
+        &[
+            ("new", "1"),
+            ("name", "secrethook"),
+            ("url", "https://other.example.invalid/"),
+            ("events", "version"),
+            ("repos", "bobs"),
+        ],
+    );
+    assert!(
+        !t.contains("there is a webhook") && t.contains("server admins only"),
+        "{t}"
+    );
+    let t = post(
+        "/c/trust",
+        &[
+            ("new", "1"),
+            ("name", "secretrule"),
+            ("github", "org/app"),
+            ("repos", "team"),
+        ],
+    );
+    assert!(
+        !t.contains("there is a trust rule") && t.contains("repositories you admin"),
+        "{t}"
+    );
+    if have("cargo") {
+        s.cli(&[
+            "repo",
+            "create",
+            "crates",
+            "-f",
+            "cargo",
+            "-s",
+            "public=true",
+        ])
+        .unwrap();
+        s.cli(&["grant", "set", "crates", "user:bob", "write"])
+            .unwrap();
+        let tok = s
+            .cli(&["token", "create", "ci", "--repos", "crates", "--write"])
+            .unwrap()
+            .trim()
+            .to_string();
+        let home = s.dir.path().join("cargohome");
+        std::fs::create_dir_all(home.join("cargo")).unwrap();
+        std::fs::write(
+            home.join("cargo/config.toml"),
+            format!(
+                "[registries.crates]\nindex = \"sparse+{}index/\"\n\n\
+                 [registry]\nglobal-credential-providers = [\"cargo:token\"]\n",
+                s.url("/crates/")
+            ),
+        )
+        .unwrap();
+        let src = cargo_crate(
+            &s.dir.path().join("cargosrc"),
+            "owned",
+            "0.1.0",
+            "",
+            ("lib.rs", ""),
+        );
+        let (ok, out) = cargo(
+            &home,
+            &src,
+            &["publish", "--registry", "crates", "--no-verify"],
+            &tok,
+        );
+        assert!(ok, "{out}");
+        let owners = |auth: Option<&str>| {
+            let mut r = c.get(s.url("/crates/api/v1/crates/owned/owners"));
+            if let Some(t) = auth {
+                r = r.header("authorization", t);
+            }
+            r.send().unwrap().text().unwrap()
+        };
+        assert!(!owners(None).contains("user:bob"), "{}", owners(None));
+        assert!(
+            owners(Some(&tok)).contains("user:bob"),
+            "{}",
+            owners(Some(&tok))
+        );
+    }
+
+    // Grants on every repository are listed as they are given.
+    s.cli(&["grant", "set", "*", "team:ops", "read"]).unwrap();
+    let out = s.cli(&["grant", "list", "*"]).unwrap();
+    assert!(out.contains("team:ops"), "{out}");
+
+    // Failed logins: an audit row a user and place, counting them.
+    let wrong = As::User("bob", "wrong-password");
+    for _ in 0..2 {
+        assert_eq!(
+            call(&s, Method::GET, "/api/v1/repos", wrong, Value::Null).0,
+            401
+        );
+    }
+    let admin = std::fs::read_to_string(s.dir.path().join("data/admin-password")).unwrap();
+    let (_, v, _) = call(
+        &s,
+        Method::GET,
+        "/api/v1/audit",
+        As::User("admin", admin.trim()),
+        Value::Null,
+    );
+    let failed: Vec<&Value> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["action"] == "login failed")
+        .collect();
+    assert_eq!(failed.len(), 1, "{v}");
+    assert_eq!(failed[0]["target"], "bob", "{v}");
+    assert_eq!(failed[0]["detail"], "api, 2 times", "{v}");
+}
+
+/// What would break something is refused, or done whole: a signing key
+/// replaced or deleted while repositories use it, settings changed in
+/// part, a listener on an address in use. A change taken back, or one
+/// that changes nothing, is not audited; lists say when they were cut;
+/// jobs page back; a proxy forgets what its old upstream gave.
+#[test]
+fn changes_that_would_break_something() {
+    use reqwest::Method;
+    let s = Server::start();
+    let pw = std::fs::read_to_string(s.dir.path().join("data/admin-password")).unwrap();
+    let admin = As::User("admin", pw.trim());
+    let get_as = |p: &str| call(&s, Method::GET, p, admin, Value::Null);
+    let audited = |target: &str, action: &str| -> Vec<String> {
+        get_as("/api/v1/audit")
+            .1
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["target"] == target && r["action"] == action)
+            .map(|r| r["detail"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // Taken back (its republish failed: no key to sign with), or with
+    // nothing changed: not audited.
+    s.cli(&["repo", "create", "unsigned", "-s", "sign=false"])
+        .unwrap();
+    s.cli(&["op", "unsigned", "dist-set", "name=x", "-y"])
+        .unwrap();
+    assert!(s.cli(&["repo", "set", "unsigned", "sign=true"]).is_err());
+    s.cli(&["repo", "set", "unsigned", "description=D"])
+        .unwrap();
+    s.cli(&["repo", "set", "unsigned", "description=D"])
+        .unwrap();
+    let a = audited("unsigned", "repo settings");
+    assert_eq!(a.len(), 1, "{a:?}");
+    assert!(a[0].contains("description"), "{a:?}");
+
+    // A key is not replaced by a key of the same name unless asked; one
+    // whose secret key file is gone is imported again.
+    let fpr = |name: &str| {
+        s.json(&["key", "list"])
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|k| k["name"] == name)
+            .map(|k| k["fingerprint"].as_str().unwrap().to_string())
+    };
+    s.cli(&["key", "generate", "main", "A <a@example.invalid>"])
+        .unwrap();
+    let first = fpr("main");
+    let e = s
+        .cli(&["key", "generate", "main", "B <b@example.invalid>"])
+        .unwrap_err();
+    assert!(e.contains("exists") && e.contains("--replace"), "{e}");
+    assert_eq!(fpr("main"), first);
+    let other = pkgpod_deb::testutil::TestKey::new().unwrap();
+    let file = s.dir.path().join("other.asc");
+    std::fs::write(&file, other.key.armored_secret().unwrap()).unwrap();
+    let file = file.to_str().unwrap();
+    assert!(s.cli(&["key", "import", "main", file]).is_err());
+    assert_eq!(fpr("main"), first);
+    s.cli(&["key", "import", "main", file, "--replace"])
+        .unwrap();
+    assert_eq!(fpr("main").as_deref(), Some(other.fpr.as_str()));
+    std::fs::remove_file(s.dir.path().join("data/keys/main.asc")).unwrap();
+    s.cli(&["key", "import", "main", file]).unwrap();
+    s.cli(&[
+        "key",
+        "generate",
+        "main",
+        "C <c@example.invalid>",
+        "--replace",
+    ])
+    .unwrap();
+    assert_ne!(fpr("main").as_deref(), Some(other.fpr.as_str()));
+
+    // A key a repository names, or the default a signing repository
+    // relies on, is deleted only when forced.
+    s.cli(&["key", "generate", "second", "S <s@example.invalid>"])
+        .unwrap();
+    s.cli(&["repo", "create", "named", "-s", "key=second"])
+        .unwrap();
+    let e = s.cli(&["key", "delete", "second"]).unwrap_err();
+    assert!(
+        e.starts_with("exit status: 3") && e.contains("named"),
+        "{e}"
+    );
+    s.cli(&["key", "delete", "second", "--force"]).unwrap();
+    s.cli(&["repo", "create", "signs"]).unwrap();
+    let e = s.cli(&["key", "delete", "main"]).unwrap_err();
+    assert!(
+        e.contains("signs") && !e.contains("unsigned") && !e.contains("named"),
+        "{e}"
+    );
+    assert!(fpr("main").is_some());
+
+    // Settings change whole, or not at all.
+    let e = s
+        .cli(&[
+            "settings",
+            "--downloads-days",
+            "5",
+            "--syncs-per-storage",
+            "100",
+        ])
+        .unwrap_err();
+    assert!(e.contains("syncs_per_storage"), "{e}");
+    assert_eq!(s.json(&["settings"])["downloads_days"], 365);
+
+    // An address in use: the management listener's, another listener's;
+    // a listener set again where it is, as it is.
+    let mport = s.api.rsplit(':').next().unwrap().to_string();
+    let e = s
+        .cli(&["listener", "set", "extra", &format!("127.0.0.1:{mport}")])
+        .unwrap_err();
+    assert!(e.starts_with("exit status: 3"), "{e}");
+    let here = format!("127.0.0.1:{}", s.serve_port);
+    let e = s.cli(&["listener", "set", "extra", &here]).unwrap_err();
+    assert!(e.contains("default"), "{e}");
+    s.cli(&["listener", "set", "default", &here]).unwrap();
+
+    // Lists cut at their limit say so.
+    s.cli(&["repo", "create", "many", "-f", "files"]).unwrap();
+    for n in ["one", "two", "three"] {
+        let f = s.dir.path().join(format!("{n}.txt"));
+        std::fs::write(&f, n).unwrap();
+        s.cli(&[
+            "upload",
+            "many",
+            f.to_str().unwrap(),
+            "-s",
+            &format!("path=lib/{n}.txt"),
+        ])
+        .unwrap();
+    }
+    let (st, v, h) = get_as("/api/v1/repos/many/packages?limit=2");
+    assert_eq!((st, v.as_array().map(Vec::len)), (200, Some(2)), "{v}");
+    assert_eq!(h.get("x-pkgpod-more").unwrap(), "true");
+    let (_, v, h) = get_as("/api/v1/repos/many/packages?limit=3");
+    assert_eq!(v.as_array().map(Vec::len), Some(3), "{v}");
+    assert!(h.get("x-pkgpod-more").is_none());
+    let (_, v, h) = get_as("/api/v1/search?q=.txt&limit=2");
+    assert_eq!(v.as_array().map(Vec::len), Some(2), "{v}");
+    assert_eq!(h.get("x-pkgpod-more").unwrap(), "true");
+    let out = s
+        .cli(&["repo", "packages", "many", "--limit", "2"])
+        .unwrap();
+    assert!(out.contains("more"), "{out}");
+    let out = s.cli(&["search", ".txt", "--limit", "2"]).unwrap();
+    assert!(out.contains("more"), "{out}");
+    let out = s.cli(&["search", ".txt"]).unwrap();
+    assert!(!out.contains("more"), "{out}");
+
+    // Jobs: paged back, by a state and kind that are checked.
+    s.cli(&[
+        "repo",
+        "create",
+        "mir",
+        "-k",
+        "mirror",
+        "-s",
+        "source=http://127.0.0.1:9/",
+        "-s",
+        "dists=x",
+    ])
+    .unwrap();
+    for _ in 0..2 {
+        assert!(s.cli(&["sync", "mir", "--wait"]).is_err());
+    }
+    let ids = |v: &Value| -> Vec<i64> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|j| j["id"].as_i64().unwrap())
+            .collect()
+    };
+    let all = ids(&s.json(&["jobs", "mir"]));
+    assert_eq!(all.len(), 2, "{all:?}");
+    // Its next sync, as the API gives times: unix seconds.
+    s.cli(&["repo", "set", "mir", "schedule=0 3 * * *"])
+        .unwrap();
+    let st = s.json(&["status", "mir"]);
+    assert!(st["sync"]["next"].is_i64(), "{st}");
+    let (st, v, _) = get_as(&format!("/api/v1/jobs?before={}", all[0]));
+    assert_eq!((st, ids(&v)), (200, vec![all[1]]), "{v}");
+    for q in ["state=done", "kind=build"] {
+        let (st, v, _) = get_as(&format!("/api/v1/jobs?{q}"));
+        assert_eq!(st, 400, "{q}: {v}");
+    }
+    let (_, v, _) = get_as(&format!("/api/v1/repos/mir/jobs?limit=1&before={}", all[0]));
+    assert_eq!(ids(&v), vec![all[1]], "{v}");
+    assert_eq!(ids(&s.json(&["jobs", "mir", "-n", "1"])), vec![all[0]]);
+    let before = all[0].to_string();
+    assert_eq!(ids(&s.json(&["jobs", "--before", &before])), vec![all[1]]);
+
+    // A proxy whose upstream changes forgets what the old one gave.
+    for (r, text) in [("up1", "one"), ("up2", "two")] {
+        s.cli(&["repo", "create", r, "-f", "files", "-s", "public=true"])
+            .unwrap();
+        for name in ["a.txt", "b.txt"] {
+            let f = s.dir.path().join(format!("{r}-{name}"));
+            std::fs::write(&f, text).unwrap();
+            s.cli(&[
+                "upload",
+                r,
+                f.to_str().unwrap(),
+                "-s",
+                &format!("path={name}"),
+            ])
+            .unwrap();
+        }
+    }
+    s.cli(&[
+        "repo",
+        "create",
+        "p",
+        "-f",
+        "files",
+        "-k",
+        "proxy",
+        "-s",
+        &format!("upstream={}", s.url("/up1/")),
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    assert_eq!(get(&s.url("/p/a.txt"), None).1, "one");
+    assert_eq!(get(&s.url("/p/b.txt"), None).1, "one");
+    let (_, v, _) = get_as("/api/v1/repos/p/cache?limit=1");
+    assert_eq!(v["rows"].as_array().map(Vec::len), Some(1), "{v}");
+    assert_eq!(v["more"], true, "{v}");
+    s.cli(&["repo", "set", "p", &format!("upstream={}", s.url("/up2/"))])
+        .unwrap();
+    assert_eq!(get(&s.url("/p/a.txt"), None).1, "two");
+}
+
+/// Tokens a trust rule gave act within it: they make no token of their
+/// own, and go when the rule is saved again or removed. An OIDC token is
+/// exchanged once, however its signature is written.
+#[test]
+fn trust_tokens_go_with_their_rule() {
+    let s = Server::start();
+    s.cli(&["repo", "create", "out", "-f", "files"]).unwrap();
+    s.cli_in(&["user", "add", "ci", "--password-stdin"], "ci-password-1")
+        .unwrap();
+    s.cli(&["grant", "set", "out", "user:ci", "write"]).unwrap();
+    let (issuer, iss) = fake_issuer(json!({}));
+    let add = || {
+        s.cli(&[
+            "trust",
+            "add",
+            "ci-rule",
+            "--issuer",
+            &issuer,
+            "--claim",
+            "repository=org/app",
+            "--user",
+            "ci",
+            "--repos",
+            "out",
+        ])
+        .unwrap()
+    };
+    add();
+    let c = reqwest::blocking::Client::new();
+    let exchange = |t: &str| {
+        let r = c
+            .post(format!("{}/api/v1/oidc/token", s.api))
+            .json(&json!({ "token": t }))
+            .send()
+            .unwrap();
+        (
+            r.status().as_u16(),
+            r.json::<Value>().unwrap_or(Value::Null),
+        )
+    };
+    let put = |tok: &str, path: &str| {
+        c.put(s.url(&format!("/out/{path}")))
+            .basic_auth("token", Some(tok))
+            .body(path.to_string())
+            .send()
+            .unwrap()
+            .status()
+            .as_u16()
+    };
+    let t = iss.token(json!({"aud": "pkgpod", "repository": "org/app"}));
+    let (st, v) = exchange(&t);
+    assert_eq!(st, 200, "{v}");
+    let tok = v["token"].as_str().unwrap().to_string();
+    let (st, v) = exchange(&format!("{t}="));
+    assert_eq!(st, 403, "{v}");
+    // Claims of many-byte characters past the token name's length.
+    let long = format!("x{}", "é".repeat(120));
+    let (st, v) =
+        exchange(&iss.token(json!({"aud": "pkgpod", "repository": "org/app", "ref": long})));
+    assert_eq!(st, 200, "{v}");
+    // It writes, but makes no token (that one would outlast it, and
+    // could change trust rules).
+    assert_eq!(put(&tok, "one.txt"), 201);
+    let r = c
+        .post(format!("{}/api/v1/tokens", s.api))
+        .bearer_auth(&tok)
+        .json(&json!({"name": "forever", "repos": ["out"], "write": true}))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 403);
+    // The rule saved again, or removed, takes its tokens.
+    add();
+    assert!(matches!(put(&tok, "two.txt"), 401 | 403));
+    let (_, v) =
+        exchange(&iss.token(json!({"aud": "pkgpod", "repository": "org/app", "jti": "again"})));
+    let tok = v["token"].as_str().unwrap().to_string();
+    assert_eq!(put(&tok, "three.txt"), 201);
+    s.cli(&["trust", "remove", "ci-rule"]).unwrap();
+    assert!(matches!(put(&tok, "four.txt"), 401 | 403));
+}
+
 /// A console session for `user` (made an admin with `password`): the
 /// client, its session cookie and CSRF token.
 fn console_session(

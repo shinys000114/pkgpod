@@ -146,6 +146,13 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
             ) {
                 return not_found();
             }
+            // Who is granted what is for those who may write: a reader
+            // is told no names.
+            if a.role < Some(Role::Write) {
+                let users =
+                    [json!({"id": 1, "login": "pkgpod", "name": "those who may write here"})];
+                return reply(StatusCode::OK, json!({ "users": users }));
+            }
             let grants = app.auth.grants(Some(&a.repo.name)).unwrap_or_default();
             let users: Vec<Value> = grants
                 .iter()

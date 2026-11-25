@@ -14,7 +14,7 @@ pub mod oidc;
 pub mod rsa_key;
 pub mod usign_key;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -108,6 +108,9 @@ pub struct Scope {
     /// it writes (or reads) its repositories and nothing else, whoever
     /// is granted what.
     pub publisher: Option<String>,
+    /// When the token stops working, if it does: a token it makes
+    /// stops then too.
+    pub expires: Option<i64>,
 }
 
 /// Who makes a request.
@@ -169,6 +172,12 @@ pub fn hash_password(password: &str) -> Result<String> {
             "a password needs at least 8 characters".into(),
         ));
     }
+    // A login reads such a password as a token, so it could never log in.
+    if password.starts_with(TOKEN_PREFIX) {
+        return Err(Error::Invalid(format!(
+            "a password may not begin with {TOKEN_PREFIX}: tokens do"
+        )));
+    }
     Argon2::default()
         .hash_password(password.as_bytes())
         .map(|h| h.to_string())
@@ -222,6 +231,43 @@ pub struct Auth {
     /// Digests of (user, hash, password) already verified: apt sends many
     /// requests and argon2 is slow on purpose.
     verified: Mutex<HashSet<[u8; 32]>>,
+    failed: Mutex<Failed>,
+}
+
+/// Failed logins by (user, who, where), each counted in an audit row.
+type Failed = HashMap<(String, &'static str, &'static str), Failures>;
+
+/// Failed logins of a user (or of unknown users, or of tokens) at one
+/// place.
+struct Failures {
+    /// The audit row counting them.
+    id: i64,
+    /// When the first was.
+    first: i64,
+    n: u64,
+    /// The count the row says, and when it was written.
+    shown: u64,
+    written: i64,
+}
+
+/// Failed logins of a user at one place within this many seconds of
+/// the first are counted in one audit row.
+const FAILED_ROW_SECS: i64 = 3600;
+
+/// After the first few, a row's count is written at most this often:
+/// a token or a disabled user is refused without a password check, so
+/// failures can come as fast as requests do.
+const FAILED_WRITE_SECS: i64 = 10;
+
+/// What a failed-login audit row says: where, how many times, and who
+/// unless it names the user.
+fn failed_detail(who: &str, surface: &str, n: u64) -> String {
+    let times = if n == 1 { "time" } else { "times" };
+    if who.is_empty() {
+        format!("{surface}, {n} {times}")
+    } else {
+        format!("{surface}, {n} {times}, {who}")
+    }
 }
 
 const USER_COLS: &str = "id, name, admin, disabled, created";
@@ -241,6 +287,7 @@ impl Auth {
         Auth {
             db,
             verified: Mutex::new(HashSet::new()),
+            failed: Mutex::new(HashMap::new()),
         }
     }
 
@@ -380,34 +427,39 @@ impl Auth {
 
     // ---- authentication ----
 
-    /// Checks a user name and password (or token).
-    pub fn login(&self, name: &str, password: &str) -> Option<Caller> {
-        if password.starts_with(TOKEN_PREFIX) {
-            let c = self.token(password)?;
-            // "__token__" as PyPI clients (twine, uv) send it; a publisher
-            // token by its name (trust:<rule>) too.
-            if name.is_empty() || name == c.name() || name == "token" || name == "__token__" {
-                return Some(c);
-            }
-            return None;
+    /// Checks a user name and password (or token), given at `surface`
+    /// (api, console, serving); a failure is logged and audited.
+    pub fn login(&self, name: &str, password: &str, surface: &'static str) -> Option<Caller> {
+        let (c, who) = self.check_login(name, password);
+        if c.is_none() {
+            self.login_failed(name, who, surface);
         }
-        let row: Option<(User, String)> = self
-            .db
-            .read(|c| {
-                c.query_row(
-                    &format!("SELECT {USER_COLS}, password FROM users WHERE name = ?1"),
-                    [name],
-                    |r| Ok((row_user(r)?, r.get(5)?)),
-                )
-                .optional()
-            })
-            .ok()?;
+        c
+    }
+
+    /// The caller, and for the audit who `name` is: "" a user, else
+    /// "unknown users" or "tokens".
+    fn check_login(&self, name: &str, password: &str) -> (Option<Caller>, &'static str) {
+        if password.starts_with(TOKEN_PREFIX) {
+            return (self.token_login(name, password), "tokens");
+        }
+        let row: Option<(User, String)> = match self.db.read(|c| {
+            c.query_row(
+                &format!("SELECT {USER_COLS}, password FROM users WHERE name = ?1"),
+                [name],
+                |r| Ok((row_user(r)?, r.get(5)?)),
+            )
+            .optional()
+        }) {
+            Ok(r) => r,
+            Err(_) => return (None, "unknown users"),
+        };
         let Some((user, hash)) = row else {
             verify_password(password, dummy_hash());
-            return None;
+            return (None, "unknown users");
         };
         if user.disabled {
-            return None;
+            return (None, "");
         }
         let key: [u8; 32] = {
             let mut h = Sha256::new();
@@ -424,7 +476,7 @@ impl Auth {
             .contains(&key);
         if !seen {
             if !verify_password(password, &hash) {
-                return None;
+                return (None, "");
             }
             let mut v = self.verified.lock().unwrap_or_else(|e| e.into_inner());
             if v.len() >= 4096 {
@@ -432,10 +484,96 @@ impl Auth {
             }
             v.insert(key);
         }
-        Some(Caller {
-            user: Some(user),
-            scope: None,
-        })
+        (
+            Some(Caller {
+                user: Some(user),
+                scope: None,
+            }),
+            "",
+        )
+    }
+
+    /// A failed login: a warning in the log, and an audit row per user and
+    /// place that counts them (unknown names share one, tokens another, so
+    /// guesses at names do not fill the audit log).
+    fn login_failed(&self, name: &str, who: &'static str, surface: &'static str) {
+        let shown: String = name.chars().take(64).collect();
+        tracing::warn!("failed login: user {shown:?} on {surface}");
+        let target = if who.is_empty() { shown } else { String::new() };
+        self.count_failed(target, who, surface, now());
+    }
+
+    /// Counts a failed login in its audit row. A count held back is
+    /// written with the next failure, of anyone, [`FAILED_WRITE_SECS`]
+    /// later: a burst that stops is still counted whole.
+    fn count_failed(&self, target: String, who: &'static str, surface: &'static str, now: i64) {
+        let mut failed = self.failed.lock().unwrap_or_else(|e| e.into_inner());
+        failed.retain(|&(_, who, surface), f| {
+            let done = f.first <= now - FAILED_ROW_SECS;
+            if done || f.written <= now - FAILED_WRITE_SECS {
+                self.write_failed(who, surface, f, now);
+            }
+            !done
+        });
+        if failed.len() >= 1024 {
+            for ((_, who, surface), f) in failed.iter_mut() {
+                self.write_failed(who, surface, f, now);
+            }
+            failed.clear();
+        }
+        let key = (target, who, surface);
+        if let Some(f) = failed.get_mut(&key) {
+            f.n += 1;
+            if f.n <= 10 || f.written <= now - FAILED_WRITE_SECS {
+                self.write_failed(who, surface, f, now);
+            }
+            return;
+        }
+        let id = self.db.write(|tx| {
+            tx.execute(
+                "INSERT INTO audit (time, actor, action, target, detail) VALUES (?1, 'anonymous', 'login failed', ?2, ?3)",
+                params![now, key.0, failed_detail(who, surface, 1)],
+            )?;
+            Ok::<_, rusqlite::Error>(tx.last_insert_rowid())
+        });
+        if let Ok(id) = id {
+            failed.insert(
+                key,
+                Failures {
+                    id,
+                    first: now,
+                    n: 1,
+                    shown: 1,
+                    written: now,
+                },
+            );
+        }
+    }
+
+    /// Writes the count of `f` to its audit row, when the row says less.
+    fn write_failed(&self, who: &str, surface: &str, f: &mut Failures, now: i64) {
+        if f.shown == f.n {
+            return;
+        }
+        let detail = failed_detail(who, surface, f.n);
+        let _ = self.db.write(|tx| {
+            tx.execute(
+                "UPDATE audit SET detail = ?1 WHERE id = ?2",
+                params![detail, f.id],
+            )
+        });
+        (f.shown, f.written) = (f.n, now);
+    }
+
+    /// A token given as a password, with the user name its client sent.
+    fn token_login(&self, name: &str, password: &str) -> Option<Caller> {
+        let c = self.token(password)?;
+        // "__token__" as PyPI clients (twine, uv) send it; a publisher
+        // token by its name (trust:<rule>) too.
+        if name.is_empty() || name == c.name() || name == "token" || name == "__token__" {
+            return Some(c);
+        }
+        None
     }
 
     /// The caller a token stands for.
@@ -484,6 +622,7 @@ impl Auth {
                 write,
                 exchanged,
                 publisher: None,
+                expires,
             }),
         })
     }
@@ -491,15 +630,15 @@ impl Auth {
     /// A publisher token: what its rule gives now (a rule removed or
     /// changed takes its tokens' rights with it).
     fn publisher_token(&self, hash: &[u8], t: i64) -> Option<Caller> {
-        let (rule, repos, write): (String, String, bool) = self
+        let (rule, repos, write, expires): (String, String, bool, i64) = self
             .db
             .read(|c| {
                 c.query_row(
-                    "SELECT r.name, r.repos, r.write FROM publish_tokens p
+                    "SELECT r.name, r.repos, r.write, p.expires FROM publish_tokens p
                      JOIN trust_rules r ON r.id = p.rule
                      WHERE p.hash = ?1 AND p.expires > ?2 AND r.user IS NULL",
                     params![hash, t],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )
                 .optional()
             })
@@ -511,6 +650,7 @@ impl Auth {
                 write,
                 exchanged: true,
                 publisher: Some(format!("trust:{rule}")),
+                expires: Some(expires),
             }),
         })
     }
@@ -924,11 +1064,11 @@ mod tests {
         a.set_member("ci", "ops", true).unwrap();
         a.grant("ppa", "user:dev", Role::Write).unwrap();
         a.grant("*", "team:ci", Role::Read).unwrap();
-        let dev = a.login("dev", "password2").unwrap();
-        let ops = a.login("ops", "password3").unwrap();
-        let root = a.login("root", "password1").unwrap();
-        assert!(a.login("dev", "wrong-password").is_none());
-        assert!(a.login("nobody", "password2").is_none());
+        let dev = a.login("dev", "password2", "api").unwrap();
+        let ops = a.login("ops", "password3", "api").unwrap();
+        let root = a.login("root", "password1", "api").unwrap();
+        assert!(a.login("dev", "wrong-password", "api").is_none());
+        assert!(a.login("nobody", "password2", "api").is_none());
         assert_eq!(a.role(&dev, "ppa", false), Some(Role::Write));
         assert_eq!(a.role(&dev, "other", false), None);
         assert_eq!(a.role(&dev, "other", true), Some(Role::Read));
@@ -941,11 +1081,11 @@ mod tests {
             .create_token("dev", "ci", &["ppa".into()], false, None)
             .unwrap();
         assert!(!info.write);
-        let t = a.login("", &tok).unwrap();
+        let t = a.login("", &tok, "api").unwrap();
         assert_eq!(a.role(&t, "ppa", false), Some(Role::Read));
         assert_eq!(a.role(&t, "other", true), Some(Role::Read));
         assert_eq!(a.role(&t, "other", false), None);
-        assert!(a.login("someone-else", &tok).is_none());
+        assert!(a.login("someone-else", &tok, "api").is_none());
         // An admin's scoped token is no server admin.
         let (rt, _) = a
             .create_token("root", "x", &["ppa".into()], true, None)
@@ -965,7 +1105,7 @@ mod tests {
         assert!(a.bootstrap(&d.path().join("pw")).unwrap());
         assert!(!a.bootstrap(&d.path().join("pw")).unwrap());
         let pw = std::fs::read_to_string(d.path().join("pw")).unwrap();
-        assert!(a.login("admin", pw.trim()).is_some());
+        assert!(a.login("admin", pw.trim(), "api").is_some());
         assert!(a.set_flags("admin", Some(false), None).is_err());
         assert!(a.delete_user("admin").is_err());
         let u = a.user("admin").unwrap();
@@ -975,5 +1115,56 @@ mod tests {
         assert!(a.session(&sid).is_none(), "a password change ends sessions");
         assert!(a.create_user("x", "short", false).is_err());
         assert!(a.create_user("bad name", "long-enough", false).is_err());
+        // It would be read as a token, never as a password.
+        assert!(a.create_user("x", "pkgpod_long-enough", false).is_err());
+        assert!(a.set_password("admin", "pkgpod_long-enough").is_err());
+    }
+
+    #[test]
+    fn failed_logins_are_audited_counted() {
+        let (_d, a) = auth();
+        a.create_user("dev", "password2", false).unwrap();
+        for _ in 0..3 {
+            assert!(a.login("dev", "wrong-password", "api").is_none());
+        }
+        assert!(a.login("dev", "wrong-password", "console").is_none());
+        assert!(a.login("nobody", "password2", "api").is_none());
+        assert!(a.login("someone", "password2", "api").is_none());
+        assert!(a.login("dev", "pkgpod_not-a-token", "serving").is_none());
+        // Refused without a password check, as fast as they come: the
+        // count is written for the first ten, then now and then.
+        for _ in 0..19 {
+            assert!(a.login("dev", "pkgpod_not-a-token", "serving").is_none());
+        }
+        assert!(a.login("dev", "password2", "api").is_some());
+        let rows = || -> Vec<String> {
+            a.audit_log(10)
+                .unwrap()
+                .iter()
+                .filter(|r| r["action"] == "login failed")
+                .map(|r| format!("{} {}", r["target"], r["detail"]))
+                .collect()
+        };
+        assert_eq!(
+            rows(),
+            [
+                r#""" "serving, 10 times, tokens""#,
+                r#""" "api, 2 times, unknown users""#,
+                r#""dev" "console, 1 time""#,
+                r#""dev" "api, 3 times""#,
+            ]
+        );
+        // What was held back is written with a later failure.
+        a.count_failed("dev".into(), "", "serving", now() + FAILED_WRITE_SECS);
+        assert_eq!(
+            rows(),
+            [
+                r#""dev" "serving, 1 time""#,
+                r#""" "serving, 20 times, tokens""#,
+                r#""" "api, 2 times, unknown users""#,
+                r#""dev" "console, 1 time""#,
+                r#""dev" "api, 3 times""#,
+            ]
+        );
     }
 }

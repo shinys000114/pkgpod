@@ -64,6 +64,9 @@ pub enum RepoCmd {
         name: String,
         #[arg(default_value = "")]
         query: String,
+        /// At most this many (the server's default: 500).
+        #[arg(long)]
+        limit: Option<usize>,
     },
     /// Settings and operations each format has.
     Formats,
@@ -329,17 +332,26 @@ pub enum KeyCmd {
         /// A file holding the key's passphrase, if it has one.
         #[arg(long, default_value = "")]
         passphrase_file: String,
+        /// Replace the key of that name.
+        #[arg(long)]
+        replace: bool,
     },
     /// Make a new Ed25519 key.
     Generate {
         name: String,
         uid: String,
+        /// Replace the key of that name.
+        #[arg(long)]
+        replace: bool,
     },
     Default {
         name: String,
     },
     Delete {
         name: String,
+        /// Delete it although repositories sign with it.
+        #[arg(long)]
+        force: bool,
     },
     /// Print the public key.
     Public {
@@ -807,13 +819,16 @@ pub fn run(
                 &yes,
             )?;
         }
-        Cmd::Search { query, repo } => {
+        Cmd::Search { query, repo, limit } => {
             let mut q = format!("q={}", enc(&query));
             if let Some(r) = repo {
                 q.push_str(&format!("&repo={}", enc(&r)));
             }
-            let v = c.get(&format!("/api/v1/search?{q}"))?;
-            x.print(&v, print_packages);
+            if let Some(n) = limit {
+                q.push_str(&format!("&limit={n}"));
+            }
+            let (v, more) = c.get_list(&format!("/api/v1/search?{q}"))?;
+            x.print(&v, |v| print_packages(v, more));
         }
         Cmd::Apply { plan } => {
             let v = c.post(&format!("/api/v1/plans/{}/apply", enc(&plan)), &Value::Null)?;
@@ -1535,6 +1550,7 @@ pub fn run(
                 name,
                 file,
                 passphrase_file,
+                replace,
             } => {
                 let read = |f: &str| -> Result<String, CliError> {
                     if f == "-" {
@@ -1556,7 +1572,11 @@ pub fn run(
                 };
                 let v = c.send(
                     Method::PUT,
-                    &format!("/api/v1/keys/{}", enc(&name)),
+                    &format!(
+                        "/api/v1/keys/{}{}",
+                        enc(&name),
+                        if replace { "?replace=1" } else { "" }
+                    ),
                     &json!({"secret_key": secret_key, "passphrase": passphrase}),
                 )?;
                 x.print(&v, |v| {
@@ -1568,9 +1588,13 @@ pub fn run(
                     )
                 });
             }
-            KeyCmd::Generate { name, uid } => {
+            KeyCmd::Generate { name, uid, replace } => {
                 let v = c.post(
-                    &format!("/api/v1/keys/{}/generate", enc(&name)),
+                    &format!(
+                        "/api/v1/keys/{}/generate{}",
+                        enc(&name),
+                        if replace { "?replace=1" } else { "" }
+                    ),
                     &json!({"uid": uid}),
                 )?;
                 x.print(&v, |v| {
@@ -1583,10 +1607,14 @@ pub fn run(
                     &Value::Null,
                 )?;
             }
-            KeyCmd::Delete { name } => {
+            KeyCmd::Delete { name, force } => {
                 c.send(
                     Method::DELETE,
-                    &format!("/api/v1/keys/{}", enc(&name)),
+                    &format!(
+                        "/api/v1/keys/{}{}",
+                        enc(&name),
+                        if force { "?force=1" } else { "" }
+                    ),
                     &Value::Null,
                 )?;
             }
@@ -1736,14 +1764,30 @@ pub fn run(
                 }
             }
         }
-        Cmd::Jobs { repo, state, kind } => {
+        Cmd::Jobs {
+            repo,
+            state,
+            kind,
+            limit,
+            before,
+        } => {
+            let mut page = vec![];
+            for (k, v) in [("limit", limit.map(|n| n as i64)), ("before", before)] {
+                if let Some(v) = v {
+                    page.push(format!("{k}={v}"));
+                }
+            }
             let v = if state.is_none() && kind.is_none() {
                 match repo {
-                    Some(r) => c.get(&format!("/api/v1/repos/{}/jobs", enc(&r)))?,
-                    None => c.get("/api/v1/jobs")?,
+                    Some(r) => c.get(&format!(
+                        "/api/v1/repos/{}/jobs?{}",
+                        enc(&r),
+                        page.join("&")
+                    ))?,
+                    None => c.get(&format!("/api/v1/jobs?{}", page.join("&")))?,
                 }
             } else {
-                let mut p = vec![];
+                let mut p = page;
                 for (k, v) in [("repo", &repo), ("state", &state), ("kind", &kind)] {
                     if let Some(v) = v {
                         p.push(format!("{k}={}", enc(v)));
@@ -2005,7 +2049,8 @@ fn follow(x: &Ctx, v: &Value, wait: bool) -> Result<(), CliError> {
     }
 }
 
-fn print_packages(v: &Value) {
+/// Packages as a table; `more`: the server had more than these.
+fn print_packages(v: &Value, more: bool) {
     let mut rows = vec![vec![
         "REPO".into(),
         "NAME".into(),
@@ -2021,6 +2066,9 @@ fn print_packages(v: &Value) {
         ]);
     }
     table(rows);
+    if more {
+        println!("... and more: --limit shows more");
+    }
 }
 
 fn repo(x: &Ctx, cmd: RepoCmd) -> Result<(), CliError> {
@@ -2142,13 +2190,14 @@ fn repo(x: &Ctx, cmd: RepoCmd) -> Result<(), CliError> {
             )?;
             x.print(&v, |v| println!("version {}", s(&v["version"])));
         }
-        RepoCmd::Packages { name, query } => {
-            let v = c.get(&format!(
-                "/api/v1/repos/{}/packages?q={}",
+        RepoCmd::Packages { name, query, limit } => {
+            let (v, more) = c.get_list(&format!(
+                "/api/v1/repos/{}/packages?q={}{}",
                 enc(&name),
-                enc(&query)
+                enc(&query),
+                limit.map(|n| format!("&limit={n}")).unwrap_or_default()
             ))?;
-            x.print(&v, print_packages);
+            x.print(&v, |v| print_packages(v, more));
         }
         RepoCmd::Formats => {
             let v = c.get("/api/v1/formats")?;

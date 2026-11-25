@@ -87,7 +87,7 @@ pub(crate) async fn login(State(app): St, h: HeaderMap, Form(f): Form<LoginForm>
         return again("The login form expired; try again.");
     }
     let (app2, user, pw) = (app.clone(), f.user.clone(), f.password.clone());
-    let who = tokio::task::spawn_blocking(move || app2.auth.login(&user, &pw))
+    let who = tokio::task::spawn_blocking(move || app2.auth.login(&user, &pw, "console"))
         .await
         .ok()
         .flatten()
