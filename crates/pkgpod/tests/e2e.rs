@@ -5916,17 +5916,21 @@ fn trusted_publishing() {
         said.contains("logged in as ci by trust rule release (for out;"),
         "{said}"
     );
-    let f = cfg.join("ci.tar.gz");
-    std::fs::write(&f, "ci").unwrap();
+    // A CI run's files in one upload: one version, under one directory.
+    let before = s.json(&["versions", "out"]).as_array().unwrap().len();
+    let (a, b) = (cfg.join("ci.tar.gz"), cfg.join("SHA256SUMS"));
+    std::fs::write(&a, "ci").unwrap();
+    std::fs::write(&b, "sums").unwrap();
     let out = s
         .cmd()
         .env("XDG_CONFIG_HOME", &cfg)
         .args([
             "upload",
             "out",
-            f.to_str().unwrap(),
+            a.to_str().unwrap(),
+            b.to_str().unwrap(),
             "-s",
-            "path=ci/ci.tar.gz",
+            "path=ci/run-1/",
         ])
         .output()
         .unwrap();
@@ -5934,6 +5938,18 @@ fn trusted_publishing() {
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
+    );
+    let v = s.json(&["versions", "out"]);
+    assert_eq!(v.as_array().unwrap().len(), before + 1, "{v}");
+    assert_eq!(
+        get(&s.url("/out/ci/run-1/SHA256SUMS"), None).0,
+        401,
+        "private"
+    );
+    let ls = s.cli(&["ls", "out", "ci/run-1"]).unwrap();
+    assert!(
+        ls.contains("ci.tar.gz") && ls.contains("SHA256SUMS"),
+        "{ls}"
     );
     // Without the job's permission there is nothing to exchange.
     let out = s
