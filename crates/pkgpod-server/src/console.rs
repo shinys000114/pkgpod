@@ -4565,6 +4565,14 @@ struct SettingsPart {
     public: bool,
     /// Cleanup rules apply, and the viewer may preview them.
     cleanup: bool,
+    /// Server admins: the webhooks and trust rules for this repository.
+    hooks: Vec<HookRow>,
+    trust: Vec<TrustRow>,
+    trust_users: Vec<String>,
+    repo_names: Vec<String>,
+    fixed_repo: String,
+    trust_prefill: String,
+    hook_prefill: String,
 }
 
 pub struct AccessRow {
@@ -4672,7 +4680,29 @@ async fn settings_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> R
     let public = r.setting_bool("public");
     let cleanup = crate::cleanup::supported(&app, &r)
         && app.auth.role(&v.caller, &repo, public) >= Some(Role::Write);
+    let server_admin = v.caller.is_admin();
+    let (hooks, trust, trust_users) = if server_admin {
+        (
+            hook_rows(&app, Some(&repo)).unwrap_or_default(),
+            trust_rows(&app, Some(&repo)).unwrap_or_default(),
+            app.auth
+                .users()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|u| u.name)
+                .collect(),
+        )
+    } else {
+        (Vec::new(), Vec::new(), Vec::new())
+    };
     render(&SettingsPart {
+        hooks,
+        trust,
+        trust_users,
+        repo_names: Vec::new(),
+        fixed_repo: repo.clone(),
+        trust_prefill: String::new(),
+        hook_prefill: String::new(),
         cleanup,
         access: if can_admin {
             access_rows(&app, &repo, public)
@@ -5147,6 +5177,7 @@ pub struct HookRow {
     pub url: String,
     pub events: String,
     pub repos: String,
+    pub all_repos: bool,
     pub active: bool,
     pub has_secret: bool,
     /// (id, event, state, status or error, when)
@@ -5190,6 +5221,154 @@ fn audit_row(a: &Value) -> AuditRow {
     }
 }
 
+/// Trust rules as the console lists them: all, or those for `repo`.
+fn trust_rows(app: &App, repo: Option<&str>) -> Result<Vec<TrustRow>> {
+    Ok(crate::oidc::rules(app)?
+        .into_iter()
+        .filter(|r| repo.is_none_or(|x| r.repos.iter().any(|y| y == x)))
+        .map(|r| TrustRow {
+            trusts: (r.issuer != crate::oidc::GITHUB)
+                .then(|| format!("issuer {}", r.issuer))
+                .into_iter()
+                .chain(r.claims.iter().map(|(k, v)| format!("{k}={v}")))
+                .collect(),
+            user: r.user,
+            repos: r.repos.join(", "),
+            token: format!(
+                "{} min{}",
+                r.minutes,
+                if r.write { ", writes" } else { ", reads" }
+            ),
+            used: when(r.used),
+            name: r.name,
+        })
+        .collect())
+}
+
+/// What fills the trust rule form when a rule's name is picked: its
+/// claims back in the form's fields.
+fn trust_prefill(app: &App) -> Result<String> {
+    let mut m = serde_json::Map::new();
+    for r in crate::oidc::rules(app)? {
+        let mut claims = r.claims.clone();
+        let github = claims.remove("repository").unwrap_or_default();
+        let workflow = match claims.remove("workflow_ref") {
+            Some(w) => {
+                let short = w
+                    .strip_prefix(&format!("{github}/.github/workflows/"))
+                    .and_then(|w| w.strip_suffix("@*"));
+                match short {
+                    Some(s) => s.to_string(),
+                    None => {
+                        claims.insert("workflow_ref".into(), w);
+                        String::new()
+                    }
+                }
+            }
+            None => String::new(),
+        };
+        let take = |c: &mut std::collections::BTreeMap<String, String>, k: &str| {
+            c.remove(k).unwrap_or_default()
+        };
+        let reff = take(&mut claims, "ref");
+        let environment = take(&mut claims, "environment");
+        let other: Vec<String> = claims.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        m.insert(
+            r.name.clone(),
+            json!({
+                "github": github, "workflow": workflow, "ref": reff,
+                "environment": environment, "user": r.user, "repos": r.repos,
+                "minutes": r.minutes, "read_only": !r.write,
+                "issuer": if r.issuer == crate::oidc::GITHUB { String::new() } else { r.issuer.clone() },
+                "audience": if r.audience == crate::oidc::AUDIENCE { String::new() } else { r.audience.clone() },
+                "claims": other.join("\n"),
+            }),
+        );
+    }
+    Ok(Value::Object(m).to_string())
+}
+
+/// Webhooks as the console lists them: all, or those that send what
+/// happens to `repo` (its own and every repository's).
+fn hook_rows(app: &App, repo: Option<&str>) -> Result<Vec<HookRow>> {
+    Ok(crate::webhooks::hooks(app)?
+        .into_iter()
+        .filter(|h| repo.is_none_or(|x| h.repos.is_empty() || h.repos.iter().any(|y| y == x)))
+        .map(|h| HookRow {
+            deliveries: crate::webhooks::deliveries(app, &h.name, 8)
+                .unwrap_or_default()
+                .iter()
+                .map(|d| {
+                    (
+                        d["id"].as_i64().unwrap_or(0),
+                        s(&d["event"]),
+                        s(&d["state"]),
+                        match (d["status"].as_i64(), d["error"].as_str()) {
+                            (_, Some(e)) if !e.is_empty() => e.to_string(),
+                            (Some(st), _) => st.to_string(),
+                            _ => String::new(),
+                        },
+                        when(d["done"].as_i64().or(d["created"].as_i64())),
+                    )
+                })
+                .collect(),
+            events: h.events.join(", "),
+            all_repos: h.repos.is_empty(),
+            repos: if h.repos.is_empty() {
+                "every repository".into()
+            } else {
+                h.repos.join(", ")
+            },
+            name: h.name,
+            kind: h.kind,
+            url: h.url,
+            active: h.active,
+            has_secret: h.has_secret,
+        })
+        .collect())
+}
+
+/// What fills the webhook form when a webhook's name is picked.
+fn hook_prefill(app: &App) -> Result<String> {
+    let mut m = serde_json::Map::new();
+    for h in crate::webhooks::hooks(app)? {
+        m.insert(
+            h.name.clone(),
+            json!({
+                "url": h.url, "kind": h.kind, "events": h.events,
+                "repos": if h.repos.is_empty() { vec!["*".to_string()] } else { h.repos.clone() },
+                "disabled": !h.active, "secret": "",
+            }),
+        );
+    }
+    Ok(Value::Object(m).to_string())
+}
+
+/// The repositories ticked in a form (`repos`, repeated); a webhook's
+/// "*" is every repository (an empty list), nothing ticked is refused.
+fn picked_repos(form: &[(String, String)], every: bool) -> Result<Vec<String>> {
+    let mut v: Vec<String> = form
+        .iter()
+        .filter(|(k, _)| k == "repos")
+        .flat_map(|(_, v)| v.split([',', ' ']))
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(String::from)
+        .collect();
+    v.dedup();
+    if every && v.iter().any(|r| r == "*") {
+        return Ok(Vec::new());
+    }
+    if v.is_empty() {
+        return Err(Error::Invalid(if every {
+            "tick the repositories, or every repository".into()
+        } else {
+            "tick the repositories its tokens are for".into()
+        }));
+    }
+    Ok(v)
+}
+
 #[derive(Template)]
 #[template(path = "server.html")]
 struct ServerPage {
@@ -5207,8 +5386,12 @@ struct ServerPage {
     downloads_days: i64,
     syncs_per_storage: i64,
     trust: Vec<TrustRow>,
-    users: Vec<String>,
+    trust_users: Vec<String>,
     repo_names: Vec<String>,
+    /// The forms' repositories: picked (empty), or this one.
+    fixed_repo: String,
+    trust_prefill: String,
+    hook_prefill: String,
     hooks: Vec<HookRow>,
     hosts: Vec<HostRow>,
 }
@@ -5291,29 +5474,11 @@ async fn server_tab_page(app: Arc<App>, v: Viewer, tab: &'static str) -> Result<
     let glance = server_glance(&app, &listeners, &keys, &storages);
     let publishing = tab == "publishing";
     let trust = if publishing {
-        crate::oidc::rules(&app)?
+        trust_rows(&app, None)?
     } else {
         Vec::new()
-    }
-    .into_iter()
-    .map(|r| TrustRow {
-        trusts: (r.issuer != crate::oidc::GITHUB)
-            .then(|| format!("issuer {}", r.issuer))
-            .into_iter()
-            .chain(r.claims.iter().map(|(k, v)| format!("{k}={v}")))
-            .collect(),
-        user: r.user,
-        repos: r.repos.join(", "),
-        token: format!(
-            "{} min{}",
-            r.minutes,
-            if r.write { ", writes" } else { ", reads" }
-        ),
-        used: when(r.used),
-        name: r.name,
-    })
-    .collect();
-    let users = app.auth.users()?.into_iter().map(|u| u.name).collect();
+    };
+    let trust_users = app.auth.users()?.into_iter().map(|u| u.name).collect();
     let hosts = if tab == "serving" {
         crate::hosts::list(&app)?
     } else {
@@ -5335,42 +5500,10 @@ async fn server_tab_page(app: Arc<App>, v: Viewer, tab: &'static str) -> Result<
     })
     .collect();
     let hooks = if publishing {
-        crate::webhooks::hooks(&app)?
+        hook_rows(&app, None)?
     } else {
         Vec::new()
-    }
-    .into_iter()
-    .map(|h| HookRow {
-        deliveries: crate::webhooks::deliveries(&app, &h.name, 8)
-            .unwrap_or_default()
-            .iter()
-            .map(|d| {
-                (
-                    d["id"].as_i64().unwrap_or(0),
-                    s(&d["event"]),
-                    s(&d["state"]),
-                    match (d["status"].as_i64(), d["error"].as_str()) {
-                        (_, Some(e)) if !e.is_empty() => e.to_string(),
-                        (Some(st), _) => st.to_string(),
-                        _ => String::new(),
-                    },
-                    when(d["done"].as_i64().or(d["created"].as_i64())),
-                )
-            })
-            .collect(),
-        events: h.events.join(", "),
-        repos: if h.repos.is_empty() {
-            "all".into()
-        } else {
-            h.repos.join(", ")
-        },
-        name: h.name,
-        kind: h.kind,
-        url: h.url,
-        active: h.active,
-        has_secret: h.has_secret,
-    })
-    .collect();
+    };
     let repo_names = app.engine.repos()?.into_iter().map(|r| r.name).collect();
     Ok(render(&ServerPage {
         s: v.shell("server"),
@@ -5386,8 +5519,19 @@ async fn server_tab_page(app: Arc<App>, v: Viewer, tab: &'static str) -> Result<
         downloads_days: crate::stats::days_kept(&app),
         syncs_per_storage: crate::jobs::syncs_per_storage(&app),
         trust,
-        users,
+        trust_users,
         repo_names,
+        fixed_repo: String::new(),
+        trust_prefill: if publishing {
+            trust_prefill(&app)?
+        } else {
+            String::new()
+        },
+        hook_prefill: if publishing {
+            hook_prefill(&app)?
+        } else {
+            String::new()
+        },
         hooks,
         hosts,
     }))
@@ -5835,15 +5979,27 @@ async fn hook_set(State(app): St, v: Viewer, Form(form): Form<Vec<(String, Strin
         secret: (!secret.is_empty()).then_some(secret),
         has_secret: false,
         events,
-        repos: f("repos")
-            .split([',', ' '])
-            .filter(|r| !r.is_empty())
-            .map(String::from)
-            .collect(),
+        repos: match picked_repos(&form, true) {
+            Ok(r) => r,
+            Err(e) => return err_part(e),
+        },
         active: form_get(&form, "disabled") != "on",
         created: 0,
         last: None,
     };
+    // From a repository's page: a new one only (changing one there
+    // would make it that repository's alone).
+    if form_get(&form, "new") == "1"
+        && crate::webhooks::hooks(&app)
+            .unwrap_or_default()
+            .iter()
+            .any(|x| x.name == h.name)
+    {
+        return err_part(Error::Conflict(format!(
+            "there is a webhook {:?}: change it on the Server page, or pick another name",
+            h.name
+        )));
+    }
     match api::webhook_put(State(app), v.who(), Json(h)).await {
         Ok(_) => refresh(),
         Err(e) => err_part(e),
@@ -5913,16 +6069,26 @@ async fn trust_set(State(app): St, v: Viewer, Form(form): Form<Vec<(String, Stri
         },
         claims,
         user: f("user"),
-        repos: f("repos")
-            .split([',', ' '])
-            .filter(|r| !r.is_empty())
-            .map(String::from)
-            .collect(),
+        repos: match picked_repos(&form, false) {
+            Ok(r) => r,
+            Err(e) => return err_part(e),
+        },
         write: form_get(&form, "read_only") != "on",
         minutes: f("minutes").parse().unwrap_or(15),
         created: 0,
         used: None,
     };
+    if form_get(&form, "new") == "1"
+        && crate::oidc::rules(&app)
+            .unwrap_or_default()
+            .iter()
+            .any(|x| x.name == rule.name)
+    {
+        return err_part(Error::Conflict(format!(
+            "there is a trust rule {:?}: change it on the Server page, or pick another name",
+            rule.name
+        )));
+    }
     match api::trust_put(State(app), v.who(), Json(rule)).await {
         Ok(_) => refresh(),
         Err(e) => err_part(e),

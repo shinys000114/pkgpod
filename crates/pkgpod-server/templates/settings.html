@@ -50,6 +50,29 @@
 </div>
 {% endif %}
 {% if server_admin %}
+<div class="card" id="repo-webhooks">
+  <div class="card-head"><h2>Webhooks</h2><span class="hint">what happens here sent to other services; one for several repositories is made and changed on <a href="/admin/server/publishing">Server, CI &amp; webhooks</a></span></div>
+  {% if hooks.is_empty() %}<p class="empty">None sends what happens here.</p>{% else %}
+  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Sends</th><th>To</th><th>Last</th></tr></thead><tbody>
+  {% for h in hooks %}<tr><td><b>{{ h.name }}</b>{% if !h.active %} <span class="tag">off</span>{% endif %}<div class="muted small">{% if h.all_repos %}every repository{% else %}{{ h.repos }}{% endif %}</div></td><td>{{ h.events }}</td><td class="mono small claims"><div>{{ h.url }}</div></td>
+    <td class="small">{% if let Some((_, ev, st, info, at)) = h.deliveries.first() %}<span class="{% if st == "ok" %}st-ok{% else if st == "failed" %}st-bad{% else %}st-run{% endif %}">{{ st }}</span> {{ ev }} <span class="muted">{{ at }}{% if !info.is_empty() %} · {{ info }}{% endif %}</span>{% else %}<span class="muted">none yet</span>{% endif %}</td></tr>{% endfor %}
+  </tbody></table></div>
+  {% endif %}
+  <details class="card-body more"><summary>Add one for {{ repo }}</summary>
+  {% include "hook_form.html" %}
+  </details>
+</div>
+<div class="card" id="repo-trust">
+  <div class="card-head"><h2>Trusted publishing</h2><span class="hint">CI jobs that publish here with their OIDC token; a rule for several repositories is made and changed on <a href="/admin/server/publishing">Server, CI &amp; webhooks</a></span></div>
+  {% if trust.is_empty() %}<p class="empty">No rule gives tokens for this repository.</p>{% else %}
+  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Trusts</th><th>As user</th><th>For</th><th>Token</th><th>Used</th></tr></thead><tbody>
+  {% for r in trust %}<tr><td><b>{{ r.name }}</b></td><td class="mono small claims">{% for c in r.trusts %}<div>{{ c }}</div>{% endfor %}</td><td>{{ r.user }}</td><td class="wrap">{{ r.repos }}</td><td class="nowrap">{{ r.token }}</td><td class="nowrap muted">{{ r.used }}</td></tr>{% endfor %}
+  </tbody></table></div>
+  {% endif %}
+  <details class="card-body more"><summary>Add one for {{ repo }}</summary>
+  {% include "trust_form.html" %}
+  </details>
+</div>
 <details class="card panel">
   <summary>Make a repository like this one <span class="hint">same format and settings (a Debian repository's dists too); its own name and address</span></summary>
   <div class="panel-body">

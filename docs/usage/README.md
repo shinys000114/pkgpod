@@ -244,7 +244,9 @@ pkgpod trust remove release
 other OIDC issuer (GitLab, a Gitea or Forgejo runner) works with
 `--issuer <https URL>` and `--claim name=pattern` for its claims.
 `--read-only` gives a token that only reads. In the console: Server,
-Trusted publishing.
+CI & webhooks (the repositories ticked from a list; picking a rule's
+name fills the form to change it), and a repository's Settings tab
+lists the rules for it and adds one for it alone.
 
 In the workflow, the job asks GitHub for its token and exchanges it.
 pkgpod's own action does all of it: it installs the `pkgpod` command
@@ -294,8 +296,9 @@ ref.
 
 What happens on the server can be sent to other services as it
 happens: a deploy after a publish, a chat line when a sync fails.
-Server admins set webhooks (CLI, API, or Server, Webhooks in the
-console):
+Server admins set webhooks (CLI, API, or the console: Server, CI &
+webhooks, every repository or those ticked; a repository's Settings
+tab lists those that send for it and adds one for it alone):
 
 ```sh
 pkgpod webhook add deploy https://api.github.com/repos/org/app/dispatches \

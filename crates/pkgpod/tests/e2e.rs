@@ -6417,6 +6417,211 @@ fn receiver(status: std::sync::Arc<std::sync::atomic::AtomicU16>) -> (String, Go
     (url, got)
 }
 
+/// Webhooks and trust rules from the console: several repositories
+/// ticked on the Server page, or one made from a repository's page.
+#[test]
+fn webhooks_and_trust_for_some_repositories() {
+    use std::sync::atomic::AtomicU16;
+    let s = Server::start();
+    for r in ["a", "b", "c"] {
+        s.cli(&["repo", "create", r, "-f", "files"]).unwrap();
+    }
+    let (url, got) = receiver(std::sync::Arc::new(AtomicU16::new(200)));
+    let (c, sid, csrf) = console_session(&s, "ops", "ops-password");
+    let post = |path: &str, form: &[(&str, &str)]| {
+        let r = c
+            .post(format!("{}{path}", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .header("x-csrf-token", &csrf)
+            .form(form)
+            .send()
+            .unwrap();
+        let refreshed = r.headers().contains_key("hx-refresh");
+        (refreshed, r.text().unwrap())
+    };
+    let page = |p: &str| {
+        c.get(format!("{}{p}", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .send()
+            .unwrap()
+            .text()
+            .unwrap()
+    };
+    let two = format!("{url}/two");
+    let (ok, t) = post(
+        "/c/webhooks",
+        &[
+            ("name", "two"),
+            ("url", &two),
+            ("events", "version"),
+            ("repos", "a"),
+            ("repos", "b"),
+        ],
+    );
+    assert!(ok, "{t}");
+    // Nothing ticked is not every repository.
+    let (ok, t) = post(
+        "/c/webhooks",
+        &[("name", "none"), ("url", &two), ("events", "version")],
+    );
+    assert!(!ok && t.contains("tick the repositories"), "{t}");
+    let every = format!("{url}/every");
+    let (ok, _) = post(
+        "/c/webhooks",
+        &[
+            ("name", "every"),
+            ("url", &every),
+            ("events", "version"),
+            ("repos", "*"),
+        ],
+    );
+    assert!(ok);
+    let hooks = s.json(&["webhook", "list"]);
+    let repos = |n: &str| {
+        hooks
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["name"] == n)
+            .unwrap()["repos"]
+            .clone()
+    };
+    assert_eq!(repos("two"), json!(["a", "b"]));
+    assert_eq!(repos("every"), json!([]));
+    // What happens to a and b is sent; c's is not.
+    let f = s.dir.path().join("x.txt");
+    std::fs::write(&f, "x").unwrap();
+    for r in ["c", "a", "b"] {
+        s.cli(&["upload", r, f.to_str().unwrap()]).unwrap();
+    }
+    let t0 = Instant::now();
+    loop {
+        let n = |p: &str| got.lock().unwrap().iter().filter(|g| g.0 == p).count();
+        // Each made (version 1) and uploaded to (version 2).
+        if n("/every") >= 6 && n("/two") >= 4 {
+            break;
+        }
+        assert!(
+            t0.elapsed() < Duration::from_secs(20),
+            "{:?}",
+            got.lock().unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let to_two: Vec<String> = got
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|g| g.0 == "/two")
+        .map(|g| {
+            serde_json::from_str::<Value>(&g.2).unwrap()["repo"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    let mut seen = to_two.clone();
+    seen.sort();
+    seen.dedup();
+    assert_eq!(seen, ["a", "b"], "{to_two:?}");
+    // The Server page fills the form from a name, ticks included.
+    let pubs = page("/admin/server/publishing");
+    assert!(
+        pubs.contains(r#"data-for="hook-name" data-value="two""#)
+            && pubs.contains("&#34;repos&#34;:[&#34;a&#34;,&#34;b&#34;]"),
+        "{pubs}"
+    );
+    // A repository's page lists what is sent for it, and makes one for it
+    // alone, new only.
+    let sa = page("/r/a/settings");
+    assert!(
+        sa.contains("<b>two</b>") && sa.contains("<b>every</b>"),
+        "{sa}"
+    );
+    let sc = page("/r/c/settings");
+    assert!(
+        !sc.contains("<b>two</b>") && sc.contains("<b>every</b>"),
+        "{sc}"
+    );
+    let (ok, t) = post(
+        "/c/webhooks",
+        &[
+            ("name", "two"),
+            ("url", &two),
+            ("events", "version"),
+            ("repos", "c"),
+            ("new", "1"),
+        ],
+    );
+    assert!(!ok && t.contains("there is a webhook"), "{t}");
+    assert_eq!(repos("two"), json!(["a", "b"]));
+    let (ok, _) = post(
+        "/c/webhooks",
+        &[
+            ("name", "c-only"),
+            ("url", &two),
+            ("events", "label"),
+            ("repos", "c"),
+            ("new", "1"),
+        ],
+    );
+    assert!(ok);
+    assert!(page("/r/c/settings").contains("<b>c-only</b>"));
+    // Trust rules: ticked repositories; none is refused.
+    s.cli_in(&["user", "add", "ci", "--password-stdin"], "ci-password-1")
+        .unwrap();
+    let (ok, t) = post(
+        "/c/trust",
+        &[
+            ("name", "pub"),
+            ("github", "o/r"),
+            ("user", "ci"),
+            ("repos", "a"),
+            ("repos", "b"),
+            ("minutes", "15"),
+        ],
+    );
+    assert!(ok, "{t}");
+    let (ok, t) = post(
+        "/c/trust",
+        &[
+            ("name", "none"),
+            ("github", "o/r"),
+            ("user", "ci"),
+            ("minutes", "15"),
+        ],
+    );
+    assert!(!ok && t.contains("tick the repositories"), "{t}");
+    let rules = s.json(&["trust", "list"]);
+    assert_eq!(rules[0]["repos"], json!(["a", "b"]), "{rules}");
+    assert!(page("/r/b/settings").contains("<b>pub</b>"));
+    assert!(!page("/r/c/settings").contains("<b>pub</b>"));
+    // A repository deleted: lists that name it are kept, and save again.
+    s.cli(&["repo", "delete", "b", "-y"]).unwrap();
+    s.cli(&[
+        "webhook", "add", "two", &two, "--events", "version", "--repos", "a,b",
+    ])
+    .unwrap();
+    let (ok, t) = post(
+        "/c/trust",
+        &[
+            ("name", "pub"),
+            ("github", "o/r"),
+            ("user", "ci"),
+            ("repos", "a"),
+            ("repos", "b"),
+            ("minutes", "15"),
+        ],
+    );
+    assert!(ok, "{t}");
+    let e = s
+        .cli(&[
+            "webhook", "add", "two", &two, "--events", "version", "--repos", "a,zz",
+        ])
+        .unwrap_err();
+    assert!(e.contains("no repository"), "{e}");
+}
+
 /// Outgoing webhooks: what they send, signed; failures tried again.
 #[test]
 fn webhooks_send_what_happens() {

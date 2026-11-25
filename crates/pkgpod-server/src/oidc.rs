@@ -206,7 +206,20 @@ pub fn put_rule(app: &App, mut r: Rule) -> Result<Rule> {
             "a rule names the repositories its tokens are for".into(),
         ));
     }
-    for repo in &r.repos {
+    // Names it already had stay, a repository deleted since included.
+    let had: Vec<String> = app
+        .db
+        .read(|c| {
+            c.query_row(
+                "SELECT repos FROM trust_rules WHERE name = ?1",
+                [&r.name],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+        })?
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    for repo in r.repos.iter().filter(|x| !had.contains(x)) {
         app.engine
             .repo(repo)
             .map_err(|_| Error::NotFound(format!("no repository {repo:?}")))?;

@@ -1,0 +1,29 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+{# A webhook's form: on the Server page (every repository or some,
+   picked; an existing name fills it), or on a repository's page
+   (fixed_repo: a new webhook for it). #}
+<form hx-post="/c/webhooks" hx-target="next .result">
+  {% if !fixed_repo.is_empty() %}<input type="hidden" name="repos" value="{{ fixed_repo }}"><input type="hidden" name="new" value="1">{% endif %}
+  <div class="fields">
+    <label class="field"><span>Name</span><input{% if fixed_repo.is_empty() %} id="hook-name" data-prefill="{{ hook_prefill }}" list="dl-hook-names"{% endif %} name="name" required placeholder="deploy" autocomplete="off" autocapitalize="off" spellcheck="false">{% if fixed_repo.is_empty() %}<datalist id="dl-hook-names">{% for h in hooks %}<option value="{{ h.name }}">{% endfor %}</datalist>{% endif %}<small>{% if fixed_repo.is_empty() %}The same name changes a webhook (picking one fills the form).{% else %}A new webhook's name.{% endif %}</small></label>
+    <label class="field wide"><span>URL</span><input name="url" required placeholder="https://api.github.com/repos/owner/name/dispatches" autocomplete="off" spellcheck="false"></label>
+    <label class="field"><span>Kind</span><select name="kind"><option value="json">JSON, signed</option><option value="github">GitHub repository_dispatch</option><option value="slack">Slack (a line of text)</option></select><small>github: the URL above; the secret a token that may dispatch.</small></label>
+    <label class="field"><span>Secret</span><input name="secret" type="password" autocomplete="new-password" placeholder="kept if left empty"><small>JSON: signs each delivery (X-Pkgpod-Signature-256). GitHub: the token.</small></label>
+    <fieldset class="field"><span>Events</span>
+      <label class="check-line"><input type="checkbox" name="events" value="version" checked> <span>version: a new version (upload, change, promotion, rollback)</span></label>
+      <label class="check-line"><input type="checkbox" name="events" value="label"> <span>label</span></label>
+      <label class="check-line"><input type="checkbox" name="events" value="job"> <span>job: a sync or import that ended</span></label>
+      <label class="check-line"><input type="checkbox" name="events" value="job-failed"> <span>job-failed: only those that did not end well</span></label>
+    </fieldset>
+    <label class="check field"><span class="check-line"><input type="checkbox" name="disabled"> <span>Disabled</span></span><small>Kept, but nothing sent.</small></label>
+    {% if fixed_repo.is_empty() %}
+    <fieldset class="field wide repo-pick"><span>Repositories</span>
+      <label class="check-line every"><input type="checkbox" name="repos" value="*"> <span>every repository, new ones too</span></label>
+      <div class="pick-list">{% for r in repo_names %}<label class="check-line"><input type="checkbox" name="repos" value="{{ r }}"> <span>{{ r }}</span></label>{% endfor %}</div>
+      <small>What happens to these is sent.</small>
+    </fieldset>
+    {% endif %}
+  </div>
+  <div class="form-foot"><button type="submit">Save webhook</button></div>
+</form>
+<div class="result"></div>
