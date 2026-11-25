@@ -8,6 +8,11 @@
 #
 #   pkgpod trust add publish --github <owner>/<name> --ref refs/heads/master \
 #     --workflow publish.yml --user <ci user> --repos <PKGPOD_REPO>
+#
+# What it uploads is what ci.yml built and tested in this run: nothing is
+# published, and master/latest does not move, unless every check passed.
+# (Where publishing is set up, a push to master runs those checks twice:
+# here and in ci.yml's own run.)
 name: publish
 
 on:
@@ -19,17 +24,28 @@ permissions:
   contents: read
 
 jobs:
-  publish:
+  ci:
     if: vars.PKGPOD_URL != '' && vars.PKGPOD_REPO != ''
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: ci
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # One at a time, none cancelled half way: a newer push cancels the
+    # checks of an older one, so the newest build is the last uploaded.
+    concurrency:
+      group: publish-master
+      cancel-in-progress: false
     permissions:
       contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/build
+      - uses: actions/download-artifact@v7
         with:
-          version: 0.0.0-ci
+          name: packages
+          path: dist
       - name: Where
         id: at
         run: echo "dir=master/${GITHUB_SHA::7}/" >> "$GITHUB_OUTPUT"
@@ -41,7 +57,11 @@ jobs:
         with:
           url: ${{ vars.PKGPOD_URL }}
           repository: ${{ vars.PKGPOD_REPO }}
-          files: dist/*.deb dist/pkgpod_0.0.0-ci_linux_* dist/checksums.txt
+          files: dist/*.deb dist/pkgpod_0.0.0-ci_linux_* dist/THIRD-PARTY-NOTICES dist/checksums.txt
           path: ${{ steps.at.outputs.dir }}
           link: master/latest
-      - run: echo "published to ${{ vars.PKGPOD_REPO }} at ${{ steps.at.outputs.dir }}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Summary
+        env:
+          REPO: ${{ vars.PKGPOD_REPO }}
+          DIR: ${{ steps.at.outputs.dir }}
+        run: echo "published to $REPO at $DIR" >> "$GITHUB_STEP_SUMMARY"

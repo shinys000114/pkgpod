@@ -442,7 +442,7 @@ fn walk(m: &FilesMirror, ctx: &FilesCtx, ex: &Excludes) -> Result<Walk, Error> {
     };
     let progress = || {
         let n = listed.fetch_add(1, Ordering::Relaxed) + 1;
-        if n % 500 == 0 {
+        if n.is_multiple_of(500) {
             (ctx.log)(&format!(
                 "listed {n} directories, {} entries",
                 entries.load(Ordering::Relaxed)

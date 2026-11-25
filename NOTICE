@@ -3,6 +3,12 @@ Copyright (C) pkgpod contributors
 Licensed under the GNU Affero General Public License, version 3 only
 (see LICENSE).
 
+The pkgpod binary links third-party Rust crates statically, and with
+them the C libraries some of them bundle. Their licences and notices are
+in THIRD-PARTY-NOTICES, which is published beside the release binaries
+and installed in /usr/share/doc/pkgpod by the Debian package
+(debian/third-party-notices.sh makes it).
+
 pkgpod is written from scratch. The source code of aptly
 (https://github.com/aptly-dev/aptly) is used as a reference for repository
 formats and edge cases. Where a part of pkgpod follows aptly's implementation

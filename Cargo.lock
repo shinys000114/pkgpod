@@ -2311,7 +2311,6 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "tokio",
- "tracing",
  "tracing-subscriber",
 ]
 
@@ -2325,7 +2324,6 @@ dependencies = [
  "pkgpod-engine",
  "serde_json",
  "sha1 0.11.0",
- "sha2 0.11.0",
  "tar",
 ]
 
@@ -2352,7 +2350,6 @@ dependencies = [
  "getrandom 0.4.3",
  "rusqlite",
  "serde",
- "serde_json",
  "sha2 0.11.0",
  "tempfile",
  "thiserror",
@@ -2453,7 +2450,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
- "tracing",
 ]
 
 [[package]]
@@ -2463,7 +2459,6 @@ dependencies = [
  "pkgpod-base",
  "pkgpod-engine",
  "serde_json",
- "tempfile",
 ]
 
 [[package]]
@@ -2547,10 +2542,8 @@ dependencies = [
 name = "pkgpod-mirror"
 version = "0.0.0"
 dependencies = [
- "axum",
  "bzip2",
  "flate2",
- "futures-util",
  "glob",
  "httpdate",
  "liblzma",
@@ -2568,7 +2561,6 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
- "tower-http 0.7.1",
  "zstd",
 ]
 
@@ -2651,7 +2643,6 @@ dependencies = [
  "futures-util",
  "glob",
  "httpdate",
- "hyper",
  "hyper-util",
  "jiff",
  "p256",

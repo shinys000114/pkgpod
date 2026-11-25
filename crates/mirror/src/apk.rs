@@ -303,7 +303,7 @@ fn sync_one(
                         }
                     }
                     let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-                    if n % 500 == 0 || n == total {
+                    if n.is_multiple_of(500) || n == total {
                         (ctx.log)(&format!("packages: {n}/{total}"));
                     }
                 }

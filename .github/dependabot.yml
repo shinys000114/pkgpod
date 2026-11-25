@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Pull requests for new versions of the crates (Cargo.lock) and of the
+# actions the workflows use; ci.yml's deny job reports advisories.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+  # "/" covers the workflows and action.yml; the build action is a
+  # composite action of its own.
+  - package-ecosystem: github-actions
+    directories: ["/", "/.github/actions/build"]
+    schedule:
+      interval: weekly

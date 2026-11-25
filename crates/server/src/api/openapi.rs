@@ -1843,6 +1843,7 @@ pub fn document() -> Value {
         "info": {
             "title": "pkgpod",
             "version": pkgpod_base::version(),
+            "license": {"name": "GNU Affero General Public License v3.0 only", "identifier": env!("CARGO_PKG_LICENSE")},
             "description": "The management API. Changes to a repository's tree are plans: without ?apply=1 a call returns what it would do and a plan id; POST /api/v1/plans/{id}/apply applies it if the repository has not changed meanwhile. The console's session cookie works too; changes then need the X-CSRF-Token header."
         },
         "components": {
@@ -1943,6 +1944,15 @@ mod tests {
             Value::Array(a) => a.iter().for_each(|v| refs(v, out)),
             _ => {}
         }
+    }
+
+    /// The API is offered over a network: its description says the
+    /// licence.
+    #[test]
+    fn the_licence_is_named() {
+        let license = &document()["info"]["license"];
+        assert_eq!(license["identifier"], "AGPL-3.0-only");
+        assert!(license["name"].is_string());
     }
 
     #[test]

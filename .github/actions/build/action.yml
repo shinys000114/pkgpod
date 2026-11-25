@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Builds the Debian source package and, from it and without network, the
 # static (musl) binary packages for amd64 and arm64, into dist/: the .deb
-# files, the source package, the bare binaries and checksums.txt.
+# files, the source package, the bare binaries, THIRD-PARTY-NOTICES (the
+# licences of the crates they link) and checksums.txt.
 name: build
 description: build pkgpod release artifacts
 inputs:
@@ -11,8 +12,10 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: dtolnay/rust-toolchain@stable
+    # The version ci.yml checks with.
+    - uses: dtolnay/rust-toolchain@master
       with:
+        toolchain: "1.99.1"
         targets: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
     - uses: mlugg/setup-zig@v2
     - uses: taiki-e/install-action@v2
@@ -28,9 +31,13 @@ runs:
         sudo sysctl -qw kernel.apparmor_restrict_unprivileged_userns=0 || true
     - name: Source and binary packages
       shell: bash
+      # Through the environment, not pasted into the script: it is a tag's
+      # name.
+      env:
+        VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
-        v="${{ inputs.version }}"; v="${v#v}"; dv="${v//-/\~}"
+        v="${VERSION#v}"; dv="${v//-/\~}"
         export PKGPOD_COMMIT="${GITHUB_SHA::7}"
         debian/make-source.sh "$v" dist
         mkdir -p build
@@ -43,4 +50,9 @@ runs:
         for t in x86_64 aarch64; do
           cp "build/src/target/$t-unknown-linux-musl/release/pkgpod" "dist/pkgpod_${v}_linux_$t"
         done
+        # One file for both binaries, which link the same crates (cmp fails
+        # the build when they stop doing so).
+        n=release/THIRD-PARTY-NOTICES
+        cmp "build/src/target/x86_64-unknown-linux-musl/$n" "build/src/target/aarch64-unknown-linux-musl/$n"
+        cp "build/src/target/x86_64-unknown-linux-musl/$n" dist/
         cd dist && sha256sum * > checksums.txt && cat checksums.txt
