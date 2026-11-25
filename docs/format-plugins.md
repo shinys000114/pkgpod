@@ -139,8 +139,12 @@ Notes on the contexts:
   limit before reading a file whole.
 - Parameters (`params`) arrive as JSON from the API, as strings from
   query strings and the CLI's `-s`: accept `true` and `"true"`, a list
-  and `"a,b"`. They are not checked against `upload_fields` or
-  `OpSpec::params` for you.
+  and `"a,b"`. A client's are checked by name against `upload_fields`
+  (uploads by the API and by PUT) and `OpSpec::params` (operations)
+  before you see them: one not declared is refused with 400, and a
+  yes/no or number field must read as one. So declare every parameter
+  `ingest` reads: an undeclared one never reaches it. Your own protocol
+  handlers may pass others.
 - `Edit` is the tree being changed: `get`, `put`, `remove`, `list`,
   `walk`. Paths are split and checked (`tree::split`,
   `tree::check_segment`: no `.` or `..` segment, no NUL), but empty

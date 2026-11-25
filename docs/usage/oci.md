@@ -121,9 +121,11 @@ pkgpod cache hub pin library/alpine/manifests/3.20
 pkgpod repo set hub max_mib=20480
 ```
 
-Tags are asked for again when older than `metadata_minutes`. A pinned
-tag keeps its manifests and layers over the size limit. Nothing is
-pushed to a proxy.
+Tags are asked for again when older than `metadata_minutes`; while
+the upstream is not there, what a tag named is served (an upstream
+that does not answer is waited for 5 seconds, and then not asked again
+for what is kept for a minute). A pinned tag keeps its manifests and
+layers over the size limit. Nothing is pushed to a proxy.
 
 ## Groups
 

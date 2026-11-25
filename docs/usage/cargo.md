@@ -32,9 +32,9 @@ Hosted repositories have the common settings and cleanup rules:
 | `keep_versions` | `50` | Versions kept besides labelled ones and the current one. |
 | `keep_days` | `30` | Versions younger than this many days are kept too. |
 | `cleanup_keep_last` | `0` | Cleanup: keep this many newest versions of each crate (0: all). |
-| `cleanup_prerelease_days` | `0` | Cleanup: remove pre-releases in for longer than this many days (0: never). |
-| `cleanup_unused_days` | `0` | Cleanup: remove versions in and not downloaded for this many days (0: never). |
-| `cleanup_max` | `50` | Cleanup: the daily run holds a cleanup that would remove more versions than this, for review. |
+| `cleanup_prerelease_days` | `0` | Cleanup: remove pre-releases added more than this many days ago (0: never). |
+| `cleanup_unused_days` | `0` | Cleanup: remove versions added, and last downloaded if ever, more than this many days ago (0: never; needs download counts kept at least as long). |
+| `cleanup_max` | `50` | Cleanup: when the daily run would remove more versions than this, it removes none; preview and apply such a cleanup by hand. |
 
 Removing a version breaks lockfiles that name it, so set cleanup rules
 with care; `pkgpod cleanup crates` shows what they remove now, `-y`

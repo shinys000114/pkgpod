@@ -86,6 +86,9 @@ changed through the console, the API or the CLI.
     store/<2 hex>/<sha256>  blobs (store/tmp: blobs being written)
     trees/<repo>/           a mirror's received tree
     state/<repo>/           what a mirror engine keeps between runs
+    state/.<repo>.import/   an import's staging (and
+                            .<repo>.import-cache); no repository
+                            name starts with a '.'
 ```
 
 A **storage** is a named directory (`pkgpod storage`); each repository
@@ -122,7 +125,6 @@ Kinds (`pkgpod_engine::Kind`):
 | Kind     | Holds                                   | Versions |
 |----------|-----------------------------------------|----------|
 | `hosted` | what uploads and operations put in      | yes      |
-| `import` | declared for "copied once, then hosted" | yes      |
 | `mirror` | an upstream's tree, received on disk    | no       |
 | `group`  | nothing: reads its `members` in order   | no       |
 | `proxy`  | what it fetched from `upstream` (cache) | no       |
@@ -130,8 +132,9 @@ Kinds (`pkgpod_engine::Kind`):
 A format says which kinds it has: `hosted` and `mirror` through
 `Format::kinds()` (deb, rpm, arch, apk and files have mirrors),
 `group` and `proxy` through `Format::groups()` and `Format::proxy()`.
-No format lists `import`: imports are jobs that fill a hosted
-repository (see [Jobs](#jobs)).
+There is no kind for imports: they are jobs that fill a hosted
+repository (see [Jobs](#jobs)), and the API refuses `import` as a
+kind.
 
 ## Blobs, state trees and served trees
 
@@ -214,18 +217,22 @@ never rewritten. `pkgpod diff` compares any two versions.
 The **catalog** holds one row per package version (name, version, a
 format-specific `extra`, the blob's digest and size, when it came in)
 of each repository's current version. Search, the console's package
-lists, download counts and cleanup rules read it.
+lists, download counts and cleanup rules read it. Search looks only
+in the repositories it is given (`Engine::search_in`): the API gives
+it those the caller may read, so its limit, and whether it cut the
+list, count nothing of the others.
 
 ## Serving
 
 Repositories are served on **serving listeners**, kept in the
 `listeners` table (name, `host:port`, optional PEM certificate and key)
 and started, changed and stopped while the server runs
-(`ops::listeners::reconcile`). A new database has one, `default`, on
-127.0.0.1:8080, for a reverse proxy in front. The **management
-listener** (`listen` in the configuration, 127.0.0.1:8090 by default)
-serves the API at `/api/v1`, the console and `/metrics`, and no
-repository.
+(`ops::listeners::reconcile`): a listener is starting until its task
+has bound its address (it tries for a few seconds), and running only
+then. A new database has one, `default`, on 127.0.0.1:8080, for a
+reverse proxy in front. The **management listener** (`listen` in the
+configuration, 127.0.0.1:8090 by default) serves the API at
+`/api/v1`, the console and `/metrics`, and no repository.
 
 A request on a serving listener (`serving::handle`):
 
@@ -244,7 +251,7 @@ request (Host, path)
   │     else /<name>/ of a repository without urls,
   │     else a listing of the repositories there, else 404
   ├─ Auth::role(caller, repo, public)        read < write < admin
-  └─ serve_repo
+  └─ serve_repo (no role: 401 or 404, whatever the method)
         group  ──> group::serve ──> serve_repo for each member (as reader)
         proxy  ──> proxy::serve ──> cache, else upstream, then kept
         npm, cargo, go, nuget, conan, swift, ... ──> the format's protocol module
@@ -264,6 +271,14 @@ formats keep for themselves (`_inputs`) are `Value` entries and answer
 
 Writes from a browser on another origin are refused. Downloads served
 whole are counted by package, version and day (`serving/stats.rs`).
+`serving::cache_control` gives each served path its `Cache-Control`:
+indexes and pool files `no-cache` (revalidated by their ETag; a
+replace or a mirror's sync may put other content at a pool name),
+`by-hash` files a year, a files repository's files `no-cache` (any
+path may get other content), most other files an hour; what not
+everyone may read (a private repository, a public group with a member
+that is not public, a request with credentials) is `private` with
+`Vary: Authorization`.
 
 ## Mirrors
 
@@ -292,12 +307,18 @@ classifier says what a request is: a **file** (an artifact that never
 changes, kept until it is evicted by hand or for `max_mib`, unless
 pinned) or **metadata** (a version list, asked for again when older
 than `metadata_minutes`, with its validators, and served as it was
-while the upstream is not there). A **miss** records that the upstream
+while the upstream is not there). Asked again for what is kept, the
+upstream is waited for 5 s (`proxy::waited`), and after it did not
+answer in time the proxy serves what it keeps without asking it for a
+minute (`proxy::is_quiet`); a files proxy's files and an OCI proxy's
+tags are renewed the same way. A **miss** records that the upstream
 had nothing there. Names in `exclude` are never asked for upstream. A
 files proxy renews its files as metadata (a file server replaces files
 under the same name), lists directories from the upstream's HTML
 listings, and streams a file not kept yet to the client while it is
-stored.
+stored. A fetched row is kept (`proxy::keep`) only if the proxy's
+upstream is still the one the fetch began with, under a lock that
+forgetting the cache for a new upstream holds too.
 `pkgpod cache` lists, pins, unpins, evicts and prefetches. Proxies take
 no uploads and have no versions.
 
@@ -311,8 +332,10 @@ A proxy member whose upstream fails while it keeps nothing for the name
 ends the search with a 502, rather than let a later member answer for
 it. Listings and search show every member's entries. A group is read
 through: its readers read the members through it (anonymous readers of
-a public group only its public members), downloads count on the
-member, and writes are refused with the member to publish to.
+a public group only its public members, so a public group with a member
+that is not public answers as a private repository does, for caches:
+`group::all_public`), downloads count on the member, and writes are
+refused with the member to publish to.
 
 ## Jobs
 
@@ -329,10 +352,13 @@ A job is a row in `jobs` (state `running`, then `ok`, `failed` or
 `<data_dir>/jobs/<id>.log`. The console's job page reads the log as
 Server-Sent Events from `/jobs/<id>/stream`: `log` events carry the
 lines written after a byte offset (the event id, so a browser that
-reconnects continues where it was), and an `end` event the final
-state. `pkgpod job <id>` and `GET /api/v1/jobs/<id>` give the log's
-end, at most 256 KiB in whole lines (`?from=` reads on from a byte, as
-`sync --wait` follows it), and `GET /api/v1/jobs/<id>/log` all of it,
+reconnects continues where it was), `state` events the job's state,
+first and whenever it changes (a queued job starts), and an `end`
+event the final state. `pkgpod job <id>` and `GET /api/v1/jobs/<id>`
+give the log's end, at most 256 KiB in whole lines (a last line longer
+than that: its end, from a character's start; `?from=` reads on from a
+byte, as `sync --wait` follows it, a piece of a longer line ending
+where a character does), and `GET /api/v1/jobs/<id>/log` all of it,
 streamed: an rsync log can be gigabytes. A stopping server cancels its
 jobs and waits up to 10 seconds for them; jobs still running when it
 stopped otherwise are marked failed on the next start.
@@ -353,7 +379,8 @@ console, the API, the CLI and every client.
 - Console sessions are cookies (stored hashed); changes need the
   session's CSRF token.
 - A caller without a right to a repository gets 404, as if it were not
-  there; an anonymous one gets 401, so clients send credentials.
+  there, whatever the method; an anonymous one gets 401, so clients
+  send credentials.
 
 Changes are written to the `audit` table.
 

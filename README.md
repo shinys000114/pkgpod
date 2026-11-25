@@ -83,9 +83,9 @@ Status: in development, nothing released.
   minutes; no secret is kept in the CI. The server hands out the
   `pkgpod` command (`/cli/install.sh`), and `action.yml` makes
   publishing one step of a workflow.
-- Webhooks: new versions, labels and ended jobs sent as signed JSON, a
-  GitHub `repository_dispatch` or a Slack line, with a delivery log and
-  retries.
+- Webhooks: new versions, labels and ended jobs sent as JSON (signed
+  when the hook has a secret), a GitHub `repository_dispatch` or a
+  Slack line, with a delivery log and retries.
 - Download statistics by package, version and day (`pkgpod downloads
   <repo>`), kept a year unless set otherwise; a status API, SVG badges
   for READMEs (`/.well-known/pkgpod/badges/<repo>/status.svg`; private

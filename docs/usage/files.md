@@ -103,8 +103,8 @@ cleanup rules, a whole directory at a time:
 | --- | --- |
 | `cleanup_dirs` | Directories whose subdirectories are builds: `master`, `nightly`. |
 | `cleanup_keep_last` | Keep this many newest subdirectories of each (0: all). |
-| `cleanup_older_days` | Remove subdirectories in for longer than this (0: never). |
-| `cleanup_max` | The daily run holds a cleanup that would remove more than this, for review (default 50). |
+| `cleanup_older_days` | Remove subdirectories whose newest file was added more than this many days ago (0: never). |
+| `cleanup_max` | When the daily run would remove more subdirectories than this, it removes none; preview and apply such a cleanup by hand (default 50). |
 
 A build's age is when its newest file came in. The newest build of
 each directory is always kept, and so is one a link anywhere in the
@@ -227,7 +227,9 @@ curl -fLO https://pkg.example.org/debian-cloud/images/cloud/trixie/latest/debian
 - A kept file is asked for again, with its validators, once it is older
   than `metadata_minutes`: a file replaced upstream under the same name
   (`latest/`) is fetched again, and one the upstream dropped answers
-  404. While the upstream is not there, the kept file is served.
+  404. While the upstream is not there, the kept file is served: an
+  upstream that does not answer is waited for 5 seconds, and then not
+  asked again for what is kept for a minute.
 - `max_mib` bounds what is kept (the least recently used unpinned files
   go first); `pkgpod cache <name>` lists, pins, evicts and prefetches.
 - As a group's last member it answers what the members before it do

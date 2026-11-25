@@ -103,9 +103,9 @@ see [files](files.md#cleanup)):
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `cleanup_keep_last` | 0 (all) | Keep this many newest versions of each package. |
-| `cleanup_prerelease_days` | 0 (never) | Remove pre-releases in for longer than this many days. |
-| `cleanup_unused_days` | 0 (never) | Remove versions in and not downloaded for this many days (needs download counts kept at least as long). |
-| `cleanup_max` | 50 | The daily run holds a cleanup that would remove more versions than this, for review. |
+| `cleanup_prerelease_days` | 0 (never) | Remove pre-releases added more than this many days ago. |
+| `cleanup_unused_days` | 0 (never) | Remove versions added, and last downloaded if ever, more than this many days ago (needs download counts kept at least as long). |
+| `cleanup_max` | 50 | When the daily run would remove more versions than this, it removes none; preview and apply such a cleanup by hand. |
 
 Each package's newest version in each place (a dist, a group) stays.
 `pkgpod cleanup <repo>` shows what the rules remove now, as a plan (`-y`
@@ -205,8 +205,9 @@ pkgpod grant revoke ppa team:builders
 
 A repository is **private** unless `public=true`: without credentials
 its clients get 401 (and a repository the caller may not read answers
-as one that does not exist). A public repository is read by anyone;
-writing still needs a token.
+as one that does not exist, whatever the request's method). Search
+looks only in the repositories the caller may read. A public
+repository is read by anyone; writing still needs a token.
 
 A token belongs to the user who made it and can do at most what that
 user may. It may be limited to some repositories and is read-only
@@ -219,6 +220,10 @@ pkgpod token create nightly --write --expires-days 30
 pkgpod token list            # --all: everyone's (server admins)
 pkgpod token delete <id>
 ```
+
+`--expires-days` takes 1 to 36500; left out, the token never expires.
+`--repos` names repositories you may read: another name is answered
+404, as one that is not there.
 
 The token is printed once. Package clients send it as a password with
 Basic authentication (user name `token`; your own user name and
@@ -404,6 +409,10 @@ one version: an apt archive (deb), a tree (files) or chosen images
 import that reads a directory on the server's own disk (`/srv/apt/`,
 `file:///srv/apt/`) is for server admins only, as is a deb mirror
 source there; the directory is read where it is and left as it was.
+An http(s) source, or an OCI import's registry, takes no user or
+password in its address (it is shown in the job's log and the
+version's summary, to every reader): one that holds them is refused
+before any job is made.
 
 ```sh
 pkgpod import ppa https://apt.example.org/ppa/ --dists noble --keyring upstream.asc --wait
@@ -478,7 +487,7 @@ The main routes:
 | `GET /api/v1/repos/<repo>/versions`, `.../versions/<n>` | Versions. |
 | `GET /api/v1/repos/<repo>/diff?from=&to=` | What changed. |
 | `GET /api/v1/repos/<repo>/tree?path=&version=&served=1` | A directory of a version. |
-| `GET /api/v1/repos/<repo>/packages?q=`, `GET /api/v1/search?q=&repo=` | Packages. |
+| `GET /api/v1/repos/<repo>/packages?q=`, `GET /api/v1/search?q=&repo=` | Packages (search: in the repositories you may read). |
 | `POST /api/v1/repos/<repo>/upload` | An upload: the file as the body (`?filename=`), or a multipart form whose file fields are one upload; the query (or the form's other fields) holds the format's upload parameters. |
 | `POST /api/v1/repos/<repo>/ops/<op>` | A format operation; the body holds its parameters. |
 | `POST /api/v1/repos/<repo>/remove` | Remove paths (`{paths}`). |

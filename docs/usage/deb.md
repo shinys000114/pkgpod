@@ -114,7 +114,7 @@ its value.
 | --- | --- | --- |
 | `name` | | The dist (`dists/<name>`); several, separated by spaces, get the same settings. |
 | `components` | `main` | Components. Components no longer listed are removed with their packages. |
-| `architectures` | those of the packages | Architectures to publish (not `all`: arch-all packages go into every one). An upload of another architecture is refused. |
+| `architectures` | those of the packages | Architectures to publish (not `all`: arch-all packages go into every one). An upload of another architecture is refused, and so is a list that leaves out an architecture the dist has packages of (it names the first five), unless the same change drops their component. |
 | `suite` | the name | `Suite:` field. |
 | `codename` | the name | `Codename:` field. |
 | `origin`, `label` | the repository's | `Origin:`, `Label:` for this dist. |
@@ -215,9 +215,9 @@ shows its plan first. In the console: Upload & change.
 | `dist-set` | see [Dists and components](#dists-and-components) | Add a dist or change one. |
 | `dist-remove` | `name` | Remove a dist with its packages. |
 | `remove` | `packages`, `dists`, `components` | Remove packages: `name`, `name_version` or `name_version_arch`; a source package as `name_version_source`. `dists` and `components` (empty: all) narrow it. |
-| `copy` | `packages`, `from`, `to`, `component` | Copy packages from one dist to another (same component); no packages: all. |
+| `copy` | `packages`, `from`, `to`, `component` | Copy packages from one dist to another; each keeps its component (`component`: only that one). No packages: all. |
 | `move` | `packages`, `from`, `to`, `component` | The same, removing them from `from`. |
-| `file-remove` | `path` | Remove another file (put with an upload's `path`). |
+| `file-remove` | `path` | Remove a file that is not a package: one uploaded with a `path`, such as a README or a keyring. |
 
 ```sh
 pkgpod op ppa remove packages=hello_1.0 dists=noble -y
@@ -294,11 +294,15 @@ given, fetching what they list (`components`, `architectures`,
 `sources`, `udebs`, `extras` narrow or widen it). With a `keyring`, the
 Release signature is checked and every file against its index; a sync
 that fails leaves the served tree as it was. Without one, the job's log
-says the signature is not checked. A Release older (by its `Date:`)
-than the one served is not taken unless `allow_older` is set, and a
-pool file upstream rebuilt under the same name is put in place only
-when its dist switches. The by-hash files of the Release a switch
-replaces are kept until the next one.
+says the signature is not checked. Each index is checked against its
+Release's SHA256 and, when given, SHA512 and served under `by-hash/` by
+each, as apt asks by the strongest; a Release whose SHA512 table is
+malformed or gives a file another size than its SHA256 one, or whose
+InRelease and Release differ in either, is refused. A Release older
+(by its `Date:`) than the one served is not taken unless `allow_older`
+is set, and a pool file upstream rebuilt under the same name is put in
+place only when its dist switches. The by-hash files of the Release a
+switch replaces are kept until the next one.
 
 ```sh
 pkgpod repo create debian -k mirror \

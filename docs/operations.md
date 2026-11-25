@@ -161,11 +161,17 @@ and are started, changed and stopped while the server runs:
 pkgpod listener set default 127.0.0.1:8080
 pkgpod listener set public 0.0.0.0:443 --cert /etc/pkgpod/tls/cert.pem --key /etc/pkgpod/tls/key.pem
 pkgpod listener set public 0.0.0.0:443 --disabled
-pkgpod listener list                 # state: running, disabled, or failed: why
+pkgpod listener list                 # running, starting, disabled, or failed: why
 ```
 
 `listener set` gives the listener all its values: without `--cert` and
-`--key` it serves plain HTTP.
+`--key` it serves plain HTTP. It refuses (409) an address that would
+clash with the management listener's or another enabled listener's, as
+binding them would: a host name (`localhost:8090`) counts as the
+addresses it resolves to, `[::]:443` takes IPv4 too (as Linux binds
+it by default), and `0.0.0.0:443` beside `[::1]:443` is allowed. A
+listener is `starting` until it listens on its address (it tries for
+five seconds while the address is in use) and `running` only then.
 
 Every serving listener serves every repository; the request's host and
 path choose which. A repository's addresses are its `urls` setting:
@@ -310,7 +316,10 @@ default `main`, in `<data_dir>/storages/main`). In a storage:
 - `store/`: the content store (the files of hosted repositories'
   versions, proxies' caches);
 - `trees/<repo>/`: a mirror's received tree, served as it is;
-- `state/`: mirrors' state between syncs and imports' staging.
+- `state/`: mirrors' state between syncs (`state/<repo>/`) and
+  imports' staging (`state/.<repo>.import/` and
+  `state/.<repo>.import-cache/`, with a '.' that no repository name
+  starts with).
 
 ```sh
 install -d -o pkgpod -g pkgpod -m 0750 /srv/pkgpod
@@ -438,11 +447,14 @@ Debian, npm, Cargo, Helm and Go repositories may remove package versions
 they no longer need. The settings (0: off):
 
 - `cleanup_keep_last`: keep this many newest versions of each package;
-- `cleanup_prerelease_days`: remove pre-releases in for longer than this;
-- `cleanup_unused_days`: remove versions in and not downloaded for this
-  long (only once download counts have been kept that long);
-- `cleanup_max` (50): the daily run holds a cleanup that would remove
-  more versions than this, for review.
+- `cleanup_prerelease_days`: remove pre-releases added more than this
+  many days ago;
+- `cleanup_unused_days`: remove versions added, and last downloaded if
+  ever, more than this many days ago (only once download counts have
+  been kept that long);
+- `cleanup_max` (50): when the daily run would remove more versions
+  than this, it removes none; preview and apply such a cleanup by hand
+  (`pkgpod cleanup <repo>`, then `-y`).
 
 The newest version of each package always stays. What goes is removed
 as one new version, so earlier versions keep it, and a rollback brings
@@ -460,7 +472,8 @@ directory at a time: `cleanup_dirs` names the directories whose
 subdirectories are builds (`master`, `nightly`), and
 `cleanup_keep_last`, `cleanup_older_days` and `cleanup_max` apply to
 those subdirectories. The newest build of each always stays, and so
-does one a link points at. See [files](usage/files.md#cleanup).
+does one a link points into, unless the link is in a build that goes
+too (its own, say). See [files](usage/files.md#cleanup).
 
 ## Scheduled mirror syncs
 
@@ -529,11 +542,12 @@ pkgpod job 42 --cancel
 
 A job ends `ok`, `failed` or `cancelled` (a sync waiting for a slot on
 its storage is `queued`). The console's job page streams its log while
-it runs. Server admins have every repository's jobs on the Server
-page, Jobs: filtered by repository, kind and state, a hundred a page,
-following those that run; the setting below is there too. A job's start
-and end are also in the server's log. Logs are kept in `<data_dir>/jobs/<id>.log`, and are in
-backups. A log can be large, so the job's page, `pkgpod job` and
+it runs, and its state as it changes (a queued job starting). Server
+admins have every repository's jobs on the Server page, Jobs: filtered
+by repository, kind and state, a hundred a page, following those that
+run; the setting below is there too. A job's start and end are also in
+the server's log. Logs are kept in `<data_dir>/jobs/<id>.log`, and are
+in backups. A log can be large, so the job's page, `pkgpod job` and
 `GET /api/v1/jobs/<id>` show its end (`?from=` reads on from a byte);
 `GET /api/v1/jobs/<id>/log` (the page links it) downloads all of it.
 
@@ -675,6 +689,12 @@ pkgpod import ppa https://old.example.org/debian/ --dists bookworm,trixie \
 - OCI: a registry and `--image name[:tag]` or `name@sha256:...`;
   `--platform`; `--username` (the password on standard input).
 
+An http(s) source, or an OCI import's registry, takes no user or
+password in its address: the source is shown in the job's log and
+summary and in the version's, which every reader of the repository
+sees. One that holds them is refused before any job is made, without
+echoing it.
+
 From a directory on the server (`/srv/apt/` or `file:///srv/apt/`), for
 server admins only, Debian and files repositories:
 
@@ -718,9 +738,10 @@ given.
 
 **A listener's address is in use.** A serving listener that cannot
 listen shows as `failed: listening on <addr>: ...; another program has
-that address` in `pkgpod listener list` and the console; the server tries
-for five seconds first. Choose another address with `pkgpod listener set`,
-or stop the other program (`ss -ltnp` shows which). When the management
+that address` in `pkgpod listener list` and the console; the server
+tries for five seconds first, and shows it as `starting` meanwhile.
+Choose another address with `pkgpod listener set`, or stop the other
+program (`ss -ltnp` shows which). When the management
 listener cannot listen, the server exits with the same message and says
 to change `listen` in the configuration file.
 
@@ -781,6 +802,10 @@ The same address is in How to use.
   pkgpod token create ci-ppa --repos ppa --write --expires-days 90
   pkgpod token create apt --repos ppa,tools
   ```
+
+  `--expires-days` takes 1 to 36500 (left out, the token never
+  expires), and `--repos` only repositories the user may read: another
+  name is answered 404, as one that is not there.
 
 - A badge token shows a private repository's badges and nothing else.
 - On the API and the serving listeners, writes a browser sends from
