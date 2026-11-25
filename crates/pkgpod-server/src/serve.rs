@@ -366,7 +366,7 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
                     entries.push(ListEntry {
                         name: seg,
                         dir: true,
-                        size: 0,
+                        size: Some(0),
                         modified: None,
                     });
                 }
@@ -1019,13 +1019,13 @@ async fn get(
                     Entry::Dir { .. } => Some(ListEntry {
                         name: name.clone(),
                         dir: true,
-                        size: 0,
+                        size: Some(0),
                         modified: None,
                     }),
                     Entry::Blob { size, meta, .. } => Some(ListEntry {
                         name: name.clone(),
                         dir: false,
-                        size: *size,
+                        size: Some(*size),
                         modified: meta.get("mtime").and_then(Value::as_i64).map(|t| {
                             std::time::UNIX_EPOCH + std::time::Duration::from_secs(t.max(0) as u64)
                         }),
@@ -1490,13 +1490,13 @@ pub(crate) fn dir_entries(app: &App, s: &crate::Served, rel: &[String]) -> Optio
                 Entry::Dir { .. } => Some(ListEntry {
                     name: name.clone(),
                     dir: true,
-                    size: 0,
+                    size: Some(0),
                     modified: None,
                 }),
                 Entry::Blob { size, meta, .. } => Some(ListEntry {
                     name: name.clone(),
                     dir: false,
-                    size: *size,
+                    size: Some(*size),
                     modified: meta.get("mtime").and_then(Value::as_i64).map(|t| {
                         std::time::UNIX_EPOCH + std::time::Duration::from_secs(t.max(0) as u64)
                     }),
@@ -1532,7 +1532,7 @@ fn fs_entries(
         v.push(ListEntry {
             name,
             dir: md.is_dir(),
-            size: if md.is_dir() { 0 } else { md.len() },
+            size: Some(if md.is_dir() { 0 } else { md.len() }),
             modified: md.modified().ok(),
         });
     }
@@ -1667,7 +1667,9 @@ async fn put(
 pub struct ListEntry {
     pub name: String,
     pub dir: bool,
-    pub size: u64,
+    /// A file's size; `None` where it is not known (a proxy's listing of
+    /// what is not fetched yet).
+    pub size: Option<u64>,
     pub modified: Option<std::time::SystemTime>,
 }
 
@@ -1803,7 +1805,7 @@ pub fn listing_html(
     }
     let dirs = entries.iter().filter(|e| e.dir).count();
     let files = entries.len() - dirs;
-    let total: u64 = entries.iter().map(|e| e.size).sum();
+    let total: u64 = entries.iter().filter_map(|e| e.size).sum();
     let sort_link = |k: &str, label: &str| {
         let next_desc = k == key && !desc;
         let arrow = if k == key {
@@ -1832,7 +1834,10 @@ pub fn listing_html(
             html(&href),
             if e.dir { "📁 " } else { "" },
             html(&e.name),
-            if e.dir { "—".into() } else { human(e.size) },
+            match e.size {
+                Some(n) if !e.dir => human(n),
+                _ => "—".into(),
+            },
             when
         ));
     }
@@ -1949,19 +1954,19 @@ mod tests {
             ListEntry {
                 name: "b.deb".into(),
                 dir: false,
-                size: 2048,
+                size: Some(2048),
                 modified: None,
             },
             ListEntry {
                 name: "<x>&\"".into(),
                 dir: false,
-                size: 1,
+                size: Some(1),
                 modified: None,
             },
             ListEntry {
                 name: "z dir".into(),
                 dir: true,
-                size: 0,
+                size: Some(0),
                 modified: None,
             },
         ];

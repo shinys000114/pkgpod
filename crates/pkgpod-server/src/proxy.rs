@@ -30,7 +30,7 @@ use crate::serve::{At, percent_encode, status};
 use crate::{App, Error, Result, Served};
 
 /// Formats whose proxies are served.
-pub const FORMATS: &[&str] = &["go", "maven", "npm", "pypi", "cargo", "oci"];
+pub const FORMATS: &[&str] = &["go", "maven", "npm", "pypi", "cargo", "oci", "files"];
 
 /// Largest file fetched.
 pub const MAX_FILE: u64 = 4 << 30;
@@ -347,8 +347,28 @@ pub fn classify(format: &str, rel: &[String]) -> Option<Asked> {
         "npm" => npm(rel),
         "pypi" => pypi(rel),
         "cargo" => cargo(rel),
+        "files" => files(rel),
         _ => None,
     }
+}
+
+/// A file server's file: kept, but asked for again (with its
+/// validators) once older than `metadata_minutes`, as a file there may
+/// be replaced under the same name (`latest/`).
+fn files(rel: &[String]) -> Option<Asked> {
+    if rel.is_empty() {
+        return None;
+    }
+    let path = joined(rel);
+    Some(Asked {
+        name: path.clone(),
+        path,
+        kind: CacheKind::File,
+        version: String::new(),
+        count: true,
+        url: None,
+        expect: None,
+    })
 }
 
 /// Before a file is fetched: where it is and what it must hash to, as
@@ -724,6 +744,12 @@ pub fn check_settings(format: &str, settings: &Value) -> Result<()> {
     }
     if let Some(u) = settings.get("upstream").and_then(Value::as_str) {
         let u = u.trim();
+        if format == "files" && u.is_empty() {
+            // No public default: the file server is the user's choice.
+            return Err(Error::Invalid(
+                "a files proxy needs upstream: the file server's base URL (https://…/)".into(),
+            ));
+        }
         // A registry may be named by its host (docker.io, ghcr.io/team).
         if !u.is_empty() && !(format == "oci" && !u.contains("://")) {
             crate::routes::parse_url(u).map_err(Error::Invalid)?;
@@ -749,6 +775,9 @@ enum Got {
     Row(Box<CacheRow>),
     /// The upstream has nothing there.
     Missing,
+    /// A file server's directory is elsewhere (its address, followed):
+    /// not kept, as the client should go there.
+    Moved(String),
 }
 
 /// The cache row for `a`, fetched from the upstream when it is not
@@ -759,10 +788,17 @@ async fn get(app: &Arc<App>, r: &RepoInfo, up: &Upstream, a: &Asked) -> Result<G
         .await
         .map_err(|e| Error::Invalid(e.to_string()))??;
     let now = pkgpod_base::now();
+    // What is asked for again when old: metadata, and a file server's
+    // files.
+    let renews = |row: &CacheRow| {
+        row.kind == CacheKind::Meta || (r.format == "files" && row.kind == CacheKind::File)
+    };
     if let Some(row) = &have {
         let fresh = now - row.fetched < up.ttl;
         match row.kind {
-            CacheKind::File => return Ok(Got::Row(Box::new(row.clone()))),
+            CacheKind::File if fresh || !renews(row) => {
+                return Ok(Got::Row(Box::new(row.clone())));
+            }
             CacheKind::Meta if fresh => return Ok(Got::Row(Box::new(row.clone()))),
             CacheKind::Miss if fresh => return Ok(Got::Missing),
             _ => {}
@@ -776,7 +812,7 @@ async fn get(app: &Arc<App>, r: &RepoInfo, up: &Upstream, a: &Asked) -> Result<G
     if let Some(a) = accept(&r.format, a) {
         req = req.header(header::ACCEPT, a);
     }
-    if let Some(row) = have.as_ref().filter(|r| r.kind == CacheKind::Meta) {
+    if let Some(row) = have.as_ref().filter(|r| renews(r)) {
         if !row.etag.is_empty() {
             req = req.header(header::IF_NONE_MATCH, &row.etag);
         }
@@ -789,18 +825,21 @@ async fn get(app: &Arc<App>, r: &RepoInfo, up: &Upstream, a: &Asked) -> Result<G
         Err(e) => {
             // Not there: the metadata as it was.
             return match have {
-                Some(row) if row.kind == CacheKind::Meta => Ok(Got::Row(Box::new(row))),
+                Some(row) if renews(&row) => Ok(Got::Row(Box::new(row))),
                 _ => Err(Error::Invalid(format!("the upstream: {e}"))),
             };
         }
     };
     let st = resp.status();
+    if r.format == "files" && a.kind == CacheKind::Meta && resp.url().as_str() != url {
+        return Ok(Got::Moved(resp.url().to_string()));
+    }
     let put = |row: CacheRow| {
         let (app2, name) = (app.clone(), r.name.clone());
         tokio::task::spawn_blocking(move || app2.engine.cache_put(&name, &row))
     };
     if st == reqwest::StatusCode::NOT_MODIFIED
-        && let Some(row) = have.clone().filter(|r| r.kind == CacheKind::Meta)
+        && let Some(row) = have.clone().filter(|r| renews(r))
     {
         let (app2, name, path) = (app.clone(), r.name.clone(), a.path.clone());
         let _ = tokio::task::spawn_blocking(move || app2.engine.cache_fresh(&name, &path)).await;
@@ -826,7 +865,7 @@ async fn get(app: &Arc<App>, r: &RepoInfo, up: &Upstream, a: &Asked) -> Result<G
     }
     if !st.is_success() {
         return match have {
-            Some(row) if row.kind == CacheKind::Meta => Ok(Got::Row(Box::new(row))),
+            Some(row) if renews(&row) => Ok(Got::Row(Box::new(row))),
             _ => Err(Error::Invalid(format!(
                 "the upstream answered {st} for {url}"
             ))),
@@ -932,6 +971,9 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
             ),
         );
     }
+    if r.format == "files" {
+        return files_serve(app, at, req).await;
+    }
     if at.rel.is_empty() {
         return crate::serve::client_note(
             StatusCode::OK,
@@ -969,7 +1011,7 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
     }
     let row = match get(&app, &r, &up, &a).await {
         Ok(Got::Row(row)) => row,
-        Ok(Got::Missing) => return status(StatusCode::NOT_FOUND),
+        Ok(Got::Missing | Got::Moved(_)) => return status(StatusCode::NOT_FOUND),
         Err(e) => return text(StatusCode::BAD_GATEWAY, e.to_string()),
     };
     let Some(sha) = row.sha256 else {
@@ -1080,6 +1122,7 @@ pub async fn prefetch(app: &Arc<App>, r: &RepoInfo, paths: &[String]) -> Result<
         let state = match get(app, r, &up, &a).await {
             Ok(Got::Row(row)) => format!("cached ({} bytes)", row.size),
             Ok(Got::Missing) => "not upstream".to_string(),
+            Ok(Got::Moved(to)) => format!("moved upstream to {to}"),
             Err(e) => format!("failed: {e}"),
         };
         out.push(json!({"path": a.path, "state": state}));
@@ -1162,6 +1205,429 @@ pub fn row_json(r: &CacheRow) -> Value {
         "fetched": r.fetched, "used": r.used, "pinned": r.pinned,
         "name": r.name, "version": r.version,
     })
+}
+
+// ---- files: a proxy of any file server ----
+
+/// A files proxy: a directory is the upstream's listing, as pkgpod lists
+/// it; a file is served from the cache when it is there and fresh (or
+/// the upstream says it has not changed), and otherwise streamed to the
+/// client as it arrives while it is kept, so a large image does not
+/// keep the client waiting until it is all here.
+async fn files_serve(app: Arc<App>, at: At, req: Request) -> Response {
+    let r = at.served.repo.clone();
+    let up = match Upstream::of(&r) {
+        Ok(u) => u,
+        Err(e) => return text(StatusCode::BAD_GATEWAY, e.to_string()),
+    };
+    let head = req.method() == Method::HEAD;
+    if at.rel.is_empty() || at.raw_path.ends_with('/') {
+        return files_listing(&app, &r, &up, &at, head, req.uri().query().unwrap_or("")).await;
+    }
+    let Some(a) = files(&at.rel) else {
+        return status(StatusCode::NOT_FOUND);
+    };
+    if up.excluded(&a.name) {
+        return status(StatusCode::NOT_FOUND);
+    }
+    let have = {
+        let (app2, name, path) = (app.clone(), r.name.clone(), a.path.clone());
+        tokio::task::spawn_blocking(move || app2.engine.cache_get(&name, &path))
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten()
+            .filter(|row| row.kind == CacheKind::File)
+    };
+    let fresh = have
+        .as_ref()
+        .is_some_and(|row| pkgpod_base::now() - row.fetched < up.ttl);
+    // Kept and fresh, a part of a file not here yet (fetched whole
+    // first), or a HEAD of what is kept: as any proxy serves.
+    let ranged = req.headers().contains_key(header::RANGE);
+    if fresh || (ranged && have.is_none()) || (head && have.is_some()) {
+        return files_cached(&app, &r, &up, &a, req).await;
+    }
+    let url = format!("{}{}", up.base, a.path);
+    if head {
+        // Not kept: what the upstream says of it, nothing fetched.
+        return match client().head(&url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let mut out = Response::new(Body::empty());
+                for k in [
+                    header::CONTENT_LENGTH,
+                    header::CONTENT_TYPE,
+                    header::LAST_MODIFIED,
+                ] {
+                    if let Some(v) = resp.headers().get(&k) {
+                        out.headers_mut().insert(k, v.clone());
+                    }
+                }
+                crate::serve::sandbox(out.headers_mut());
+                out
+            }
+            Ok(resp) if matches!(resp.status().as_u16(), 404 | 410) => {
+                status(StatusCode::NOT_FOUND)
+            }
+            Ok(resp) => text(
+                StatusCode::BAD_GATEWAY,
+                format!("the upstream answered {} for {url}", resp.status()),
+            ),
+            Err(e) => text(StatusCode::BAD_GATEWAY, format!("the upstream: {e}")),
+        };
+    }
+    let mut q = client().get(&url);
+    if let Some(row) = &have {
+        if !row.etag.is_empty() {
+            q = q.header(header::IF_NONE_MATCH, &row.etag);
+        }
+        if !row.last_modified.is_empty() {
+            q = q.header(header::IF_MODIFIED_SINCE, &row.last_modified);
+        }
+    }
+    let resp = match q.send().await {
+        Ok(resp) => resp,
+        // Not there: what is kept, as it was.
+        Err(_) if have.is_some() => return files_kept(&app, &r, &a, have, req).await,
+        Err(e) => return text(StatusCode::BAD_GATEWAY, format!("the upstream: {e}")),
+    };
+    let st = resp.status();
+    if st == reqwest::StatusCode::NOT_MODIFIED && have.is_some() {
+        let (app2, name, path) = (app.clone(), r.name.clone(), a.path.clone());
+        let _ = tokio::task::spawn_blocking(move || app2.engine.cache_fresh(&name, &path)).await;
+        return files_kept(&app, &r, &a, have, req).await;
+    }
+    if st == reqwest::StatusCode::NOT_FOUND || st == reqwest::StatusCode::GONE {
+        // Gone upstream: so here, from now on.
+        let now = pkgpod_base::now();
+        let row = CacheRow {
+            path: a.path.clone(),
+            kind: CacheKind::Miss,
+            sha256: None,
+            size: 0,
+            content_type: String::new(),
+            etag: String::new(),
+            last_modified: String::new(),
+            fetched: now,
+            used: now,
+            pinned: false,
+            name: a.name.clone(),
+            version: String::new(),
+        };
+        let (app2, name) = (app.clone(), r.name.clone());
+        let _ = tokio::task::spawn_blocking(move || app2.engine.cache_put(&name, &row)).await;
+        return status(StatusCode::NOT_FOUND);
+    }
+    if !st.is_success() {
+        if have.is_some() {
+            return files_kept(&app, &r, &a, have, req).await;
+        }
+        return text(
+            StatusCode::BAD_GATEWAY,
+            format!("the upstream answered {st} for {url}"),
+        );
+    }
+    if ranged {
+        // Changed upstream, and a part asked for: fetched whole first.
+        return files_cached(&app, &r, &up, &a, req).await;
+    }
+    let counts = crate::stats::counts(req.method(), req.headers());
+    let resp = files_stream(&app, &r, &up, &a, have.is_some_and(|h| h.pinned), resp).await;
+    app.stats.named(counts, &resp, &r.name, &a.name, "");
+    resp
+}
+
+/// Through the common proxy path: the cache row, fetched whole when
+/// needed, then served as a blob is (ranges, validators).
+async fn files_cached(
+    app: &Arc<App>,
+    r: &RepoInfo,
+    up: &Upstream,
+    a: &Asked,
+    req: Request,
+) -> Response {
+    let row = match get(app, r, up, a).await {
+        Ok(Got::Row(row)) => Some(*row),
+        Ok(Got::Missing | Got::Moved(_)) => return status(StatusCode::NOT_FOUND),
+        Err(e) => return text(StatusCode::BAD_GATEWAY, e.to_string()),
+    };
+    files_kept(app, r, a, row, req).await
+}
+
+/// Serves what the cache keeps for `a`.
+async fn files_kept(
+    app: &Arc<App>,
+    r: &RepoInfo,
+    a: &Asked,
+    row: Option<CacheRow>,
+    req: Request,
+) -> Response {
+    let Some(row) = row else {
+        return status(StatusCode::NOT_FOUND);
+    };
+    let Some(sha) = row.sha256 else {
+        return status(StatusCode::NOT_FOUND);
+    };
+    let counts = crate::stats::counts(req.method(), req.headers());
+    let file = r.store().path(&sha);
+    let name = a.path.rsplit('/').next().unwrap_or("").to_string();
+    let name = String::from_utf8_lossy(&crate::serve::percent_decode(&name)).into_owned();
+    let mut resp = crate::serve::serve_blob(&file, &sha, &name, None, true, req).await;
+    if !row.content_type.is_empty()
+        && let Ok(v) = HeaderValue::from_str(&row.content_type)
+    {
+        resp.headers_mut().insert(header::CONTENT_TYPE, v);
+    }
+    app.stats.named(counts, &resp, &r.name, &a.name, "");
+    let (app2, name, path) = (app.clone(), r.name.clone(), a.path.clone());
+    tokio::spawn(async move {
+        let _ = tokio::task::spawn_blocking(move || app2.engine.cache_used(&name, &path)).await;
+    });
+    resp
+}
+
+/// The upstream's answer passed to the client as it arrives, and kept:
+/// when the last byte is in, the file is put in the store and the cache
+/// row written. A client that goes away, an upstream that breaks off or
+/// a file over the limit leaves nothing kept.
+async fn files_stream(
+    app: &Arc<App>,
+    r: &RepoInfo,
+    up: &Upstream,
+    a: &Asked,
+    pinned: bool,
+    resp: reqwest::Response,
+) -> Response {
+    use futures_util::StreamExt;
+    use std::io::Write;
+    let h = |k: header::HeaderName| {
+        resp.headers()
+            .get(k)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    };
+    let (etag, lm, ct) = (
+        h(header::ETAG),
+        h(header::LAST_MODIFIED),
+        h(header::CONTENT_TYPE),
+    );
+    let length = resp.content_length();
+    let store = r.store();
+    let inc = if length.is_some_and(|n| n > MAX_FILE) {
+        None
+    } else {
+        let s = store.clone();
+        tokio::task::spawn_blocking(move || s.incoming())
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+    };
+    let now = pkgpod_base::now();
+    let row = CacheRow {
+        path: a.path.clone(),
+        kind: CacheKind::File,
+        sha256: None,
+        size: 0,
+        content_type: ct.clone(),
+        etag,
+        last_modified: lm.clone(),
+        fetched: now,
+        used: now,
+        pinned,
+        name: a.name.clone(),
+        version: String::new(),
+    };
+    struct Tee {
+        up: futures_util::stream::BoxStream<'static, reqwest::Result<axum::body::Bytes>>,
+        inc: Option<pkgpod_base::store::Incoming>,
+        n: u64,
+        /// What the upstream said it sends.
+        length: Option<u64>,
+        keep: Option<(Arc<App>, String, CacheRow, u64)>,
+        store: pkgpod_base::store::Store,
+        done: bool,
+    }
+    impl Tee {
+        /// Every byte is in: the file into the store and the cache.
+        async fn finish(&mut self) {
+            let (Some(inc), Some((app, repo, mut row, max))) = (self.inc.take(), self.keep.take())
+            else {
+                return;
+            };
+            if self.length.is_some_and(|l| l != self.n) {
+                return;
+            }
+            let store = self.store.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                let (sha, size) = store.commit(inc, None).ok()?;
+                row.sha256 = Some(sha);
+                row.size = size;
+                app.engine.cache_put(&repo, &row).ok()?;
+                if max > 0 {
+                    let _ = app.engine.cache_shrink(&repo, max);
+                }
+                Some(())
+            })
+            .await;
+        }
+    }
+    let tee = Tee {
+        up: resp.bytes_stream().boxed(),
+        inc,
+        n: 0,
+        length,
+        keep: Some((app.clone(), r.name.clone(), row, up.max)),
+        store,
+        done: false,
+    };
+    let body = futures_util::stream::unfold(tee, |mut t| async move {
+        if t.done {
+            return None;
+        }
+        match t.up.next().await {
+            Some(Ok(b)) => {
+                t.n += b.len() as u64;
+                if let Some(inc) = t.inc.as_mut()
+                    && (t.n > MAX_FILE || inc.write_all(&b).is_err())
+                {
+                    t.inc = None;
+                }
+                // With a length the client stops reading at the last
+                // byte, before this stream would end: kept now.
+                if t.length == Some(t.n) {
+                    t.finish().await;
+                }
+                Some((Ok::<_, std::io::Error>(b), t))
+            }
+            Some(Err(e)) => {
+                t.done = true;
+                t.inc = None;
+                Some((Err(std::io::Error::other(e)), t))
+            }
+            None => {
+                t.done = true;
+                t.finish().await;
+                None
+            }
+        }
+    });
+    let mut out = Response::new(Body::from_stream(body));
+    let hs = out.headers_mut();
+    if let Some(n) = length {
+        hs.insert(header::CONTENT_LENGTH, HeaderValue::from(n));
+    }
+    if let Ok(v) = HeaderValue::from_str(if ct.is_empty() {
+        "application/octet-stream"
+    } else {
+        &ct
+    }) {
+        hs.insert(header::CONTENT_TYPE, v);
+    }
+    if let Ok(v) = HeaderValue::from_str(&lm)
+        && !lm.is_empty()
+    {
+        hs.insert(header::LAST_MODIFIED, v);
+    }
+    hs.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    crate::serve::sandbox(hs);
+    out
+}
+
+/// A directory of the upstream, listed as pkgpod lists its own: the
+/// upstream's HTML listing (kept as metadata) read for its entries; a
+/// file kept here shows its size.
+async fn files_listing(
+    app: &Arc<App>,
+    r: &RepoInfo,
+    up: &Upstream,
+    at: &At,
+    head: bool,
+    query: &str,
+) -> Response {
+    let dir = if at.rel.is_empty() {
+        String::new()
+    } else {
+        format!("{}/", joined(&at.rel))
+    };
+    let url = format!("{}{dir}", up.base);
+    let a = Asked {
+        // The root's key: no path starts with a slash otherwise.
+        path: if dir.is_empty() {
+            "/".into()
+        } else {
+            dir.clone()
+        },
+        kind: CacheKind::Meta,
+        name: dir.clone(),
+        version: String::new(),
+        count: false,
+        url: Some(url.clone()),
+        expect: None,
+    };
+    let row = match get(app, r, up, &a).await {
+        Ok(Got::Row(row)) => *row,
+        Ok(Got::Missing) => return status(StatusCode::NOT_FOUND),
+        Ok(Got::Moved(to)) => {
+            // Within the upstream: the same place through here.
+            let mount = at.raw_path.strip_suffix(dir.as_str()).unwrap_or("");
+            return match to.strip_prefix(up.base.as_str()) {
+                Some(rest) if mount.ends_with('/') => {
+                    axum::response::Redirect::temporary(&format!("{mount}{rest}")).into_response()
+                }
+                _ => text(
+                    StatusCode::BAD_GATEWAY,
+                    format!("the upstream moves {url} out of itself, to {to}"),
+                ),
+            };
+        }
+        Err(e) => return text(StatusCode::BAD_GATEWAY, e.to_string()),
+    };
+    let Some(sha) = row.sha256 else {
+        return status(StatusCode::NOT_FOUND);
+    };
+    let (store, app2, name, prefix) = (r.store(), app.clone(), r.name.clone(), dir.clone());
+    let read = tokio::task::spawn_blocking(move || {
+        let html = store.read(&sha).ok()?;
+        let kept = app2
+            .engine
+            .cache_list(&name, &prefix, 100_000)
+            .unwrap_or_default();
+        Some((html, kept))
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some((html, kept)) = read else {
+        return text(
+            StatusCode::BAD_GATEWAY,
+            "the upstream's listing is not here".into(),
+        );
+    };
+    let Ok(base) = reqwest::Url::parse(&url) else {
+        return status(StatusCode::NOT_FOUND);
+    };
+    let (found, _) = pkgpod_mirror::files::parse_listing(&base, &String::from_utf8_lossy(&html));
+    let sizes: std::collections::HashMap<&str, u64> = kept
+        .iter()
+        .filter(|k| k.kind == CacheKind::File)
+        .filter_map(|k| Some((k.path.strip_prefix(dir.as_str())?, k.size)))
+        .filter(|(rest, _)| !rest.contains('/'))
+        .collect();
+    let entries = found
+        .into_iter()
+        .map(|(name, is_dir, _)| crate::serve::ListEntry {
+            size: if is_dir {
+                None
+            } else {
+                sizes.get(percent_encode(&name).as_str()).copied()
+            },
+            name,
+            dir: is_dir,
+            modified: None,
+        })
+        .collect();
+    crate::serve::listing(&at.raw_path, entries, query, head, &Default::default())
 }
 
 #[cfg(test)]

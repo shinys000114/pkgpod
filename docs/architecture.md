@@ -282,7 +282,11 @@ until it is evicted by hand or for `max_mib`, unless pinned) or
 **metadata** (a version list, asked for again when older than
 `metadata_minutes`, with its validators, and served as it was while the
 upstream is not there). A **miss** records that the upstream had
-nothing there. Names in `exclude` are never asked for upstream.
+nothing there. Names in `exclude` are never asked for upstream. A
+files proxy renews its files as metadata (a file server replaces files
+under the same name), lists directories from the upstream's HTML
+listings, and streams a file not kept yet to the client while it is
+stored.
 `pkgpod cache` lists, pins, unpins, evicts and prefetches. Proxies take
 no uploads and have no versions.
 
