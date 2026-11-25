@@ -254,15 +254,33 @@ pub(crate) fn resolve_links(
     root: &Digest,
     path: &str,
 ) -> pkgpod_engine::Result<Option<Entry>> {
-    let mut segs: Vec<String> = path
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .collect();
+    Ok(resolve_links_at(objs, root, path)?.map(|(_, e)| e))
+}
+
+/// [`resolve_links`], with the path the entry is really at. A link's
+/// target is a path of the same tree: it never leaves the repository,
+/// and one naming `.` or `..` (or a loop, past eight links) resolves to
+/// nothing.
+pub(crate) fn resolve_links_at(
+    objs: &pkgpod_engine::Objects,
+    root: &Digest,
+    path: &str,
+) -> pkgpod_engine::Result<Option<(String, Entry)>> {
+    let names = |s: &str| -> Option<Vec<String>> {
+        let v: Vec<String> = s
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect();
+        (!v.iter().any(|s| s == "." || s == "..")).then_some(v)
+    };
+    let Some(mut segs) = names(path) else {
+        return Ok(None);
+    };
     let mut hops = 0;
     'path: loop {
         if segs.is_empty() {
-            return objs.resolve(root, "");
+            return Ok(objs.resolve(root, "")?.map(|e| (String::new(), e)));
         }
         let mut at = String::new();
         for (i, seg) in segs.iter().enumerate() {
@@ -276,16 +294,14 @@ pub(crate) fn resolve_links(
                     if hops > 8 {
                         return Ok(None);
                     }
-                    let mut next: Vec<String> = target
-                        .split('/')
-                        .filter(|s| !s.is_empty())
-                        .map(String::from)
-                        .collect();
+                    let Some(mut next) = names(&target) else {
+                        return Ok(None);
+                    };
                     next.extend(segs[i + 1..].iter().cloned());
                     segs = next;
                     continue 'path;
                 }
-                Some(e) if i + 1 == segs.len() => return Ok(Some(e)),
+                Some(e) if i + 1 == segs.len() => return Ok(Some((at, e))),
                 Some(Entry::Dir { .. }) => {}
                 _ => return Ok(None),
             }

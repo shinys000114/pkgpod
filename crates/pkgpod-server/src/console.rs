@@ -3298,6 +3298,11 @@ pub struct TreeRow {
     pub dir: bool,
     pub size: String,
     pub detail: String,
+    /// A link: "dir" or "file" (where it leads, in this tree), "broken";
+    /// empty for anything else.
+    pub link: &'static str,
+    /// Where a link leads (links followed).
+    pub to: String,
 }
 
 #[derive(Template)]
@@ -3380,6 +3385,13 @@ async fn tree_part(
             };
             let ty = s(&e["type"]);
             TreeRow {
+                link: match (ty.as_str(), e["to"].as_str()) {
+                    ("ref", Some("dir")) => "dir",
+                    ("ref", Some("file")) => "file",
+                    ("ref", _) => "broken",
+                    _ => "",
+                },
+                to: s(&e["resolved"]),
                 dir: ty == "dir",
                 size: e["size"]
                     .as_u64()
@@ -3391,6 +3403,9 @@ async fn tree_part(
                         .map(|h| h[..16].to_string())
                         .unwrap_or_default(),
                     "value" => e["value"].to_string(),
+                    "ref" if e["to"].is_null() => {
+                        format!("→ {} (not there)", s(&e["target"]))
+                    }
                     "ref" => format!("→ {}", s(&e["target"])),
                     _ => String::new(),
                 },
@@ -3473,10 +3488,15 @@ async fn file_download(
             } else {
                 ver.root
             };
-            Ok(match app2.engine.objects().resolve(&root, &q2.0)? {
-                Some(Entry::Blob { sha256, .. }) => Some((sha256, r2.store().path(&sha256))),
-                _ => None,
-            })
+            // A link is followed, within the tree.
+            Ok(
+                match crate::serve::resolve_links_at(app2.engine.objects(), &root, &q2.0)? {
+                    Some((_, Entry::Blob { sha256, .. })) => {
+                        Some((sha256, r2.store().path(&sha256)))
+                    }
+                    _ => None,
+                },
+            )
         },
     )
     .await;

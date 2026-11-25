@@ -15,10 +15,10 @@
     <tbody>
     {% for r in rows %}
     <tr>
-      <td class="wrap">{% if r.dir %}<a href="#" hx-get="/r/{{ repo }}/tree?path={{ r.path|urlencode }}&version={{ version|urlencode }}&served={% if served %}1{% else %}0{% endif %}" hx-target="#tab">📁 {{ r.name }}/</a>{% else %}{{ r.name }}{% endif %}</td>
+      <td class="wrap">{% if r.dir %}<a href="#" hx-get="/r/{{ repo }}/tree?path={{ r.path|urlencode }}&version={{ version|urlencode }}&served={% if served %}1{% else %}0{% endif %}" hx-target="#tab">📁 {{ r.name }}/</a>{% else if r.link == "dir" %}<a href="#" hx-get="/r/{{ repo }}/tree?path={{ r.to|urlencode }}&version={{ version|urlencode }}&served={% if served %}1{% else %}0{% endif %}" hx-target="#tab" title="a link to {{ r.to }}/">🔗 {{ r.name }}/</a>{% else if r.link == "file" %}<span title="a link to {{ r.to }}">🔗 {{ r.name }}</span>{% else if r.link == "broken" %}<span class="muted" title="a link to nothing here">🔗 {{ r.name }}</span>{% else %}{{ r.name }}{% endif %}</td>
       <td class="num">{{ r.size }}</td>
       <td class="mono wrap muted">{{ r.detail }}</td>
-      <td class="acts nowrap">{% if !r.dir %}{% if !mirror %}<a href="/r/{{ repo }}/file?path={{ r.path|urlencode }}&served={% if served %}1{% else %}0{% endif %}&version={{ version|urlencode }}" download>download</a>{% endif %}{% if !base.is_empty() %} <span class="copy-src" hidden>{{ base }}{{ r.path }}</span><button class="copy link" type="button" title="{{ base }}{{ r.path }}">copy address</button>{% endif %}{% endif %}</td>
+      <td class="acts nowrap">{% if !r.dir && r.link != "dir" && r.link != "broken" %}{% if !mirror %}<a href="/r/{{ repo }}/file?path={{ r.path|urlencode }}&served={% if served %}1{% else %}0{% endif %}&version={{ version|urlencode }}" download>download</a>{% endif %}{% if !base.is_empty() %} <span class="copy-src" hidden>{{ base }}{{ r.path }}</span><button class="copy link" type="button" title="{{ base }}{{ r.path }}">copy address</button>{% endif %}{% endif %}</td>
       {% if can_write %}<td class="acts"><form hx-post="/c/r/{{ repo }}/remove" hx-target="#tab-result"><input type="hidden" name="path" value="{{ r.path }}"><button class="link danger" type="submit">remove…</button></form></td>{% endif %}
     </tr>
     {% endfor %}

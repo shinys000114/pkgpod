@@ -1017,6 +1017,7 @@ pub fn tree_entries(
         .objects()
         .dir(&root, path)?
         .ok_or_else(|| Error::NotFound(format!("no directory {path}")))?;
+    let objs = app.engine.objects();
     let mut out: Vec<Value> = t
         .iter()
         .map(|(name, e)| match e {
@@ -1024,7 +1025,20 @@ pub fn tree_entries(
             Entry::Blob { sha256, size, meta } => {
                 json!({"name": name, "type": "file", "size": size, "sha256": sha256, "meta": meta})
             }
-            Entry::Ref { target } => json!({"name": name, "type": "ref", "target": target}),
+            Entry::Ref { target } => {
+                // Where it leads, in this tree (nothing: a broken link).
+                let full = if path.trim_matches('/').is_empty() {
+                    name.clone()
+                } else {
+                    format!("{}/{name}", path.trim_matches('/'))
+                };
+                let (to, resolved) = match crate::serve::resolve_links_at(objs, &root, &full) {
+                    Ok(Some((at, Entry::Dir { .. }))) => (json!("dir"), json!(at)),
+                    Ok(Some((at, Entry::Blob { .. }))) => (json!("file"), json!(at)),
+                    _ => (Value::Null, Value::Null),
+                };
+                json!({"name": name, "type": "ref", "target": target, "to": to, "resolved": resolved})
+            }
             Entry::Value { value } => json!({"name": name, "type": "value", "value": value}),
         })
         .collect();
