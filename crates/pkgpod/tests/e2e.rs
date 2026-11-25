@@ -991,6 +991,11 @@ fn server_sections_jobs_and_logs() {
         assert_eq!(st, 200, "{p}: {body}");
         assert!(body.contains(has), "{p}: {body}");
     }
+    let (_, overview) = page("/admin/server");
+    assert!(
+        overview.contains(r#"<a class="stat" href="/admin/server/jobs?state=failed">"#),
+        "{overview}"
+    );
     let (_, storage) = page("/admin/server/storage");
     assert!(
         !storage.contains("Trusted publishing"),

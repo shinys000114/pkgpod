@@ -420,6 +420,9 @@
     if (fill) {
       var to = document.getElementById(fill.getAttribute("data-for"));
       if (to) {
+        // A form folded away is opened.
+        var folded = to.closest("details");
+        if (folded) folded.open = true;
         to.value = fill.getAttribute("data-value");
         prefill(to);
         to.focus();
