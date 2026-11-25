@@ -8976,6 +8976,417 @@ fn cli_from_the_server() {
     assert!(sh.contains(&format!("{}/cli/pkgpod", s.api)), "{sh}");
 }
 
+/// A stand-in for a server, or for a proxy in front of one: `answer`
+/// gives the status, content type and body for a method and path. It
+/// keeps the request heads, reads no body and closes the connection
+/// after each answer.
+fn fake_server(
+    answer: impl Fn(&str, &str) -> (&'static str, &'static str, String) + Send + 'static,
+) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::io::{BufRead, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
+    let heads = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let heads2 = heads.clone();
+    std::thread::spawn(move || {
+        for mut c in l.incoming().flatten() {
+            let mut r = std::io::BufReader::new(c.try_clone().unwrap());
+            let mut head = String::new();
+            loop {
+                let mut line = String::new();
+                if r.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+                    break;
+                }
+                head.push_str(&line);
+            }
+            let mut first = head.split_whitespace();
+            let (m, p) = (first.next().unwrap_or(""), first.next().unwrap_or(""));
+            let (st, ct, body) = answer(m, p);
+            heads2.lock().unwrap().push(head.clone());
+            let _ = c.write_all(
+                format!(
+                    "HTTP/1.1 {st}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\n\
+                     Connection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+        }
+    });
+    (url, heads)
+}
+
+/// A token of `user` (by password, as a script would make one).
+fn token_of(s: &Server, user: &str, password: &str) -> String {
+    let v: Value = reqwest::blocking::Client::new()
+        .post(format!("{}/api/v1/tokens", s.api))
+        .basic_auth(user, Some(password))
+        .json(&json!({"name": "t", "write": true}))
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    v["token"].as_str().unwrap().to_string()
+}
+
+/// An upload the server, or a proxy in front, refuses before it reads
+/// it: the CLI says why, not that the connection went away while it was
+/// still sending. A long call a proxy gave up on may still finish.
+#[test]
+fn cli_says_why_an_upload_or_call_failed() {
+    let s = Server::start();
+    s.cli(&["repo", "create", "r", "-f", "files", "-s", "public=true"])
+        .unwrap();
+    let (f, g) = (s.dir.path().join("a.bin"), s.dir.path().join("b.bin"));
+    std::fs::write(&f, vec![1u8; 8 << 20]).unwrap();
+    std::fs::write(&g, vec![2u8; 8 << 20]).unwrap();
+    let up = |env: &[(&str, &str)], args: &[&str]| {
+        let mut c = s.cmd();
+        for (k, v) in env {
+            c.env(k, v);
+        }
+        let out = c.args(args).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr).to_string();
+        (out.status.code(), err)
+    };
+    let (fs, gs) = (f.to_str().unwrap(), g.to_str().unwrap());
+    for args in [
+        vec!["upload", "nothing-here", fs],
+        vec!["upload", "nothing-here", fs, gs],
+    ] {
+        let (code, err) = up(&[], &args);
+        assert_eq!(code, Some(4), "{err}");
+        assert!(err.contains("no repository nothing-here"), "{err}");
+    }
+    s.cli_in(
+        &["user", "add", "reader", "--password-stdin"],
+        "reader-password-1",
+    )
+    .unwrap();
+    s.cli(&["grant", "set", "r", "user:reader", "read"])
+        .unwrap();
+    let tok = token_of(&s, "reader", "reader-password-1");
+    let (code, err) = up(&[("PKGPOD_TOKEN", &tok)], &["upload", "r", fs]);
+    assert_eq!(code, Some(7), "{err}");
+    assert!(err.contains("write"), "{err}");
+
+    // A proxy in front with a limit on the size of a request.
+    let (proxy, _) = fake_server(|m, _| match m {
+        "GET" => (
+            "200 OK",
+            "application/json",
+            json!({"name": "r", "role": "write"}).to_string(),
+        ),
+        _ => (
+            "413 Payload Too Large",
+            "text/html",
+            "<html>413</html>".into(),
+        ),
+    });
+    for args in [vec!["upload", "r", fs], vec!["upload", "r", fs, gs]] {
+        let (code, err) = up(&[("PKGPOD_URL", &proxy), ("PKGPOD_TOKEN", "x")], &args);
+        assert_ne!(code, Some(0));
+        assert!(err.contains("proxy") && err.contains("100 MB"), "{err}");
+        assert!(!err.contains("receiver is gone"), "{err}");
+    }
+    // One that stopped waiting for a long call (Cloudflare's 524).
+    let (proxy, _) = fake_server(|_, _| {
+        (
+            "524 A timeout occurred",
+            "text/html",
+            "<html>524</html>".into(),
+        )
+    });
+    let (code, err) = up(&[("PKGPOD_URL", &proxy), ("PKGPOD_TOKEN", "x")], &["gc"]);
+    assert_eq!(code, Some(1), "{err}");
+    assert!(
+        err.contains("524") && err.contains("may still finish") && !err.contains("unknown"),
+        "{err}"
+    );
+}
+
+/// The saved login's token goes only to the server it is for; another
+/// address (--url, PKGPOD_URL) gets none, unless one is given.
+#[test]
+fn cli_sends_the_saved_token_only_to_its_server() {
+    let s = Server::start();
+    let (other, heads) = fake_server(|_, _| {
+        (
+            "200 OK",
+            "application/json",
+            json!({"pkgpod": "x"}).to_string(),
+        )
+    });
+    let run = |c: &mut Command| {
+        let out = c.output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        (
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    };
+    let (out, err) = run(s.cmd().env("PKGPOD_URL", &other).arg("status"));
+    assert!(out.contains("not logged in"), "{out}");
+    assert!(
+        err.starts_with("pkgpod: ") && err.contains("not sent"),
+        "{err}"
+    );
+    run(s.cmd().args(["--url", &other, "status"]));
+    run(s
+        .cmd()
+        .args(["--url", &other, "status"])
+        .env("PKGPOD_TOKEN", "given-token"));
+    let heads = heads.lock().unwrap().clone();
+    assert_eq!(heads.len(), 3, "{heads:?}");
+    for h in &heads[..2] {
+        let h = h.to_ascii_lowercase();
+        assert!(!h.contains("authorization"), "{h}");
+        assert!(h.contains("\r\nuser-agent: pkgpod/"), "{h}");
+    }
+    assert!(
+        heads[2]
+            .to_ascii_lowercase()
+            .contains("authorization: bearer given-token"),
+        "{}",
+        heads[2]
+    );
+    // The same server written another way is still the saved login's.
+    let url = format!("{}/", s.api);
+    for (out, err) in [
+        run(s.cmd().env("PKGPOD_URL", &url).arg("status")),
+        run(s.cmd().args(["--url", &url, "status"])),
+    ] {
+        assert!(out.contains("logged in as admin (admin)"), "{out}");
+        assert!(err.is_empty(), "{err}");
+    }
+}
+
+/// Commands in scripts: they end on a refusal, read passwords from
+/// stdin, and say so when there is no terminal to ask on.
+#[test]
+fn cli_commands_in_scripts() {
+    use std::os::unix::process::CommandExt as _;
+    let s = Server::start();
+    s.cli_in(
+        &["user", "add", "dev", "--password-stdin"],
+        "dev-password-1",
+    )
+    .unwrap();
+    let e = s.cli(&["user", "set", "dev"]).unwrap_err();
+    assert!(
+        e.contains("exit status: 2") && e.contains("nothing to change"),
+        "{e}"
+    );
+    s.cli_in(
+        &["user", "set", "dev", "--password-stdin"],
+        "dev-password-2",
+    )
+    .unwrap();
+    let st = |pw: &str| {
+        reqwest::blocking::Client::new()
+            .get(format!("{}/api/v1/status", s.api))
+            .basic_auth("dev", Some(pw))
+            .send()
+            .unwrap()
+            .json::<Value>()
+            .unwrap()["user"]
+            .clone()
+    };
+    assert_eq!(st("dev-password-2"), json!("dev"));
+    let tok = token_of(&s, "dev", "dev-password-2");
+    let mut c = s.cmd();
+    c.env("PKGPOD_TOKEN", &tok)
+        .args(["user", "passwd", "--password-stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null());
+    let mut ch = c.spawn().unwrap();
+    std::io::Write::write_all(
+        ch.stdin.as_mut().unwrap(),
+        b"dev-password-2\ndev-password-3\n",
+    )
+    .unwrap();
+    assert!(ch.wait().unwrap().success());
+    assert_eq!(st("dev-password-3"), json!("dev"));
+    // No terminal (a new session has none): the password cannot be
+    // asked for.
+    let mut c = s.cmd();
+    c.args(["user", "set", "dev", "--password"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped());
+    // SAFETY: setsid is async-signal-safe.
+    unsafe {
+        c.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let out = c.output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && err.contains("--password-stdin"),
+        "{err}"
+    );
+
+    // `logs -f` ends once its token is gone, instead of asking forever.
+    let follow = s.cli(&["token", "create", "follow", "--write"]).unwrap();
+    let mut ch = s
+        .cmd()
+        .env("PKGPOD_TOKEN", follow.trim())
+        .args(["logs", "-f"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    let id = s
+        .json(&["token", "list"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "follow")
+        .unwrap()["id"]
+        .to_string();
+    s.cli(&["token", "delete", &id]).unwrap();
+    let t0 = Instant::now();
+    let status = loop {
+        if let Some(st) = ch.try_wait().unwrap() {
+            break Some(st);
+        }
+        if t0.elapsed() > Duration::from_secs(10) {
+            let _ = ch.kill();
+            let _ = ch.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let status = status.expect("logs -f went on without a token");
+    assert_eq!(status.code(), Some(7), "{status}");
+
+    // `admin -c` after its subcommand too.
+    let out = s
+        .cmd()
+        .args(["admin", "check", "-c"])
+        .arg(s.dir.path().join("pkgpod.toml"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stdout).ends_with("ok\n"));
+}
+
+/// Tables have headers, and the help names the list of formats.
+#[test]
+fn cli_tables_and_help() {
+    let s = Server::start();
+    s.cli(&["repo", "create", "r", "-f", "files"]).unwrap();
+    s.cli(&["team", "add", "t"]).unwrap();
+    s.cli(&["key", "generate", "k", "K <k@example.invalid>"])
+        .unwrap();
+    let first = |args: &[&str]| {
+        let out = s.cli(args).unwrap();
+        out.lines().next().unwrap_or("").to_string()
+    };
+    assert_eq!(first(&["team", "list"]), "NAME  MEMBERS");
+    assert_eq!(first(&["grant", "list", "r"]), "SUBJECT  ROLE");
+    assert!(first(&["key", "list"]).starts_with("NAME  FINGERPRINT"));
+    assert!(first(&["storage", "list"]).starts_with("NAME  PATH"));
+    let jobs = first(&["jobs"]);
+    assert!(jobs.starts_with("JOB  KIND  REPO"), "{jobs}");
+    // Each format's lists line up on its own names; no empty
+    // operations list.
+    let f = s.cli(&["repo", "formats"]).unwrap();
+    // Where the second column of an entry starts.
+    let col = |l: &str| {
+        let end = 4 + l[4..].find(' ').unwrap();
+        end + l[end..].len() - l[end..].trim_start().len()
+    };
+    let lines: Vec<&str> = f.lines().collect();
+    for block in lines.split(|l| !l.starts_with(' ')) {
+        let at = block
+            .iter()
+            .position(|l| l.trim() == "operations:")
+            .unwrap_or(block.len());
+        assert!(at + 1 != block.len(), "an empty list: {block:#?}");
+        let (settings, ops) = block.split_at(at);
+        for part in [settings, ops] {
+            let mut cols: Vec<usize> = part
+                .iter()
+                .filter(|l| l.starts_with("    "))
+                .map(|l| col(l))
+                .collect();
+            cols.sort();
+            cols.dedup();
+            assert!(cols.len() <= 1, "not lined up: {part:#?}");
+        }
+    }
+    let help = s.cli(&["repo", "create", "--help"]).unwrap();
+    assert!(help.contains("pkgpod repo formats"), "{help}");
+    let help = s.cli(&["status", "--help"]).unwrap();
+    assert!(help.contains("Server:") && help.contains("--url"), "{help}");
+}
+
+/// The server's log is plain text where it is not a terminal, and has no
+/// time of its own where the journal stamps each line (not where
+/// JOURNAL_STREAM is only inherited, as in a shell a service started).
+#[test]
+fn server_log_off_a_terminal() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_port();
+    let cfg = dir.path().join("pkgpod.toml");
+    std::fs::write(
+        &cfg,
+        format!(
+            "data_dir = \"{}\"\nlisten = \"127.0.0.1:{port}\"\nlog = \"info\"\n",
+            dir.path().join("data").display()
+        ),
+    )
+    .unwrap();
+    // None: no JOURNAL_STREAM; Some(true): it names stdout; Some(false):
+    // it names another stream.
+    let run = |journal: Option<bool>| {
+        let log = dir.path().join(format!("log-{journal:?}"));
+        let out = std::fs::File::create(&log).unwrap();
+        let m = out.metadata().unwrap();
+        let mut c = Command::new(env!("CARGO_BIN_EXE_pkgpod"));
+        c.args(["serve", "-c"])
+            .arg(&cfg)
+            .env_remove("JOURNAL_STREAM")
+            .stdout(out)
+            .stderr(Stdio::null());
+        match journal {
+            Some(true) => c.env("JOURNAL_STREAM", format!("{}:{}", m.dev(), m.ino())),
+            Some(false) => c.env("JOURNAL_STREAM", format!("{}:{}", m.dev(), m.ino() + 1)),
+            None => &mut c,
+        };
+        let mut ch = c.spawn().unwrap();
+        let t = Instant::now();
+        while !std::fs::read_to_string(&log)
+            .unwrap()
+            .contains("management:")
+        {
+            assert!(t.elapsed() < Duration::from_secs(20), "no log");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = ch.kill();
+        let _ = ch.wait();
+        std::fs::read_to_string(&log).unwrap()
+    };
+    for journal in [None, Some(false)] {
+        let text = run(journal);
+        assert!(!text.contains('\x1b'), "{text:?}");
+        assert!(text.lines().all(|l| l.starts_with("20")), "{text}");
+    }
+    let text = run(Some(true));
+    assert!(!text.contains('\x1b'), "{text:?}");
+    for l in text.lines() {
+        let level = l.split_whitespace().next().unwrap_or("");
+        assert!(
+            ["ERROR", "WARN", "INFO", "DEBUG", "TRACE"].contains(&level),
+            "{l}"
+        );
+    }
+}
+
 /// Links in a files repository (a stable address for the newest build)
 /// and cleanup of old build directories.
 #[test]
