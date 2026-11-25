@@ -44,6 +44,7 @@ pub mod status;
 pub mod swift;
 pub mod terraform;
 pub mod usign_key;
+pub mod webhooks;
 
 mod console;
 mod cron;
@@ -326,6 +327,7 @@ pub async fn run(app: Arc<App>) -> Result<(), String> {
     listeners::reconcile(&app);
     let sched = jobs::scheduler(app.clone());
     let counts = stats::writer(app.clone());
+    let hooks = webhooks::worker(app.clone());
     let gc = {
         let app = app.clone();
         tokio::spawn(async move {
@@ -405,6 +407,7 @@ pub async fn run(app: Arc<App>) -> Result<(), String> {
     app.jobs.cancel_all();
     sched.abort();
     gc.abort();
+    hooks.abort();
     let drained = tokio::time::timeout(DRAIN, async move {
         let r = mgmt.await;
         for h in serving {

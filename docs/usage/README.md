@@ -264,6 +264,44 @@ audience and expiry, and takes each token once. Each exchange is in
 the audit log under the rule's user, with the job's repository and
 ref.
 
+## Webhooks
+
+What happens on the server can be sent to other services as it
+happens: a deploy after a publish, a chat line when a sync fails.
+Server admins set webhooks (CLI, API, or Server, Webhooks in the
+console):
+
+```sh
+pkgpod webhook add deploy https://api.github.com/repos/org/app/dispatches \
+  --kind github --events version --repos ppa --secret-stdin   # the secret: a token
+pkgpod webhook add alerts https://hooks.slack.com/services/... --kind slack --events job-failed
+pkgpod webhook add audit https://ci.example.org/hook --events version,label,job --secret-stdin
+pkgpod webhook list
+pkgpod webhook ping audit
+pkgpod webhook deliveries audit           # pkgpod webhook retry audit <id>
+pkgpod webhook remove audit
+```
+
+| Event | When |
+| --- | --- |
+| `version` | A repository has a new version: an upload, an operation, a promotion, a rollback, a cleanup. |
+| `label` | A label is set. |
+| `job` | A sync or import ended, well or not. |
+| `job-failed` | Only one that did not end well. |
+
+| Kind | Sends |
+| --- | --- |
+| `json` | The event as JSON; with a secret, signed: `X-Pkgpod-Signature-256: sha256=<HMAC-SHA256 of the body>`, as GitHub signs its own. `X-Pkgpod-Event` and `X-Pkgpod-Delivery` name it. |
+| `github` | A `repository_dispatch` to the GitHub repository of the URL, `event_type` `pkgpod-<event>`, the event as `client_payload`; the secret is a token that may dispatch. A workflow `on: repository_dispatch: types: [pkgpod-version]` runs on it. |
+| `slack` | A line of text, to a Slack (or compatible) incoming webhook. |
+
+The event's fields: `event`, `repo`, `time`, and for a version
+`format`, `version`, `summary`, `actor`; for a label `label`,
+`version`; for a job `job`, `kind`, `state`, `summary`. Events are taken
+from what the server records, so none is missed whatever caused it; a
+delivery that fails is tried again after 1, 5 and 30 minutes and 2
+hours, and deliveries are kept 30 days.
+
 ## Badges and status
 
 `/.well-known/pkgpod/badges/<repo>/<kind>.svg`, on every serving

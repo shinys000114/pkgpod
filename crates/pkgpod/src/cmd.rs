@@ -159,6 +159,53 @@ pub enum TokenCmd {
     },
 }
 
+#[derive(Subcommand)]
+pub enum WebhookCmd {
+    List,
+    /// Add a webhook, or change the one of the same name.
+    ///
+    /// pkgpod webhook add deploy https://api.github.com/repos/org/app/dispatches
+    ///   --kind github --secret-stdin --events version --repos ppa
+    Add {
+        name: String,
+        /// Where deliveries are sent.
+        #[arg(value_name = "URL")]
+        address: String,
+        /// json (signed with the secret), github (repository_dispatch;
+        /// the secret is a token) or slack.
+        #[arg(long, default_value = "json")]
+        kind: String,
+        /// version, label, job, job-failed.
+        #[arg(long, value_delimiter = ',', required = true)]
+        events: Vec<String>,
+        /// Only these repositories (default: all).
+        #[arg(long, value_delimiter = ',')]
+        repos: Vec<String>,
+        /// Read the secret from stdin (kept if left out on a change).
+        #[arg(long)]
+        secret_stdin: bool,
+        /// Kept, but nothing sent.
+        #[arg(long)]
+        disabled: bool,
+    },
+    Remove {
+        name: String,
+    },
+    /// The last deliveries, newest first.
+    Deliveries {
+        name: String,
+    },
+    /// Send a ping.
+    Ping {
+        name: String,
+    },
+    /// Send a delivery again.
+    Retry {
+        name: String,
+        id: i64,
+    },
+}
+
 // Parsed once per run: the size of its largest variant does not matter.
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
@@ -864,6 +911,149 @@ pub fn run(
                 c.send(
                     Method::DELETE,
                     &format!("/api/v1/tokens/{id}"),
+                    &Value::Null,
+                )?;
+            }
+        },
+        Cmd::Webhook(w) => match w {
+            WebhookCmd::List => {
+                let v = c.get("/api/v1/webhooks")?;
+                x.print(&v, |v| {
+                    let mut rows = vec![vec![
+                        "NAME".into(),
+                        "KIND".into(),
+                        "URL".into(),
+                        "EVENTS".into(),
+                        "REPOS".into(),
+                        "LAST".into(),
+                    ]];
+                    for h in v.as_array().into_iter().flatten() {
+                        let list = |k: &str| {
+                            h[k].as_array()
+                                .into_iter()
+                                .flatten()
+                                .map(s)
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        };
+                        let repos = list("repos");
+                        rows.push(vec![
+                            format!(
+                                "{}{}",
+                                s(&h["name"]),
+                                if h["active"] == json!(false) {
+                                    " (off)"
+                                } else {
+                                    ""
+                                }
+                            ),
+                            s(&h["kind"]),
+                            s(&h["url"]),
+                            list("events"),
+                            if repos.is_empty() { "*".into() } else { repos },
+                            if h["last"].is_object() {
+                                format!(
+                                    "{} {} {}",
+                                    s(&h["last"]["event"]),
+                                    s(&h["last"]["state"]),
+                                    when(h["last"]["time"].as_i64())
+                                )
+                            } else {
+                                "-".into()
+                            },
+                        ]);
+                    }
+                    table(rows);
+                });
+            }
+            WebhookCmd::Add {
+                name,
+                address,
+                kind,
+                events,
+                repos,
+                secret_stdin,
+                disabled,
+            } => {
+                let mut body = json!({
+                    "name": name, "url": address, "kind": kind, "events": events,
+                    "repos": repos, "active": !disabled,
+                });
+                if secret_stdin {
+                    let sec = term::read_stdin_line()
+                        .map_err(|e| CliError::other(format!("reading the secret: {e}")))?;
+                    body["secret"] = json!(sec.trim());
+                }
+                let v = c.post("/api/v1/webhooks", &body)?;
+                x.print(&v, |v| {
+                    println!(
+                        "webhook {}: {} to {}{}",
+                        s(&v["name"]),
+                        v["events"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(s)
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        s(&v["url"]),
+                        if v["has_secret"] == json!(true) {
+                            " (with a secret)"
+                        } else {
+                            ""
+                        }
+                    )
+                });
+            }
+            WebhookCmd::Remove { name } => {
+                c.send(
+                    Method::DELETE,
+                    &format!("/api/v1/webhooks/{}", enc(&name)),
+                    &Value::Null,
+                )?;
+            }
+            WebhookCmd::Deliveries { name } => {
+                let v = c.get(&format!("/api/v1/webhooks/{}/deliveries", enc(&name)))?;
+                x.print(&v, |v| {
+                    let mut rows = vec![vec![
+                        "ID".into(),
+                        "EVENT".into(),
+                        "STATE".into(),
+                        "TRIES".into(),
+                        "STATUS".into(),
+                        "WHEN".into(),
+                        "ERROR".into(),
+                    ]];
+                    for d in v.as_array().into_iter().flatten() {
+                        rows.push(vec![
+                            s(&d["id"]),
+                            s(&d["event"]),
+                            s(&d["state"]),
+                            s(&d["attempts"]),
+                            if d["status"].is_null() {
+                                "-".into()
+                            } else {
+                                s(&d["status"])
+                            },
+                            when(d["done"].as_i64().or(d["created"].as_i64())),
+                            s(&d["error"]),
+                        ]);
+                    }
+                    table(rows);
+                });
+            }
+            WebhookCmd::Ping { name } => {
+                let v = c.post(
+                    &format!("/api/v1/webhooks/{}/ping", enc(&name)),
+                    &Value::Null,
+                )?;
+                x.print(&v, |v| {
+                    println!("ping queued (delivery {})", s(&v["delivery"]))
+                });
+            }
+            WebhookCmd::Retry { name, id } => {
+                c.post(
+                    &format!("/api/v1/webhooks/{}/deliveries/{id}/retry", enc(&name)),
                     &Value::Null,
                 )?;
             }

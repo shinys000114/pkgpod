@@ -3109,6 +3109,50 @@ fn openapi_describes_what_the_api_sends() {
     );
     let v = a.ok("get", "/api/v1/cli", "/api/v1/cli", None, 200);
     assert!(v["sha256"].as_str().is_some_and(|h| h.len() == 64), "{v}");
+    // Webhooks: one to nowhere, pinged, its delivery sent again, removed.
+    let wh = "/api/v1/webhooks";
+    let v = a.ok(
+        "post",
+        wh,
+        wh,
+        Some(json!({"name": "w", "url": "http://127.0.0.1:1/", "events": ["version"], "secret": "k"})),
+        201,
+    );
+    assert_eq!(
+        (&v["has_secret"], &v["kind"]),
+        (&json!(true), &json!("json"))
+    );
+    a.ok("get", wh, wh, None, 200);
+    let v = a.ok(
+        "post",
+        "/api/v1/webhooks/{name}/ping",
+        "/api/v1/webhooks/w/ping",
+        None,
+        202,
+    );
+    let did = v["delivery"].as_i64().unwrap();
+    let v = a.ok(
+        "get",
+        "/api/v1/webhooks/{name}/deliveries",
+        "/api/v1/webhooks/w/deliveries",
+        None,
+        200,
+    );
+    assert_eq!(v[0]["id"], json!(did), "{v}");
+    a.ok(
+        "post",
+        "/api/v1/webhooks/{name}/deliveries/{id}/retry",
+        &format!("/api/v1/webhooks/w/deliveries/{did}/retry"),
+        None,
+        202,
+    );
+    a.ok(
+        "delete",
+        "/api/v1/webhooks/{name}",
+        "/api/v1/webhooks/w",
+        None,
+        204,
+    );
     a.ok(
         "delete",
         member,
@@ -5659,6 +5703,270 @@ fn files_hosted() {
         found.to_string().contains("tools/v1/tool.tar.gz") && found.to_string().contains("\"v1\""),
         "{found}"
     );
+}
+
+/// What a webhook receiver got: (path, headers in lower case, body).
+type Got = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<(String, String)>, String)>>>;
+
+/// A receiver of webhooks on the loopback, answering `status`.
+fn receiver(status: std::sync::Arc<std::sync::atomic::AtomicU16>) -> (String, Got) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
+    let got: Got = Default::default();
+    let g2 = got.clone();
+    std::thread::spawn(move || {
+        for conn in l.incoming() {
+            let Ok(mut conn) = conn else { continue };
+            let mut r = BufReader::new(conn.try_clone().unwrap());
+            let mut line = String::new();
+            let _ = r.read_line(&mut line);
+            let mut headers = Vec::new();
+            let mut len = 0;
+            loop {
+                let mut h = String::new();
+                if r.read_line(&mut h).unwrap_or(0) == 0 || h == "\r\n" {
+                    break;
+                }
+                if let Some((k, v)) = h.trim_end().split_once(':') {
+                    let (k, v) = (k.trim().to_ascii_lowercase(), v.trim().to_string());
+                    if k == "content-length" {
+                        len = v.parse().unwrap_or(0);
+                    }
+                    headers.push((k, v));
+                }
+            }
+            let mut body = vec![0; len];
+            let _ = r.read_exact(&mut body);
+            let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
+            g2.lock()
+                .unwrap()
+                .push((path, headers, String::from_utf8_lossy(&body).into_owned()));
+            let code = status.load(std::sync::atomic::Ordering::Relaxed);
+            let _ = write!(
+                conn,
+                "HTTP/1.1 {code} X\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok"
+            );
+        }
+    });
+    (url, got)
+}
+
+/// Outgoing webhooks: what they send, signed; failures tried again.
+#[test]
+fn webhooks_send_what_happens() {
+    use std::sync::atomic::{AtomicU16, Ordering};
+    let s = Server::start();
+    s.cli(&["repo", "create", "f", "-f", "files"]).unwrap();
+    s.cli(&[
+        "repo",
+        "create",
+        "m",
+        "-f",
+        "files",
+        "-k",
+        "mirror",
+        "-s",
+        "source=http://127.0.0.1:1/x/",
+    ])
+    .unwrap();
+    let status = std::sync::Arc::new(AtomicU16::new(200));
+    let (url, got) = receiver(status.clone());
+    let add = |args: &[&str], secret: &str| {
+        let mut a = vec!["webhook", "add"];
+        a.extend_from_slice(args);
+        if secret.is_empty() {
+            s.cli(&a).unwrap()
+        } else {
+            a.push("--secret-stdin");
+            s.cli_in(&a, secret).unwrap()
+        }
+    };
+    let out = add(
+        &[
+            "all",
+            &format!("{url}/all"),
+            "--events",
+            "version,label,job",
+        ],
+        "s3cret",
+    );
+    assert!(out.contains("(with a secret)"), "{out}");
+    add(
+        &[
+            "fails",
+            &format!("{url}/fails"),
+            "--events",
+            "job-failed",
+            "--repos",
+            "m",
+        ],
+        "",
+    );
+    add(
+        &[
+            "gh",
+            &format!("{url}/repos/o/r/dispatches"),
+            "--kind",
+            "github",
+            "--events",
+            "version",
+            "--repos",
+            "f",
+        ],
+        "ghtoken",
+    );
+    add(
+        &[
+            "chat",
+            &format!("{url}/slack"),
+            "--kind",
+            "slack",
+            "--events",
+            "job-failed",
+        ],
+        "",
+    );
+    let e = s
+        .cli(&["webhook", "add", "bad", "ftp://x", "--events", "version"])
+        .unwrap_err();
+    assert!(e.contains("http(s)"), "{e}");
+    let e = s
+        .cli(&["webhook", "add", "bad", "http://x", "--events", "nothing"])
+        .unwrap_err();
+    assert!(e.contains("event \"nothing\""), "{e}");
+
+    // Waits for a delivery to `path` carrying `what`.
+    let wait = |path: &str, what: &str| {
+        let t = Instant::now();
+        loop {
+            if let Some(x) = got
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(p, _, b)| p == path && b.contains(what))
+            {
+                return x.clone();
+            }
+            assert!(
+                t.elapsed() < Duration::from_secs(15),
+                "no {what} to {path}: {:?}",
+                got.lock().unwrap()
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    let header = |h: &[(String, String)], k: &str| {
+        h.iter()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
+    };
+    s.cli(&["webhook", "ping", "all"]).unwrap();
+    let (_, h, _) = wait("/all", "\"ping\"");
+    assert_eq!(header(&h, "x-pkgpod-event"), "ping");
+
+    // A new version: signed JSON, and a repository_dispatch.
+    let file = s.dir.path().join("a.txt");
+    std::fs::write(&file, "a").unwrap();
+    s.cli(&["upload", "f", file.to_str().unwrap()]).unwrap();
+    let (_, h, body) = wait("/all", "a.txt");
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        (v["repo"].as_str(), v["event"].as_str()),
+        (Some("f"), Some("version"))
+    );
+    assert!(v["summary"].as_str().unwrap().contains("a.txt"), "{v}");
+    let mac = pkgpod_server::webhooks::hmac_sha256(b"s3cret", body.as_bytes());
+    let hexmac: String = mac.iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(
+        header(&h, "x-pkgpod-signature-256"),
+        format!("sha256={hexmac}")
+    );
+    let (_, h, body) = wait("/repos/o/r/dispatches", "a.txt");
+    assert!(body.contains("\"event_type\":\"pkgpod-version\""), "{body}");
+    assert_eq!(header(&h, "authorization"), "Bearer ghtoken");
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["client_payload"]["repo"], "f", "{v}");
+    // A label.
+    s.cli(&["label", "f", "rel-1"]).unwrap();
+    wait("/all", "\"rel-1\"");
+    // A sync that fails: to job, job-failed and chat hooks.
+    let _ = s.cli(&["sync", "m", "--wait"]);
+    let (_, _, body) = wait("/fails", "\"failed\"");
+    assert!(body.contains("\"repo\":\"m\""), "{body}");
+    wait("/all", "\"failed\"");
+    let (_, _, body) = wait("/slack", "m: sync failed");
+    assert!(body.starts_with("{\"text\":"), "{body}");
+
+    // A receiver that fails: kept pending with its answer, then sent again.
+    status.store(500, Ordering::Relaxed);
+    let before = got.lock().unwrap().len();
+    s.cli(&["upload", "f", file.to_str().unwrap(), "-s", "path=b.txt"])
+        .unwrap();
+    let t = Instant::now();
+    let failed = loop {
+        let d = s.json(&["webhook", "deliveries", "all"]);
+        if let Some(x) = d
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["attempts"] == json!(1) && x["state"] == "pending")
+        {
+            break x.clone();
+        }
+        assert!(t.elapsed() < Duration::from_secs(15), "{d}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(got.lock().unwrap().len() > before);
+    assert_eq!(failed["status"], json!(500), "{failed}");
+    assert!(
+        failed["error"].as_str().unwrap().contains("answered 500"),
+        "{failed}"
+    );
+    assert!(
+        failed["next_try"].as_i64().unwrap() > pkgpod_base_now() + 30,
+        "{failed}"
+    );
+    status.store(200, Ordering::Relaxed);
+    s.cli(&["webhook", "retry", "all", &failed["id"].to_string()])
+        .unwrap();
+    let t = Instant::now();
+    loop {
+        let d = s.json(&["webhook", "deliveries", "all"]);
+        let x = d
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == failed["id"])
+            .unwrap()
+            .clone();
+        if x["state"] == "ok" {
+            assert_eq!(x["attempts"], json!(2));
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(15), "{x}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let list = s.cli(&["webhook", "list"]).unwrap();
+    assert!(
+        list.contains("all") && list.contains("gh") && list.contains("version ok"),
+        "{list}"
+    );
+    // Server admins only; a removed hook sends nothing more.
+    s.cli_in(
+        &["user", "add", "u", "--password-stdin"],
+        "u-password-12345",
+    )
+    .unwrap();
+    let r = reqwest::blocking::Client::new()
+        .get(format!("{}/api/v1/webhooks", s.api))
+        .basic_auth("u", Some("u-password-12345"))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 403);
+    s.cli(&["webhook", "remove", "gh"]).unwrap();
+    assert!(!s.cli(&["webhook", "list"]).unwrap().contains("dispatches"));
 }
 
 /// The server hands out its own binary as the CLI, with its SHA-256 and

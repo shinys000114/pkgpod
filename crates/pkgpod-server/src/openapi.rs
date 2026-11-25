@@ -599,6 +599,70 @@ fn schemas() -> Value {
             ),
         ),
         (
+            "Webhook",
+            object(
+                "An outgoing webhook: these events, of these repositories (none: all), sent to url.",
+                vec![
+                    ("name", string()),
+                    ("url", string()),
+                    (
+                        "kind",
+                        json!({"type": "string", "enum": ["json", "github", "slack"], "description": "json: the event, signed with the secret (X-Pkgpod-Signature-256); github: a repository_dispatch (url .../repos/<owner>/<name>/dispatches, secret a token); slack: a line of text."}),
+                    ),
+                    (
+                        "secret",
+                        text(
+                            "Written only: json's signing key, github's token. Left out on a change: kept; empty: removed.",
+                        ),
+                    ),
+                    ("has_secret", boolean()),
+                    (
+                        "events",
+                        json!({"type": "array", "items": {"type": "string", "enum": ["version", "label", "job", "job-failed"]}}),
+                    ),
+                    ("repos", strings()),
+                    ("active", boolean()),
+                    ("created", integer()),
+                    (
+                        "last",
+                        or_null(any("The last delivery: state, status, time, event.")),
+                    ),
+                ],
+                &["name", "url", "events"],
+            ),
+        ),
+        (
+            "Delivery",
+            object(
+                "",
+                vec![
+                    ("id", integer()),
+                    ("event", string()),
+                    (
+                        "state",
+                        json!({"type": "string", "enum": ["pending", "ok", "failed"]}),
+                    ),
+                    ("attempts", integer()),
+                    ("status", nullable("integer", "The receiver's HTTP status.")),
+                    ("error", string()),
+                    ("created", integer()),
+                    (
+                        "next_try",
+                        nullable("integer", "When it is tried again (pending)."),
+                    ),
+                    ("done", nullable("integer", "")),
+                    (
+                        "payload",
+                        any("What was sent (for github, the client_payload)."),
+                    ),
+                ],
+                &[
+                    "id", "event", "state", "attempts", "status", "error", "created", "next_try",
+                    "done", "payload",
+                ],
+            ),
+        ),
+        (
             "Cli",
             object(
                 "",
@@ -1357,6 +1421,19 @@ fn ops() -> Vec<Op> {
             .reply(200, "The token.", sref("OidcToken")),
         op("get", "/api/v1/cli", "cli_info", "The pkgpod command this server hands out (its own build): version, platform, SHA-256, where to get it; no credentials needed.")
             .reply(200, "The command.", sref("Cli")),
+        op("get", "/api/v1/webhooks", "webhooks", "Outgoing webhooks, each with its last delivery (server admin).")
+            .reply(200, "The webhooks.", array(sref("Webhook"))),
+        op("post", "/api/v1/webhooks", "webhook_put", "Add a webhook, or change the one of the same name (server admin); a secret left out is kept.")
+            .body("Webhook")
+            .reply(201, "The webhook.", sref("Webhook")),
+        op("delete", "/api/v1/webhooks/{name}", "webhook_delete", "Remove a webhook and its deliveries (server admin).")
+            .empty(204, "Removed."),
+        op("get", "/api/v1/webhooks/{name}/deliveries", "webhook_deliveries", "A webhook's last 50 deliveries, newest first (server admin).")
+            .reply(200, "The deliveries.", array(sref("Delivery"))),
+        op("post", "/api/v1/webhooks/{name}/ping", "webhook_ping", "Send a ping delivery (server admin).")
+            .reply(202, "Queued; sent within a second.", object("", vec![("delivery", integer())], &["delivery"])),
+        op("post", "/api/v1/webhooks/{name}/deliveries/{id}/retry", "webhook_retry", "Send a delivery again, now (server admin).")
+            .empty(202, "Queued."),
         op("get", "/api/v1/listeners", "listeners", "Serving listeners (server admin).")
             .reply(200, "The listeners.", array(sref("Listener"))),
         op("put", "/api/v1/listeners/{name}", "listener_set", "Add or change {addr, cert?, key?, enabled?, proto?, passive?} (server admin).")
@@ -1434,6 +1511,7 @@ fn path_param(path: &str, name: &str) -> (Value, &'static str) {
         "subject" => (string(), "user:<name> or team:<name>."),
         "id" if path.starts_with("/api/v1/plans/") => (string(), "Plan id."),
         "id" if path.starts_with("/api/v1/tokens/") => (integer(), "Token id."),
+        "id" if path.starts_with("/api/v1/webhooks/") => (integer(), "Delivery id."),
         "id" => (integer(), "Job id."),
         "user" => (string(), "User name."),
         "team" => (string(), "Team name."),
@@ -1646,6 +1724,8 @@ mod tests {
                                 | "badge_token_new"
                                 | "cleanup"
                                 | "cleanup_all"
+                                | "webhook_ping"
+                                | "webhook_retry"
                         )
                     );
                     assert_eq!(o.get("requestBody").is_some(), wants, "{at}: request body");

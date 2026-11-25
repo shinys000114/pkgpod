@@ -154,6 +154,36 @@ CREATE TABLE trust_rules (
     used INTEGER
 );
 ",
+    // Outgoing webhooks: what happens (new versions, labels, jobs) sent
+    // to other services, each delivery kept with its outcome.
+    "
+CREATE TABLE webhooks (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    url TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    secret TEXT NOT NULL,
+    events TEXT NOT NULL,
+    repos TEXT NOT NULL,
+    active INTEGER NOT NULL,
+    created INTEGER NOT NULL
+);
+CREATE TABLE webhook_deliveries (
+    id INTEGER PRIMARY KEY,
+    hook INTEGER NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,
+    event TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    state TEXT NOT NULL,
+    attempts INTEGER NOT NULL,
+    status INTEGER,
+    error TEXT NOT NULL DEFAULT '',
+    created INTEGER NOT NULL,
+    next_try INTEGER,
+    done INTEGER
+);
+CREATE INDEX webhook_deliveries_hook ON webhook_deliveries(hook, id);
+CREATE INDEX webhook_deliveries_due ON webhook_deliveries(state, next_try);
+",
 ];
 
 pub fn migrate(db: &Db) -> pkgpod_base::Result<()> {
@@ -176,6 +206,7 @@ mod tests {
             "ecf508f3a5114520",
             "c4eb88395a908cdd",
             "fcc2c4368702bf38",
+            "bc20a95501f079e1",
         ];
         let got: Vec<String> = super::STEPS
             .iter()

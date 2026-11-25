@@ -122,6 +122,10 @@ pub fn router() -> Router<Arc<App>> {
         .route("/c/teams/{team}/delete", post(team_delete))
         .route("/c/teams/{team}/members", post(member))
         .route("/admin/server", get(server_page))
+        .route("/c/webhooks", post(hook_set))
+        .route("/c/webhooks/{name}/delete", post(hook_delete))
+        .route("/c/webhooks/{name}/ping", post(hook_ping))
+        .route("/c/webhooks/{name}/retry/{id}", post(hook_retry))
         .route("/c/trust", post(trust_set))
         .route("/c/trust/{name}/delete", post(trust_delete))
         .route("/c/listeners", post(listener_set))
@@ -4980,6 +4984,19 @@ pub struct ListenerRow {
     pub ok: bool,
 }
 
+/// A webhook as the Server page lists it, with its last deliveries.
+pub struct HookRow {
+    pub name: String,
+    pub kind: String,
+    pub url: String,
+    pub events: String,
+    pub repos: String,
+    pub active: bool,
+    pub has_secret: bool,
+    /// (id, event, state, status or error, when)
+    pub deliveries: Vec<(i64, String, String, String, String)>,
+}
+
 /// A trust rule as the Server page lists it.
 pub struct TrustRow {
     pub name: String,
@@ -5034,6 +5051,7 @@ struct ServerPage {
     trust: Vec<TrustRow>,
     users: Vec<String>,
     repo_names: Vec<String>,
+    hooks: Vec<HookRow>,
 }
 
 async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
@@ -5113,6 +5131,39 @@ async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
         })
         .collect();
     let users = app.auth.users()?.into_iter().map(|u| u.name).collect();
+    let hooks = crate::webhooks::hooks(&app)?
+        .into_iter()
+        .map(|h| HookRow {
+            deliveries: crate::webhooks::deliveries(&app, &h.name, 8)
+                .unwrap_or_default()
+                .iter()
+                .map(|d| {
+                    (
+                        d["id"].as_i64().unwrap_or(0),
+                        s(&d["event"]),
+                        s(&d["state"]),
+                        match (d["status"].as_i64(), d["error"].as_str()) {
+                            (_, Some(e)) if !e.is_empty() => e.to_string(),
+                            (Some(st), _) => st.to_string(),
+                            _ => String::new(),
+                        },
+                        when(d["done"].as_i64().or(d["created"].as_i64())),
+                    )
+                })
+                .collect(),
+            events: h.events.join(", "),
+            repos: if h.repos.is_empty() {
+                "all".into()
+            } else {
+                h.repos.join(", ")
+            },
+            name: h.name,
+            kind: h.kind,
+            url: h.url,
+            active: h.active,
+            has_secret: h.has_secret,
+        })
+        .collect();
     let repo_names = app.engine.repos()?.into_iter().map(|r| r.name).collect();
     Ok(render(&ServerPage {
         s: v.shell("server"),
@@ -5128,7 +5179,64 @@ async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
         trust,
         users,
         repo_names,
+        hooks,
     }))
+}
+
+/// A webhook from the Server page's form.
+async fn hook_set(State(app): St, v: Viewer, Form(form): Form<Vec<(String, String)>>) -> Response {
+    let f = |k: &str| form_get(&form, k).trim().to_string();
+    let events: Vec<String> = form
+        .iter()
+        .filter(|(k, _)| k == "events")
+        .map(|(_, v)| v.clone())
+        .collect();
+    let secret = f("secret");
+    let h = crate::webhooks::Hook {
+        name: f("name"),
+        url: f("url"),
+        kind: match f("kind") {
+            k if k.is_empty() => "json".into(),
+            k => k,
+        },
+        // Empty in the form: keep the one set.
+        secret: (!secret.is_empty()).then_some(secret),
+        has_secret: false,
+        events,
+        repos: f("repos")
+            .split([',', ' '])
+            .filter(|r| !r.is_empty())
+            .map(String::from)
+            .collect(),
+        active: form_get(&form, "disabled") != "on",
+        created: 0,
+        last: None,
+    };
+    match api::webhook_put(State(app), v.who(), Json(h)).await {
+        Ok(_) => refresh(),
+        Err(e) => err_part(e),
+    }
+}
+
+async fn hook_delete(State(app): St, v: Viewer, Path(name): Path<String>) -> Response {
+    match api::webhook_delete(State(app), v.who(), Path(name)).await {
+        Ok(_) => refresh(),
+        Err(e) => err_part(e),
+    }
+}
+
+async fn hook_ping(State(app): St, v: Viewer, Path(name): Path<String>) -> Response {
+    match api::webhook_ping(State(app), v.who(), Path(name)).await {
+        Ok(_) => refresh(),
+        Err(e) => err_part(e),
+    }
+}
+
+async fn hook_retry(State(app): St, v: Viewer, Path((name, id)): Path<(String, i64)>) -> Response {
+    match api::webhook_retry(State(app), v.who(), Path((name, id))).await {
+        Ok(_) => refresh(),
+        Err(e) => err_part(e),
+    }
 }
 
 /// A trust rule from the Server page's form: GitHub's fields, or claims

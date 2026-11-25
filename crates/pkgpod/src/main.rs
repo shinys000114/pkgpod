@@ -207,6 +207,10 @@ pub(crate) enum Cmd {
     /// get a short-lived token of which user (server admins).
     #[command(subcommand)]
     Trust(cmd::TrustCmd),
+    /// Outgoing webhooks: new versions, labels and jobs sent to other
+    /// services (server admins).
+    #[command(subcommand)]
+    Webhook(cmd::WebhookCmd),
     /// Serving listeners.
     #[command(subcommand)]
     Listener(cmd::ListenerCmd),
