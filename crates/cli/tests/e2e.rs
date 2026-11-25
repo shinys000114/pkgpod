@@ -11607,6 +11607,116 @@ fn oci_registry_protocol() {
     assert!(found.to_string().contains("multi"), "{found}");
 }
 
+#[test]
+fn oci_upload_sessions_referrers_and_index_children() {
+    let s = Server::start();
+    s.cli(&["repo", "create", "img", "-f", "oci"]).unwrap();
+    s.cli(&["repo", "create", "other", "-f", "oci"]).unwrap();
+    let token = |name: &str, repo: &str| {
+        s.cli(&["token", "create", name, "--repos", repo, "--write"])
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    let (tok, tok2) = (token("ci", "img"), token("ci2", "other"));
+    let reg = Reg {
+        c: reqwest::blocking::Client::new(),
+        base: s.url(""),
+        tok: Some(&tok),
+        host: None,
+    };
+    let reg2 = Reg {
+        c: reqwest::blocking::Client::new(),
+        base: s.url(""),
+        tok: Some(&tok2),
+        host: None,
+    };
+    let status = |reg: &Reg, m: reqwest::Method, path: &str| {
+        reg.req(m, path).send().unwrap().status().as_u16()
+    };
+    // An upload session is its repository's: another repository's
+    // writer cannot cancel it, and an unknown one is not cancelled.
+    let r = reg
+        .req(reqwest::Method::POST, "/v2/img/app/blobs/uploads/")
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 202);
+    let id = r.headers()["docker-upload-uuid"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    let theirs = format!("/v2/other/x/blobs/uploads/{id}");
+    let mine = format!("/v2/img/app/blobs/uploads/{id}");
+    assert_eq!(status(&reg2, reqwest::Method::DELETE, &theirs), 404);
+    assert_eq!(status(&reg, reqwest::Method::GET, &mine), 204, "still open");
+    assert_eq!(status(&reg, reqwest::Method::DELETE, &mine), 204);
+    assert_eq!(status(&reg, reqwest::Method::DELETE, &mine), 404);
+
+    // A referrer's annotations are in its descriptor.
+    let cfg = reg.blob("img/app", b"{}");
+    let m = image_manifest(&cfg, &[], None);
+    let (st, digest) = reg.manifest("img/app", "1.0", OCI_M, &m);
+    assert_eq!(st, 201, "{digest}");
+    let sig = image_manifest(&cfg, &[], Some(&digest));
+    let sig = format!(
+        r#"{},"annotations":{{"org.example.signer":"ci"}}}}"#,
+        &sig[..sig.len() - 1]
+    );
+    let sig_digest = format!(
+        "sha256:{}",
+        pkgpod_deb::hash::hash_bytes(sig.as_bytes()).sha256
+    );
+    assert_eq!(reg.manifest("img/app", &sig_digest, OCI_M, &sig).0, 201);
+    let refs: Value = reg
+        .req(
+            reqwest::Method::GET,
+            &format!("/v2/img/app/referrers/{digest}"),
+        )
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(
+        refs["manifests"][0]["annotations"]["org.example.signer"], "ci",
+        "{refs}"
+    );
+
+    // A manifest an index lists stays: a conflict that names the index,
+    // not a denial.
+    let index = format!(
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{{"mediaType":"{OCI_M}","digest":"{digest}","size":1}}]}}"#
+    );
+    let (st, idx) = reg.manifest(
+        "img/app",
+        "multi",
+        "application/vnd.oci.image.index.v1+json",
+        &index,
+    );
+    assert_eq!(st, 201, "{idx}");
+    let r = reg
+        .req(
+            reqwest::Method::DELETE,
+            &format!("/v2/img/app/manifests/{digest}"),
+        )
+        .send()
+        .unwrap();
+    let st = r.status().as_u16();
+    let body = r.text().unwrap();
+    assert_eq!(st, 409, "{body}");
+    assert!(
+        body.contains("MANIFEST_INVALID") && body.contains(&idx[7..]),
+        "{body}"
+    );
+    assert_eq!(
+        status(
+            &reg,
+            reqwest::Method::GET,
+            &format!("/v2/img/app/manifests/{digest}")
+        ),
+        200
+    );
+}
+
 /// docker with its own config directory; (ok, output).
 fn docker(cfg: &Path, args: &[&str], stdin: Option<&str>) -> (bool, String) {
     use std::io::Write;
@@ -14336,6 +14446,53 @@ fn helm_charts_with_helm() {
     );
 }
 
+#[test]
+fn helm_app_version_that_looks_like_a_number() {
+    let images = images_here(&["alpine/helm:3.19.0", "alpine/helm:4.3.2"]);
+    if images.is_empty() || !have("tar") {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&["repo", "create", "charts", "-f", "helm"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "charts", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    // Packed by hand, as a chart tool other than helm may: appVersion
+    // unquoted, which YAML reads as the number 1.1.
+    let work = s.dir.path().join("helmnum");
+    std::fs::create_dir_all(work.join("num/templates")).unwrap();
+    std::fs::write(
+        work.join("num/Chart.yaml"),
+        "apiVersion: v2\nname: num\nversion: 1.0.0\nappVersion: 1.10\n",
+    )
+    .unwrap();
+    let ok = Command::new("tar")
+        .args(["czf", "num-1.0.0.tgz", "num"])
+        .current_dir(&work)
+        .status()
+        .unwrap();
+    assert!(ok.success());
+    let r = reqwest::blocking::Client::new()
+        .put(s.url("/charts/upload"))
+        .basic_auth("token", Some(&tok))
+        .body(std::fs::read(work.join("num-1.0.0.tgz")).unwrap())
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 201, "{}", r.text().unwrap());
+    let base = s.url("/charts/");
+    let (ok, out) = docker_sh(
+        images[0],
+        &format!(
+            "set -e; export HOME=/tmp; helm repo add pk {base} --username token --password {tok} >/dev/null; \
+             helm search repo pk/num"
+        ),
+    );
+    let row = out.lines().find(|l| l.starts_with("pk/num")).unwrap_or("");
+    assert!(ok && row.split_whitespace().nth(2) == Some("1.10"), "{out}");
+}
+
 /// Runs mvn's `script` in the Maven image with `work` at /work. Plugins
 /// from Maven Central are kept between runs in the volume pkgpod-e2e-m2;
 /// what the tests deploy has a group of its own each run, so nothing
@@ -15005,6 +15162,81 @@ fn nuget_with_dotnet() {
 }
 
 #[test]
+fn nuget_symbols_are_pushed_once() {
+    if !have("zip") {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&["repo", "create", "feed", "-f", "nuget"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "feed", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let work = s.dir.path().join("nugetsym");
+    // A package or a symbol package zipped by hand: its .nuspec at the
+    // top, and a file that makes the content differ.
+    let make = |dir: &str, symbols: bool, text: &str| {
+        let d = work.join(dir);
+        std::fs::create_dir_all(&d).unwrap();
+        let kind = if symbols {
+            "<packageTypes><packageType name=\"SymbolsPackage\" /></packageTypes>"
+        } else {
+            ""
+        };
+        std::fs::write(
+            d.join("Hello.Sym.nuspec"),
+            format!(
+                "<?xml version=\"1.0\"?><package><metadata><id>Hello.Sym</id><version>1.0.0</version>\
+                 <authors>t</authors><description>test</description>{kind}</metadata></package>"
+            ),
+        )
+        .unwrap();
+        std::fs::write(d.join("readme.txt"), text).unwrap();
+        let out = work.join(format!("{dir}.zip"));
+        let ok = Command::new("zip")
+            .arg("-qr")
+            .arg(&out)
+            .arg(".")
+            .current_dir(&d)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        std::fs::read(out).unwrap()
+    };
+    let c = reqwest::blocking::Client::new();
+    let push = |what: &str, data: Vec<u8>| {
+        let form = reqwest::blocking::multipart::Form::new().part(
+            "package",
+            reqwest::blocking::multipart::Part::bytes(data).file_name("p.nupkg"),
+        );
+        let r = c
+            .put(s.url(&format!("/feed/api/v2/{what}")))
+            .basic_auth("token", Some(&tok))
+            .multipart(form)
+            .send()
+            .unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    let (st, out) = push("package", make("pkg", false, "a"));
+    assert_eq!(st, 201, "{out}");
+    let sym = make("sym", true, "b");
+    let (st, out) = push("symbolpackage", sym.clone());
+    assert_eq!(st, 201, "{out}");
+    let versions = || s.json(&["versions", "feed"]).as_array().unwrap().len();
+    let n = versions();
+    // The same symbols again make no new version.
+    let (st, out) = push("symbolpackage", sym);
+    assert_eq!(st, 202, "{out}");
+    assert!(out.contains("already there"), "{out}");
+    assert_eq!(versions(), n);
+    // Other symbols for that version are refused; the first stay.
+    let (st, out) = push("symbolpackage", make("sym2", true, "c"));
+    assert_eq!(st, 409, "{out}");
+    assert_eq!(versions(), n);
+}
+
+#[test]
 fn a_key_from_gpg_is_imported_and_signs() {
     if !have("gpg") || !have("gpgv") || !have("dpkg-deb") {
         return;
@@ -15560,6 +15792,73 @@ fn composer_packages_with_composer() {
     assert!(ok && out.contains("acme/hello 1.0.0"), "{out}");
     let (ok, _) = docker_sh(COMPOSER_IMAGE, &project("@first/", "1.1.0"));
     assert!(!ok, "the label has no 1.1.0");
+}
+
+#[test]
+fn composer_one_version_however_spelt() {
+    if !have("zip") {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&["repo", "create", "php", "-f", "composer"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "php", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let work = s.dir.path().join("phpspelt");
+    let make = |text: &str| {
+        let d = work.join(text).join("hello");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("composer.json"), r#"{"name": "acme/hello"}"#).unwrap();
+        std::fs::write(d.join("x.php"), text).unwrap();
+        let zip = work.join(format!("{text}.zip"));
+        let ok = Command::new("zip")
+            .arg("-qr")
+            .arg(&zip)
+            .arg("hello")
+            .current_dir(work.join(text))
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        std::fs::read(zip).unwrap()
+    };
+    let c = reqwest::blocking::Client::new();
+    let upload = |data: Vec<u8>, v: &str| {
+        let r = c
+            .put(s.url(&format!("/php/upload?version={v}")))
+            .basic_auth("token", Some(&tok))
+            .body(data)
+            .send()
+            .unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    let one = make("one");
+    let (st, out) = upload(one.clone(), "1.0.0");
+    assert_eq!(st, 201, "{out}");
+    // v1.0.0 is 1.0.0 to composer: the same zip is already there, another
+    // is refused.
+    let (st, out) = upload(one, "v1.0.0");
+    assert!(st == 201 && out.contains("already there"), "{out}");
+    let (st, out) = upload(make("two"), "v1.0.0");
+    assert_eq!(st, 409, "{out}");
+    let p2: Value = c
+        .get(s.url("/php/p2/acme/hello.json"))
+        .basic_auth("token", Some(&tok))
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    let list = p2["packages"]["acme/hello"].as_array().unwrap();
+    assert_eq!(list.len(), 1, "{p2}");
+    assert_eq!(list[0]["version"], "1.0.0", "{p2}");
+    assert_eq!(
+        s.json(&["repo", "packages", "php"])
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 const MINIFORGE_IMAGE: &str = "condaforge/miniforge3:latest";
@@ -16738,6 +17037,126 @@ fn galaxy_collections_with_ansible_galaxy() {
     assert!(ok && out.contains("\"msg\": \"hello 1.0.0\""), "{out}");
 }
 
+#[test]
+fn upload_forms_bound_their_fields() {
+    if !have("tar") {
+        return;
+    }
+    let s = Server::start();
+    for (name, format) in [
+        ("ans", "galaxy"),
+        ("py", "pypi"),
+        ("sw", "swift"),
+        ("f", "files"),
+    ] {
+        s.cli(&["repo", "create", name, "-f", format]).unwrap();
+    }
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "ans,py,sw,f", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    // Collections packed by hand: MANIFEST.json at the top.
+    let work = s.dir.path().join("forms");
+    let collection = |ver: &str| {
+        let d = work.join(ver);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(
+            d.join("MANIFEST.json"),
+            format!(
+                r#"{{"collection_info": {{"namespace": "team", "name": "hello", "version": "{ver}"}}}}"#
+            ),
+        )
+        .unwrap();
+        let ok = Command::new("tar")
+            .args(["czf", "a.tar.gz", "MANIFEST.json"])
+            .current_dir(&d)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        std::fs::read(d.join("a.tar.gz")).unwrap()
+    };
+    use reqwest::blocking::multipart::{Form, Part};
+    let c = reqwest::blocking::Client::new();
+    let send = |r: reqwest::blocking::RequestBuilder, form: Form| {
+        let r = r
+            .basic_auth("token", Some(&tok))
+            .multipart(form)
+            .send()
+            .unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    let galaxy = |form: Form| send(c.post(s.url("/ans/api/v3/artifacts/collections/")), form);
+    let one = collection("1.0.0");
+    let file = |data: &[u8]| Part::bytes(data.to_vec()).file_name("a.tar.gz");
+    // A sha256 longer than any is refused; a field of another name, of
+    // any size, is passed over.
+    let (st, out) = galaxy(
+        Form::new()
+            .text("sha256", "a".repeat(200))
+            .part("file", file(&one)),
+    );
+    assert!(st == 400 && out.contains("larger than"), "{out}");
+    let (st, out) = galaxy(
+        Form::new()
+            .part("junk", Part::bytes(vec![b'j'; 3 << 20]))
+            .text("sha256", pkgpod_deb::hash::hash_bytes(&one).sha256)
+            .part("file", file(&one)),
+    );
+    assert_eq!(st, 202, "{out}");
+    // The file in base64, as ansible-galaxy may send it.
+    let two = collection("1.0.1");
+    let mut h = reqwest::header::HeaderMap::new();
+    h.insert("content-transfer-encoding", "base64".parse().unwrap());
+    {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&two);
+        let (st, out) = galaxy(Form::new().part("file", file(b64.as_bytes()).headers(h)));
+        assert_eq!(st, 202, "{out}");
+    }
+    let found = s.json(&["repo", "packages", "ans"]);
+    assert_eq!(found.as_array().unwrap().len(), 2, "{found}");
+
+    // Text fields of twine's, SwiftPM's and pkgpod's own upload forms are
+    // read up to 64 KiB.
+    let big = "x".repeat(70 << 10);
+    let (st, out) = send(
+        c.post(s.url("/py/")),
+        Form::new().text(":action", big.clone()).part(
+            "content",
+            Part::bytes(b"x".to_vec()).file_name("a-1.0.tar.gz"),
+        ),
+    );
+    assert!(st == 400 && out.contains("larger than"), "{out}");
+    let (st, out) = send(
+        c.put(s.url("/sw/team/Greeting/1.0.0")),
+        Form::new()
+            .text("metadata", format!(r#"{{"description": "{big}"}}"#))
+            .part(
+                "source-archive",
+                Part::bytes(b"x".to_vec()).file_name("a.zip"),
+            ),
+    );
+    assert!(st == 400 && out.contains("larger than"), "{out}");
+    let (st, out) = send(
+        c.post(format!("{}/api/v1/repos/f/upload", s.api)),
+        Form::new()
+            .text("path", big)
+            .part("file", Part::bytes(b"x".to_vec()).file_name("a.txt")),
+    );
+    assert!(st == 400 && out.contains("larger than"), "{out}");
+    // And so are they together, each under the bound.
+    let half = "x".repeat(40 << 10);
+    let (st, out) = send(
+        c.post(format!("{}/api/v1/repos/f/upload", s.api)),
+        Form::new()
+            .text("note", half.clone())
+            .text("note", half)
+            .part("file", Part::bytes(b"x".to_vec()).file_name("a.txt")),
+    );
+    assert!(st == 400 && out.contains("together"), "{out}");
+}
+
 const CONAN_NEW: &str = "pkgpod-e2e/conan:2.34.0";
 const CONAN_OLD: &str = "pkgpod-e2e/conan:2.0.17";
 
@@ -17060,6 +17479,81 @@ fn swift_registry_with_swiftpm() {
     wait_port(port);
     let (ok, out) = app(&url, &tok, resolve);
     assert!(ok && out.contains("\"version\" : \"1.0.0\""), "{out}");
+}
+
+#[test]
+fn swift_release_versions_keep_their_case() {
+    if !have("zip") {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&["repo", "create", "sw", "-f", "swift"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "sw", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let work = s.dir.path().join("swiftcase");
+    std::fs::create_dir_all(work.join("G")).unwrap();
+    std::fs::write(
+        work.join("G/Package.swift"),
+        "// swift-tools-version:5.9\nimport PackageDescription\nlet package = Package(name: \"Greeting\")\n",
+    )
+    .unwrap();
+    let zip = work.join("g.zip");
+    let ok = Command::new("zip")
+        .arg("-qr")
+        .arg(&zip)
+        .arg("G")
+        .current_dir(&work)
+        .status()
+        .unwrap();
+    assert!(ok.success());
+    // One release added by the CLI, one published as SwiftPM does.
+    s.cli(&[
+        "upload",
+        "sw",
+        zip.to_str().unwrap(),
+        "-s",
+        "scope=team",
+        "-s",
+        "name=Greeting",
+        "-s",
+        "version=2.0.0-Beta1",
+    ])
+    .unwrap();
+    let c = reqwest::blocking::Client::new();
+    let form = reqwest::blocking::multipart::Form::new().part(
+        "source-archive",
+        reqwest::blocking::multipart::Part::bytes(std::fs::read(&zip).unwrap()).file_name("g.zip"),
+    );
+    let r = c
+        .put(s.url("/sw/team/Greeting/1.0.0-RC1"))
+        .bearer_auth(&tok)
+        .multipart(form)
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 201);
+    let get = |p: &str| {
+        let r = c.get(s.url(p)).bearer_auth(&tok).send().unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    let (st, list) = get("/sw/team/greeting");
+    assert_eq!(st, 200);
+    assert!(
+        list.contains("\"1.0.0-RC1\"") && list.contains("\"2.0.0-Beta1\""),
+        "{list}"
+    );
+    // Scope and name in any case; the version as it is spelt.
+    for p in [
+        "/sw/team/greeting/2.0.0-Beta1",
+        "/sw/TEAM/Greeting/2.0.0-Beta1.zip",
+        "/sw/team/greeting/1.0.0-RC1.json",
+        "/sw/team/greeting/1.0.0-RC1/Package.swift",
+    ] {
+        assert_eq!(get(p).0, 200, "{p}");
+    }
+    assert_eq!(get("/sw/team/greeting/2.0.0-beta1").0, 404);
 }
 
 #[test]

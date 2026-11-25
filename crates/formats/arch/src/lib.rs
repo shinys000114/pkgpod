@@ -257,41 +257,37 @@ pub fn database(entries: &[(String, String, Option<String>)], mtime: u64) -> Vec
         .expect("in memory")
 }
 
-/// rpm's comparison of version strings, which pacman uses: runs of
-/// digits compare as numbers, runs of letters as text, digits newer
-/// than letters, more segments newer, `~` older than anything.
+/// libalpm's rpmvercmp (pacman's version.c): runs of digits compare as
+/// numbers, runs of letters as text, digits newer than letters; a
+/// longer run of separators is newer; at the end, a letter run left
+/// over is older than nothing (1.0rc1 < 1.0) and anything else left
+/// over is newer (1.0.1 > 1.0, 1.0~rc1 > 1.0: `~` is no special case).
 fn rpmvercmp(a: &str, b: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering::*;
-    let (mut a, mut b) = (a.as_bytes(), b.as_bytes());
-    loop {
-        while let [c, rest @ ..] = a
-            && !c.is_ascii_alphanumeric()
-            && *c != b'~'
-        {
-            a = rest;
+    if a == b {
+        return Equal;
+    }
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    // Where the segments last compared end, and where the next begin.
+    let (mut ea, mut eb) = (0, 0);
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        while i < a.len() && !a[i].is_ascii_alphanumeric() {
+            i += 1;
         }
-        while let [c, rest @ ..] = b
-            && !c.is_ascii_alphanumeric()
-            && *c != b'~'
-        {
-            b = rest;
+        while j < b.len() && !b[j].is_ascii_alphanumeric() {
+            j += 1;
         }
-        match (a.first(), b.first()) {
-            (Some(b'~'), Some(b'~')) => {
-                a = &a[1..];
-                b = &b[1..];
-                continue;
-            }
-            (Some(b'~'), _) => return Less,
-            (_, Some(b'~')) => return Greater,
-            (None, None) => return Equal,
-            (None, _) => return Less,
-            (_, None) => return Greater,
-            _ => {}
+        if i == a.len() || j == b.len() {
+            break;
         }
-        let digits = a[0].is_ascii_digit();
-        let run = |s: &[u8]| {
-            s.iter()
+        if i - ea != j - eb {
+            return (i - ea).cmp(&(j - eb));
+        }
+        let digits = a[i].is_ascii_digit();
+        let run = |s: &[u8], from: usize| {
+            from + s[from..]
+                .iter()
                 .take_while(|c| {
                     if digits {
                         c.is_ascii_digit()
@@ -301,49 +297,64 @@ fn rpmvercmp(a: &str, b: &str) -> std::cmp::Ordering {
                 })
                 .count()
         };
-        let (na, nb) = (run(a), run(b));
-        if nb == 0 {
+        (ea, eb) = (run(a, i), run(b, j));
+        if eb == j {
             // A number is newer than letters.
             return if digits { Greater } else { Less };
         }
-        let (sa, sb) = (&a[..na], &b[..nb]);
-        let o = if digits {
-            let (ta, tb) = (
-                &sa[sa.iter().take_while(|c| **c == b'0').count()..],
-                &sb[sb.iter().take_while(|c| **c == b'0').count()..],
-            );
-            ta.len().cmp(&tb.len()).then(ta.cmp(tb))
-        } else {
-            sa.cmp(sb)
-        };
+        let (mut sa, mut sb) = (&a[i..ea], &b[j..eb]);
+        if digits {
+            while let [b'0', rest @ ..] = sa {
+                sa = rest;
+            }
+            while let [b'0', rest @ ..] = sb {
+                sb = rest;
+            }
+            if sa.len() != sb.len() {
+                return sa.len().cmp(&sb.len());
+            }
+        }
+        let o = sa.cmp(sb);
         if o != Equal {
             return o;
         }
-        a = &a[na..];
-        b = &b[nb..];
+        (i, j) = (ea, eb);
+    }
+    let (ra, rb) = (&a[i..], &b[j..]);
+    if ra.is_empty() && rb.is_empty() {
+        return Equal;
+    }
+    let alpha = |s: &[u8]| s.first().is_some_and(u8::is_ascii_alphabetic);
+    if (ra.is_empty() && !alpha(rb)) || alpha(ra) {
+        Less
+    } else {
+        Greater
     }
 }
 
-/// pacman's version comparison: `[epoch:]version[-release]`.
+/// pacman's version comparison: `[epoch:]version[-release]`, the
+/// release compared only when both have one.
 pub fn vercmp(a: &str, b: &str) -> std::cmp::Ordering {
-    let split = |s: &str| {
-        let (e, rest) = match s.split_once(':') {
-            Some((e, r)) if e.bytes().all(|c| c.is_ascii_digit()) => {
-                (e.parse::<u64>().unwrap_or(0), r)
-            }
-            _ => (0, s),
+    fn split(s: &str) -> (&str, &str, Option<&str>) {
+        let digits = s.bytes().take_while(u8::is_ascii_digit).count();
+        let (e, rest) = match s[digits..].strip_prefix(':') {
+            Some(r) if digits > 0 => (&s[..digits], r),
+            Some(r) => ("0", r),
+            None => ("0", s),
         };
         match rest.rsplit_once('-') {
-            Some((v, r)) => (e, v.to_string(), Some(r.to_string())),
-            None => (e, rest.to_string(), None),
+            Some((v, r)) => (e, v, Some(r)),
+            None => (e, rest, None),
         }
-    };
+    }
     let (ea, va, ra) = split(a);
     let (eb, vb, rb) = split(b);
-    ea.cmp(&eb).then(rpmvercmp(&va, &vb)).then(match (ra, rb) {
-        (Some(x), Some(y)) => rpmvercmp(&x, &y),
-        _ => std::cmp::Ordering::Equal,
-    })
+    rpmvercmp(ea, eb)
+        .then_with(|| rpmvercmp(va, vb))
+        .then_with(|| match (ra, rb) {
+            (Some(x), Some(y)) => rpmvercmp(x, y),
+            _ => std::cmp::Ordering::Equal,
+        })
 }
 
 /// The binary signature in an ASCII-armored one.
@@ -820,18 +831,48 @@ mod tests {
             .collect();
         assert_eq!(names, ["hello-1.0-1/", "hello-1.0-1/desc"]);
         use std::cmp::Ordering::*;
+        // pacman's own vercmp gives these.
         for (a, b, o) in [
             ("1.0-1", "1.1-1", Less),
             ("1.10-1", "1.9-1", Greater),
             ("1.0-2", "1.0-10", Less),
             ("1:0.1-1", "2.0-1", Greater),
-            ("1.0a-1", "1.0-1", Greater),
+            ("1.0a-1", "1.0-1", Less),
+            ("1.0a", "1.0", Less),
+            ("1.0rc1", "1.0", Less),
+            ("1.0~rc1", "1.0", Greater),
+            ("1.0.a", "1.0", Greater),
+            ("1..0", "1.0", Greater),
             ("1.0alpha-1", "1.0.1-1", Less),
-            ("1.0~rc1-1", "1.0-1", Less),
             ("1.0-1", "1.0", Equal),
             ("001.2", "1.2", Equal),
+            ("1.5.1", "1.5", Greater),
+            ("1.5-1", "1.5.1-1", Less),
+            ("1.5b", "1.5.1", Less),
+            ("1.0a", "1.0alpha", Less),
+            ("1.0alpha", "1.0b", Less),
+            ("1.0beta", "1.0rc", Less),
+            ("1.5.b", "1.5.a", Greater),
+            ("1.5.1", "1.5.b", Greater),
+            ("1.5.b-1", "1.5.b", Equal),
+            ("1.5-1", "1.5.b", Less),
+            ("2.0", "2_0", Equal),
+            ("2.0_a", "2_0.a", Equal),
+            ("2.0a", "2.0.a", Less),
+            ("2___a", "2_a", Greater),
+            ("0:1.0", "1.0", Equal),
+            ("1:1.0", "0:1.0-1", Greater),
+            ("1:1.0", "1.1", Greater),
+            (":1.0", "1.0", Equal),
+            ("01:1.0", "1:1.0", Equal),
+            ("1.0+1", "1.0", Greater),
+            ("1.0.0", "1.0", Greater),
+            ("1.0-1.1", "1.0-1", Greater),
+            ("1.0~1", "1.0.1", Equal),
+            ("a", "b", Less),
         ] {
             assert_eq!(vercmp(a, b), o, "{a} {b}");
+            assert_eq!(vercmp(b, a), o.reverse(), "{b} {a}");
         }
         let armored =
             b"-----BEGIN PGP SIGNATURE-----\n\niQEz\nAAEC\n=abcd\n-----END PGP SIGNATURE-----\n";

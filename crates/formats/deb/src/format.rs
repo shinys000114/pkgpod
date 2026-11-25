@@ -383,19 +383,28 @@ fn str_list(v: &Value, k: &str) -> Vec<String> {
 /// Where the other files of a repository are kept in its state.
 const EXTRA: &str = "extra";
 
-/// A path for another file beside the archive: relative, plain segments,
-/// and none of what the archive itself publishes.
+/// A path for another file beside the archive: relative, plain segments
+/// (no backslash, which no URL can name), not starting with `@` (that
+/// addresses a label), and none of what the archive itself publishes.
 fn check_extra(path: &str) -> Result<()> {
     let bad = |why: &str| Err(Error::Invalid(format!("{path:?}: {why}")));
     if path.is_empty() {
         return bad("empty");
     }
     for seg in path.split('/') {
-        if seg.is_empty() || seg == "." || seg == ".." || seg.starts_with(".pkgpod") {
+        if seg.is_empty()
+            || seg == "."
+            || seg == ".."
+            || seg.starts_with(".pkgpod")
+            || seg.contains('\\')
+        {
             return bad("not a plain relative path");
         }
     }
     let first = path.split('/').next().unwrap_or("");
+    if first.starts_with('@') {
+        return bad("a top-level name starting with @ (that addresses a label)");
+    }
     if ["dists", "pool"].contains(&first) || path == "key.asc" {
         return bad("the archive publishes that path itself");
     }
@@ -1701,4 +1710,28 @@ fn generate_dist(
     }
     out.push(("Release".into(), release.into_bytes()));
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extra_paths() {
+        for ok in ["README", "docs/a.txt", "x/@y"] {
+            check_extra(ok).unwrap();
+        }
+        // Each is a path no URL can fetch.
+        for bad in [
+            "",
+            "a//b",
+            "../x",
+            "dists/x",
+            "key.asc",
+            "a\\b",
+            "@x/README",
+        ] {
+            assert!(check_extra(bad).is_err(), "{bad:?}");
+        }
+    }
 }

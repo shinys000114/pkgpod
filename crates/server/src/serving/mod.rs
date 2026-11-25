@@ -1811,6 +1811,32 @@ where
 /// Uploads are limited to this size.
 pub const MAX_UPLOAD: u64 = 8 << 30;
 
+/// The text fields of upload forms are read up to this size.
+pub const MAX_FIELD: usize = 64 << 10;
+
+/// A form field read whole, refused above `max` bytes (a field is
+/// otherwise bounded only by the body's limit, gigabytes).
+pub async fn field_capped(
+    mut field: axum::extract::multipart::Field<'_>,
+    max: usize,
+) -> Result<Vec<u8>, Error> {
+    let name = field.name().unwrap_or("").to_string();
+    let mut out = Vec::new();
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|e| Error::Invalid(format!("reading the upload: {e}")))?
+    {
+        if out.len() + chunk.len() > max {
+            return Err(Error::Invalid(format!(
+                "the form's field {name:?} is larger than {max} bytes"
+            )));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
+
 async fn put(
     app: Arc<App>,
     repo: pkgpod_engine::RepoInfo,

@@ -342,11 +342,15 @@ async fn answer(cx: Ctx, target: Target, req: Request) -> Response {
         (Target::Upload(id), Method::PUT) => finish_upload(&cx, &id, req).await,
         (Target::Upload(id), Method::GET) => upload_status(&cx, &id),
         (Target::Upload(id), Method::DELETE) => {
-            sessions()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&id);
-            reply(StatusCode::NO_CONTENT)
+            // Only this repository's session, as for the other upload
+            // requests; one that is not here was not cancelled.
+            let mut s = sessions().lock().unwrap_or_else(|e| e.into_inner());
+            if s.get(&id).is_some_and(|x| x.repo == cx.r.name) {
+                s.remove(&id);
+                reply(StatusCode::NO_CONTENT)
+            } else {
+                oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", id)
+            }
         }
         (Target::Tags, Method::GET) => tags(&cx, req.uri().query().unwrap_or("")).await,
         (Target::Referrers(d), Method::GET) => {
@@ -1070,6 +1074,11 @@ async fn delete_manifest(cx: &Ctx, re: &str) -> Response {
             "MANIFEST_UNKNOWN",
             format!("{m} is not here"),
         ),
+        // The repository would not be whole without it (an index lists
+        // it): a conflict, not a denial.
+        Some(Err(pkgpod_engine::Error::Invalid(m))) => {
+            oci_err(StatusCode::CONFLICT, "MANIFEST_INVALID", m)
+        }
         Some(Err(e)) => oci_err(StatusCode::BAD_REQUEST, "DENIED", e.to_string()),
         None => oci_err(StatusCode::INTERNAL_SERVER_ERROR, "UNKNOWN", "failed"),
     }
@@ -1409,19 +1418,23 @@ async fn referrers(cx: &Ctx, d: &str, q: &str) -> Response {
             if p.subject != Some(subject) {
                 continue;
             }
-            let at = p.artifact_type.clone().or_else(|| {
-                // An image manifest's artifact type is its config's.
-                let body = store.read(dg).ok()?;
-                let v: Value = serde_json::from_slice(&body).ok()?;
-                v["config"]["mediaType"].as_str().map(String::from)
-            });
+            let body = store.read(dg).unwrap_or_default();
+            let v: Value = serde_json::from_slice(&body).unwrap_or_default();
+            // An image manifest's artifact type is its config's.
+            let at = p
+                .artifact_type
+                .clone()
+                .or_else(|| v["config"]["mediaType"].as_str().map(String::from));
             if filter.as_ref().is_some_and(|f| Some(f) != at.as_ref()) {
                 continue;
             }
-            let size = std::fs::metadata(store.path(dg)).map_or(0, |m| m.len());
-            let mut e = json!({"mediaType": p.media_type, "digest": format!("sha256:{}", dg.hex()), "size": size});
+            let mut e = json!({"mediaType": p.media_type, "digest": format!("sha256:{}", dg.hex()), "size": body.len()});
             if let Some(a) = at {
                 e["artifactType"] = json!(a);
+            }
+            // The spec wants a referrer's annotations in its descriptor.
+            if v["annotations"].as_object().is_some_and(|a| !a.is_empty()) {
+                e["annotations"] = v["annotations"].clone();
             }
             out.push(e);
         }

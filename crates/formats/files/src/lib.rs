@@ -19,9 +19,9 @@ use serde_json::{Value, json};
 pub struct Files;
 
 /// Is `p` a path a file may have: segments that are not empty, `.` or
-/// `..`, no control characters, a first segment not starting with `@`
-/// (`@label` addresses a version), nothing the mirror engines use for
-/// themselves.
+/// `..`, no control characters or backslashes (no URL can fetch them),
+/// a first segment not starting with `@` (`@label` addresses a
+/// version), nothing the mirror engines use for themselves.
 pub fn check_path(p: &str) -> Result<()> {
     let bad = |why: &str| Err(Error::Invalid(format!("{p:?}: {why}")));
     if p.is_empty() {
@@ -39,6 +39,9 @@ pub fn check_path(p: &str) -> Result<()> {
         }
         if seg.chars().any(|c| c.is_control()) {
             return bad("control characters");
+        }
+        if seg.contains('\\') {
+            return bad("a backslash (a URL cannot name it)");
         }
         if i == 0 && seg.starts_with('@') {
             return bad("a top-level name starting with @ (that addresses a label)");
@@ -497,6 +500,8 @@ mod tests {
             "./a",
             "@label/x",
             "a/b\nc",
+            "a\\..\\b",
+            "dir/a\\b",
             "a/x.pkgpod-part",
             ".rsync-partial/x",
         ] {

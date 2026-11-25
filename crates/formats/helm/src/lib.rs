@@ -103,6 +103,81 @@ pub fn to_yaml(v: &Value) -> Yaml {
     }
 }
 
+/// Chart.yaml as JSON, with the fields helm reads as strings kept
+/// strings as written: `appVersion: 1.10` is "1.10", not the number 1.1
+/// (a number there makes helm refuse the whole index.yaml).
+fn chart_json(y: &Yaml) -> Value {
+    fn text(y: &Yaml) -> Option<String> {
+        match y {
+            Yaml::String(s) | Yaml::Real(s) => Some(s.clone()),
+            Yaml::Integer(i) => Some(i.to_string()),
+            Yaml::Boolean(b) => Some(b.to_string()),
+            _ => None,
+        }
+    }
+    fn strings(v: &mut Value, y: &Yaml, keys: &[&str]) {
+        for k in keys {
+            if let Some(s) = text(&y[*k]) {
+                v[*k] = Value::String(s);
+            }
+        }
+    }
+    fn lists(v: &mut Value, y: &Yaml, keys: &[&str]) {
+        for k in keys {
+            if let Yaml::Array(a) = &y[*k] {
+                for (i, e) in a.iter().enumerate() {
+                    if let Some(s) = text(e) {
+                        v[*k][i] = Value::String(s);
+                    }
+                }
+            }
+        }
+    }
+    let mut v = to_json(y);
+    strings(
+        &mut v,
+        y,
+        &[
+            "apiVersion",
+            "name",
+            "version",
+            "kubeVersion",
+            "description",
+            "type",
+            "home",
+            "icon",
+            "appVersion",
+            "condition",
+            "tags",
+        ],
+    );
+    lists(&mut v, y, &["keywords", "sources"]);
+    if let Yaml::Hash(h) = &y["annotations"] {
+        for (k, a) in h {
+            if let (Some(k), Some(a)) = (text(k), text(a)) {
+                v["annotations"][k] = Value::String(a);
+            }
+        }
+    }
+    for (list, keys) in [
+        ("maintainers", &["name", "email", "url"][..]),
+        (
+            "dependencies",
+            &["name", "version", "repository", "condition", "alias"][..],
+        ),
+    ] {
+        if let Yaml::Array(a) = &y[list] {
+            for (i, e) in a.iter().enumerate() {
+                strings(&mut v[list][i], e, keys);
+                if list == "dependencies" {
+                    lists(&mut v[list][i], e, &["tags"]);
+                }
+            }
+        }
+    }
+    v
+}
+
 /// A chart read: its Chart.yaml as JSON, name and version.
 #[derive(Debug, Clone)]
 pub struct Chart {
@@ -144,9 +219,10 @@ pub fn read_chart(data: &[u8]) -> Result<Chart> {
         }
     }
     let (dir, text) = found.ok_or_else(|| invalid("the chart has no <name>/Chart.yaml"))?;
-    let docs = yaml_rust2::YamlLoader::load_from_str(&text)
+    // Aliases may stand for at most as much as the file may hold.
+    let docs = pkgpod_base::yaml::load(&text, MAX_CHART_YAML)
         .map_err(|e| invalid(format!("its Chart.yaml: {e}")))?;
-    let meta = docs.first().map(to_json).unwrap_or(Value::Null);
+    let meta = docs.first().map(chart_json).unwrap_or(Value::Null);
     if !meta.is_object() {
         return Err(invalid("its Chart.yaml is not a mapping"));
     }
@@ -398,5 +474,44 @@ mod tests {
         );
         assert_eq!(web[1]["created"].as_str(), Some("1970-01-01T00:00:00Z"));
         assert_eq!(doc["apiVersion"].as_str(), Some("v1"));
+    }
+
+    #[test]
+    fn string_fields_stay_strings() {
+        // helm reads these fields as strings; written as numbers, its
+        // index.yaml cannot be read at all.
+        let yaml = "apiVersion: v2\nname: web\nversion: 0.1.0\nappVersion: 1.10\nkubeVersion: 1e3\n\
+                    keywords: [web, 2]\nmaintainers:\n  - name: 7\n    email: x@example.invalid\n\
+                    annotations:\n  build: 42\ndependencies:\n  - name: db\n    version: 1.0\n    tags: [3]\n\
+                    deprecated: false\n";
+        let c = read_chart(&chart_tgz("web", yaml)).unwrap();
+        assert_eq!(c.meta["appVersion"], "1.10");
+        assert_eq!(c.meta["kubeVersion"], "1e3");
+        assert_eq!(c.meta["keywords"], json!(["web", "2"]));
+        assert_eq!(c.meta["maintainers"][0]["name"], "7");
+        assert_eq!(c.meta["annotations"]["build"], "42");
+        assert_eq!(c.meta["dependencies"][0]["version"], "1.0");
+        assert_eq!(c.meta["dependencies"][0]["tags"], json!(["3"]));
+        assert_eq!(c.meta["deprecated"], false, "not a string field");
+        let file = c.file_name();
+        let idx = index(&[(c.meta, Digest::of(b"1"), 0, file)], 0);
+        let doc = &yaml_rust2::YamlLoader::load_from_str(&idx).unwrap()[0];
+        let web = &doc["entries"]["web"][0];
+        assert_eq!(web["appVersion"].as_str(), Some("1.10"), "{idx}");
+        assert_eq!(web["kubeVersion"].as_str(), Some("1e3"), "{idx}");
+        assert_eq!(web["annotations"]["build"].as_str(), Some("42"), "{idx}");
+    }
+
+    #[test]
+    fn aliases_bounded() {
+        // A kilobyte named eleven hundred times: more than a Chart.yaml
+        // itself may hold.
+        let yaml = format!(
+            "name: web\nversion: 0.1.0\nx: &x {}\ny: [{}]\n",
+            "y".repeat(1000),
+            vec!["*x"; 1100].join(",")
+        );
+        let e = read_chart(&chart_tgz("web", &yaml)).unwrap_err();
+        assert!(e.to_string().contains("aliases"), "{e}");
     }
 }

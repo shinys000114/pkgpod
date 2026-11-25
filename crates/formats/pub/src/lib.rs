@@ -94,7 +94,8 @@ pub fn read_archive(data: &[u8]) -> Result<(String, String, Value)> {
                 .take(MAX_PUBSPEC)
                 .read_to_string(&mut text)
                 .map_err(|e| invalid(format!("its pubspec.yaml: {e}")))?;
-            let docs = yaml_rust2::YamlLoader::load_from_str(&text)
+            // Aliases may stand for at most as much as the file may hold.
+            let docs = pkgpod_base::yaml::load(&text, MAX_PUBSPEC)
                 .map_err(|e| invalid(format!("its pubspec.yaml: {e}")))?;
             let spec = docs.first().map(yaml_json).unwrap_or(Value::Null);
             let name = spec
@@ -317,5 +318,18 @@ mod tests {
         );
         assert_eq!(doc["latest"]["version"], "1.0.0", "release, not retracted");
         assert_eq!(doc["versions"][2]["version"], "2.0.0-beta");
+    }
+
+    #[test]
+    fn aliases_bounded() {
+        // A kilobyte named eleven hundred times: more than a pubspec
+        // itself may hold.
+        let spec = format!(
+            "name: hello_pk\nversion: 1.0.0\nx: &x {}\ny: [{}]\n",
+            "y".repeat(1000),
+            vec!["*x"; 1100].join(",")
+        );
+        let e = read_archive(&archive(&spec)).unwrap_err();
+        assert!(e.to_string().contains("aliases"), "{e}");
     }
 }

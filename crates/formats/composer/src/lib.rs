@@ -215,14 +215,22 @@ impl Format for Composer {
             .collect();
         drop(data);
         let path = format!("{}/{}.zip", pkg.name, pkg.version);
-        if let Some(Entry::Blob { sha256, .. }) = e.get(&path)? {
-            if sha256 == up.sha256 {
-                return Ok(format!("{} {} is already there", pkg.name, pkg.version));
+        // One version however it is spelt: composer takes 1.0.0 and
+        // v1.0.0 for the same, and p2 lists only one of them.
+        for (_, entry) in e.list(&pkg.name)? {
+            if let Some(Entry::Blob { sha256, meta, .. }) = entry
+                && meta.get("version_normalized").and_then(Value::as_str)
+                    == Some(pkg.normalized.as_str())
+            {
+                let had = meta.get("version").and_then(Value::as_str).unwrap_or("");
+                if sha256 == up.sha256 {
+                    return Ok(format!("{} {had} is already there", pkg.name));
+                }
+                return Err(Error::Conflict(format!(
+                    "{} {had} is already there: a version is uploaded once",
+                    pkg.name
+                )));
             }
-            return Err(Error::Conflict(format!(
-                "{} {} is already there: a version is uploaded once",
-                pkg.name, pkg.version
-            )));
         }
         e.put(
             &path,
