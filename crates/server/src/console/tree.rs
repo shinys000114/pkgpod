@@ -217,6 +217,9 @@ pub(crate) async fn file_download(
     };
     let name = q.path.rsplit('/').next().unwrap_or("file").to_string();
     let mut resp = crate::serving::serve_blob(&file, &sha, &name, None, false, req).await;
+    // Only for the browser that asked: the session is a cookie, which a
+    // shared cache in front does not tell apart.
+    crate::serving::private(&mut resp);
     let h = resp.headers_mut();
     h.insert(
         header::CONTENT_TYPE,

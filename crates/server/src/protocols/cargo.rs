@@ -229,7 +229,7 @@ fn text(req: &Request, ctype: &'static str, body: String) -> Response {
         .headers()
         .get(header::IF_NONE_MATCH)
         .and_then(|x| x.to_str().ok())
-        .is_some_and(|x| x.split(',').any(|t| t.trim() == etag))
+        .is_some_and(|x| crate::serving::inm_matches(x, &etag))
     {
         return StatusCode::NOT_MODIFIED.into_response();
     }

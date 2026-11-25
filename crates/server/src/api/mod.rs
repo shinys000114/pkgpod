@@ -981,13 +981,7 @@ pub fn tree_entries(
             crate::serving::segments(path).ok_or_else(|| Error::Invalid("bad path".into()))?;
         let tree = r.tree_dir();
         let files = r.format == "files";
-        let hidden = |name: &str| {
-            if files {
-                pkgpod_files::engine_name(name)
-            } else {
-                name.starts_with('.')
-            }
-        };
+        let hidden = |name: &str| crate::serving::mirror_hidden(files, name);
         let none = || Error::NotFound(format!("no directory {path}"));
         if segs.iter().any(|s| hidden(s)) {
             return Err(none());

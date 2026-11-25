@@ -66,8 +66,12 @@ pub async fn handle(
     let method = req.method().clone();
     let reading = method == Method::GET || method == Method::HEAD;
     if role.is_none() || (!reading && role < Some(Role::Write)) {
+        // Logged in without a right: as if it were not there; a reader
+        // who may not write is refused.
         let st = if caller.user.is_none() {
             StatusCode::UNAUTHORIZED
+        } else if role.is_none() {
+            StatusCode::NOT_FOUND
         } else {
             StatusCode::FORBIDDEN
         };

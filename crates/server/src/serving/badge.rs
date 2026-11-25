@@ -182,7 +182,7 @@ pub fn serve(
         h.insert(header::ETAG, v);
     }
     crate::serving::sandbox(h);
-    if if_none_match == Some(etag.as_str()) {
+    if if_none_match.is_some_and(|v| crate::serving::inm_matches(v, &etag)) {
         *resp.status_mut() = StatusCode::NOT_MODIFIED;
         *resp.body_mut() = Body::empty();
     }

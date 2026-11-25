@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::auth::Caller;
+use crate::routes::Hit;
 use crate::{App, Error, Result};
 
 /// The most of a title, header or footer.
@@ -173,10 +174,37 @@ pub fn list(app: &App) -> Result<Vec<Value>> {
         })?
         .collect::<rusqlite::Result<Vec<_>>>()
     })?;
+    let listeners = crate::ops::listeners::list(&app.db)?;
     for p in &pages {
-        hosts
-            .entry(p.host.clone())
-            .or_insert_with(|| (format!("https://{}/", p.host), Vec::new(), None));
+        if hosts.contains_key(&p.host) {
+            continue;
+        }
+        // A host no address names as it is: what its root serves (the
+        // repositories without an address, or those of the host without
+        // its port), by the scheme of those addresses, or else of the
+        // listener on its port.
+        let scheme = table
+            .routes
+            .iter()
+            .find(|r| r.host == crate::routes::host_name(&p.host))
+            .map_or_else(
+                || listener_scheme(&listeners, &p.host),
+                |r| r.scheme.as_str(),
+            );
+        let (repos, root) = match table.route(&p.host, &[]) {
+            Hit::Repo { repo, .. } => (vec![repo.clone()], Some(repo)),
+            Hit::Index(list) => {
+                let mut v: Vec<String> = list.into_iter().map(|(_, r)| r).collect();
+                v.sort();
+                v.dedup();
+                (v, None)
+            }
+            Hit::None => (Vec::new(), None),
+        };
+        hosts.insert(
+            p.host.clone(),
+            (format!("{scheme}://{}/", p.host), repos, root),
+        );
     }
     Ok(hosts
         .into_iter()
@@ -192,6 +220,17 @@ pub fn list(app: &App) -> Result<Vec<Value>> {
             })
         })
         .collect())
+}
+
+/// The scheme of a host no address names: TLS if a serving listener on
+/// its port (443 when it names none) has a certificate, else plain HTTP.
+fn listener_scheme<'a>(listeners: &[crate::ops::listeners::Listener], host: &str) -> &'a str {
+    let port = |s: &str| s.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok());
+    let want = port(host).unwrap_or(443);
+    let tls = listeners
+        .iter()
+        .any(|l| l.enabled && !l.cert.is_empty() && port(&l.addr) == Some(want));
+    if tls { "https" } else { "http" }
 }
 
 /// One repository on a host page.

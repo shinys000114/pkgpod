@@ -239,9 +239,39 @@ pub fn sync(m: &RsyncMirror, ctx: &Ctx) -> Result<RsyncReport, Error> {
                 at(e)
             })?;
     }
+    remove_partials(ctx.dest, ctx.log);
     remove_update_markers(ctx.dest, ctx.log);
     report.ok = true;
     Ok(report)
+}
+
+/// Removes rsync's partial-dirs under `dest` after a run that completed.
+/// What an interrupted transfer left there is of a file that is now
+/// whole, or that upstream dropped since; rsync never deletes a
+/// partial-dir, and the second kind would stay (and be served) for good.
+fn remove_partials(dest: &Path, log: &(dyn Fn(&str) + Sync)) {
+    let mut dirs = vec![dest.to_path_buf()];
+    while let Some(d) = dirs.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            // Not through links: only the tree's own directories.
+            if !e.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
+            if e.file_name() != ".rsync-partial" {
+                dirs.push(e.path());
+            } else if std::fs::remove_dir_all(e.path()).is_ok() {
+                let shown = e.path();
+                let shown = shown.strip_prefix(dest).unwrap_or(&shown);
+                log(&format!(
+                    "removed what an interrupted transfer left: {}",
+                    shown.display()
+                ));
+            }
+        }
+    }
 }
 
 fn remove_update_markers(dest: &Path, log: &(dyn Fn(&str) + Sync)) {
