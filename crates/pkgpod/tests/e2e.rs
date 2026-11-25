@@ -5707,6 +5707,130 @@ fn files_hosted() {
     );
 }
 
+/// A file server that answers every request after `delay`: a listing of
+/// one file at a directory, the file's content otherwise.
+fn slow_files(delay: Duration) -> String {
+    use std::io::{BufRead, BufReader, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
+    std::thread::spawn(move || {
+        for conn in l.incoming() {
+            let Ok(mut conn) = conn else { continue };
+            std::thread::spawn(move || {
+                let mut r = BufReader::new(conn.try_clone().unwrap());
+                let mut line = String::new();
+                let _ = r.read_line(&mut line);
+                loop {
+                    let mut h = String::new();
+                    if r.read_line(&mut h).unwrap_or(0) == 0 || h == "\r\n" {
+                        break;
+                    }
+                }
+                std::thread::sleep(delay);
+                let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let body = if path.ends_with('/') {
+                    "<html><body><a href=\"x.txt\">x.txt</a></body></html>".to_string()
+                } else {
+                    "x".to_string()
+                };
+                let _ = write!(
+                    conn,
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            });
+        }
+    });
+    url
+}
+
+/// Syncs on one storage wait for a slot (syncs_per_storage).
+#[test]
+fn syncs_wait_for_a_slot_on_their_storage() {
+    let s = Server::start();
+    let up = slow_files(Duration::from_secs(2));
+    for m in ["m1", "m2", "m3"] {
+        s.cli(&[
+            "repo",
+            "create",
+            m,
+            "-f",
+            "files",
+            "-k",
+            "mirror",
+            "-s",
+            &format!("source={up}/{m}/"),
+        ])
+        .unwrap();
+    }
+    let out = s.cli(&["settings", "--syncs-per-storage", "1"]).unwrap();
+    assert!(out.contains("syncs_per_storage = 1"), "{out}");
+    let job = |m: &str| -> i64 {
+        let out = s.cli(&["sync", m]).unwrap();
+        out.split_whitespace().nth(1).unwrap().parse().unwrap()
+    };
+    let (j1, j2, j3) = (job("m1"), job("m2"), job("m3"));
+    let state = |id: i64| -> String {
+        let all = s.json(&["jobs"]);
+        all.as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"] == json!(id))
+            .map(|j| j["state"].as_str().unwrap().to_string())
+            .unwrap()
+    };
+    // One runs; the others wait, queued, and say why.
+    let t = Instant::now();
+    while state(j2) != "queued" || state(j3) != "queued" {
+        assert!(
+            t.elapsed() < Duration::from_secs(10),
+            "{} {}",
+            state(j2),
+            state(j3)
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(state(j1), "running");
+    let log = s.cli(&["job", &j2.to_string()]).unwrap();
+    assert!(
+        log.contains("waiting: 1 syncs run on storage main at once"),
+        "{log}"
+    );
+    // A queued job can be cancelled; the rest go one after another.
+    s.cli(&["job", &j3.to_string(), "--cancel"]).unwrap();
+    let t = Instant::now();
+    while state(j1) != "ok" || state(j2) != "ok" || state(j3) != "cancelled" {
+        assert!(
+            t.elapsed() < Duration::from_secs(40),
+            "{} {} {}",
+            state(j1),
+            state(j2),
+            state(j3)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let jobs = s.json(&["jobs"]);
+    let f = |id: i64, k: &str| {
+        jobs.as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"] == json!(id))
+            .unwrap()[k]
+            .as_i64()
+            .unwrap()
+    };
+    assert!(f(j2, "started") >= f(j1, "finished"), "{jobs}");
+    // 0: no limit.
+    s.cli(&["settings", "--syncs-per-storage", "0"]).unwrap();
+    let (a, b) = (job("m1"), job("m2"));
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!((state(a), state(b)), ("running".into(), "running".into()));
+    let e = s
+        .cli(&["settings", "--syncs-per-storage", "99"])
+        .unwrap_err();
+    assert!(e.contains("0 (no limit) to 64"), "{e}");
+}
+
 /// What a webhook receiver got: (path, headers in lower case, body).
 type Got = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<(String, String)>, String)>>>;
 

@@ -1579,18 +1579,25 @@ pub fn run(
                 None => println!("no badge token (make one with --new)"),
             });
         }
-        Cmd::Settings { downloads_days } => {
-            let v = if downloads_days.is_some() {
-                c.send(
-                    Method::PATCH,
-                    "/api/v1/settings",
-                    &json!({"downloads_days": downloads_days}),
-                )?
+        Cmd::Settings {
+            downloads_days,
+            syncs_per_storage,
+        } => {
+            let v = if downloads_days.is_some() || syncs_per_storage.is_some() {
+                let mut b = serde_json::Map::new();
+                if let Some(d) = downloads_days {
+                    b.insert("downloads_days".into(), json!(d));
+                }
+                if let Some(n) = syncs_per_storage {
+                    b.insert("syncs_per_storage".into(), json!(n));
+                }
+                c.send(Method::PATCH, "/api/v1/settings", &Value::Object(b))?
             } else {
                 c.get("/api/v1/settings")?
             };
             x.print(&v, |v| {
-                println!("downloads_days = {}", s(&v["downloads_days"]))
+                println!("downloads_days = {}", s(&v["downloads_days"]));
+                println!("syncs_per_storage = {}", s(&v["syncs_per_storage"]));
             });
         }
         Cmd::Gc {

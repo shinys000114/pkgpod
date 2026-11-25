@@ -326,6 +326,9 @@ pub(crate) enum Cmd {
         /// Days download counts are kept (0: none counted).
         #[arg(long)]
         downloads_days: Option<i64>,
+        /// Mirror syncs that run at once on one storage (0: no limit).
+        #[arg(long)]
+        syncs_per_storage: Option<i64>,
     },
     /// Collect garbage.
     Gc {

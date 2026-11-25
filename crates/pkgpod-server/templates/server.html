@@ -135,7 +135,12 @@ steps:
   <div class="table-wrap"><table><thead><tr><th>Name</th><th>Path</th><th></th></tr></thead><tbody>
   {% for (n, p) in storages %}<tr><td><b>{{ n }}</b></td><td class="mono">{{ p }}</td><td class="acts">{% if n != "main" %}<button class="link danger" hx-post="/c/storages/{{ n|urlencode }}/delete" hx-target="#server-result">remove</button>{% endif %}</td></tr>{% endfor %}
   </tbody></table></div>
-  <div class="card-body"><form class="inline" hx-post="/c/storages" hx-target="#server-result"><input name="name" required placeholder="name" size="10" autocomplete="off" autocapitalize="off" spellcheck="false"> <input name="path" required placeholder="/srv/pkgpod" size="30" autocomplete="off" spellcheck="false"> <button type="submit">Save storage</button></form></div>
+  <div class="card-body"><form class="inline" hx-post="/c/storages" hx-target="#server-result"><input name="name" required placeholder="name" size="10" autocomplete="off" autocapitalize="off" spellcheck="false"> <input name="path" required placeholder="/srv/pkgpod" size="30" autocomplete="off" spellcheck="false"> <button type="submit">Save storage</button></form>
+  <form class="inline mt" hx-post="/c/settings" hx-target="next .result">
+    At most <input type="number" name="syncs_per_storage" value="{{ syncs_per_storage }}" min="0" max="64" size="3"> mirror syncs at once on a storage <span class="muted small">(others wait, queued: mirrors on the same disks slow one another; 0: no limit)</span>
+    <button type="submit">Save</button>
+  </form>
+  <div class="result"></div></div>
 </div>
 <div class="card">
   <div class="card-head"><h2>Storage use</h2><span class="hint">what each repository's versions take, and what keeping each file once saves</span>

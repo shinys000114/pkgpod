@@ -99,6 +99,7 @@ What is in the database, and the commands that change it:
 | Storages | `pkgpod storage list\|set\|delete` | Server |
 | Signing keys | `pkgpod key list\|generate\|import\|default\|public\|delete` | Server |
 | Download statistics kept | `pkgpod settings --downloads-days <n>` | Server |
+| Syncs at once per storage | `pkgpod settings --syncs-per-storage <n>` | Server, Storages |
 | Users, teams, rights | `pkgpod user`, `pkgpod team`, `pkgpod grant` | Users & teams; a repository's members |
 | Tokens | `pkgpod token list\|create\|delete` | Account & tokens |
 | Repositories | `pkgpod repo create\|set\|show\|delete` | Repositories |
@@ -407,6 +408,13 @@ Schedules are read in the server's time zone, every minute. A mirror
 already syncing is not started again, and a time that passes while the
 server is down is not made up for. A mirror's status says when it syncs
 next.
+
+At most `syncs_per_storage` syncs (default 2) run at once on one
+storage; others wait, queued, and their log says so. Mirrors on the
+same disks slow one another: five syncs at once on one HDD array move
+less than two do. `pkgpod settings --syncs-per-storage 0` lifts the
+limit; a change applies to syncs already waiting. A queued sync can be
+cancelled like a running one.
 
 ## Jobs and their logs
 
