@@ -1055,6 +1055,12 @@ async fn new_repo_page(State(app): St, v: Viewer, headers: HeaderMap) -> Result<
                         ("deb", Kind::Mirror) => "follow an apt archive; served as received",
                         ("deb", _) => "apt packages you upload, signed per version",
                         ("files", Kind::Mirror) => "follow a file server (rsync, HTTP)",
+                        ("rpm", Kind::Mirror) => {
+                            "follow dnf repositories (Rocky, Alma, EPEL, Fedora); served as received"
+                        }
+                        ("arch", Kind::Mirror) => {
+                            "follow an Arch Linux (or Arch Linux ARM) mirror; served as received"
+                        }
                         ("files", _) => "any files by path: builds, images, tools",
                         ("oci", _) => "container images for docker and podman",
                         ("pypi", _) => "Python packages for pip, uploaded with twine",
@@ -1744,6 +1750,18 @@ fn usage_places(app: &App, r: &pkgpod_engine::RepoInfo) -> Vec<String> {
     if r.format == "deb" && r.kind == Kind::Mirror {
         return crate::mirror_pkgs::tree_index(&r.tree_dir()).0;
     }
+    if r.kind == Kind::Mirror {
+        // A dnf mirror's repositories, as set; others have none to pick.
+        return if r.format == "rpm" {
+            r.setting_list("repos")
+                .iter()
+                .map(|x| x.trim_matches('/').to_string())
+                .filter(|x| !x.is_empty())
+                .collect()
+        } else {
+            Vec::new()
+        };
+    }
     let Some(root) = app.engine.current(r).ok().flatten().map(|v| v.root) else {
         return Vec::new();
     };
@@ -2124,6 +2142,70 @@ fn usage(
         out.push(UseLine {
             label: "A labelled version".into(),
             text: format!("{base}@<label>/index.json   (read-only)"),
+        });
+        return out;
+    }
+    if r.format == "arch" && r.kind == Kind::Mirror {
+        let server = if r.setting_bool("public") {
+            base.clone()
+        } else {
+            let (scheme, rest) = base.split_once("://").unwrap_or(("https", &base));
+            format!("{scheme}://token:<token>@{rest}")
+        };
+        let layout = match r.setting_str("layout").trim() {
+            "" => "$repo/os/$arch".to_string(),
+            l => l.trim_matches('/').to_string(),
+        };
+        out.push(UseLine {
+            label: "/etc/pacman.d/mirrorlist (first)".into(),
+            text: format!("Server = {server}{layout}"),
+        });
+        out.push(UseLine {
+            label: "Update".into(),
+            text: "sudo pacman -Syu   # packages and databases as upstream signed them".into(),
+        });
+        return out;
+    }
+    if r.format == "rpm" && r.kind == Kind::Mirror {
+        let repos = usage_places(app, r);
+        let place = if want.is_empty() {
+            repos.first().cloned().unwrap_or_default()
+        } else {
+            want.to_string()
+        };
+        let id = format!(
+            "{}{}",
+            r.name.replace('.', "-"),
+            if place.is_empty() {
+                String::new()
+            } else {
+                format!("-{}", place.replace(['/', '.'], "-"))
+            }
+        );
+        let url = if place.is_empty() {
+            base.clone()
+        } else {
+            format!("{base}{place}/")
+        };
+        let mut repo = format!(
+            "[{id}]\nname={}{}\nbaseurl={url}\nenabled=1\ngpgcheck=1\n# gpgkey= as the distribution's own .repo file has it (its key under /etc/pki/rpm-gpg/)",
+            r.name,
+            if place.is_empty() {
+                String::new()
+            } else {
+                format!(" {place}")
+            }
+        );
+        if !r.setting_bool("public") {
+            repo.push_str("\nusername=token\npassword=<token>");
+        }
+        out.push(UseLine {
+            label: format!("/etc/yum.repos.d/{id}.repo"),
+            text: repo,
+        });
+        out.push(UseLine {
+            label: "Install".into(),
+            text: "dnf install <package>".into(),
         });
         return out;
     }
@@ -2776,9 +2858,12 @@ fn repo_tabs(r: &pkgpod_engine::RepoInfo, can_write: bool, can_admin: bool) -> V
         format!("/r/{n}/packages"),
     );
     let browse = t("browse", "Browse", format!("/r/{n}/tree?path="));
-    if r.format == "files" {
+    // A mirror's packages are listed from its indexes for Debian only;
+    // others are browsed as the tree they are.
+    let listed = !mirror || r.format == "deb";
+    if r.format == "files" || !listed {
         v.push(browse);
-        if !mirror {
+        if listed {
             v.push(catalog);
         }
     } else {

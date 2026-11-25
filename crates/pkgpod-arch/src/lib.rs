@@ -394,10 +394,81 @@ impl Format for Arch {
     }
 
     fn kinds(&self) -> &'static [Kind] {
-        &[Kind::Hosted]
+        &[Kind::Hosted, Kind::Mirror]
     }
 
-    fn settings(&self, _kind: Kind) -> Vec<Field> {
+    fn check_settings(&self, kind: Kind, settings: &Value) -> Result<()> {
+        if kind != Kind::Mirror {
+            return Ok(());
+        }
+        let source = pkgpod_engine::settings::check_mirror_source(settings)?;
+        let list = |k: &str| -> Vec<String> {
+            settings[k]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        };
+        let name_ok = |s: &str| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+        };
+        for (k, v) in [
+            ("repos", list("repos")),
+            ("architectures", list("architectures")),
+        ] {
+            if let Some(bad) = v.iter().find(|x| !name_ok(x) || *x == "..") {
+                return Err(invalid(format!("{k}: {bad:?}")));
+            }
+        }
+        if source.starts_with("http")
+            && (list("repos").is_empty() || list("architectures").is_empty())
+        {
+            return Err(invalid(
+                "an http(s) source needs the repositories and architectures to mirror (an rsync one takes the whole tree)",
+            ));
+        }
+        let layout = settings["layout"].as_str().unwrap_or("").trim();
+        if !layout.is_empty()
+            && (!layout.contains("$repo")
+                || layout
+                    .split('/')
+                    .any(|c| c.is_empty() || c == "." || c == ".."))
+        {
+            return Err(invalid(format!(
+                "layout {layout:?}: a path under the source with $repo (and $arch), as $repo/os/$arch"
+            )));
+        }
+        Ok(())
+    }
+
+    fn settings(&self, kind: Kind) -> Vec<Field> {
+        if kind == Kind::Mirror {
+            let mut v = vec![
+                Field::text(
+                    "source",
+                    "",
+                    "The upstream: http(s)://host/archlinux/ (its repositories below are followed through their databases: packages and databases) or rsync://host/archlinux/ (the whole tree, ISOs too).",
+                ),
+                Field::list(
+                    "repos",
+                    "Repositories to mirror (http): core, extra, multilib.",
+                ),
+                Field::list(
+                    "architectures",
+                    "Architectures (http): x86_64; aarch64 for Arch Linux ARM.",
+                ),
+                Field::text(
+                    "layout",
+                    "$repo/os/$arch",
+                    "Where a repository is under the source: $repo/os/$arch (Arch Linux), $arch/$repo (Arch Linux ARM).",
+                ),
+            ];
+            v.extend(pkgpod_engine::settings::mirror_common());
+            return v;
+        }
         vec![
             pkgpod_engine::settings::key_field(),
             Field::bool(
