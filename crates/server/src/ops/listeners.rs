@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::Router;
 use pkgpod_base::db::Db;
@@ -279,6 +280,12 @@ pub async fn bind(
     }
 }
 
+/// How long a client has for the TLS handshake, and for each request's
+/// headers (an idle kept-alive connection too): connections that send
+/// nothing would otherwise hold their file descriptors for ever.
+const HANDSHAKE: Duration = Duration::from_secs(10);
+const HEADERS: Duration = Duration::from_secs(30);
+
 /// Serves `router` on `addr` until `stop` turns true; then accepts no
 /// more connections, closes idle ones and returns once the requests in
 /// flight are answered.
@@ -287,7 +294,7 @@ pub async fn serve_router(
     addr: &str,
     tls: Option<tokio_rustls::TlsAcceptor>,
     router: Router,
-    mut stop: watch::Receiver<bool>,
+    stop: watch::Receiver<bool>,
 ) -> Result<(), String> {
     let listener = bind(addr, &stop).await.map_err(|e| {
         if !e.ends_with("another program has that address") {
@@ -305,55 +312,191 @@ pub async fn serve_router(
             .map_or(addr.to_string(), |a| a.to_string()),
         if tls.is_some() { " (TLS)" } else { "" }
     );
-    let Some(acceptor) = tls else {
-        // Without TCP_NODELAY a small file (headers and body written
-        // apart) waits for the client's delayed ACK: 40 ms a request.
-        use axum::serve::ListenerExt;
-        let listener = listener.tap_io(|tcp| {
-            let _ = tcp.set_nodelay(true);
-        });
-        return axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move {
-            let _ = stop.wait_for(|s| *s).await;
-        })
-        .await
-        .map_err(|e| format!("serving: {e}"));
-    };
+    serve_on(listener, tls, router, stop, HANDSHAKE, HEADERS).await;
+    Ok(())
+}
+
+async fn serve_on(
+    listener: tokio::net::TcpListener,
+    tls: Option<tokio_rustls::TlsAcceptor>,
+    router: Router,
+    mut stop: watch::Receiver<bool>,
+    handshake: Duration,
+    headers: Duration,
+) {
+    let addr = listener
+        .local_addr()
+        .map_or_else(|_| "?".to_string(), |a| a.to_string());
+    let mut builder =
+        hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+    builder
+        .http1()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(headers);
+    // HTTP/2 has no header timeout: past its preface, a connection that
+    // sends nothing more would be held for ever. One that does not
+    // answer a ping in time is closed (a client in the middle of a long
+    // download answers them).
+    builder
+        .http2()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .keep_alive_interval(headers)
+        .keep_alive_timeout(headers);
     let graceful = hyper_util::server::graceful::GracefulShutdown::new();
+    let mut warned: Option<tokio::time::Instant> = None;
     loop {
-        let (tcp, peer) = tokio::select! {
-            r = listener.accept() => match r {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!("accept on {addr}: {e}");
-                    continue;
-                }
-            },
+        let accepted = tokio::select! {
+            r = listener.accept() => r,
             _ = stop.wait_for(|s| *s) => break,
         };
-        let acceptor = acceptor.clone();
-        let app = router.clone();
-        let watcher = graceful.watcher();
+        let (tcp, peer) = match accepted {
+            Ok(c) => c,
+            // The client gave up before it was accepted.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::ConnectionReset
+                ) =>
+            {
+                continue;
+            }
+            Err(e) => {
+                // Out of file descriptors, say: the next accept fails at
+                // once too. Wait for some to be closed, and say so once a
+                // minute, not a million times a second.
+                if warned.is_none_or(|t| t.elapsed() >= Duration::from_secs(60)) {
+                    tracing::warn!("accept on {addr}: {e}");
+                    warned = Some(tokio::time::Instant::now());
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(250)) => continue,
+                    _ = stop.wait_for(|s| *s) => break,
+                }
+            }
+        };
+        // Without TCP_NODELAY a small file (headers and body written
+        // apart) waits for the client's delayed ACK: 40 ms a request.
         let _ = tcp.set_nodelay(true);
+        let acceptor = tls.clone();
+        // The peer address, as axum's ConnectInfo gives it.
+        let app = tower::Layer::layer(
+            &axum::Extension(axum::extract::ConnectInfo(peer)),
+            router.clone(),
+        );
+        let watcher = graceful.watcher();
+        let builder = builder.clone();
         tokio::spawn(async move {
-            let Ok(tls) = acceptor.accept(tcp).await else {
-                return;
-            };
-            // The peer address, as the plain listener gives it.
-            let app = app.layer(axum::Extension(axum::extract::ConnectInfo(peer)));
             let service = hyper_util::service::TowerToHyperService::new(app);
-            let builder =
-                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
-            let conn = builder.serve_connection(hyper_util::rt::TokioIo::new(tls), service);
-            let _ = watcher.watch(conn).await;
+            match acceptor {
+                Some(a) => {
+                    let Ok(Ok(tls)) = tokio::time::timeout(handshake, a.accept(tcp)).await else {
+                        return;
+                    };
+                    let io = hyper_util::rt::TokioIo::new(FirstBytes::new(tls, headers));
+                    let _ = watcher.watch(builder.serve_connection(io, service)).await;
+                }
+                None => {
+                    let io = hyper_util::rt::TokioIo::new(FirstBytes::new(tcp, headers));
+                    let _ = watcher.watch(builder.serve_connection(io, service)).await;
+                }
+            }
         });
     }
     drop(listener);
     graceful.shutdown().await;
-    Ok(())
+}
+
+/// A connection, until its first bytes show which HTTP it speaks: hyper
+/// reads them to tell HTTP/2's preface from HTTP/1 with no timeout of
+/// its own (its header timeout starts after), so a client that sends
+/// nothing would hold the connection for ever.
+struct FirstBytes<I> {
+    io: I,
+    /// Until the bytes read stop being the start of the preface.
+    deadline: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+    seen: usize,
+}
+
+impl<I> FirstBytes<I> {
+    fn new(io: I, within: Duration) -> Self {
+        FirstBytes {
+            io,
+            deadline: Some(Box::pin(tokio::time::sleep(within))),
+            seen: 0,
+        }
+    }
+}
+
+impl<I: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for FirstBytes<I> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        use std::future::Future;
+        use std::task::Poll;
+        const PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+        let this = self.get_mut();
+        let before = buf.filled().len();
+        let r = std::pin::Pin::new(&mut this.io).poll_read(cx, buf);
+        let Some(deadline) = this.deadline.as_mut() else {
+            return r;
+        };
+        match r {
+            Poll::Ready(Ok(())) => {
+                let new = &buf.filled()[before..];
+                let preface = PREFACE.get(this.seen..).unwrap_or(&[]);
+                this.seen += new.len();
+                if new.is_empty()
+                    || this.seen >= PREFACE.len()
+                    || new.iter().zip(preface).any(|(a, b)| a != b)
+                {
+                    this.deadline = None;
+                }
+            }
+            Poll::Pending if deadline.as_mut().poll(cx).is_ready() => {
+                return Poll::Ready(Err(std::io::ErrorKind::TimedOut.into()));
+            }
+            _ => {}
+        }
+        r
+    }
+}
+
+impl<I: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for FirstBytes<I> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().io).poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().io).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.io.is_write_vectored()
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().io).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().io).poll_shutdown(cx)
+    }
 }
 
 /// A TLS acceptor from PEM files.
@@ -382,4 +525,179 @@ pub fn files(l: &Listener) -> Vec<PathBuf> {
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+    use std::time::Instant;
+
+    use super::*;
+
+    /// A listener answering "ok", with short timeouts.
+    async fn serve(
+        tls: Option<tokio_rustls::TlsAcceptor>,
+    ) -> (std::net::SocketAddr, watch::Sender<bool>) {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let a = l.local_addr().unwrap();
+        let (tx, rx) = watch::channel(false);
+        let slowly = || async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            "slow"
+        };
+        // A body in two parts, a second apart.
+        let streamed = || async {
+            let parts = futures_util::stream::unfold(0, |i| async move {
+                if i == 2 {
+                    return None;
+                }
+                if i == 1 {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Some((
+                    Ok::<_, std::io::Error>(axum::body::Bytes::from("part\n")),
+                    i + 1,
+                ))
+            });
+            axum::body::Body::from_stream(parts)
+        };
+        let router = Router::new()
+            .route("/", axum::routing::get(|| async { "ok" }))
+            .route("/slow", axum::routing::get(slowly))
+            .route("/stream", axum::routing::get(streamed))
+            .route("/upload", axum::routing::post(|b: String| async move { b }));
+        let t = Duration::from_millis(300);
+        tokio::spawn(serve_on(l, tls, router, rx, t, t));
+        (a, tx)
+    }
+
+    /// Whether the server closes `c` within a few seconds.
+    fn closed(c: &mut std::net::TcpStream) -> bool {
+        c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let t = Instant::now();
+        let mut buf = [0u8; 64];
+        matches!(c.read(&mut buf), Ok(0)) && t.elapsed() < Duration::from_secs(4)
+    }
+
+    /// Whether the server closes `c` within a few seconds, whatever it
+    /// says before.
+    fn closed_after(c: &mut std::net::TcpStream) -> bool {
+        c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let t = Instant::now();
+        let mut buf = [0u8; 256];
+        while let Ok(n) = c.read(&mut buf) {
+            if n == 0 {
+                return t.elapsed() < Duration::from_secs(4);
+            }
+        }
+        false
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connections_that_send_nothing_are_closed() {
+        let (a, _stop) = serve(None).await;
+        tokio::task::spawn_blocking(move || {
+            let mut c = std::net::TcpStream::connect(a).unwrap();
+            assert!(closed(&mut c), "never a request");
+            // Answered, then idle.
+            let mut c = std::net::TcpStream::connect(a).unwrap();
+            c.write_all(b"GET / HTTP/1.1\r\nhost: x\r\n\r\n").unwrap();
+            let mut buf = [0u8; 512];
+            let n = c.read(&mut buf).unwrap();
+            assert!(buf[..n].starts_with(b"HTTP/1.1 200"), "{:?}", &buf[..n]);
+            assert!(closed(&mut c), "kept alive, idle");
+            // Headers that never end.
+            let mut c = std::net::TcpStream::connect(a).unwrap();
+            c.write_all(b"GET / HTTP/1.1\r\nhost: x\r\n").unwrap();
+            assert!(closed(&mut c), "half a request");
+            // HTTP/2's preface, then nothing.
+            let mut c = std::net::TcpStream::connect(a).unwrap();
+            c.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n").unwrap();
+            assert!(closed_after(&mut c), "HTTP/2, idle");
+        })
+        .await
+        .unwrap();
+    }
+
+    /// What the server answers to `req`, sent in parts a second apart.
+    fn exchange(a: std::net::SocketAddr, req: &[&str]) -> String {
+        let mut c = std::net::TcpStream::connect(a).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        for (i, part) in req.iter().enumerate() {
+            if i > 0 {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            c.write_all(part.as_bytes()).unwrap();
+        }
+        let mut out = Vec::new();
+        let _ = c.read_to_end(&mut out);
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn requests_longer_than_the_timeouts_are_answered() {
+        let (a, _stop) = serve(None).await;
+        tokio::task::spawn_blocking(move || {
+            let close = "host: x\r\nconnection: close\r\n";
+            // A slow answer, a body streamed slowly, a body sent slowly.
+            let r = exchange(a, &[&format!("GET /slow HTTP/1.1\r\n{close}\r\n")]);
+            assert!(r.starts_with("HTTP/1.1 200") && r.ends_with("slow"), "{r}");
+            let r = exchange(a, &[&format!("GET /stream HTTP/1.1\r\n{close}\r\n")]);
+            assert!(
+                r.starts_with("HTTP/1.1 200")
+                    && r.ends_with("5\r\npart\n\r\n5\r\npart\n\r\n0\r\n\r\n"),
+                "{r}"
+            );
+            let r = exchange(
+                a,
+                &[
+                    &format!("POST /upload HTTP/1.1\r\n{close}content-length: 10\r\n\r\nfirst"),
+                    "later",
+                ],
+            );
+            assert!(
+                r.starts_with("HTTP/1.1 200") && r.ends_with("firstlater"),
+                "{r}"
+            );
+        })
+        .await
+        .unwrap();
+        // Over HTTP/2 too: the client answers the pings.
+        let c = reqwest::Client::builder()
+            .http2_prior_knowledge()
+            .build()
+            .unwrap();
+        for (path, want) in [("slow", "slow"), ("stream", "part\npart\n")] {
+            let r = c.get(format!("http://{a}/{path}")).send().await.unwrap();
+            assert_eq!(r.version(), reqwest::Version::HTTP_2);
+            assert_eq!(r.text().await.unwrap(), want);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tls_handshake_that_never_comes_is_cut() {
+        let d = tempfile::tempdir().unwrap();
+        let (cert, key) = (d.path().join("cert.pem"), d.path().join("key.pem"));
+        let made = std::process::Command::new("openssl")
+            .args([
+                "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+            ])
+            .args(["-subj", "/CN=127.0.0.1", "-keyout"])
+            .arg(&key)
+            .arg("-out")
+            .arg(&cert)
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !made {
+            eprintln!("skipping: openssl not installed");
+            return;
+        }
+        let (a, _stop) = serve(Some(tls_acceptor(&cert, &key).unwrap())).await;
+        tokio::task::spawn_blocking(move || {
+            let mut c = std::net::TcpStream::connect(a).unwrap();
+            assert!(closed(&mut c));
+        })
+        .await
+        .unwrap();
+    }
 }

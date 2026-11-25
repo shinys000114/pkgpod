@@ -72,7 +72,7 @@ impl RsyncMirror {
     /// shell, and a leading `-` would be an option.
     pub fn validate(&self) -> Result<(), Error> {
         let s = &self.source;
-        let daemon = s.starts_with("rsync://") || (s.contains("::") && !s.starts_with('-'));
+        let daemon = pkgpod_base::source_kind(s) == pkgpod_base::Source::Rsync;
         if !daemon || s.contains(char::is_whitespace) {
             return Err(Error::Config(format!(
                 "{s:?} is not an rsync daemon source (rsync://host/module/ or host::module)"
@@ -508,6 +508,8 @@ mod tests {
             "/srv/debian",
             "-e ssh x::y",
             "rsync://a b/",
+            "h:/p::",
+            "rsync://h:x/",
         ] {
             assert!(
                 RsyncMirror::new(bad, Mode::Apt).validate().is_err(),

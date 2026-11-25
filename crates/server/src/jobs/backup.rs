@@ -188,6 +188,7 @@ pub fn backup(app: &App, to: &Path, mirrors: bool, log: &mut dyn FnMut(&str)) ->
     let bdb = Arc::new(Db::open(&db_path)?);
     let engine = engine_at(bdb.clone(), to)?;
     let check = engine.check(false)?;
+    drop(engine);
     for p in &check.problems {
         rep.warnings.push(p.clone());
     }
@@ -197,6 +198,18 @@ pub fn backup(app: &App, to: &Path, mirrors: bool, log: &mut dyn FnMut(&str)) ->
     }
     for (name, _) in storages(&bdb)? {
         set_storage(&bdb, &name, &format!("storages/{name}"))?;
+    }
+    // pkgpod.db stands alone, copied without a -wal file beside it: what
+    // was written since it was opened (the storages' paths) goes into
+    // the file, which leaves WAL mode (a restore opens it in WAL again).
+    drop(bdb);
+    let c = rusqlite::Connection::open(&db_path)?;
+    let mode: String = c.query_row("PRAGMA journal_mode = DELETE", [], |r| r.get(0))?;
+    if mode != "delete" {
+        rep.warnings.push(format!(
+            "{} is still in {mode} mode: copy the files beside it with it",
+            db_path.display()
+        ));
     }
     if !mirrors {
         rep.warnings.push(
@@ -245,4 +258,33 @@ pub fn restore(from: &Path, data_dir: &Path, log: &mut dyn FnMut(&str)) -> Resul
         rep.warnings.push(format!("... and {more} more problems"));
     }
     Ok(rep)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_backup_database_stands_alone() {
+        let d = tempfile::tempdir().unwrap();
+        let app = App::open(crate::config::Config {
+            data_dir: d.path().join("data"),
+            ..Default::default()
+        })
+        .unwrap();
+        let to = d.path().join("backup");
+        let rep = backup(&app, &to, false, &mut |_| {}).unwrap();
+        assert!(!rep.warnings.iter().any(|w| w.contains("mode")), "{rep:?}");
+        // pkgpod.db copied alone names the storages under the backup.
+        let alone = d.path().join("alone.db");
+        std::fs::copy(to.join("pkgpod.db"), &alone).unwrap();
+        let c = rusqlite::Connection::open(&alone).unwrap();
+        let path: String = c
+            .query_row("SELECT path FROM storages WHERE name = 'main'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(path, "storages/main");
+        assert!(!to.join("pkgpod.db-wal").exists());
+    }
 }

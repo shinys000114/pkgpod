@@ -141,25 +141,32 @@ fn propose_files(app: &App, r: &RepoInfo, actor: &str) -> Result<Proposal> {
     let now = pkgpod_base::now();
     let mut removals = Vec::new();
     let plan = app.engine.preview(&r.name, actor, |_, e| {
+        // What links point at, wherever they are (a top-level `stable`).
+        let targets: Vec<String> = e
+            .walk("")?
+            .into_iter()
+            .filter_map(|(_, entry)| match entry {
+                pkgpod_engine::tree::Entry::Ref { target } => Some(target),
+                _ => None,
+            })
+            .collect();
         for d in &dirs {
             let mut builds = Vec::new();
-            let mut linked = std::collections::HashSet::new();
             for (name, entry) in e.list(d)? {
-                match entry {
-                    // A directory (None: one this edit has open).
-                    None | Some(pkgpod_engine::tree::Entry::Dir { .. }) => builds.push(name),
-                    Some(pkgpod_engine::tree::Entry::Ref { target }) => {
-                        if let Some(child) = target.strip_prefix(&format!("{d}/")) {
-                            linked.insert(child.split('/').next().unwrap_or("").to_string());
-                        }
-                    }
-                    _ => {}
+                // A directory (None: one this edit has open).
+                if matches!(entry, None | Some(pkgpod_engine::tree::Entry::Dir { .. })) {
+                    builds.push(name);
                 }
             }
+            let linked: std::collections::HashSet<&str> = targets
+                .iter()
+                .filter_map(|t| t.strip_prefix(&format!("{d}/")))
+                .map(|child| child.split('/').next().unwrap_or(""))
+                .collect();
             let at = |b: &String| newest.get(&(d.clone(), b.clone())).copied().unwrap_or(0);
             builds.sort_by(|a, b| at(b).cmp(&at(a)).then(b.cmp(a)));
             for (i, b) in builds.iter().enumerate().skip(1) {
-                if linked.contains(b) {
+                if linked.contains(b.as_str()) {
                     continue;
                 }
                 let age = now - at(b);

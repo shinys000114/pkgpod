@@ -1690,6 +1690,420 @@ fn server_sections_jobs_and_logs() {
     }
 }
 
+/// The admin's password, for requests of the API by hand.
+fn admin_password(s: &Server) -> String {
+    std::fs::read_to_string(s.dir.path().join("data/admin-password"))
+        .unwrap()
+        .trim()
+        .to_string()
+}
+
+/// A job's log is read in parts: its end, or on from a byte; all of it
+/// only as a download. Who may not read the repository reads none.
+#[test]
+fn job_logs_are_read_in_parts() {
+    let s = Server::start();
+    s.cli(&[
+        "repo",
+        "create",
+        "mir",
+        "-k",
+        "mirror",
+        "-s",
+        "source=http://127.0.0.1:9/",
+        "-s",
+        "dists=x",
+    ])
+    .unwrap();
+    assert!(s.cli(&["sync", "mir", "--wait"]).is_err());
+    // A log of some MiB, as an rsync mirror's grows.
+    let path = s.dir.path().join("data/jobs/1.log");
+    let mut log = std::fs::read_to_string(&path).unwrap();
+    for i in 0..60_000 {
+        log.push_str(&format!(
+            "2026-11-25 00:00:00 file {i:08} of the tree, transferred\n"
+        ));
+    }
+    std::fs::write(&path, &log).unwrap();
+    let pw = admin_password(&s);
+    let c = reqwest::blocking::Client::new();
+    let job = |q: &str| -> Value {
+        let r = c
+            .get(format!("{}/api/v1/jobs/1{q}", s.api))
+            .basic_auth("admin", Some(&pw))
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+        r.json().unwrap()
+    };
+    let end = job("");
+    let text = end["log"].as_str().unwrap();
+    assert!(
+        text.len() <= 256 << 10 && text.ends_with("transferred\n"),
+        "{}",
+        text.len()
+    );
+    assert_eq!(end["log_size"], json!(log.len()));
+    assert_eq!(end["log_next"], json!(log.len()));
+    let from = end["log_from"].as_u64().unwrap() as usize;
+    assert!(from > 0 && log[from..] == *text, "{from}");
+    // Paged from the start, whole lines each time, all of it in the end.
+    let first = job("?from=0&max=1000");
+    let t = first["log"].as_str().unwrap();
+    assert!(
+        t.len() <= 1000 && t.ends_with('\n') && log.starts_with(t),
+        "{t}"
+    );
+    let (mut at, mut all) = (0u64, String::new());
+    while at < log.len() as u64 {
+        let p = job(&format!("?from={at}"));
+        assert_eq!(p["log_from"], json!(at));
+        all.push_str(p["log"].as_str().unwrap());
+        at = p["log_next"].as_u64().unwrap();
+    }
+    assert!(all == log, "{} of {} bytes", all.len(), log.len());
+    // All of it, as a download.
+    let r = c
+        .get(format!("{}/api/v1/jobs/1/log", s.api))
+        .basic_auth("admin", Some(&pw))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert!(
+        r.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/plain")
+    );
+    assert!(r.text().unwrap() == log);
+    // The CLI shows the end and says where the rest is.
+    let out = s.cli(&["job", "1"]).unwrap();
+    assert!(
+        out.contains("(the log's end; all of it: GET /api/v1/jobs/1/log)") && out.len() < 300 << 10,
+        "{}",
+        out.len()
+    );
+    // So does the console's job page.
+    let (cc, sid, _) = console_session(&s, "ops", "ops-password");
+    let page = cc
+        .get(format!("{}/jobs/1", s.api))
+        .header("cookie", format!("pkgpod_session={sid}"))
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(
+        page.contains(r#"<a href="/api/v1/jobs/1/log">download the whole log</a>"#)
+            && page.len() < (1 << 20) + (64 << 10),
+        "{}",
+        page.len()
+    );
+    // Not for others: anonymous, or a user with no role on the mirror.
+    s.cli_in(&["user", "add", "dev", "--password-stdin"], "dev-password")
+        .unwrap();
+    for q in ["", "?from=0", "?from=0&max=10", "/log"] {
+        let r = c.get(format!("{}/api/v1/jobs/1{q}", s.api)).send().unwrap();
+        assert_eq!(r.status().as_u16(), 401, "{q}");
+        let r = c
+            .get(format!("{}/api/v1/jobs/1{q}", s.api))
+            .basic_auth("dev", Some("dev-password"))
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 404, "{q}");
+    }
+}
+
+/// An rsync daemon on the loopback serving `root` as the module `up`.
+struct RsyncDaemon {
+    child: Child,
+    url: String,
+    _dir: tempfile::TempDir,
+}
+
+impl RsyncDaemon {
+    fn start(root: &Path) -> RsyncDaemon {
+        let dir = tempfile::tempdir().unwrap();
+        let conf = dir.path().join("rsyncd.conf");
+        std::fs::write(
+            &conf,
+            format!(
+                "use chroot = no\n[up]\npath = {}\nread only = yes\n",
+                root.display()
+            ),
+        )
+        .unwrap();
+        // The port can be taken before rsync binds it: wait for its
+        // greeting, and try another if it died.
+        for _ in 0..10 {
+            let port = free_port();
+            let mut child = Command::new("rsync")
+                .args(["--daemon", "--no-detach", "--address=127.0.0.1"])
+                .arg(format!("--port={port}"))
+                .arg(format!("--config={}", conf.display()))
+                .stdin(Stdio::null())
+                .spawn()
+                .unwrap();
+            for _ in 0..100 {
+                if child.try_wait().unwrap().is_some() {
+                    break;
+                }
+                let greets =
+                    std::net::TcpStream::connect(("127.0.0.1", port)).is_ok_and(|mut c| {
+                        use std::io::Read;
+                        let _ = c.set_read_timeout(Some(Duration::from_millis(500)));
+                        let mut buf = [0u8; 8];
+                        c.read_exact(&mut buf).is_ok() && &buf == b"@RSYNCD:"
+                    });
+                if greets {
+                    return RsyncDaemon {
+                        child,
+                        url: format!("rsync://127.0.0.1:{port}/up/"),
+                        _dir: dir,
+                    };
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        panic!("rsync daemon did not start");
+    }
+}
+
+impl Drop for RsyncDaemon {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The rsync processes whose command line names `dir`.
+fn rsyncs_in(dir: &Path) -> Vec<u32> {
+    let needle = dir.to_string_lossy().to_string();
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .flatten()
+        .filter_map(|e| {
+            let pid: u32 = e.file_name().to_str()?.parse().ok()?;
+            let cmd = std::fs::read(e.path().join("cmdline")).ok()?;
+            let cmd = String::from_utf8_lossy(&cmd).replace('\0', " ");
+            (cmd.starts_with("rsync ") && cmd.contains(&needle)).then_some(pid)
+        })
+        .collect()
+}
+
+/// A stopping server stops its jobs first: a sync's rsync goes with it,
+/// and the job ends cancelled by the server's stop.
+#[test]
+fn a_stopping_server_stops_its_syncs() {
+    if !have("rsync") {
+        return;
+    }
+    let mut s = Server::start();
+    let up = tempfile::tempdir().unwrap();
+    let big: Vec<u8> = (0..8u32 << 20).map(|i| (i * 31 % 251) as u8).collect();
+    std::fs::write(up.path().join("big.bin"), big).unwrap();
+    let d = RsyncDaemon::start(up.path());
+    s.cli(&[
+        "repo",
+        "create",
+        "rs",
+        "-f",
+        "files",
+        "-k",
+        "mirror",
+        "-s",
+        &format!("source={}", d.url),
+        "-s",
+        "bwlimit=32",
+    ])
+    .unwrap();
+    s.cli(&["sync", "rs"]).unwrap();
+    let t = Instant::now();
+    while rsyncs_in(s.dir.path()).is_empty() {
+        assert!(t.elapsed() < Duration::from_secs(20), "no rsync started");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let st = Command::new("kill")
+        .args(["-TERM", &s.child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(st.success());
+    let t = Instant::now();
+    while s.child.try_wait().unwrap().is_none() {
+        assert!(
+            t.elapsed() < Duration::from_secs(20),
+            "the server did not stop"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let left = rsyncs_in(s.dir.path());
+    for p in &left {
+        let _ = Command::new("kill")
+            .args(["-KILL", &p.to_string()])
+            .status();
+    }
+    assert!(left.is_empty(), "rsync left running: {left:?}");
+    s.restart();
+    let j = &s.json(&["jobs", "rs"])[0];
+    assert_eq!(
+        (j["state"].as_str(), j["summary"].as_str()),
+        (Some("cancelled"), Some("the server stopped")),
+        "{j}"
+    );
+}
+
+/// One server per data directory: a second one on the same data (on
+/// another address) refuses to start, and leaves the first one's
+/// running job alone.
+#[test]
+fn one_server_per_data_directory() {
+    let s = Server::start();
+    let up = slow_files(Duration::from_secs(60));
+    s.cli(&[
+        "repo",
+        "create",
+        "slow",
+        "-f",
+        "files",
+        "-k",
+        "mirror",
+        "-s",
+        &format!("source={up}/"),
+    ])
+    .unwrap();
+    s.cli(&["sync", "slow"]).unwrap();
+    let cfg = s.dir.path().join("second.toml");
+    std::fs::write(
+        &cfg,
+        format!(
+            "data_dir = \"{}\"\nlisten = \"127.0.0.1:{}\"\nlog = \"warn\"\n",
+            s.dir.path().join("data").display(),
+            free_port()
+        ),
+    )
+    .unwrap();
+    let mut second = Command::new(env!("CARGO_BIN_EXE_pkgpod"))
+        .args(["serve", "-c"])
+        .arg(&cfg)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let t = Instant::now();
+    while second.try_wait().unwrap().is_none() {
+        if t.elapsed() > Duration::from_secs(10) {
+            let _ = second.kill();
+            let _ = second.wait();
+            panic!("a second server runs on the same data");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let out = second.wait_with_output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && err.contains("another pkgpod serve (pid "),
+        "{err}"
+    );
+    let j = &s.json(&["jobs", "slow"])[0];
+    assert_eq!(j["state"], "running", "{j}");
+}
+
+/// What a server killed during an import or an upload left is removed
+/// when it starts again, and when its repository is deleted; a mirror's
+/// state that happens to be named so stays.
+#[test]
+fn leftovers_of_a_killed_server_are_removed() {
+    let mut s = Server::start();
+    s.cli(&["repo", "create", "k", "-f", "files"]).unwrap();
+    s.cli(&["repo", "create", "h", "-f", "files"]).unwrap();
+    s.cli(&[
+        "repo",
+        "create",
+        "h.import",
+        "-f",
+        "files",
+        "-k",
+        "mirror",
+        "-s",
+        "source=http://127.0.0.1:9/",
+    ])
+    .unwrap();
+    let main = s.dir.path().join("data/storages/main");
+    let state = main.join("state");
+    let left = [
+        state.join("k.import/pool/a.deb"),
+        state.join("k.import-cache/hashes"),
+        state.join("h.import/the-mirrors-own"),
+        main.join("store/tmp/.tmpAbC123"),
+    ];
+    for f in &left {
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(f, "x").unwrap();
+    }
+    s.restart();
+    assert!(!state.join("k.import").exists());
+    assert!(!state.join("k.import-cache").exists());
+    assert!(!left[3].exists());
+    assert!(left[2].exists(), "a mirror's state is its own");
+    std::fs::create_dir_all(state.join("k.import")).unwrap();
+    s.cli(&["repo", "delete", "k", "-y"]).unwrap();
+    assert!(!state.join("k.import").exists());
+}
+
+/// Files cleanup keeps a build that a link outside the cleaned
+/// directory points at.
+#[test]
+fn files_cleanup_keeps_builds_linked_from_anywhere() {
+    let s = Server::start();
+    s.cli(&["repo", "create", "b", "-f", "files", "-s", "public=true"])
+        .unwrap();
+    let a = s.dir.path().join("app.bin");
+    for run in ["b1", "b2", "b3", "b4"] {
+        std::fs::write(&a, format!("app {run}")).unwrap();
+        s.cli(&[
+            "upload",
+            "b",
+            a.to_str().unwrap(),
+            "-s",
+            &format!("path=builds/{run}/"),
+        ])
+        .unwrap();
+    }
+    s.cli(&["op", "b", "link", "path=stable", "to=builds/b1", "-y"])
+        .unwrap();
+    s.cli(&[
+        "op",
+        "b",
+        "link",
+        "path=docs/app.bin",
+        "to=builds/b2/app.bin",
+        "-y",
+    ])
+    .unwrap();
+    s.cli(&[
+        "repo",
+        "set",
+        "b",
+        "cleanup_dirs=builds",
+        "cleanup_keep_last=1",
+    ])
+    .unwrap();
+    let plan = s.cli(&["cleanup", "b"]).unwrap();
+    assert!(
+        plan.contains("builds/b3")
+            && !plan.contains("builds/b1")
+            && !plan.contains("builds/b2")
+            && !plan.contains("builds/b4"),
+        "{plan}"
+    );
+    s.cli(&["cleanup", "b", "-y"]).unwrap();
+    assert_eq!(get(&s.url("/b/builds/b3/app.bin"), None).0, 404);
+    assert_eq!(get(&s.url("/b/stable/app.bin"), None).1, "app b1");
+    assert_eq!(get(&s.url("/b/docs/app.bin"), None).1, "app b2");
+    assert_eq!(get(&s.url("/b/builds/b4/app.bin"), None).1, "app b4");
+}
+
 #[test]
 fn console_login_pages_and_csrf() {
     let s = Server::start();
@@ -4156,6 +4570,27 @@ fn openapi_describes_what_the_api_sends() {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
+    // Its log from a byte on, and all of it as text.
+    let v = a.ok(
+        "get",
+        "/api/v1/jobs/{id}",
+        &format!("/api/v1/jobs/{sync}?from=0&max=100"),
+        None,
+        200,
+    );
+    assert_eq!(v["log_from"], 0, "{v}");
+    let v = a.ok(
+        "get",
+        "/api/v1/jobs/{id}/log",
+        &format!("/api/v1/jobs/{sync}/log"),
+        None,
+        200,
+    );
+    assert!(
+        v.as_str()
+            .is_some_and(|t| t.contains("sync of mir started")),
+        "{v}"
+    );
     let (st, v) = a.check(
         "post",
         "/api/v1/jobs/{id}/cancel",

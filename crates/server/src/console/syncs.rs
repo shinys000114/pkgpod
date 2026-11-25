@@ -66,9 +66,10 @@ pub(crate) fn log_progress(log: &str) -> (Option<u32>, String) {
     (None, String::new())
 }
 
-/// How far a running job's log says it got.
+/// How far a running job's log says it got (its end only: the page
+/// asks every few seconds, and a log can be gigabytes).
 pub(crate) fn live_job(app: &App, j: &crate::jobs::Job) -> LiveJob {
-    let log = crate::jobs::log(app, j.id);
+    let log = crate::jobs::log_tail(app, j.id, 64 << 10).text;
     let lines: Vec<&str> = log.lines().collect();
     let tail = lines[lines.len().saturating_sub(12)..].join("\n");
     let (pct, at) = log_progress(&log);
@@ -111,7 +112,9 @@ pub(crate) struct JobPage {
     pub(crate) job: JobRow,
     pub(crate) repo: String,
     pub(crate) log: String,
-    pub(crate) from: usize,
+    pub(crate) from: u64,
+    /// Earlier lines are left out.
+    pub(crate) cut: bool,
     pub(crate) running: bool,
     pub(crate) id: i64,
     pub(crate) state: String,
@@ -139,11 +142,26 @@ pub(crate) fn still_missing(app: &App, job: &crate::jobs::Job) -> Vec<String> {
         .collect()
 }
 
+/// How much of a job's log its page shows: the end; the whole log is a
+/// download.
+const PAGE_LOG: u64 = 1 << 20;
+
+/// A job the viewer may read, with the end of its log.
+async fn job_with_log(
+    app: &Arc<App>,
+    v: &Viewer,
+    id: i64,
+) -> Result<(crate::jobs::Job, crate::jobs::LogPart)> {
+    let c = v.caller.clone();
+    api::blocking(app, move |app| {
+        let j = api::job_for(app, &c, id)?;
+        Ok((j, crate::jobs::log_tail(app, id, PAGE_LOG)))
+    })
+    .await
+}
+
 pub(crate) async fn job_page(State(app): St, v: Viewer, Path(id): Path<i64>) -> Result<Response> {
-    let j = json_of(api::job(State(app.clone()), v.who(), Path(id)).await)?;
-    let log = s(&j["log"]);
-    let job: crate::jobs::Job =
-        serde_json::from_value(j).map_err(|e| Error::Invalid(e.to_string()))?;
+    let (job, log) = job_with_log(&app, &v, id).await?;
     let missing = still_missing(&app, &job);
     let can_allow = !missing.is_empty()
         && app.engine.repo(&job.repo).is_ok_and(|r| {
@@ -160,17 +178,17 @@ pub(crate) async fn job_page(State(app): St, v: Viewer, Path(id): Path<i64>) -> 
         running: job.state == "running",
         repo: job.repo.clone(),
         job: job_row(&job),
-        from: log.len(),
-        log,
+        from: log.next,
+        cut: log.from > 0,
+        log: log.text,
     }))
 }
 
 /// Adds the files a sync found gone upstream to the repository's
 /// Missing files allowed, and syncs again.
 pub(crate) async fn job_allow_missing(State(app): St, v: Viewer, Path(id): Path<i64>) -> Response {
-    let job = match json_of(api::job(State(app.clone()), v.who(), Path(id)).await).and_then(|j| {
-        serde_json::from_value::<crate::jobs::Job>(j).map_err(|e| Error::Invalid(e.to_string()))
-    }) {
+    let c = v.caller.clone();
+    let job = match api::blocking(&app, move |app| api::job_for(app, &c, id)).await {
         Ok(j) => j,
         Err(e) => return err_part(e),
     };
@@ -220,25 +238,24 @@ pub(crate) async fn job_allow_missing(State(app): St, v: Viewer, Path(id): Path<
 pub(crate) struct JobLog {
     pub(crate) id: i64,
     pub(crate) log: String,
-    /// Where the stream goes on from (the log's length in bytes).
-    pub(crate) from: usize,
+    /// Where the stream goes on from (in the log, in bytes).
+    pub(crate) from: u64,
+    /// Earlier lines are left out.
+    pub(crate) cut: bool,
     pub(crate) running: bool,
     pub(crate) state: String,
 }
 
 pub(crate) async fn job_log(State(app): St, v: Viewer, Path(id): Path<i64>) -> Response {
-    match api::job(State(app), v.who(), Path(id)).await {
-        Ok(Json(j)) => {
-            let state = s(&j["state"]);
-            let log = s(&j["log"]);
-            render(&JobLog {
-                id,
-                from: log.len(),
-                log,
-                running: state == "running",
-                state,
-            })
-        }
+    match job_with_log(&app, &v, id).await {
+        Ok((j, log)) => render(&JobLog {
+            id,
+            from: log.next,
+            cut: log.from > 0,
+            log: log.text,
+            running: j.state == "running",
+            state: j.state,
+        }),
         Err(e) => err_part(e),
     }
 }
@@ -267,7 +284,8 @@ pub(crate) async fn job_stream(
         .and_then(|v| v.parse().ok())
         .unwrap_or(q.from);
     // Who may read the job's repository may read its log.
-    if let Err(e) = api::job(State(app.clone()), v.who(), Path(id)).await {
+    let c = v.caller.clone();
+    if let Err(e) = api::blocking(&app, move |app| api::job_for(app, &c, id)).await {
         return err_part(e);
     }
     let path = crate::jobs::log_path(&app, id);

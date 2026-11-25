@@ -29,8 +29,11 @@ The unit runs `pkgpod serve --config /etc/pkgpod/pkgpod.toml` as
 `pkgpod`, and:
 
 - restarts it 10 seconds after a failure;
-- gives it 45 seconds to stop (the server answers the requests in flight
-  for up to 30);
+- gives it 60 seconds to stop (the server answers the requests in flight
+  for up to 30, and gives the jobs it cancels 10 to end), sending
+  SIGTERM to the server alone and killing what is left of the unit once
+  it is gone (`KillMode=mixed`);
+- allows 65536 open files: every connection takes one;
 - lets it listen on ports below 1024 (`CAP_NET_BIND_SERVICE`), so a
   serving listener can take 80 or 443 without root;
 - makes `/usr`, `/boot` and `/etc` read-only to it (`ProtectSystem=full`)
@@ -84,6 +87,9 @@ log = "info"
 In `data_dir`:
 
 - `pkgpod.db`: the database (SQLite);
+- `pkgpod.lock`: held by the server running on the data (its pid in
+  it): a second `pkgpod serve` on the same data directory refuses to
+  start;
 - `admin-password`: the first admin's password, on a new database;
 - `keys/`: the OpenPGP secret keys (mode 0700, files 0600);
 - `rsa/`: the server's RSA key (apk indexes) and usign key (ipk feeds),
@@ -469,7 +475,7 @@ pkgpod jobs                      # recent jobs of every repository
 pkgpod jobs debian
 pkgpod jobs --state failed       # server admins: by state (active: queued
 pkgpod jobs --kind import        #   or running) or kind, any repository
-pkgpod job 42                    # its state, summary and log
+pkgpod job 42                    # its state, summary and log's end
 pkgpod job 42 --cancel
 ```
 
@@ -479,7 +485,9 @@ it runs. Server admins have every repository's jobs on the Server
 page, Jobs: filtered by repository, kind and state, a hundred a page,
 following those that run; the setting below is there too. A job's start
 and end are also in the server's log. Logs are kept in `<data_dir>/jobs/<id>.log`, and are in
-backups.
+backups. A log can be large, so the job's page, `pkgpod job` and
+`GET /api/v1/jobs/<id>` show its end (`?from=` reads on from a byte);
+`GET /api/v1/jobs/<id>/log` (the page links it) downloads all of it.
 
 Ended jobs older than `jobs_days` (default 90) go with their logs in
 the daily run, except each repository's newest ten; a log whose job is
@@ -491,9 +499,13 @@ pkgpod settings --jobs-days 30   # 0: keep all
 pkgpod cleanup                   # the daily run now: cleanup rules and old jobs
 ```
 
-When the server stops, it asks running jobs to stop. On the next start,
-a job still recorded as running is marked failed ("the server stopped
-during the job"); start it again.
+When the server stops, it cancels the running jobs and waits up to 10
+seconds for them to end (a sync's rsync stops with it): they end
+cancelled, "the server stopped". A job that did not end by then is
+recorded so too. On the next start, a job still recorded as running (the
+server was killed) is marked failed ("the server stopped during the
+job"), and what imports and uploads left half done is removed. Start
+the jobs again.
 
 ## Monitoring
 

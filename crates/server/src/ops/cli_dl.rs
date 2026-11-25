@@ -81,21 +81,60 @@ pub fn ci_action(app: &App) -> Option<String> {
 }
 
 /// A console address as set: http(s), a host, no path, query or user.
+/// As the install script names it, the host is a plain one.
 pub fn check_console_url(v: &str) -> crate::Result<String> {
     let v = v.trim().trim_end_matches('/');
     let u = reqwest::Url::parse(v)
         .map_err(|e| crate::Error::Invalid(format!("console_url {v:?}: {e}")))?;
-    if !matches!(u.scheme(), "http" | "https")
-        || u.host_str().is_none()
-        || u.path() != "/"
-        || u.query().is_some()
-        || !u.username().is_empty()
-    {
-        return Err(crate::Error::Invalid(format!(
+    let host = u.host_str().map(|h| match u.port() {
+        Some(p) => format!("{h}:{p}"),
+        None => h.to_string(),
+    });
+    match host {
+        Some(host)
+            if matches!(u.scheme(), "http" | "https")
+                && u.path() == "/"
+                && u.query().is_none()
+                && u.fragment().is_none()
+                && u.username().is_empty()
+                && u.password().is_none()
+                && plain_host(&host) =>
+        {
+            Ok(format!("{}://{host}", u.scheme()))
+        }
+        _ => Err(crate::Error::Invalid(format!(
             "console_url {v:?}: an http(s) address without a path (https://pkg.example.org)"
-        )));
+        ))),
     }
-    Ok(v.to_string())
+}
+
+/// A host as it may go into a shell script: a name of letters, digits,
+/// '.', '-' and '_' (a container's name), or a bracketed IPv6 address;
+/// then perhaps `:port`.
+fn plain_host(h: &str) -> bool {
+    let rest = match h.strip_prefix('[') {
+        Some(r) => match r.split_once(']') {
+            Some((ip, rest)) if ip.parse::<std::net::Ipv6Addr>().is_ok() => rest,
+            _ => return false,
+        },
+        None => {
+            let end = h.find(':').unwrap_or(h.len());
+            let name = &h[..end];
+            if name.is_empty()
+                || name.starts_with(['-', '.'])
+                || !name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+            {
+                return false;
+            }
+            &h[end..]
+        }
+    };
+    rest.is_empty()
+        || rest
+            .strip_prefix(':')
+            .is_some_and(|p| !p.is_empty() && p.len() <= 5 && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// An action's place as set: owner/repository[/path]@ref.
@@ -123,11 +162,13 @@ pub fn console_base(app: &App, h: &HeaderMap) -> String {
 }
 
 /// The address the request came to, as the client sees it (behind a
-/// proxy, its scheme).
+/// proxy, its scheme). A Host that is not a plain host[:port] goes
+/// into no script: `localhost` instead.
 pub(crate) fn base(h: &HeaderMap) -> String {
     let host = h
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
+        .filter(|h| plain_host(h))
         .unwrap_or("localhost");
     let scheme = h
         .get("x-forwarded-proto")
@@ -163,7 +204,7 @@ pub(crate) async fn binary() -> Response {
     let Ok(f) = tokio::fs::File::open(exe()).await else {
         return (StatusCode::NOT_FOUND, "the server's binary cannot be read").into_response();
     };
-    let mut r = Response::new(Body::from_stream(tokio_util_stream(f)));
+    let mut r = Response::new(Body::from_stream(file_stream(f)));
     let hs = r.headers_mut();
     hs.insert(
         header::CONTENT_TYPE,
@@ -181,7 +222,7 @@ pub(crate) async fn binary() -> Response {
 }
 
 /// A file as a stream of chunks.
-fn tokio_util_stream(
+pub(crate) fn file_stream(
     f: tokio::fs::File,
 ) -> impl futures_util::Stream<Item = std::io::Result<axum::body::Bytes>> {
     use tokio::io::AsyncReadExt;
@@ -248,4 +289,57 @@ case ":$PATH:" in *":$dir:"*) ;; *) echo "(add $dir to PATH)" ;; esac
         script,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_plain_address_goes_into_the_script() {
+        let base_of = |host: &str| {
+            let mut h = HeaderMap::new();
+            h.insert(header::HOST, HeaderValue::from_str(host).unwrap());
+            base(&h)
+        };
+        for ok in [
+            "pkg.example.org",
+            "pkg.example.org:8090",
+            "127.0.0.1:8090",
+            "[::1]:8090",
+            "pkgpod_server:8090",
+        ] {
+            assert_eq!(base_of(ok), format!("http://{ok}"));
+        }
+        for bad in [
+            "x\"; touch /tmp/pwn; \"",
+            "x$(id)",
+            "x`id`",
+            "x:80/y",
+            "x:port",
+            "[::1",
+            "[x]:1",
+            "-x",
+            "",
+        ] {
+            assert_eq!(base_of(bad), "http://localhost", "{bad:?}");
+        }
+        assert_eq!(
+            check_console_url("https://Pkg.Example.org:8443/").unwrap(),
+            "https://pkg.example.org:8443"
+        );
+        assert_eq!(
+            check_console_url("http://[::1]:8090").unwrap(),
+            "http://[::1]:8090"
+        );
+        for bad in [
+            "https://a$(id).example",
+            "https://a'b.example",
+            "https://x#y",
+            "https://:pw@x.example",
+            "https://x.example/path",
+        ] {
+            assert!(check_console_url(bad).is_err(), "{bad:?}");
+        }
+    }
 }

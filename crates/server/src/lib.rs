@@ -291,9 +291,13 @@ impl App {
 /// Runs the server until SIGINT or SIGTERM: the management listener, the
 /// serving listeners in the database, and the background jobs.
 pub async fn run(app: Arc<App>) -> Result<(), String> {
+    // One server per data directory: a second would take the first's
+    // running jobs for ones a stop left. Held until this returns.
+    let lock = lock(&app.cfg.data_dir)?;
     // Only the running server owns jobs: admin commands open the same
     // database while a server runs.
     jobs::recover(&app.db).map_err(|e| e.to_string())?;
+    jobs::remove_leftovers(&app);
     listeners::reconcile(&app);
     let sched = jobs::scheduler(app.clone());
     let counts = stats::writer(app.clone());
@@ -362,6 +366,8 @@ pub async fn run(app: Arc<App>) -> Result<(), String> {
             // The management listener could not start (or failed).
             listeners::stop_all(&app);
             app.jobs.cancel_all();
+            jobs_end(&app, JOBS_STOP).await;
+            drop(lock);
             return r.unwrap_or_else(|e| Err(e.to_string()));
         }
         _ = shutdown_signal() => {}
@@ -378,20 +384,25 @@ pub async fn run(app: Arc<App>) -> Result<(), String> {
     sched.abort();
     gc.abort();
     hooks.abort();
-    let drained = tokio::time::timeout(DRAIN, async move {
-        let r = mgmt.await;
-        for h in serving {
-            let _ = h.await;
-        }
-        r
-    })
-    .await;
+    // Meanwhile the jobs stop (a sync's rsync with it), up to JOBS_STOP:
+    // a job left running dies with the process, its rsync orphaned.
+    let (drained, ()) = tokio::join!(
+        tokio::time::timeout(DRAIN, async move {
+            let r = mgmt.await;
+            for h in serving {
+                let _ = h.await;
+            }
+            r
+        }),
+        jobs_end(&app, JOBS_STOP)
+    );
     // The downloads counted last.
     counts.abort();
     let app2 = app.clone();
     if let Ok(Err(e)) = tokio::task::spawn_blocking(move || app2.stats.flush(&app2)).await {
         tracing::warn!("download counts: {e}");
     }
+    drop(lock);
     match drained {
         Ok(r) => r.unwrap_or_else(|e| Err(e.to_string())),
         Err(_) => {
@@ -407,11 +418,125 @@ pub async fn run(app: Arc<App>) -> Result<(), String> {
 /// How long a stopping server answers the requests in flight.
 pub const DRAIN: Duration = Duration::from_secs(30);
 
+/// How long a stopping server waits for the jobs it cancelled to end:
+/// a sync's rsync gets SIGTERM, and SIGKILL 5s later, well within it.
+pub const JOBS_STOP: Duration = Duration::from_secs(10);
+
+/// Waits for the cancelled jobs to end, up to `within`; those still
+/// running then are recorded as stopped by the server.
+async fn jobs_end(app: &Arc<App>, within: Duration) {
+    if app.jobs.idle() {
+        return;
+    }
+    tracing::info!(
+        "stopping: waiting for the running jobs to stop (at most {}s)",
+        within.as_secs()
+    );
+    let t = tokio::time::Instant::now();
+    while !app.jobs.idle() {
+        if t.elapsed() >= within {
+            let app = app.clone();
+            let _ = tokio::task::spawn_blocking(move || jobs::stopped(&app)).await;
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Takes `<data_dir>/pkgpod.lock`, an exclusive lock held while the file
+/// is open, with the server's pid in it; refused while another server
+/// has it.
+fn lock(data_dir: &std::path::Path) -> Result<std::fs::File, String> {
+    use std::io::{Read, Seek, Write};
+    let p = data_dir.join("pkgpod.lock");
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&p)
+        .map_err(|e| format!("{}: {e}", p.display()))?;
+    match rustix::fs::flock(&f, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => {}
+        Err(rustix::io::Errno::WOULDBLOCK) => {
+            let mut pid = String::new();
+            let _ = f.read_to_string(&mut pid);
+            return Err(format!(
+                "another pkgpod serve (pid {}) has the data directory {}",
+                pid.trim(),
+                data_dir.display()
+            ));
+        }
+        Err(e) => return Err(format!("{}: {e}", p.display())),
+    }
+    let _ = f.set_len(0);
+    let _ = f.rewind();
+    let _ = writeln!(f, "{}", std::process::id());
+    Ok(f)
+}
+
 async fn shutdown_signal() {
     use tokio::signal::unix::{SignalKind, signal};
     let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {},
         _ = term.recv() => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_job_that_does_not_stop_in_time_is_recorded_stopped() {
+        let d = tempfile::tempdir().unwrap();
+        let app = App::open(Config {
+            data_dir: d.path().join("data"),
+            ..Default::default()
+        })
+        .unwrap();
+        let r = RepoInfo {
+            id: 1,
+            name: "m".into(),
+            format: "files".into(),
+            kind: pkgpod_engine::Kind::Mirror,
+            storage: "main".into(),
+            storage_path: Default::default(),
+            settings: serde_json::json!({}),
+            current: None,
+            created: 0,
+        };
+        // Work that does not look at its cancel flag.
+        let go_on = Arc::new(AtomicBool::new(false));
+        let go = go_on.clone();
+        let id = jobs::start(
+            &app,
+            r,
+            "test",
+            "ann",
+            Box::new(move |_, _, _, _| {
+                while !go.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Ok((true, "done".into(), serde_json::Value::Null))
+            }),
+        )
+        .unwrap();
+        app.jobs.cancel_all();
+        let t = std::time::Instant::now();
+        jobs_end(&app, Duration::from_millis(300)).await;
+        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+        let j = jobs::get(&app.db, id).unwrap();
+        assert_eq!(
+            (j.state.as_str(), j.summary.as_str(), j.finished.is_some()),
+            ("cancelled", "the server stopped", true)
+        );
+        go_on.store(true, Ordering::Relaxed);
+        while !app.jobs.idle() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 }

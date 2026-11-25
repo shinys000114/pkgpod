@@ -107,9 +107,10 @@ cleanup rules, a whole directory at a time:
 | `cleanup_max` | The daily run holds a cleanup that would remove more than this, for review (default 50). |
 
 A build's age is when its newest file came in. The newest build of
-each directory is always kept, and so is one a link in the directory
-points at (`master/latest`). Removing makes a version, so a rollback
-brings a build back while retention keeps the version before.
+each directory is always kept, and so is one a link anywhere in the
+repository points at (`master/latest`, a top-level `stable`). Removing
+makes a version, so a rollback brings a build back while retention
+keeps the version before.
 
 ```sh
 pkgpod repo set tools cleanup_dirs=master,nightly cleanup_keep_last=20
