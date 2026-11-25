@@ -810,6 +810,7 @@ pub(crate) async fn repo_delete(
         app.engine.delete_repo(&repo)?;
         crate::oci::forget(app, &repo);
         app.auth.forget_repo(&repo)?;
+        crate::oidc::forget_repo(app, &repo)?;
         app.stats.forget(app, &repo)?;
         crate::badge::drop_token(app, &repo)?;
         // Groups read it no more.
@@ -1802,12 +1803,91 @@ pub(crate) async fn webhook_retry(
 
 // ---- trusted publishing ----
 
+/// Whether the caller admins every one of these repositories.
+pub(crate) fn admins_all(app: &App, c: &Caller, repos: &[String]) -> bool {
+    !repos.is_empty()
+        && repos.iter().all(|r| {
+            app.engine
+                .repo(r)
+                .is_ok_and(|i| app.auth.role(c, r, i.setting_bool("public")) == Some(Role::Admin))
+        })
+}
+
+/// Who may make, change or remove a trust rule: server admins any; a
+/// repository's admins one without a user, of GitHub's issuer, for
+/// repositories they admin (as it is and as sent). A token a rule gave
+/// changes none.
+fn may_manage_rule(
+    app: &App,
+    c: &Caller,
+    stored: Option<&crate::oidc::Rule>,
+    sent: Option<&crate::oidc::Rule>,
+) -> Result<()> {
+    if c.scope.as_ref().is_some_and(|s| s.exchanged) {
+        return Err(Error::Forbidden(
+            "a token a trust rule gave changes no trust rule".into(),
+        ));
+    }
+    if c.is_admin() {
+        return Ok(());
+    }
+    app.require_user(c)?;
+    if let Some(s) = stored {
+        if !s.user.is_empty() {
+            return Err(Error::Forbidden(format!(
+                "trust rule {}: its tokens act as a user; server admins change it",
+                s.name
+            )));
+        }
+        if !admins_all(app, c, &s.repos) {
+            return Err(Error::Forbidden(format!(
+                "trust rule {}: it is for repositories you do not admin",
+                s.name
+            )));
+        }
+    }
+    if let Some(r) = sent {
+        if !r.user.trim().is_empty() {
+            return Err(Error::Forbidden(
+                "a rule whose tokens act as a user is for server admins; leave the user out: \
+                 its tokens then write to its repositories only"
+                    .into(),
+            ));
+        }
+        if r.issuer.trim().trim_end_matches('/') != crate::oidc::GITHUB {
+            return Err(Error::Forbidden(
+                "rules for other issuers than GitHub Actions' are for server admins".into(),
+            ));
+        }
+        if !admins_all(app, c, &r.repos) {
+            return Err(Error::Forbidden(
+                "a rule is for repositories you admin".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Trust rules: all for server admins; for others, those naming a
+/// repository they admin.
 pub(crate) async fn trust_rules(State(app): St, Who(c): Who) -> Result<Json<Value>> {
-    app.require_admin(&c)?;
-    let app2 = app.clone();
-    Ok(Json(json!(
-        blocking(&app, move |_| crate::oidc::rules(&app2)).await?
-    )))
+    blocking(&app, move |app| {
+        let all = crate::oidc::rules(app)?;
+        if c.is_admin() {
+            return Ok(Json(json!(all)));
+        }
+        app.require_user(&c)?;
+        let mine: Vec<_> = all
+            .into_iter()
+            .filter(|r| {
+                r.repos
+                    .iter()
+                    .any(|x| admins_all(app, &c, std::slice::from_ref(x)))
+            })
+            .collect();
+        Ok(Json(json!(mine)))
+    })
+    .await
 }
 
 /// Adds a trust rule, or replaces the one of the same name.
@@ -1816,9 +1896,16 @@ pub(crate) async fn trust_put(
     Who(c): Who,
     Json(rule): Json<crate::oidc::Rule>,
 ) -> Result<(StatusCode, Json<Value>)> {
-    app.require_admin(&c)?;
     let app2 = app.clone();
-    let r = blocking(&app, move |_| crate::oidc::put_rule(&app2, rule)).await?;
+    let c2 = c.clone();
+    let r = blocking(&app, move |_| {
+        let stored = crate::oidc::rules(&app2)?
+            .into_iter()
+            .find(|x| x.name == rule.name.trim());
+        may_manage_rule(&app2, &c2, stored.as_ref(), Some(&rule))?;
+        crate::oidc::put_rule(&app2, rule)
+    })
+    .await?;
     app.auth.audit(
         c.name(),
         "trust rule",
@@ -1842,9 +1929,19 @@ pub(crate) async fn trust_delete(
     Who(c): Who,
     Path(name): Path<String>,
 ) -> Result<StatusCode> {
-    app.require_admin(&c)?;
-    let (app2, n2) = (app.clone(), name.clone());
-    blocking(&app, move |_| crate::oidc::remove_rule(&app2, &n2)).await?;
+    let (app2, n2, c2) = (app.clone(), name.clone(), c.clone());
+    blocking(&app, move |_| {
+        let stored = crate::oidc::rules(&app2)?
+            .into_iter()
+            .find(|x| x.name == n2);
+        match &stored {
+            Some(s) => may_manage_rule(&app2, &c2, Some(s), None)?,
+            None if !c2.is_admin() => app2.require_user(&c2).map(|_| ())?,
+            None => {}
+        }
+        crate::oidc::remove_rule(&app2, &n2)
+    })
+    .await?;
     app.auth.audit(c.name(), "trust rule remove", &name, "");
     Ok(StatusCode::NO_CONTENT)
 }

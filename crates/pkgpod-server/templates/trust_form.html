@@ -10,7 +10,7 @@
     <label class="field"><span>Ref</span><input name="ref" placeholder="refs/tags/v*" autocomplete="off" spellcheck="false"><small>Branch or tag the job runs for; * matches the rest. Empty: any.</small></label>
     <label class="field"><span>Workflow</span><input name="workflow" placeholder="release.yml" autocomplete="off" spellcheck="false"><small>Its file in .github/workflows. Empty: any.</small></label>
     <label class="field"><span>Environment</span><input name="environment" placeholder="production" autocomplete="off" spellcheck="false"><small>A deployment environment the job must run in (its reviewers then guard publishing).</small></label>
-    <label class="field"><span>As user</span><select name="user" required>{% for u in trust_users %}<option>{{ u }}</option>{% endfor %}</select><small>Whose rights the token has, at most: a user for CI, with grants on the repositories.</small></label>
+    {% if as_user %}<label class="field"><span>As user</span><select name="user"><option value="">none: write to these repositories only</option>{% for u in trust_users %}<option>{{ u }}</option>{% endfor %}</select><small>None: the token writes to the rule's repositories and nothing else. A user: it has that user's rights there, at most.</small></label>{% endif %}
     <label class="field"><span>Minutes</span><input name="minutes" type="number" min="1" max="60" value="15"><small>How long a token lasts.</small></label>
     <label class="check field"><span class="check-line"><input type="checkbox" name="read_only"> <span>Read only</span></span><small>A token that reads (a private repository in a build).</small></label>
     {% if fixed_repo.is_empty() %}
@@ -20,13 +20,14 @@
     </fieldset>
     {% endif %}
   </div>
-  <details class="more"><summary>Another CI (any OIDC issuer)</summary>
+  {% if !as_user %}<p class="muted small">The token can do what a writer can here (upload, sync, remove, roll back), for the minutes set, and nothing elsewhere. Rules that act as a user, or trust another CI than GitHub Actions, are made by server admins.</p>{% endif %}
+  {% if as_user %}<details class="more"><summary>Another CI (any OIDC issuer)</summary>
   <div class="fields">
     <label class="field"><span>Issuer</span><input name="issuer" placeholder="https://gitlab.example.org" autocomplete="off" spellcheck="false"><small>Empty: GitHub Actions'.</small></label>
     <label class="field"><span>Audience</span><input name="audience" placeholder="pkgpod" autocomplete="off" spellcheck="false"><small>What the job asks its token for.</small></label>
     <label class="field wide"><span>Claims</span><textarea name="claims" rows="3" spellcheck="false" placeholder="project_path=team/app&#10;ref_protected=true"></textarea><small>A claim=pattern a line; all must match.</small></label>
   </div>
-  </details>
+  </details>{% endif %}
   <div class="form-foot"><button type="submit">Save rule</button></div>
 </form>
 <div class="result"></div>

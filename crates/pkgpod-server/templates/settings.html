@@ -49,6 +49,21 @@
   {% endif %}
 </div>
 {% endif %}
+{% if can_admin %}
+<div class="card" id="repo-trust">
+  <div class="card-head"><h2>Trusted publishing</h2><span class="hint">CI jobs that publish here with their OIDC token, no secret kept in the CI{% if server_admin %}; a rule for several repositories, or one that acts as a user, is made and changed on <a href="/admin/server/publishing">Server, CI &amp; webhooks</a>{% endif %}</span></div>
+  {% if trust.is_empty() %}<p class="empty">No rule gives tokens for this repository.</p>{% else %}
+  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Trusts</th><th>Token</th><th>For</th><th>Used</th><th></th></tr></thead><tbody>
+  {% for r in trust %}<tr><td><b>{{ r.name }}</b></td><td class="mono small claims">{% for c in r.trusts %}<div>{{ c }}</div>{% endfor %}</td><td class="nowrap">{{ r.token }}<div class="muted small">{% if r.publisher %}as trust:{{ r.name }}{% else %}as {{ r.user }}{% endif %}</div></td><td class="wrap">{{ r.repos }}</td><td class="nowrap muted">{{ r.used }}</td>
+    <td class="acts nowrap">{% if r.can_change %}<button class="link danger" hx-post="/c/trust/{{ r.name|urlencode }}/delete" hx-target="#repo-trust-result" hx-confirm="Remove trust rule {{ r.name }}? Jobs it trusts cannot publish any more.">remove</button>{% endif %}</td></tr>{% endfor %}
+  </tbody></table></div>
+  {% endif %}
+  <div id="repo-trust-result"></div>
+  <details class="card-body more"{% if trust.is_empty() %} open{% endif %}><summary>Add one for {{ repo }}</summary>
+  {% include "trust_form.html" %}
+  </details>
+</div>
+{% endif %}
 {% if server_admin %}
 <div class="card" id="repo-webhooks">
   <div class="card-head"><h2>Webhooks</h2><span class="hint">what happens here sent to other services; one for several repositories is made and changed on <a href="/admin/server/publishing">Server, CI &amp; webhooks</a></span></div>
@@ -60,17 +75,6 @@
   {% endif %}
   <details class="card-body more"><summary>Add one for {{ repo }}</summary>
   {% include "hook_form.html" %}
-  </details>
-</div>
-<div class="card" id="repo-trust">
-  <div class="card-head"><h2>Trusted publishing</h2><span class="hint">CI jobs that publish here with their OIDC token; a rule for several repositories is made and changed on <a href="/admin/server/publishing">Server, CI &amp; webhooks</a></span></div>
-  {% if trust.is_empty() %}<p class="empty">No rule gives tokens for this repository.</p>{% else %}
-  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Trusts</th><th>As user</th><th>For</th><th>Token</th><th>Used</th></tr></thead><tbody>
-  {% for r in trust %}<tr><td><b>{{ r.name }}</b></td><td class="mono small claims">{% for c in r.trusts %}<div>{{ c }}</div>{% endfor %}</td><td>{{ r.user }}</td><td class="wrap">{{ r.repos }}</td><td class="nowrap">{{ r.token }}</td><td class="nowrap muted">{{ r.used }}</td></tr>{% endfor %}
-  </tbody></table></div>
-  {% endif %}
-  <details class="card-body more"><summary>Add one for {{ repo }}</summary>
-  {% include "trust_form.html" %}
   </details>
 </div>
 <details class="card panel">

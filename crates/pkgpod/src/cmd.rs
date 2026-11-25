@@ -279,9 +279,11 @@ pub enum TrustCmd {
         issuer: Option<String>,
         #[arg(long, default_value = "pkgpod")]
         audience: String,
-        /// The pkgpod user whose token is given.
+        /// The pkgpod user whose token is given (server admins). Without
+        /// one, the token writes to the rule's repositories and nothing
+        /// else (as trust:<rule>): what a repository's admins may make.
         #[arg(long)]
-        user: String,
+        user: Option<String>,
         /// The repositories the token is for.
         #[arg(long, value_delimiter = ',', required = true)]
         repos: Vec<String>,
@@ -1341,7 +1343,10 @@ pub fn run(
                                 },
                                 claims.join(" ")
                             ),
-                            s(&r["user"]),
+                            match r["user"].as_str() {
+                                Some(u) if !u.is_empty() => u.to_string(),
+                                _ => "-".to_string(),
+                            },
                             r["repos"]
                                 .as_array()
                                 .into_iter()
@@ -1410,7 +1415,7 @@ pub fn run(
                     "/api/v1/trust",
                     &json!({
                         "name": name, "issuer": issuer, "audience": audience, "claims": m,
-                        "user": user, "repos": repos, "write": !read_only, "minutes": minutes,
+                        "user": user.unwrap_or_default(), "repos": repos, "write": !read_only, "minutes": minutes,
                     }),
                 )?;
                 x.print(&v, |v| {
@@ -1425,7 +1430,10 @@ pub fn run(
                             .collect::<Vec<_>>()
                             .join(" "),
                         s(&v["minutes"]),
-                        s(&v["user"]),
+                        match v["user"].as_str() {
+                            Some(u) if !u.is_empty() => u.to_string(),
+                            _ => format!("trust:{}", s(&v["name"])),
+                        },
                         v["repos"]
                             .as_array()
                             .into_iter()
@@ -2302,7 +2310,9 @@ fn login_oidc(url: &str, audience: &str, rule: Option<&str>) -> Result<(), CliEr
     })?;
     println!(
         "logged in as {} by trust rule {} (for {}; until {}); token saved in {}",
-        s(&v["user"]),
+        v["user"]
+            .as_str()
+            .map_or_else(|| format!("trust:{}", s(&v["rule"])), String::from),
         s(&v["rule"]),
         v["repos"]
             .as_array()

@@ -196,6 +196,35 @@ CREATE TABLE host_pages (
     actor TEXT NOT NULL
 );
 ",
+    // Trust rules without a user give publisher tokens: their
+    // repositories only, written to (or read), never more. The rules are
+    // made again with `user` optional (ids kept); a publisher token is
+    // checked against its rule each time it is used.
+    "
+CREATE TABLE trust_rules_new (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    issuer TEXT NOT NULL,
+    audience TEXT NOT NULL,
+    claims TEXT NOT NULL,
+    user INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    repos TEXT NOT NULL,
+    write INTEGER NOT NULL,
+    minutes INTEGER NOT NULL,
+    created INTEGER NOT NULL,
+    used INTEGER
+);
+INSERT INTO trust_rules_new (id, name, issuer, audience, claims, user, repos, write, minutes, created, used)
+    SELECT id, name, issuer, audience, claims, user, repos, write, minutes, created, used FROM trust_rules;
+DROP TABLE trust_rules;
+ALTER TABLE trust_rules_new RENAME TO trust_rules;
+CREATE TABLE publish_tokens (
+    hash BLOB PRIMARY KEY,
+    rule INTEGER NOT NULL REFERENCES trust_rules(id) ON DELETE CASCADE,
+    expires INTEGER NOT NULL,
+    created INTEGER NOT NULL
+) WITHOUT ROWID;
+",
 ];
 
 pub fn migrate(db: &Db) -> pkgpod_base::Result<()> {
@@ -220,6 +249,7 @@ mod tests {
             "fcc2c4368702bf38",
             "bc20a95501f079e1",
             "6c9cf89a642c0e1a",
+            "9d3a1cc5bb2cf4ed",
         ];
         let got: Vec<String> = super::STEPS
             .iter()
