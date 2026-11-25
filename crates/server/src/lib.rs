@@ -6,52 +6,15 @@
 
 pub mod api;
 pub mod auth;
-pub mod backup;
-pub mod badge;
-pub mod cargo;
-pub mod cleanup;
-pub mod cli_dl;
-pub mod composer;
-pub mod conan;
 pub mod config;
-pub mod galaxy;
-pub mod gems;
-pub mod go;
-pub mod group;
-pub mod helm;
-pub mod hosts;
-pub mod import;
 pub mod jobs;
-pub mod keys;
-pub mod listeners;
-pub mod logs;
-pub mod metrics;
-pub mod notes;
-pub mod npm;
-pub mod nuget;
-pub mod oci;
-pub mod oidc;
-pub mod openapi;
-pub mod promote;
-pub mod proxy;
-pub mod pub_api;
-pub mod pypi;
-pub mod resign;
+pub mod ops;
+pub mod protocols;
 pub mod routes;
-pub mod rsa_key;
-pub mod schedules;
 pub mod schema;
-pub mod serve;
-pub mod stats;
-pub mod status;
-pub mod swift;
-pub mod terraform;
-pub mod usign_key;
-pub mod webhooks;
+pub mod serving;
 
 mod console;
-mod cron;
-mod mirror_pkgs;
 mod web;
 
 use std::collections::HashMap;
@@ -63,9 +26,13 @@ use axum::response::{IntoResponse, Response};
 use pkgpod_base::db::Db;
 use pkgpod_engine::{Engine, Plan, RepoInfo, Version};
 
-use crate::auth::Auth;
+use crate::auth::keys::Keys;
+use crate::auth::{Auth, oidc};
 use crate::config::Config;
-use crate::keys::Keys;
+use crate::jobs::{cleanup, resign};
+use crate::ops::{listeners, webhooks};
+use crate::protocols::conan;
+use crate::serving::stats;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

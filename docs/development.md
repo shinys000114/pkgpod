@@ -140,7 +140,7 @@ Some tests check the tree rather than the code:
   untracked and not ignored) has `SPDX-License-Identifier: AGPL-3.0-only`
   in its first three lines, except Markdown, `Cargo.toml` files and the
   few others it names.
-- `crates/server/src/openapi.rs`: every API route is in the
+- `crates/server/src/api/openapi.rs`: every API route is in the
   OpenAPI description and nothing else is, every reference resolves and
   every operation is complete. A new route needs its entry there.
 
@@ -268,7 +268,7 @@ is refused.
 A format is a crate implementing `pkgpod_engine::Format`
 (`crates/core/engine/src/format.rs`), listed in `formats()` in
 `crates/server/src/lib.rs`, with what its clients speak beyond
-plain files in `crates/server/src/<format>.rs`, and end-to-end
+plain files in `crates/server/src/protocols/<format>.rs`, and end-to-end
 tests with its real client. See [format-plugins.md](format-plugins.md).
 
 ## Where to look
@@ -278,21 +278,15 @@ tests with its real client. See [format-plugins.md](format-plugins.md).
 | CLI commands and flags | `crates/cli/src/main.rs`, `cmd.rs`; the API client and saved login: `client.rs` |
 | The configuration file | `crates/server/src/config.rs` |
 | Starting, stopping, daily cleanup and GC | `crates/server/src/lib.rs` (`App::open`, `run`) |
-| Serving listeners, TLS | `crates/server/src/listeners.rs` |
-| Which repository a request is for | `crates/server/src/routes.rs`, `serve.rs` |
-| The API and its description | `crates/server/src/api.rs`, `openapi.rs` |
-| The console | `crates/server/src/console.rs`, `templates/`, `assets/` |
-| The server's recent log (for the console and API) | `crates/server/src/logs.rs` |
-| Users, teams, rights, tokens, sessions | `crates/server/src/auth.rs` |
-| Signing keys, server settings | `crates/server/src/keys.rs`, `rsa_key.rs`, `usign_key.rs` |
-| Jobs, mirror syncs, schedules | `crates/server/src/jobs.rs`, `cron.rs`, `schedules.rs` |
-| Imports | `crates/server/src/import.rs` |
-| Deb mirrors: their packages, re-signing, promotion | `mirror_pkgs.rs`, `resign.rs`, `promote.rs` in `crates/server/src/` |
-| Proxies and groups | `crates/server/src/proxy.rs`, `group.rs` |
-| Backup and restore | `crates/server/src/backup.rs` |
-| Cleanup rules | `crates/server/src/cleanup.rs` |
-| Statistics, status, badges, metrics | `stats.rs`, `status.rs`, `badge.rs`, `metrics.rs` in `crates/server/src/` |
-| Clients' protocols | `crates/server/src/npm.rs`, `pypi.rs`, `oci.rs`, ... |
+| Which repository a request is for | `crates/server/src/routes.rs`; serving it: `serving/mod.rs` |
+| The API and its description | `crates/server/src/api/` (`mod.rs`, `openapi.rs`) |
+| The console | `crates/server/src/console/`, `templates/`, `assets/` |
+| Users, teams, rights, tokens, sessions; trusted publishing; signing keys and server settings | `crates/server/src/auth/` (`mod.rs`, `oidc.rs`, `keys.rs`, `rsa_key.rs`, `usign_key.rs`) |
+| Jobs, mirror syncs, schedules, imports, cleanup, backup | `crates/server/src/jobs/` (`mod.rs`, `cron.rs`, `schedules.rs`, `import.rs`, `cleanup.rs`, `backup.rs`) |
+| Mirrors' packages, deb re-signing, promotion | `mirror_pkgs.rs`, `resign.rs`, `promote.rs` in `crates/server/src/jobs/` |
+| Proxies, groups, host pages, statistics, status, badges | `crates/server/src/serving/` (`proxy.rs`, `group.rs`, `hosts.rs`, `stats.rs`, `status.rs`, `badge.rs`) |
+| Clients' protocols | `crates/server/src/protocols/` (`npm.rs`, `pypi.rs`, `oci.rs`, ...) |
+| Listeners and TLS, the recent log, metrics, webhooks, the CLI handed out, Markdown notes | `crates/server/src/ops/` (`listeners.rs`, `logs.rs`, `metrics.rs`, `webhooks.rs`, `cli_dl.rs`, `notes.rs`) |
 | Repositories, versions, labels | `crates/core/engine/src/engine.rs` |
 | State trees | `crates/core/engine/src/tree.rs` |
 | Retention, GC, the consistency check | `crates/core/engine/src/gc.rs`, `check.rs` |

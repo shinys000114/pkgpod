@@ -6760,7 +6760,7 @@ fn webhooks_send_what_happens() {
         (Some("f"), Some("version"))
     );
     assert!(v["summary"].as_str().unwrap().contains("a.txt"), "{v}");
-    let mac = pkgpod_server::webhooks::hmac_sha256(b"s3cret", body.as_bytes());
+    let mac = pkgpod_server::ops::webhooks::hmac_sha256(b"s3cret", body.as_bytes());
     let hexmac: String = mac.iter().map(|b| format!("{b:02x}")).collect();
     assert_eq!(
         header(&h, "x-pkgpod-signature-256"),
@@ -7199,12 +7199,12 @@ fn fake_issuer(
     claims: Value,
 ) -> (
     String,
-    std::sync::Arc<pkgpod_server::oidc::testutil::Issuer>,
+    std::sync::Arc<pkgpod_server::auth::oidc::testutil::Issuer>,
 ) {
     use std::io::{BufRead, BufReader, Write};
     let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
-    let iss = std::sync::Arc::new(pkgpod_server::oidc::testutil::Issuer::new(&url));
+    let iss = std::sync::Arc::new(pkgpod_server::auth::oidc::testutil::Issuer::new(&url));
     let i2 = iss.clone();
     std::thread::spawn(move || {
         for conn in l.incoming() {

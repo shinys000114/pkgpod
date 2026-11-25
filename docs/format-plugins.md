@@ -72,7 +72,7 @@ files/<project>/<filename>[.metadata]
 ```
 
 `pkgpod-npm`: state only; the registry protocol answers from it per
-request (`crates/server/src/npm.rs`), since packuments carry
+request (`crates/server/src/protocols/npm.rs`), since packuments carry
 absolute tarball URLs that follow the address asked.
 
 ```text
@@ -229,7 +229,7 @@ implement `publish` for that, and return `Ok(None)`.
    in `crates/server/src/lib.rs`. From then on the engine
    accepts `-f <id>`, the API lists it at `GET /api/v1/formats`, and
    the console offers its settings, operations and upload form.
-4. In `crates/server/src/console.rs`: the line describing the
+4. In `crates/server/src/console/`: the line describing the
    format when a repository is made (the `blurb` in `index`), the words
    for its catalog (`catalog_words`), and its "How to use" lines
    (`usage`, below).
@@ -251,7 +251,7 @@ segment is the file name), and the API's
 `POST /api/v1/repos/<repo>/upload` (used by `pkgpod upload` and the
 console).
 
-A module `crates/server/src/<id>.rs` is needed when clients
+A module `crates/server/src/protocols/<id>.rs` is needed when clients
 speak an API: publishing in their own protocol (npm's JSON with a
 base64 tarball, NuGet's multipart push, cargo's framed body), documents
 made per request with absolute URLs (npm packuments, cargo's index
@@ -290,7 +290,7 @@ repositories, and share a shape:
 
 ## The console's "How to use"
 
-`usage()` in `crates/server/src/console.rs` returns a format's
+`usage()` in `crates/server/src/console/` returns a format's
 lines (`UseLine`: a label and the text to copy) for a repository: its
 address (`base`, from the first of its `urls`, else the listener), the
 client configuration, how to log in, publish and install, and a
@@ -325,7 +325,7 @@ of those kinds; serving them is the server's:
 ## Mirrors and imports
 
 Listing `Kind::Mirror` in `kinds()` is not enough either. A mirror's
-sync (`jobs::sync` in `crates/server/src/jobs.rs`) runs the
+sync (`jobs::sync` in `crates/server/src/jobs/mod.rs`) runs the
 plain-tree engines for files and treats every other format as an apt
 archive, and imports (`import::start`) take deb, files and OCI only. A
 new format with mirrors or imports needs its own branch there (and an
