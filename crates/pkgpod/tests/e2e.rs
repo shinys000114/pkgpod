@@ -7064,6 +7064,73 @@ fn files_links_and_cleanup() {
     ])
     .unwrap();
     assert_eq!(get(&s.url("/b/master/stable/app.bin"), None).1, "app r1");
+    // Browsed: a link says where it leads in this tree, and is followed
+    // there (a directory opened, a file downloaded); one whose target
+    // went is shown as such; one naming .. is refused when made.
+    let tmp = w.join("x.txt");
+    std::fs::write(&tmp, "x").unwrap();
+    s.cli(&["upload", "b", tmp.to_str().unwrap(), "-s", "path=tmp/x/"])
+        .unwrap();
+    for (path, to) in [("links/app", "master/r1/app.bin"), ("links/gone", "tmp/x")] {
+        s.cli(&[
+            "op",
+            "b",
+            "link",
+            &format!("path={path}"),
+            &format!("to={to}"),
+            "-y",
+        ])
+        .unwrap();
+    }
+    s.cli(&["op", "b", "move", "from=tmp/x", "to=tmp/y", "-y"])
+        .unwrap();
+    assert!(
+        s.cli(&["op", "b", "link", "path=links/up", "to=../x", "-y"])
+            .is_err()
+    );
+    let tree_of = |p: &str| -> Value {
+        reqwest::blocking::get(format!("{}/api/v1/repos/b/tree?path={p}", s.api))
+            .unwrap()
+            .json()
+            .unwrap()
+    };
+    let entry = |t: &Value, n: &str| {
+        t["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == n)
+            .unwrap()
+            .clone()
+    };
+    let m = tree_of("master");
+    assert_eq!(
+        (
+            entry(&m, "latest")["to"].clone(),
+            entry(&m, "latest")["resolved"].clone()
+        ),
+        (json!("dir"), json!("master/r4"))
+    );
+    let l = tree_of("links");
+    assert_eq!(entry(&l, "app")["to"], "file");
+    assert!(entry(&l, "gone")["to"].is_null(), "{l}");
+    let (c, sid, _) = console_session(&s, "ops", "ops-password");
+    let page = |p: &str| {
+        c.get(format!("{}{p}", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .send()
+            .unwrap()
+    };
+    let tree = page("/r/b/tree?path=master").text().unwrap();
+    assert!(
+        tree.contains("tree?path=master/r4&version=") && tree.contains("🔗 latest/"),
+        "{tree}"
+    );
+    let links = page("/r/b/tree?path=links").text().unwrap();
+    assert!(links.contains("→ tmp/x (not there)"), "{links}");
+    let d = page("/r/b/file?path=links%2Fapp&served=1");
+    assert_eq!(d.status().as_u16(), 200);
+    assert_eq!(d.text().unwrap(), "app r1");
     let e = s
         .cli(&[
             "upload",

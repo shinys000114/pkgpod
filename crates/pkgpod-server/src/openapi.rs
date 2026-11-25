@@ -339,6 +339,17 @@ fn schemas() -> Value {
                         ),
                     ),
                     ("target", string()),
+                    (
+                        "to",
+                        json!({"type": ["string", "null"], "enum": ["dir", "file", null], "description": "A ref: what its target is, in this tree; null: nothing there (a broken link)."}),
+                    ),
+                    (
+                        "resolved",
+                        nullable(
+                            "string",
+                            "A ref: the path it leads to, links followed (never out of the tree).",
+                        ),
+                    ),
                     ("value", any("")),
                     ("mtime", nullable("integer", "Mirrors: modification time.")),
                 ],
