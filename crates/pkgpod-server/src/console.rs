@@ -2890,9 +2890,9 @@ fn repo_tabs(r: &pkgpod_engine::RepoInfo, can_write: bool, can_admin: bool) -> V
         format!("/r/{n}/packages"),
     );
     let browse = t("browse", "Browse", format!("/r/{n}/tree?path="));
-    // A mirror's packages are listed from its indexes for Debian only;
-    // others are browsed as the tree they are.
-    let listed = !mirror || r.format == "deb";
+    // A mirror's packages are listed from its indexes; a file tree's
+    // only browsed.
+    let listed = !mirror || matches!(r.format.as_str(), "deb" | "rpm" | "arch" | "apk");
     if r.format == "files" || !listed {
         v.push(browse);
         if listed {
@@ -3813,6 +3813,104 @@ struct MirrorQ {
     component: String,
     #[serde(default)]
     arch: String,
+    /// RPM, Arch and Alpine mirrors: which index.
+    #[serde(default)]
+    place: String,
+}
+
+#[derive(Template)]
+#[template(path = "mirror_index.html")]
+struct MirrorIndex {
+    repo: String,
+    /// Where its files are served, for their links.
+    base: String,
+    places: Vec<(String, bool)>,
+    q: String,
+    rows: Vec<PkgRow>,
+    total: usize,
+    note: String,
+}
+
+/// An RPM, Arch or Alpine mirror's packages, from the index chosen.
+async fn mirror_index_packages(
+    app: Arc<App>,
+    v: Viewer,
+    headers: HeaderMap,
+    repo: String,
+    q: MirrorQ,
+) -> Response {
+    let r = match app.repo_for(&v.caller, &repo, Role::Read) {
+        Ok(r) => r,
+        Err(e) => return err_part(e),
+    };
+    let r2 = r.clone();
+    let places = tokio::task::spawn_blocking(move || crate::mirror_pkgs::index_places(&r2))
+        .await
+        .unwrap_or_default();
+    let chosen = places
+        .iter()
+        .find(|(n, _)| *n == q.place)
+        .or(places.first())
+        .cloned();
+    let urls = r.setting_list("urls");
+    let mut out = MirrorIndex {
+        base: base_url(&app, &r, &urls, &host_of(&headers)),
+        places: places
+            .iter()
+            .map(|(n, _)| (n.clone(), chosen.as_ref().is_some_and(|c| c.0 == *n)))
+            .collect(),
+        q: q.q.clone(),
+        rows: Vec::new(),
+        total: 0,
+        note: String::new(),
+        repo,
+    };
+    let Some((_, index)) = chosen else {
+        out.note = "No index received yet: sync the mirror first.".into();
+        return render(&out);
+    };
+    let (format, tree) = (r.format.clone(), r.tree_dir());
+    match tokio::task::spawn_blocking(move || {
+        crate::mirror_pkgs::load_index(&format, &tree, &index)
+    })
+    .await
+    {
+        Ok(Ok(pkgs)) => {
+            let needle = q.q.trim().to_lowercase();
+            let hits: Vec<_> = pkgs
+                .iter()
+                .filter(|p| needle.is_empty() || p.name.to_lowercase().contains(&needle))
+                .collect();
+            out.total = hits.len();
+            out.rows = hits
+                .into_iter()
+                .take(500)
+                .map(|p| PkgRow {
+                    repo: String::new(),
+                    name: p.name.clone(),
+                    version: p.version.clone(),
+                    extra: p.arch.clone(),
+                    size: crate::serve::human(p.size),
+                    bytes: p.size,
+                    path: p.filename.clone(),
+                    // Its address, each segment encoded (gcc-c++).
+                    file: format!(
+                        "{}{}",
+                        out.base,
+                        p.filename
+                            .split('/')
+                            .map(crate::serve::percent_encode)
+                            .collect::<Vec<_>>()
+                            .join("/")
+                    ),
+                    downloads: 0,
+                })
+                .collect();
+        }
+        Ok(Err(e)) => out.note = e,
+        Err(_) => out.note = "reading the index failed".into(),
+    }
+    render(&out)
 }
 
 #[derive(Template)]
@@ -3933,12 +4031,16 @@ async fn mirror_packages(app: Arc<App>, v: Viewer, repo: String, q: MirrorQ) -> 
 async fn packages_part(
     State(app): St,
     v: Viewer,
+    headers: HeaderMap,
     Path(repo): Path<String>,
     Query(mq): Query<MirrorQ>,
 ) -> Response {
     match app.engine.repo(&repo) {
         Ok(r) if r.kind == Kind::Mirror && r.format == "deb" => {
             return mirror_packages(app, v, repo, mq).await;
+        }
+        Ok(r) if r.kind == Kind::Mirror && matches!(r.format.as_str(), "rpm" | "arch" | "apk") => {
+            return mirror_index_packages(app, v, headers, repo, mq).await;
         }
         Ok(r) if r.kind == Kind::Mirror => {
             return msg(false, "A file tree: see Browse.".to_string());

@@ -10881,6 +10881,18 @@ fn alpine_packages_with_apk() {
     .unwrap();
     let out = s.cli(&["sync", "alpmir", "--wait"]).unwrap();
     assert!(out.contains("ok:"), "{out}");
+    let (vc, vsid, _) = console_session(&s, "viewer", "viewer-password");
+    let pk = vc
+        .get(format!("{}/r/alpmir/packages", s.api))
+        .header("cookie", format!("pkgpod_session={vsid}"))
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(
+        pk.contains("<b>hello-apk</b>") && pk.contains("v3.22/main/x86_64/hello-apk-"),
+        "{pk}"
+    );
     let mirror = format!(
         "echo {}v3.22/main > /etc/apk/repositories && apk update && apk add hello-apk motd-apk && hello-apk",
         s.url("/alpmir/")
@@ -11046,6 +11058,19 @@ fn rpm_packages_with_dnf() {
     assert_eq!(
         st["packages"], 3,
         "the mirror counts what its indexes name: {st}"
+    );
+    // Its Packages tab lists them from its index.
+    let (vc, vsid, _) = console_session(&s, "viewer", "viewer-password");
+    let pk = vc
+        .get(format!("{}/r/rpmmir/packages?q=tool", s.api))
+        .header("cookie", format!("pkgpod_session={vsid}"))
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(
+        pk.contains("<b>tool-rpm</b>") && pk.contains("0.1-1") && !pk.contains("<b>hello-rpm</b>"),
+        "{pk}"
     );
     let out = s.cli(&["sync", "rpmmir", "--wait"]).unwrap();
     assert!(out.contains("0 file(s) downloaded"), "{out}");
@@ -11779,6 +11804,20 @@ fn arch_packages_with_pacman() {
     .unwrap();
     let out = s.cli(&["sync", "archmir", "--wait"]).unwrap();
     assert!(out.contains("ok:"), "{out}");
+    let (vc, vsid, _) = console_session(&s, "viewer", "viewer-password");
+    let pk = vc
+        .get(format!("{}/r/archmir/packages", s.api))
+        .header("cookie", format!("pkgpod_session={vsid}"))
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(
+        pk.contains("<b>hello-pk</b>")
+            && pk.contains("<b>tool-pk</b>")
+            && pk.contains(".pkg.tar.zst\" download"),
+        "{pk}"
+    );
     let mserver = format!("Server = {}$repo/$arch", s.url("/archmir/"));
     let script = setup("", true).replace(&format!("Server = {base}$repo/$arch"), &mserver);
     assert!(script.contains(&mserver));

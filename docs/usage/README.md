@@ -426,7 +426,7 @@ your role):
 
 | Tab | What it does |
 | --- | --- |
-| Packages (Images for OCI, All files for files) | The current version's packages, filtered by name (a name with several files, versions or places folded under one row, which chooses them all); a package's details and downloads; Remove… and Promote… on the checked ones. A deb mirror's Packages come from its own indexes, by dist, component and architecture, with promotion of the checked ones into a hosted repository. |
+| Packages (Images for OCI, All files for files) | The current version's packages, filtered by name (a name with several files, versions or places folded under one row, which chooses them all); a package's details and downloads; Remove… and Promote… on the checked ones. A mirror's Packages come from its own indexes: a deb mirror's by dist, component and architecture, with promotion of the checked ones into a hosted repository; an RPM, Arch or Alpine mirror's by repository (as its settings name them, or as found in an rsync tree), each file linked where the mirror serves it. |
 | Browse | The repository's tree, by directory. |
 | Versions | Versions and labels: compare two versions, label one, see its changes, roll back to it. |
 | How to use | The client commands for this repository with its address (for deb, per dist; rpm, per group; apk, per branch/repository; ipk, per feed); Make a token puts a token for this repository in them. |

@@ -101,6 +101,10 @@ pub struct Data {
 /// One package of `primary`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Package {
+    pub name: String,
+    /// `[epoch:]version-release`
+    pub version: String,
+    pub arch: String,
     pub href: String,
     pub sha256: String,
     pub size: u64,
@@ -222,6 +226,9 @@ pub fn parse_primary(r: impl BufRead) -> Result<Vec<Package>, Error> {
     let mut cur: Option<Package> = None;
     let mut sum_type = String::new();
     let mut in_sum = false;
+    // The package's own <name> and <arch> (not those of its format).
+    let mut field: Option<&'static str> = None;
+    let mut depth = 0usize;
     let mut text = String::new();
     let mut buf = Vec::new();
     loop {
@@ -233,12 +240,34 @@ pub fn parse_primary(r: impl BufRead) -> Result<Vec<Package>, Error> {
                 let name = e.local_name();
                 match name.as_ref() {
                     "package" => {
+                        depth = 0;
                         cur = Some(Package {
+                            name: String::new(),
+                            version: String::new(),
+                            arch: String::new(),
                             href: String::new(),
                             sha256: String::new(),
                             size: 0,
                         })
                     }
+                    n @ ("name" | "arch") if cur.is_some() && depth == 0 => {
+                        field = Some(if n == "name" { "name" } else { "arch" });
+                        text.clear();
+                    }
+                    "version" if cur.is_some() && depth == 0 => {
+                        if let Some(p) = &mut cur {
+                            let v = format!(
+                                "{}-{}",
+                                attr(&e, "ver").unwrap_or_default(),
+                                attr(&e, "rel").unwrap_or_default()
+                            );
+                            p.version = match attr(&e, "epoch").as_deref() {
+                                None | Some("0") | Some("") => v,
+                                Some(ep) => format!("{ep}:{v}"),
+                            };
+                        }
+                    }
+                    "format" if cur.is_some() => depth += 1,
                     "checksum" if cur.is_some() => {
                         sum_type = attr(&e, "type").unwrap_or_default();
                         in_sum = true;
@@ -264,8 +293,21 @@ pub fn parse_primary(r: impl BufRead) -> Result<Vec<Package>, Error> {
                     _ => {}
                 }
             }
-            Event::Text(t) if in_sum => text.push_str(&t.into_inner()),
+            Event::Text(t) if in_sum || field.is_some() => text.push_str(&t.into_inner()),
             Event::End(e) => match e.local_name().as_ref() {
+                "format" if depth > 0 => depth -= 1,
+                n @ ("name" | "arch")
+                    if field == Some(if n == "name" { "name" } else { "arch" }) =>
+                {
+                    if let Some(p) = &mut cur {
+                        if n == "name" {
+                            p.name = text.trim().to_string();
+                        } else {
+                            p.arch = text.trim().to_string();
+                        }
+                    }
+                    field = None;
+                }
                 "checksum" if in_sum => {
                     in_sum = false;
                     if let Some(p) = &mut cur {
@@ -299,7 +341,7 @@ pub fn parse_primary(r: impl BufRead) -> Result<Vec<Package>, Error> {
 }
 
 /// A compressed metadata file read as a stream.
-fn open_decompressed(path: &Path) -> Result<Box<dyn BufRead>, Error> {
+pub fn open_decompressed(path: &Path) -> Result<Box<dyn BufRead>, Error> {
     let name = path.to_string_lossy().into_owned();
     let mut f = fs::File::open(path)?;
     let mut magic = [0u8; 6];
@@ -583,6 +625,8 @@ mod tests {
 <metadata xmlns="http://linux.duke.edu/metadata/common" xmlns:rpm="http://linux.duke.edu/metadata/rpm" packages="2">
 <package type="rpm">
   <name>a</name>
+  <arch>noarch</arch>
+  <version epoch="0" ver="1.0" rel="1"/>
   <checksum type="sha256" pkgid="YES">1111</checksum>
   <size package="10" installed="20" archive="30"/>
   <location href="Packages/a/a-1.rpm"/>
@@ -590,6 +634,8 @@ mod tests {
 </package>
 <package type="rpm">
   <name>b</name>
+  <arch>x86_64</arch>
+  <version epoch="2" ver="3" rel="4"/>
   <checksum type="sha256" pkgid="YES">2222</checksum>
   <size package="5"/>
   <location href="Packages/b/b-1.rpm"/>
@@ -600,11 +646,17 @@ mod tests {
             p,
             vec![
                 Package {
+                    name: "a".into(),
+                    version: "1.0-1".into(),
+                    arch: "noarch".into(),
                     href: "Packages/a/a-1.rpm".into(),
                     sha256: "1111".into(),
                     size: 10
                 },
                 Package {
+                    name: "b".into(),
+                    version: "2:3-4".into(),
+                    arch: "x86_64".into(),
                     href: "Packages/b/b-1.rpm".into(),
                     sha256: "2222".into(),
                     size: 5
