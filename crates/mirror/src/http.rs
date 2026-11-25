@@ -15,7 +15,7 @@ use pkgpod_deb::verify::{Keyring, inrelease_text_unverified, verify_detached, ve
 use serde::Serialize;
 
 use crate::cache::HashCache;
-use crate::fetch::{FetchError, Http, PART, join_url, sha256_file, sha256_hex};
+use crate::fetch::{FetchError, Http, PART, join_url, sha256_file};
 use crate::release::{
     PoolFile, Release, VARIANTS, decompress, packages_files, parseable, sources_files, variant_path,
 };
@@ -660,7 +660,10 @@ fn stage_dist(m: &HttpMirror, ctx: &Ctx, dist: &str, staging: &Path) -> Result<S
             .expect("has parent")
             .to_path_buf();
         if by_hash {
-            dirs.insert(parent.join("by-hash/SHA256"));
+            for name in rel.files[*path].by_hash() {
+                let (family, _) = name.rsplit_once('/').expect("by-hash/<family>/<hash>");
+                dirs.insert(parent.join(family));
+            }
         }
         dirs.insert(parent);
     }
@@ -684,13 +687,17 @@ fn stage_dist(m: &HttpMirror, ctx: &Ctx, dist: &str, staging: &Path) -> Result<S
                 retry_fs(|| fs::write(p, data))
                     .map_err(|e| DistErr::Fatal(format!("{}: {e}", p.display())))
             };
+            // Under every hash Release lists and the file was checked by:
+            // apt asks for the strongest.
             let by_hash_copy = |data_at: &Path| -> Result<(), DistErr> {
                 if by_hash {
-                    let bh = staging.join(format!("{dir}{sep}by-hash/SHA256/{}", entry.sha256));
-                    mkdir(&bh)?;
-                    if fs::hard_link(data_at, &bh).is_err() {
-                        fs::copy(data_at, &bh)
-                            .map_err(|e| DistErr::Fatal(format!("{}: {e}", bh.display())))?;
+                    for name in entry.by_hash() {
+                        let bh = staging.join(format!("{dir}{sep}{name}"));
+                        mkdir(&bh)?;
+                        if fs::hard_link(data_at, &bh).is_err() {
+                            fs::copy(data_at, &bh)
+                                .map_err(|e| DistErr::Fatal(format!("{}: {e}", bh.display())))?;
+                        }
                     }
                 }
                 Ok(())
@@ -698,7 +705,7 @@ fn stage_dist(m: &HttpMirror, ctx: &Ctx, dist: &str, staging: &Path) -> Result<S
             let local = current.join(path);
             if fs::metadata(&local).is_ok_and(|m| m.len() == entry.size)
                 && let Ok(data) = fs::read(&local)
-                && sha256_hex(&data) == entry.sha256
+                && entry.matches(&data)
             {
                 mkdir(&out)?;
                 // Link big files (no second copy); small ones are just
@@ -730,7 +737,7 @@ fn stage_dist(m: &HttpMirror, ctx: &Ctx, dist: &str, staging: &Path) -> Result<S
                 }
             }
             let Some(data) = data else { return Ok(None) };
-            if data.len() as u64 != entry.size || sha256_hex(&data) != entry.sha256 {
+            if !entry.matches(&data) {
                 return Err(DistErr::Changed(format!("{path} does not match Release")));
             }
             mkdir(&out)?;
@@ -822,14 +829,20 @@ fn stage_dist(m: &HttpMirror, ctx: &Ctx, dist: &str, staging: &Path) -> Result<S
         let mut kept: Vec<PathBuf> = old
             .files
             .iter()
-            .map(|(path, entry)| {
+            .flat_map(|(path, entry)| {
                 let dir = path.rsplit_once('/').map_or("", |(d, _)| d);
                 let sep = if dir.is_empty() { "" } else { "/" };
-                PathBuf::from(format!("{dir}{sep}by-hash/SHA256/{}", entry.sha256))
+                entry
+                    .by_hash()
+                    .into_iter()
+                    .map(move |name| PathBuf::from(format!("{dir}{sep}{name}")))
             })
             .collect();
         if old.files == rel.files {
-            for d in dirs.iter().filter(|d| d.ends_with("by-hash/SHA256")) {
+            let by_hash_dirs = dirs
+                .iter()
+                .filter(|d| d.parent().is_some_and(|p| p.ends_with("by-hash")));
+            for d in by_hash_dirs {
                 let Ok(d) = d.strip_prefix(staging) else {
                     continue;
                 };

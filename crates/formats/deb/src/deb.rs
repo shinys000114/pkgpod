@@ -94,6 +94,10 @@ const MAX_CONTROL: u64 = 1 << 20;
 /// How much of control.tar is read to find the control file: the
 /// maintainer scripts and md5sums come with it, a few MiB at most.
 const MAX_CONTROL_TAR: u64 = 64 << 20;
+/// Largest GNU name table, or BSD long name, of an ar archive taken: ar
+/// reads either whole at the size its header claims (up to 9 GiB), and
+/// a .deb has neither (dpkg-deb writes short names).
+const MAX_AR_NAMES: u64 = 1 << 20;
 
 /// Reads a `.deb` file.
 pub fn read_deb(path: &Path) -> Result<DebInfo, Error> {
@@ -103,7 +107,7 @@ pub fn read_deb(path: &Path) -> Result<DebInfo, Error> {
 
 /// Reads a `.deb` from any reader (consumed to the end).
 pub fn read_deb_from<R: Read>(r: R) -> Result<DebInfo, Error> {
-    let mut archive = ar::Archive::new(HashingReader::new(r));
+    let mut archive = ar::Archive::new(ArGuard::new(HashingReader::new(r)));
     let mut saw_binary = false;
     let mut control = None;
     while let Some(entry) = archive.next_entry() {
@@ -131,7 +135,7 @@ pub fn read_deb_from<R: Read>(r: R) -> Result<DebInfo, Error> {
             }
         }
     }
-    let hashes = archive.into_inner()?.finish()?;
+    let hashes = archive.into_inner()?.inner.finish()?;
     if !saw_binary {
         return Err(Error::Format("missing debian-binary member".into()));
     }
@@ -142,6 +146,107 @@ pub fn read_deb_from<R: Read>(r: R) -> Result<DebInfo, Error> {
         }
     }
     Ok(DebInfo { control, hashes })
+}
+
+/// Passes an ar archive on to ar, checking each member header before its
+/// last byte goes out: ar acts on a header as soon as it has it whole. A
+/// GNU name table or BSD long name larger than [`MAX_AR_NAMES`] is
+/// refused before ar allocates it, and a GNU long name that starts past
+/// the end of the name table before ar indexes there (it panics).
+struct ArGuard<R> {
+    inner: R,
+    /// Bytes passed on, and where the next member header starts.
+    at: u64,
+    next: u64,
+    header: [u8; 60],
+    /// The size of the name table read, and the variant ar took the
+    /// archive for (it reads long names of the other one as names).
+    names: u64,
+    gnu: bool,
+    bsd: bool,
+}
+
+impl<R: Read> ArGuard<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            at: 0,
+            // After the global header, "!<arch>\n".
+            next: 8,
+            header: [0; 60],
+            names: 0,
+            gnu: false,
+            bsd: false,
+        }
+    }
+
+    /// Checks the header just read, as ar reads it, and finds the next.
+    fn check(&mut self) -> io::Result<()> {
+        let refuse = |why: &str| Err(io::Error::new(io::ErrorKind::InvalidData, why.to_string()));
+        let num = |b: &[u8]| {
+            std::str::from_utf8(b)
+                .ok()
+                .and_then(|s| s.trim_end().parse::<u64>().ok())
+        };
+        let Some(size) = num(&self.header[48..58]) else {
+            return refuse("bad ar member size");
+        };
+        let mut id = &self.header[..16];
+        while let [rest @ .., b' '] = id {
+            id = rest;
+        }
+        let mut data = size;
+        if !self.bsd && id.starts_with(b"/") {
+            self.gnu = true;
+            if id == b"//" {
+                if size > MAX_AR_NAMES {
+                    return refuse("the ar name table is larger than 1 MiB");
+                }
+                self.names = size;
+            } else if id != b"/" && num(&id[1..]).is_none_or(|at| at > self.names) {
+                return refuse("an ar member's name is outside the name table");
+            }
+        } else if !self.bsd && id.ends_with(b"/") {
+            self.gnu = true;
+        } else if !self.gnu
+            && let Some(len) = id.strip_prefix(b"#1/")
+        {
+            self.bsd = true;
+            match num(len) {
+                Some(len) if len > MAX_AR_NAMES => {
+                    return refuse("an ar member's long name is larger than 1 MiB");
+                }
+                // The name is the start of the member's data; ar pads
+                // by the size of the rest.
+                Some(len) if len <= size => data = size - len,
+                _ => return refuse("bad ar member name length"),
+            }
+        }
+        self.next += 60 + size + data % 2;
+        Ok(())
+    }
+}
+
+impl<R: Read> Read for ArGuard<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let in_header = self.at >= self.next;
+        let room = if in_header {
+            self.next + 60 - self.at
+        } else {
+            self.next - self.at
+        };
+        let want = buf.len().min(usize::try_from(room).unwrap_or(usize::MAX));
+        let n = self.inner.read(&mut buf[..want])?;
+        if in_header {
+            let off = (self.at - self.next) as usize;
+            self.header[off..off + n].copy_from_slice(&buf[..n]);
+            if off + n == 60 {
+                self.check()?;
+            }
+        }
+        self.at += n as u64;
+        Ok(n)
+    }
 }
 
 fn decompressor<'a, R: Read + 'a>(ext: &str, r: R) -> Result<Box<dyn Read + 'a>, Error> {
@@ -263,6 +368,72 @@ mod tests {
             ("./control", tar::EntryType::Regular, b"Package: x\n"),
         ]);
         assert_eq!(read_control_tar(&t[..]).unwrap().get("Package"), Some("x"));
+    }
+
+    /// An ar archive of `members` (header name, data).
+    fn ar_of(members: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut out = b"!<arch>\n".to_vec();
+        for (name, data) in members {
+            out.extend(
+                format!(
+                    "{name:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n",
+                    0,
+                    0,
+                    0,
+                    100644,
+                    data.len()
+                )
+                .as_bytes(),
+            );
+            out.extend(*data);
+            if data.len() % 2 == 1 {
+                out.push(b'\n');
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn ar_names_are_bounded() {
+        let control = tar_of(&[(
+            "./control",
+            tar::EntryType::Regular,
+            b"Package: x\nVersion: 1\nArchitecture: all\n",
+        )]);
+        let binary: (&str, &[u8]) = ("debian-binary", b"2.0\n");
+        let read = |members: &[(&str, &[u8])]| read_deb_from(&ar_of(members)[..]);
+        // A long name from a small name table is read.
+        let info = read(&[("//", b"control.tar/\n"), binary, ("/0", &control)]).unwrap();
+        assert_eq!(info.name(), "x");
+        // And a BSD one, at the start of its member's data (odd-sized,
+        // so padded).
+        let named = [&b"a-long-member-name\0\0"[..], b"odd"].concat();
+        let info = read(&[binary, ("#1/20", &named), ("control.tar", &control)]).unwrap();
+        assert_eq!(info.name(), "x");
+        // ar takes in a GNU name table, or a BSD long name, whole at the
+        // size its header claims.
+        let big = vec![b'n'; (MAX_AR_NAMES + 2) as usize];
+        let bsd = format!("#1/{}", big.len());
+        for members in [
+            [("//", &big[..]), binary, ("control.tar", &control)],
+            [binary, ("control.tar", &control), (&bsd, &big)],
+        ] {
+            let err = read(&members).unwrap_err();
+            assert!(err.to_string().contains("larger than 1 MiB"), "{err}");
+        }
+        // Refused at its header, before ar would allocate 9 GiB for it.
+        let mut huge = b"!<arch>\n".to_vec();
+        huge.extend(format!("{:<48}{:<10}`\n", "//", 9_999_999_999u64).as_bytes());
+        let err = read_deb_from(&huge[..]).unwrap_err();
+        assert!(err.to_string().contains("larger than 1 MiB"), "{err}");
+        // A long name past the table (ar would index past its end).
+        for members in [
+            [binary, ("/5", b"x"), ("control.tar", &control)],
+            [("//", b"a/\n"), ("/4", b"x"), ("control.tar", &control)],
+        ] {
+            let err = read(&members).unwrap_err();
+            assert!(err.to_string().contains("outside the name table"), "{err}");
+        }
     }
 
     #[test]

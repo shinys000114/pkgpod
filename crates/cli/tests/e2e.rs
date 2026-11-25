@@ -17471,6 +17471,82 @@ fn upload_forms_bound_their_fields() {
     assert!(st == 400 && out.contains("together"), "{out}");
 }
 
+/// A galaxy artifact (sent as it is and in base64) and an ipk go to the
+/// store as they come and are read from there: the server never holds
+/// one whole, so its peak memory hardly grows with their size.
+#[test]
+fn uploads_are_not_held_in_memory() {
+    use std::io::Read as _;
+    let s = Server::start();
+    let pid = s.child.id();
+    let peak = || -> Option<u64> {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        let kib = status.lines().find_map(|l| l.strip_prefix("VmHWM:"))?;
+        Some(
+            kib.trim()
+                .trim_end_matches("kB")
+                .trim()
+                .parse::<u64>()
+                .ok()?
+                << 10,
+        )
+    };
+    if peak().is_none() {
+        return;
+    }
+    for (name, format) in [("ans", "galaxy"), ("ipks", "ipk")] {
+        s.cli(&["repo", "create", name, "-f", format]).unwrap();
+    }
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "ans,ipks", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    const SIZE: u64 = 128 << 20;
+    // None of them is a package: each is refused once it is read. The
+    // allocator keeps what was freed, so they go from the one that
+    // would take the least to the one that would take the most.
+    let grew = |send: &dyn Fn() -> reqwest::blocking::RequestBuilder| -> u64 {
+        // The peak from here on, where the kernel can start it again.
+        let _ = std::fs::write(format!("/proc/{pid}/clear_refs"), "5");
+        let before = peak().unwrap();
+        let r = send().basic_auth("token", Some(&tok)).send().unwrap();
+        let st = r.status().as_u16();
+        let out = r.text().unwrap();
+        assert!((400..500).contains(&st), "{st} {out}");
+        peak().unwrap().saturating_sub(before)
+    };
+    use reqwest::blocking::multipart::{Form, Part};
+    // Each takes seconds on a debug server, more when tests run beside
+    // it: past the default 30 s.
+    let c = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .unwrap();
+    let galaxy = |part: Part| {
+        c.post(s.url("/ans/api/v3/artifacts/collections/"))
+            .multipart(Form::new().part("file", part.file_name("a.tar.gz")))
+    };
+    let ipk = grew(&|| {
+        let gzip = std::io::Cursor::new([0x1f, 0x8b]).chain(std::io::repeat(0).take(SIZE));
+        c.put(s.url("/ipks/upload?feed=main"))
+            .body(reqwest::blocking::Body::new(gzip))
+    });
+    let raw = grew(&|| galaxy(Part::reader(std::io::repeat(0).take(SIZE))));
+    let b64 = grew(&|| {
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert("content-transfer-encoding", "base64".parse().unwrap());
+        galaxy(Part::reader(std::io::repeat(b'A').take(SIZE)).headers(h))
+    });
+    for (what, grew) in [("ipk", ipk), ("galaxy", raw), ("galaxy in base64", b64)] {
+        assert!(
+            grew < 48 << 20,
+            "{what}: the server's peak memory grew by {} MiB",
+            grew >> 20
+        );
+    }
+}
+
 const CONAN_NEW: &str = "pkgpod-e2e/conan:2.34.0";
 const CONAN_OLD: &str = "pkgpod-e2e/conan:2.0.17";
 

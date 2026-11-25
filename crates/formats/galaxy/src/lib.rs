@@ -50,9 +50,9 @@ pub fn check_name(what: &str, n: &str) -> Result<()> {
 }
 
 /// The collection_info of an artifact's MANIFEST.json, its namespace,
-/// name and version checked.
-pub fn read_artifact(data: &[u8]) -> Result<Value> {
-    let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(data));
+/// name and version checked; the artifact is read as it comes.
+pub fn read_artifact(r: impl Read) -> Result<Value> {
+    let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(r));
     for f in ar
         .entries()
         .map_err(|e| invalid(format!("the artifact: {e}")))?
@@ -134,9 +134,8 @@ impl Format for Galaxy {
         if up.size > MAX_ARTIFACT {
             return Err(invalid("an artifact is at most 512 MiB"));
         }
-        let data = std::fs::read(cx.store.path(&up.sha256))?;
-        let info = read_artifact(&data)?;
-        drop(data);
+        let f = std::fs::File::open(cx.store.path(&up.sha256))?;
+        let info = read_artifact(std::io::BufReader::new(f))?;
         let s = |k: &str| {
             info.get(k)
                 .and_then(Value::as_str)
@@ -229,10 +228,10 @@ mod tests {
     #[test]
     fn artifacts_and_names() {
         let a = make_artifact("team", "hello", "1.2.0", &[("README.md", b"hi")]);
-        let i = read_artifact(&a).unwrap();
+        let i = read_artifact(&a[..]).unwrap();
         assert_eq!(i["version"], "1.2.0");
-        assert!(read_artifact(&make_artifact("Team", "hello", "1.0.0", &[])).is_err());
-        assert!(read_artifact(&make_artifact("team", "hello", "1.0", &[])).is_err());
+        assert!(read_artifact(&make_artifact("Team", "hello", "1.0.0", &[])[..]).is_err());
+        assert!(read_artifact(&make_artifact("team", "hello", "1.0", &[])[..]).is_err());
         assert_eq!(
             artifact_name("team", "hello", "1.2.0"),
             "team-hello-1.2.0.tar.gz"

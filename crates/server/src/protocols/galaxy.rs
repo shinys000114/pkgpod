@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use axum::extract::multipart::Field;
 use axum::extract::{FromRequest, Multipart, Request};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -263,71 +264,136 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
     }
 }
 
+/// Base64 that comes in pieces, decoded four characters at a time:
+/// white space is left out, and nothing may follow the padding.
+#[derive(Default)]
+struct Base64Pieces {
+    /// The characters short of four.
+    rest: Vec<u8>,
+    padded: bool,
+}
+
+impl Base64Pieces {
+    /// The bytes that `piece` completes.
+    fn decode(&mut self, piece: &[u8]) -> Result<Vec<u8>, String> {
+        self.rest
+            .extend(piece.iter().filter(|c| !c.is_ascii_whitespace()));
+        let whole = self.rest.len() / 4 * 4;
+        if self.padded && whole > 0 {
+            return Err("base64 after its padding".into());
+        }
+        let out = base64::engine::general_purpose::STANDARD
+            .decode(&self.rest[..whole])
+            .map_err(|e| e.to_string())?;
+        self.padded |= self.rest[..whole].ends_with(b"=");
+        self.rest.drain(..whole);
+        Ok(out)
+    }
+
+    /// Whether what came ends where base64 can.
+    fn finish(&self) -> Result<(), String> {
+        if self.rest.is_empty() {
+            Ok(())
+        } else {
+            Err("the base64 is cut short".into())
+        }
+    }
+}
+
+/// The file part sent in base64, decoded into the store as it comes.
+async fn base64_to_store(
+    store: pkgpod_base::store::Store,
+    field: Field<'_>,
+) -> Result<(pkgpod_base::Digest, u64), crate::Error> {
+    // Four bytes for three, and line breaks a few more.
+    const MAX_SENT: u64 = pkgpod_galaxy::MAX_ARTIFACT / 2 * 3;
+    let start = (field, Base64Pieces::default(), 0u64);
+    let decoded = futures_util::stream::unfold(start, |(mut f, mut b64, mut sent)| async move {
+        let out = match f.chunk().await {
+            Err(e) => Err(e.to_string()),
+            Ok(None) => match b64.finish() {
+                Ok(()) => return None,
+                Err(e) => Err(format!("file: {e}")),
+            },
+            Ok(Some(chunk)) => {
+                sent += chunk.len() as u64;
+                if sent > MAX_SENT {
+                    Err(format!(
+                        "the form's field \"file\" is larger than {MAX_SENT} bytes"
+                    ))
+                } else {
+                    b64.decode(&chunk).map_err(|e| format!("file: {e}"))
+                }
+            }
+        };
+        Some((out, (f, b64, sent)))
+    });
+    crate::serving::stream_to_store(store, decoded, pkgpod_galaxy::MAX_ARTIFACT).await
+}
+
 async fn upload(app: &Arc<App>, a: &Ask, req: Request) -> Response {
     let mut m = match Multipart::from_request(req, &()).await {
         Ok(m) => m,
         Err(e) => return error(StatusCode::BAD_REQUEST, format!("not an upload: {e}")),
     };
-    let mut data = None;
+    let mut file = None;
     let mut sha_given = None;
     loop {
         match m.next_field().await {
             Ok(Some(f)) => {
-                let name = f.name().unwrap_or("").to_string();
                 let b64 = f
                     .headers()
                     .get("content-transfer-encoding")
                     .and_then(|v| v.to_str().ok())
                     .is_some_and(|v| v.eq_ignore_ascii_case("base64"));
-                // Only the file and its sha256 are read, each as far as it
-                // can go (base64 makes four bytes of three, and line breaks
-                // a few more); other fields are passed over unread.
-                let max = match name.as_str() {
-                    "file" if b64 => pkgpod_galaxy::MAX_ARTIFACT as usize / 2 * 3,
-                    "file" => pkgpod_galaxy::MAX_ARTIFACT as usize,
-                    "sha256" => 128,
-                    _ => continue,
-                };
-                let bytes = match crate::serving::field_capped(f, max).await {
-                    Ok(b) => b,
-                    Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
-                };
-                let bytes = if b64 {
-                    let clean: Vec<u8> = bytes
-                        .iter()
-                        .copied()
-                        .filter(|c| !c.is_ascii_whitespace())
-                        .collect();
-                    match base64::engine::general_purpose::STANDARD.decode(clean) {
-                        Ok(b) => b,
-                        Err(e) => return error(StatusCode::BAD_REQUEST, format!("{name}: {e}")),
+                // Only the file and its sha256 are read; other fields are
+                // passed over unread. The file goes to the store as it
+                // comes, so it is never held whole.
+                match f.name().unwrap_or("") {
+                    "file" => {
+                        let store = a.repo.store();
+                        let stored = if b64 {
+                            base64_to_store(store, f).await
+                        } else {
+                            crate::serving::stream_to_store(store, f, pkgpod_galaxy::MAX_ARTIFACT)
+                                .await
+                        };
+                        match stored {
+                            Ok(x) => file = Some(x),
+                            Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
+                        }
                     }
-                } else {
-                    bytes
-                };
-                match name.as_str() {
-                    "file" => data = Some(bytes),
                     "sha256" => {
-                        sha_given = Some(String::from_utf8_lossy(&bytes).trim().to_string())
+                        let bytes = match crate::serving::field_capped(f, 128).await {
+                            Ok(b) => b,
+                            Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
+                        };
+                        let bytes = if b64 {
+                            let clean: Vec<u8> = bytes
+                                .iter()
+                                .copied()
+                                .filter(|c| !c.is_ascii_whitespace())
+                                .collect();
+                            match base64::engine::general_purpose::STANDARD.decode(clean) {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    return error(StatusCode::BAD_REQUEST, format!("sha256: {e}"));
+                                }
+                            }
+                        } else {
+                            bytes
+                        };
+                        sha_given = Some(String::from_utf8_lossy(&bytes).trim().to_string());
                     }
-                    _ => {}
+                    _ => continue,
                 }
             }
             Ok(None) => break,
             Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
         }
     }
-    let Some(data) = data else {
+    let Some((sha256, size)) = file else {
         return error(StatusCode::BAD_REQUEST, "no file in the upload");
-    };
-    if data.len() as u64 > pkgpod_galaxy::MAX_ARTIFACT {
-        return error(StatusCode::BAD_REQUEST, "an artifact is at most 512 MiB");
-    }
-    let store = a.repo.store();
-    let (sha256, size) = match tokio::task::spawn_blocking(move || store.put_bytes(&data)).await {
-        Ok(Ok(x)) => x,
-        Ok(Err(e)) => return error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
     if let Some(given) = sha_given
         && !given.is_empty()
@@ -364,5 +430,48 @@ async fn upload(app: &Arc<App>, a: &Ask, req: Request) -> Response {
         }
         Ok(Err(e)) => error(StatusCode::BAD_REQUEST, e.to_string()),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64_in_pieces() {
+        let data: Vec<u8> = (0..=255u8).cycle().take(1000).collect();
+        let text = base64::engine::general_purpose::STANDARD.encode(&data);
+        // With line breaks, as MIME has them.
+        let sent: String = text
+            .as_bytes()
+            .chunks(76)
+            .map(|l| format!("{}\r\n", std::str::from_utf8(l).unwrap()))
+            .collect();
+        // Cut in two anywhere, and in pieces of one to nine bytes.
+        for at in 0..=sent.len() {
+            let mut b = Base64Pieces::default();
+            let mut got = b.decode(&sent.as_bytes()[..at]).unwrap();
+            got.extend(b.decode(&sent.as_bytes()[at..]).unwrap());
+            b.finish().unwrap();
+            assert_eq!(got, data, "cut at {at}");
+        }
+        for n in 1..=9 {
+            let mut b = Base64Pieces::default();
+            let mut got = Vec::new();
+            for piece in sent.as_bytes().chunks(n) {
+                got.extend(b.decode(piece).unwrap());
+            }
+            b.finish().unwrap();
+            assert_eq!(got, data, "pieces of {n}");
+        }
+        // Padded, then more; cut short; not base64.
+        let mut b = Base64Pieces::default();
+        assert_eq!(b.decode(b"QQ==").unwrap(), b"A");
+        assert_eq!(b.decode(b" \n").unwrap(), b"");
+        assert!(b.decode(b"QUJD").is_err());
+        let mut b = Base64Pieces::default();
+        assert_eq!(b.decode(b"QUJDRA").unwrap(), b"ABC");
+        assert!(b.finish().is_err());
+        assert!(Base64Pieces::default().decode(b"QU*D").is_err());
     }
 }
