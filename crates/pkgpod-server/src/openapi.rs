@@ -599,6 +599,30 @@ fn schemas() -> Value {
             ),
         ),
         (
+            "Cli",
+            object(
+                "",
+                vec![
+                    ("version", string()),
+                    (
+                        "platform",
+                        text("os-arch, as uname -s and -m name them (linux-x86_64)."),
+                    ),
+                    (
+                        "sha256",
+                        nullable("string", "Null when the binary cannot be read."),
+                    ),
+                    ("size", nullable("integer", "")),
+                    ("url", text("The binary (GET /cli/pkgpod).")),
+                    (
+                        "install",
+                        text("A command that installs it (GET /cli/install.sh, piped to sh)."),
+                    ),
+                ],
+                &["version", "platform", "sha256", "size", "url", "install"],
+            ),
+        ),
+        (
             "OidcExchange",
             object(
                 "",
@@ -1331,6 +1355,8 @@ fn ops() -> Vec<Op> {
         op("post", "/api/v1/oidc/token", "oidc_token", "A CI job's OIDC token for a short-lived pkgpod token, as a trust rule allows; no other credential.")
             .body("OidcExchange")
             .reply(200, "The token.", sref("OidcToken")),
+        op("get", "/api/v1/cli", "cli_info", "The pkgpod command this server hands out (its own build): version, platform, SHA-256, where to get it; no credentials needed.")
+            .reply(200, "The command.", sref("Cli")),
         op("get", "/api/v1/listeners", "listeners", "Serving listeners (server admin).")
             .reply(200, "The listeners.", array(sref("Listener"))),
         op("put", "/api/v1/listeners/{name}", "listener_set", "Add or change {addr, cert?, key?, enabled?, proto?, passive?} (server admin).")

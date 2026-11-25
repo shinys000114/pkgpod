@@ -61,10 +61,17 @@
   contents: read
 steps:
   - uses: actions/checkout@v4
+  - uses: &lt;owner&gt;/pkgpod@master          # the pkgpod action
+    with:
+      url: &lt;this server&gt;
+      repository: ppa
+      files: dist/*.deb
+      params: dists=noble
+# or by hand:
   - run: |
-      curl -fsSL -o pkgpod &lt;the pkgpod binary&gt; &amp;&amp; chmod +x pkgpod
-      ./pkgpod --url &lt;this server&gt; login --oidc
-      ./pkgpod upload ppa dist/*.deb -s dists=noble</pre>
+      curl -fsSL &lt;this server&gt;/cli/install.sh | sh
+      pkgpod --url &lt;this server&gt; login --oidc
+      pkgpod upload ppa dist/*.deb -s dists=noble</pre>
   </details>
   </div>
 </div>

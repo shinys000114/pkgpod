@@ -10,6 +10,7 @@ pub mod backup;
 pub mod badge;
 pub mod cargo;
 pub mod cleanup;
+pub mod cli_dl;
 pub mod composer;
 pub mod conan;
 pub mod config;

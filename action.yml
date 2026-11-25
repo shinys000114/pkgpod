@@ -1,0 +1,98 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Publishes to a pkgpod server from GitHub Actions with trusted publishing:
+# the pkgpod command comes from the server itself, the job logs in with its
+# GitHub OIDC token (the job needs `permissions: id-token: write`, and the
+# server a trust rule for it), then uploads.
+#
+#   - uses: <owner>/pkgpod@master
+#     with:
+#       url: https://pkg.example.org
+#       repository: builds
+#       files: dist/*
+#       path: master/${{ github.sha }}/
+#       link: master/latest
+name: pkgpod
+description: Log in to a pkgpod server with the job's OIDC token, and upload files
+inputs:
+  url:
+    description: the server's console and API address
+    required: true
+  repository:
+    description: the repository to upload to (empty only logs in)
+    required: false
+    default: ""
+  files:
+    description: files to upload, as the shell expands them (dist/*.deb)
+    required: false
+    default: ""
+  path:
+    description: where, for a files repository (a directory ending in /)
+    required: false
+    default: ""
+  link:
+    description: a link to point at what is uploaded (files; master/latest)
+    required: false
+    default: ""
+  params:
+    description: other upload parameters, KEY=VALUE a line (deb - dists=noble)
+    required: false
+    default: ""
+  audience:
+    description: the audience to ask the job's token for, as the trust rule names it
+    required: false
+    default: pkgpod
+  rule:
+    description: the trust rule to use when several match
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: pkgpod command
+      shell: bash
+      env:
+        PKGPOD_URL: ${{ inputs.url }}
+      run: |
+        set -euo pipefail
+        bin="$RUNNER_TEMP/pkgpod-bin"
+        curl -fsSL "${PKGPOD_URL%/}/cli/install.sh" | PKGPOD_BIN="$bin" sh
+        echo "$bin" >> "$GITHUB_PATH"
+    - name: Log in with the job's OIDC token
+      shell: bash
+      env:
+        PKGPOD_URL: ${{ inputs.url }}
+        AUDIENCE: ${{ inputs.audience }}
+        RULE: ${{ inputs.rule }}
+      run: |
+        set -euo pipefail
+        args=(login --oidc --audience "$AUDIENCE")
+        if [ -n "$RULE" ]; then args+=(--rule "$RULE"); fi
+        pkgpod "${args[@]}"
+    - name: Upload
+      if: inputs.repository != '' && inputs.files != ''
+      shell: bash
+      env:
+        PKGPOD_URL: ${{ inputs.url }}
+        REPO: ${{ inputs.repository }}
+        FILES: ${{ inputs.files }}
+        UPATH: ${{ inputs.path }}
+        LINK: ${{ inputs.link }}
+        PARAMS: ${{ inputs.params }}
+      run: |
+        set -euo pipefail
+        # The file list split and globbed (not evaluated); one upload, one
+        # version.
+        shopt -s nullglob
+        # shellcheck disable=SC2206
+        files=($FILES)
+        if [ ${#files[@]} -eq 0 ]; then
+          echo "pkgpod: no files match: $FILES" >&2
+          exit 1
+        fi
+        args=(upload "$REPO" "${files[@]}")
+        if [ -n "$UPATH" ]; then args+=(-s "path=$UPATH"); fi
+        if [ -n "$LINK" ]; then args+=(-s "link=$LINK"); fi
+        while IFS= read -r p; do
+          if [ -n "$p" ]; then args+=(-s "$p"); fi
+        done <<< "$PARAMS"
+        pkgpod "${args[@]}"

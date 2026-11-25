@@ -3107,6 +3107,8 @@ fn openapi_describes_what_the_api_sends() {
         None,
         204,
     );
+    let v = a.ok("get", "/api/v1/cli", "/api/v1/cli", None, 200);
+    assert!(v["sha256"].as_str().is_some_and(|h| h.len() == 64), "{v}");
     a.ok(
         "delete",
         member,
@@ -5657,6 +5659,82 @@ fn files_hosted() {
         found.to_string().contains("tools/v1/tool.tar.gz") && found.to_string().contains("\"v1\""),
         "{found}"
     );
+}
+
+/// The server hands out its own binary as the CLI, with its SHA-256 and
+/// an install script that checks it.
+#[test]
+fn cli_from_the_server() {
+    use sha2::Digest as _;
+    let s = Server::start();
+    let c = reqwest::blocking::Client::new();
+    let v: Value = c
+        .get(format!("{}/api/v1/cli", s.api))
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    let own = std::fs::read(env!("CARGO_BIN_EXE_pkgpod")).unwrap();
+    let want = sha2::Sha256::digest(&own)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    assert_eq!(v["sha256"], json!(want), "{v}");
+    assert_eq!(v["size"], json!(own.len()), "{v}");
+    assert_eq!(
+        v["platform"],
+        json!(format!(
+            "{}-{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ))
+    );
+    assert_eq!(v["url"], json!(format!("{}/cli/pkgpod", s.api)), "{v}");
+    let r = c.get(format!("{}/cli/pkgpod", s.api)).send().unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(r.headers()["etag"], format!("\"{want}\"").as_str());
+    let got = r.bytes().unwrap();
+    assert!(got.len() == own.len() && got.as_ref() == own.as_slice());
+    // The script installs it where told, checked, and it runs.
+    let script = c
+        .get(format!("{}/cli/install.sh", s.api))
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(script.contains(&want), "the script checks the digest");
+    let bin = s.dir.path().join("bin");
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(&script)
+        .env("PKGPOD_BIN", &bin)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("installed as"));
+    let installed = std::fs::read(bin.join("pkgpod")).unwrap();
+    assert!(installed == own);
+    let out = Command::new(bin.join("pkgpod"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    // A changed download is refused, and nothing is left behind.
+    let bad = script.replace(&want, &"0".repeat(64));
+    let bin2 = s.dir.path().join("bin2");
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(&bad)
+        .env("PKGPOD_BIN", &bin2)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("SHA-256"));
+    assert_eq!(std::fs::read_dir(&bin2).unwrap().count(), 0, "nothing left");
 }
 
 /// Links in a files repository (a stable address for the newest build)
