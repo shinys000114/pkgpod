@@ -27,9 +27,11 @@ Status: in development, nothing released.
 - **Go**: a module proxy for go (`GOPROXY`); modules uploaded as their
   zip (`git archive`).
 - **Alpine**: apk repositories by branch and repository, with an
-  APKINDEX signed per version (tried with apk 2 and 3).
+  APKINDEX signed per version (tried with apk 2 and 3); mirrors of an
+  Alpine mirror (HTTP or rsync).
 - **RPM**: repositories for dnf and yum by group, with repodata made
-  and signed per version (tried with dnf 4 and 5).
+  and signed per version (tried with dnf 4 and 5); mirrors of dnf
+  repositories (HTTP checking repomd.xml's signature, or rsync).
 - **Helm**: chart repositories (`index.yaml`) for `helm repo add`
   (tried with helm 3 and 4).
 - **Maven**: repositories for `mvn deploy` and builds that depend on
@@ -38,7 +40,8 @@ Status: in development, nothing released.
 - **RubyGems**: `gem push`, `gem install` and bundler (compact index),
   yanking (tried with RubyGems 3.6 and Bundler 2.6).
 - **Arch**: pacman repositories with packages and databases signed
-  (tried with pacman 7.1, `SigLevel = Required DatabaseRequired`).
+  (tried with pacman 7.1, `SigLevel = Required DatabaseRequired`);
+  mirrors of an Arch Linux mirror (HTTP or rsync).
 - **NuGet**: feeds for dotnet and NuGet (V3 API): push, restore,
   search, unlisting (tried with .NET 10).
 - **Composer**: repositories for PHP's composer (packages.json, p2
@@ -62,7 +65,12 @@ Status: in development, nothing released.
   repository API v2): dart pub publish, get, retraction (tried with
   Dart 3.14).
 - Repositories are reached by their own addresses (host name and path);
-  a reverse proxy in front only provides certificates.
+  a reverse proxy in front only provides certificates. A host's root
+  that no repository has lists the repositories there and how to use
+  each, under a title and Markdown of your own.
+- Mirrors sync when asked or on a cron schedule; one page shows every
+  mirror's schedule and the syncs of the next day, and syncs on the
+  same storage take turns (`syncs_per_storage`).
 - Proxy repositories (Go, Maven, npm, PyPI, Cargo, OCI, files): a
   public registry's packages, or a file server's files, fetched when
   asked for and kept, managed by hand (pin, evict, prefetch, a size
@@ -103,7 +111,7 @@ password to `<data_dir>/admin-password`. Then, with the console at
 
 ```sh
 pkgpod login -u admin
-pkgpod key generate main "Team packages <packages@example.org>"   # or: key import
+pkgpod key generate main "Team packages <packages@example.org>"   # or: key import; 409 if main exists (--replace)
 pkgpod repo create ppa -s urls=https://ppa.example.org/
 pkgpod op ppa dist-set name=noble components=main -y
 pkgpod upload ppa hello_1.0_amd64.deb

@@ -124,9 +124,10 @@ sudo -u pkgpod pkgpod admin check
 
 The other commands are clients of the API: `--url` (or `PKGPOD_URL`;
 default: the saved login, else `http://127.0.0.1:8090`) and `--token`
-(or `PKGPOD_TOKEN`; default: the saved login). `pkgpod login` saves the
-URL and a token in `~/.config/pkgpod/client.json` (under
-`$XDG_CONFIG_HOME` when it is set).
+(or `PKGPOD_TOKEN`; default: the saved login's, sent only to the
+server it was saved for). `pkgpod login` saves the URL and a token in
+`~/.config/pkgpod/client.json` (under `$XDG_CONFIG_HOME` when it is
+set).
 
 ## The first start
 
@@ -206,12 +207,8 @@ repository itself.
 - Pass the path unchanged (no prefix stripped), and the whole host when
   OCI, Terraform or badges are used: those are at the host's root.
 - Uploads may be up to 8 GiB; raise the proxy's limit on request bodies.
-  A CDN in front has limits of its own, which its lower plans do not
-  let you raise: Cloudflare takes at most 100 MB per request and waits
-  100 s for an answer (`gc`, deleting a repository with its tree or a
-  large promote can take longer, and still finish on the server). Send
-  big uploads and such calls to a name that does not go through it (DNS
-  only, or the management listener over the LAN or an SSH tunnel).
+  A CDN in front has limits of its own: see
+  [Behind Cloudflare](#behind-cloudflare).
 - pkgpod closes a connection that has been idle for 3 minutes; keep the
   proxy's idle connections to it shorter than that (Caddy keeps them 2
   minutes and nginx 1 by default), or an upload sent on one being closed
@@ -277,6 +274,33 @@ pkgpod settings --ci-action org/pkgpod@master   # the GitHub action's place, for
 pkgpod settings --console-url ''                # back to each request's
 ```
 
+### Behind Cloudflare
+
+A CDN in front of the reverse proxy brings limits and a cache of its
+own. With Cloudflare:
+
+- Its lower plans take at most 100 MB per request and wait 100 s for an
+  answer, and do not let you raise either. A larger upload is refused
+  (`pkgpod upload` sends all its files in one request, docker a layer
+  in one), and a longer call (`gc`, deleting a repository with its
+  tree, a large promote) is answered 524 while it still finishes on the
+  server; the CLI says which. Send big uploads and such calls to a name
+  that does not go through it (DNS only, or the management listener
+  over the LAN or an SSH tunnel).
+- Set Browser Cache TTL to respect the existing headers. Otherwise it
+  puts its own lifetime in place of pkgpod's `no-cache` on indexes and
+  badges, and browsers and the caches between clients and Cloudflare
+  keep old ones.
+- Do not cache the hosts of private repositories: no cache-everything
+  rule and no edge lifetime that overrides the origin's. pkgpod marks
+  what only some may read `Cache-Control: private` with `Vary:
+  Authorization`, but Cloudflare's cache key leaves Authorization out,
+  so a rule that caches it anyway hands a reader's file to anyone.
+- Leave bot challenges off for these hosts: apt, pip, the CLI and CI
+  jobs cannot answer them.
+- What it serves from its cache does not reach pkgpod and is not
+  counted as a download.
+
 ## Storages
 
 A storage is a directory on a disk. Each repository is on one, chosen
@@ -319,12 +343,18 @@ pkgpod key default main
 pkgpod key public main > key.asc
 ```
 
-The first key made or imported becomes the default. A secret key is kept
-in `<data_dir>/keys/<name>.asc` (mode 0600); the passphrase it was
-imported with, if any, beside it in `<name>.pass`, so that the server can
-use it. The passphrase therefore protects nothing on the server's disk:
-protect the data directory and the backups. `key import` sends the
-secret key over the API; use it on the server's machine or over TLS.
+The first key made or imported becomes the default. `key generate` and
+`key import` answer 409 for a name that is taken (unless its secret
+key file is gone, to be imported again); `--replace` replaces that key,
+and what it signs is signed with the new one from its next publish on.
+`key delete` of a key that repositories sign with (by name, or as the
+default) answers 409 with their names; `--force` deletes it anyway. A
+secret key is kept in `<data_dir>/keys/<name>.asc` (mode 0600); the
+passphrase it was imported with, if any, beside it in `<name>.pass`,
+so that the server can use it. The passphrase therefore protects
+nothing on the server's disk: protect the data directory and the
+backups. `key import` sends the secret key over the API; use it on the
+server's machine or over TLS.
 
 The RSA key (apk) and the usign key (ipk) are made on first use in
 `<data_dir>/rsa/` and are backed up with the data.
@@ -424,6 +454,13 @@ pkgpod cleanup ppa               # the plan: what goes and why
 pkgpod cleanup ppa -y            # apply it
 pkgpod cleanup                   # the daily run, now (server admins)
 ```
+
+Files repositories remove old build directories instead, a whole
+directory at a time: `cleanup_dirs` names the directories whose
+subdirectories are builds (`master`, `nightly`), and
+`cleanup_keep_last`, `cleanup_older_days` and `cleanup_max` apply to
+those subdirectories. The newest build of each always stays, and so
+does one a link points at. See [files](usage/files.md#cleanup).
 
 ## Scheduled mirror syncs
 
@@ -563,15 +600,18 @@ badge token (`?token=`), which grants nothing else: `pkgpod badge
 stops working), `--remove` removes it. A repository's Badges card in the
 console gives each badge's Markdown.
 
-The server logs to standard error (the journal: `journalctl -u
+The server logs to standard output (the journal: `journalctl -u
 pkgpod`), at the configuration's `log` level (`PKGPOD_LOG` overrides
-it). It also keeps its newest events since it started in memory (5000
-at most) for server admins: the console's Server page, Logs (by level
-and text, following new ones), `pkgpod logs` (`--level warn`, `--grep
-debian`, `-f` to follow) and `GET /api/v1/logs`. A restart empties it;
-the journal keeps everything. It has the server's own events (listeners,
-jobs started and ended, cleanups, garbage collection, errors), not a
-line per request: the reverse proxy in front keeps an access log.
+it), in colour only on a terminal and without its own time stamps when
+that output is the journal, which stamps each line. It also keeps its
+newest events since it started in memory (5000 at most) for server
+admins: the console's Server page, Logs (by level and text, following
+new ones), `pkgpod logs` (`--level warn`, `--grep debian`, `-f` to
+follow) and `GET /api/v1/logs`. A restart empties it; the journal keeps
+everything. It has the server's own events (listeners, jobs started and
+ended, cleanups, garbage collection, errors, failed logins), not a line
+per request: turn on the access log of the reverse proxy in front
+(Caddy keeps none without a `log` directive).
 
 The Server page's Overview lists recent changes (who did what), with
 counts at a glance (jobs running and failed, errors and warnings logged
@@ -598,7 +638,8 @@ so make a backup before upgrading to be able to go back. Upgrade when no
 job runs (`pkgpod jobs`): a restart interrupts them.
 
 With the package, install the new one (`apt install
-./pkgpod_<version>_amd64.deb`); debhelper's defaults restart the
+./pkgpod_<version>-1_amd64.deb`, `~` in place of a pre-release's `-`:
+`pkgpod_0.1.0~rc1-1_amd64.deb`); debhelper's defaults restart the
 unit.
 
 With the bare binary, put the new one beside the old under a temporary
@@ -742,8 +783,9 @@ The same address is in How to use.
   ```
 
 - A badge token shows a private repository's badges and nothing else.
-- On a serving listener, writes a browser sends from another site (an
-  `Origin` that is not the host) are refused.
+- On the API and the serving listeners, writes a browser sends from
+  another site (an `Origin` that is not the host, or `Sec-Fetch-Site:
+  cross-site`) are refused.
 - The data directory is closed to others (0750; the server and
   `pkgpod admin` write with umask 0027; keys and `admin-password` are
   0600). Backups hold the secret keys and their passphrases: keep them as

@@ -126,7 +126,7 @@ Server = https://token:<token>@pkg.example.org/archrepo/@<label>/$repo/$arch
 ## Example
 
 ```sh
-pkgpod key generate main "Team packages <packages@example.invalid>"   # once per server
+pkgpod key generate main "Team packages <packages@example.invalid>"   # once per server (then 409; --replace)
 pkgpod repo create archrepo -f arch
 pkgpod token create ci --repos archrepo --write
 pkgpod upload archrepo hello-1.0-1-x86_64.pkg.tar.zst -s repository=team

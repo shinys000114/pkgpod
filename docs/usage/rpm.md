@@ -145,7 +145,7 @@ baseurl=https://pkg.example.org/rpms/@<label>/el9/
 ## Example
 
 ```sh
-pkgpod key generate main "Team packages <packages@example.invalid>"   # once per server
+pkgpod key generate main "Team packages <packages@example.invalid>"   # once per server (then 409; --replace)
 pkgpod repo create rpms -f rpm
 pkgpod token create ci --repos rpms --write
 curl -u token:<token> -T hello-1.0-1.x86_64.rpm 'https://pkg.example.org/rpms/upload?group=el9'

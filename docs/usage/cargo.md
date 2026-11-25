@@ -4,7 +4,8 @@ A Cargo repository is a registry for cargo with a sparse index
 (`index/config.json` and `index/<prefix>/<name>`, made per request),
 downloads, `cargo publish`, `cargo yank`, `cargo search` and
 `cargo owner --list`. Crate owners are pkgpod's rights: who may write
-to the repository (`pkgpod grant`); `cargo owner --add` is refused.
+to the repository (`pkgpod grant`), listed to those who may write (a
+reader gets one placeholder); `cargo owner --add` is refused.
 
 Repositories, versions, labels, tokens and rights are the same for every
 format: see [the common part](README.md). On this page the repository

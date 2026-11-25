@@ -83,12 +83,17 @@ dotnet pack -c Release -o out
 dotnet nuget push out/Hello.Pk.1.0.0.nupkg -s https://pkg.example.org/feed/index.json -k <token>
 ```
 
-`-s feed` names the source from `nuget.config` instead. When the
-project makes a symbol package (`-p:IncludeSymbols=true
+`-s feed` names the source from `nuget.config` instead. A private
+feed needs that source with its credentials (above) even when pushing
+by URL: dotnet reads the service index first, without the API key,
+which it sends only with the push, so `-k` alone gets 401 there. When
+the project makes a symbol package (`-p:IncludeSymbols=true
 -p:SymbolPackageFormat=snupkg`), the `.snupkg` next to the `.nupkg` is
-pushed with it. A version is pushed once (409 for another). An id is
-kept in one spelling: a package whose id differs only in case from one
-here is refused.
+pushed with it. A version is pushed once (409 for another), and so are
+its symbols. Symbol packages are kept beside their package (`pkgpod
+ls`, the console's Browse tab), but the feed is no symbol server:
+debuggers do not fetch symbols from it. An id is kept in one spelling:
+a package whose id differs only in case from one here is refused.
 
 ### pkgpod upload and the API
 
@@ -111,7 +116,7 @@ A package is at most 1 GiB.
 Deleting from the client unlists:
 
 ```sh
-dotnet nuget delete Hello.Pk 1.1.0 -s https://pkg.example.org/feed/index.json -k <token> --non-interactive
+dotnet nuget delete Hello.Pk 1.1.0 -s feed -k <token> --non-interactive
 ```
 
 Or as pkgpod operations:
@@ -168,18 +173,20 @@ with its own `<packageSourceCredentials>` entry under its key.
 ## Example
 
 ```sh
-# The repository and a token that may push.
+# The repository, a token that may push, and the feed as a source with it.
 pkgpod repo create feed -f nuget -s urls=https://pkg.example.org/feed/
 T=$(pkgpod token create ci --repos feed --write)
+dotnet nuget add source https://pkg.example.org/feed/index.json -n feed \
+  -u token -p "$T" --store-password-in-clear-text
 
 # Pack and push 1.0.0, label it, then 1.1.0.
 dotnet pack hello -c Release -p:Version=1.0.0 -o out
-dotnet nuget push out/Hello.Pk.1.0.0.nupkg -s https://pkg.example.org/feed/index.json -k "$T"
+dotnet nuget push out/Hello.Pk.1.0.0.nupkg -s feed -k "$T"
 pkgpod label feed release-1
 dotnet pack hello -c Release -p:Version=1.1.0 -o out
-dotnet nuget push out/Hello.Pk.1.1.0.nupkg -s https://pkg.example.org/feed/index.json -k "$T"
+dotnet nuget push out/Hello.Pk.1.1.0.nupkg -s feed -k "$T"
 
-# An app restores it (nuget.config as above), then 1.1.0 is unlisted.
+# An app restores it, then 1.1.0 is unlisted.
 dotnet run --project app
-dotnet nuget delete Hello.Pk 1.1.0 -s https://pkg.example.org/feed/index.json -k "$T" --non-interactive
+dotnet nuget delete Hello.Pk 1.1.0 -s feed -k "$T" --non-interactive
 ```

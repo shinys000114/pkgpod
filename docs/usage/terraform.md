@@ -22,6 +22,8 @@ pkgpod token (`pkgpod token create`).
   path is found.
 - **A signing key**: `pkgpod key generate` (or `key import`) for the
   server's default key, or the repository's `key` setting for another.
+  A key is made once: for a name that exists both answer 409, and
+  `--replace` replaces that key.
 
 ## Kinds
 
@@ -48,7 +50,7 @@ and under **More settings** the address (an https one) and the key.
 With the CLI:
 
 ```sh
-pkgpod key generate main "Team packages <packages@example.invalid>"
+pkgpod key generate main "Team packages <packages@example.invalid>"   # once per server (then 409; --replace)
 pkgpod repo create tf -f terraform -s urls=https://pkg.example.org/tf/
 pkgpod token create ci --repos tf --write      # for uploads
 pkgpod token create dev --repos tf             # read only, for init
@@ -163,7 +165,7 @@ host "pkg.example.org" {
 ## Example
 
 ```sh
-# A key, the repository on an https address, a token.
+# A key (once per server), the repository on an https address, a token.
 pkgpod key generate main "Team packages <packages@example.invalid>"
 pkgpod repo create tf -f terraform -s urls=https://pkg.example.org/tf/
 T=$(pkgpod token create ci --repos tf --write)

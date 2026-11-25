@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Jobs: mirror syncs, run in the background with a log, one at a time
-//! per repository, started by hand or by a repository's schedule.
+//! Jobs: mirror syncs and imports, run in the background with a log,
+//! one at a time per repository; syncs are started by hand or by a
+//! mirror's schedule, imports by hand.
 
 pub mod backup;
 pub mod cleanup;
