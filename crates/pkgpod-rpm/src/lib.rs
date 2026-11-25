@@ -578,10 +578,45 @@ impl Format for Rpm {
     }
 
     fn kinds(&self) -> &'static [Kind] {
-        &[Kind::Hosted]
+        &[Kind::Hosted, Kind::Mirror]
     }
 
-    fn settings(&self, _kind: Kind) -> Vec<Field> {
+    fn check_settings(&self, kind: Kind, settings: &Value) -> Result<()> {
+        if kind != Kind::Mirror {
+            return Ok(());
+        }
+        pkgpod_engine::settings::check_mirror_source(settings)?;
+        for r in settings["repos"].as_array().into_iter().flatten() {
+            let r = r.as_str().unwrap_or("").trim_matches('/');
+            if r.split('/').any(|c| c.is_empty() || c == "." || c == "..") {
+                return Err(invalid(format!(
+                    "repos: {r:?} is not a path under the source"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn settings(&self, kind: Kind) -> Vec<Field> {
+        if kind == Kind::Mirror {
+            let mut v = vec![
+                Field::text(
+                    "source",
+                    "",
+                    "The upstream: http(s)://host/rocky/9/ (its repositories below are followed through their repodata: packages and metadata) or rsync://host/module/path/ (the whole tree, installer images too).",
+                ),
+                Field::list(
+                    "repos",
+                    "Repositories under an http(s) source, each a directory with repodata/ (BaseOS/x86_64/os, AppStream/x86_64/os); empty: the source itself is one.",
+                ),
+                Field::long(
+                    "keyring",
+                    "The upstream's public key(s), armored; each repodata/repomd.xml.asc is checked against them (http). Empty: not checked.",
+                ),
+            ];
+            v.extend(pkgpod_engine::settings::mirror_common());
+            return v;
+        }
         vec![
             pkgpod_engine::settings::key_field(),
             Field::bool(

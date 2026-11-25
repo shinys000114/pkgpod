@@ -124,6 +124,44 @@ pub fn key_field() -> Field {
     )
 }
 
+/// What every mirror is synced with, whatever its format: a schedule,
+/// pruning, bandwidth, parallel downloads.
+pub fn mirror_common() -> Vec<Field> {
+    vec![
+        Field::text(
+            "schedule",
+            "",
+            "When to sync, as cron (0 */6 * * *); empty: only when asked.",
+        ),
+        Field::bool(
+            "prune",
+            false,
+            "Delete files upstream no longer lists (otherwise only reported).",
+        ),
+        Field::int(
+            "max_delete",
+            10000,
+            "Delete nothing when more files than this would go.",
+        ),
+        Field::int("bwlimit", 0, "Bandwidth limit in KiB/s; 0: none."),
+        Field::int("parallel", 8, "Parallel downloads (http)."),
+    ]
+}
+
+/// A mirror's source: http(s) (followed through its indexes) or rsync
+/// (the whole tree).
+pub fn check_mirror_source(settings: &Value) -> Result<String> {
+    let s = settings["source"].as_str().unwrap_or("").trim().to_string();
+    let http = s.starts_with("http://") || s.starts_with("https://");
+    let rsync = s.starts_with("rsync://") || s.contains("::");
+    if !s.is_empty() && !http && !rsync {
+        return Err(crate::Error::Invalid(format!(
+            "source {s:?}: http(s)://… or rsync://…"
+        )));
+    }
+    Ok(s)
+}
+
 /// Settings every repository of a kind has, whatever its format.
 pub fn common(kind: crate::Kind) -> Vec<Field> {
     let mut v = vec![

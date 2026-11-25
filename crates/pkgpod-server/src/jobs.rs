@@ -600,12 +600,19 @@ fn sync(
         return Ok(rep);
     }
     if source.starts_with("rsync://") || source.contains("::") {
-        let mut m =
-            pkgpod_mirror::rsync::RsyncMirror::new(&source, pkgpod_mirror::rsync::Mode::Apt);
+        // Packages first, then the indexes that name them.
+        let mode = match r.format.as_str() {
+            "rpm" => pkgpod_mirror::rsync::Mode::Rpm,
+            "arch" => pkgpod_mirror::rsync::Mode::Arch,
+            _ => pkgpod_mirror::rsync::Mode::Apt,
+        };
+        let mut m = pkgpod_mirror::rsync::RsyncMirror::new(&source, mode);
         m.delete = r.setting_bool("prune");
         m.max_delete = int_of(r, "max_delete", 10_000).max(0) as usize;
         m.bwlimit = bwlimit;
-        m.trace_host = trace_host(r);
+        if r.format == "deb" {
+            m.trace_host = trace_host(r);
+        }
         let ctx = pkgpod_mirror::rsync::Ctx {
             dest: &dest,
             cancel,
@@ -623,6 +630,82 @@ fn sync(
                 .unwrap_or_default()
         );
         return Ok((rep.ok, summary, json!(rep)));
+    }
+    let http = pkgpod_mirror::fetch::Http::new(Duration::from_secs(60))
+        .map_err(|e| e.to_string())?
+        .with_limit(bwlimit);
+    let ctx = pkgpod_mirror::http::Ctx {
+        http: &http,
+        dest: &dest,
+        state_dir: &state,
+        cancel,
+        log,
+    };
+    if r.format == "rpm" {
+        let mut m = pkgpod_mirror::rpm::RpmMirror::new(&source, &list_of(r, "repos"));
+        m.prune = r.setting_bool("prune");
+        m.max_delete = int_of(r, "max_delete", 10_000).max(0) as usize;
+        m.parallel = int_of(r, "parallel", 8).clamp(1, 64) as usize;
+        let keyring = r.setting_str("keyring").trim();
+        if keyring.is_empty() {
+            log("no keyring: the upstream's signatures are not checked");
+        } else {
+            m.keyring = Some(
+                pkgpod_deb::verify::Keyring::from_bytes(keyring.as_bytes())
+                    .map_err(|e| format!("keyring: {e}"))?,
+            );
+        }
+        let rep = pkgpod_mirror::rpm::sync(&m, &ctx).map_err(interrupted)?;
+        let mut s = format!(
+            "{} file(s) downloaded ({}), {} deleted",
+            rep.downloaded,
+            crate::serve::human(rep.downloaded_bytes),
+            rep.deleted
+        );
+        if rep.would_delete > 0 {
+            s.push_str(&format!(", {} unreferenced left", rep.would_delete));
+        }
+        for x in rep.repos.iter().filter(|x| !x.ok) {
+            s.push_str(&format!(
+                "; {}: {}",
+                if x.repo.is_empty() { "/" } else { &x.repo },
+                x.error.as_deref().unwrap_or("failed")
+            ));
+        }
+        return Ok((rep.ok(), s, json!(rep)));
+    }
+    if r.format == "arch" {
+        let mut m = pkgpod_mirror::arch::ArchMirror::new(
+            &source,
+            &list_of(r, "repos"),
+            &list_of(r, "architectures"),
+        );
+        let layout = r.setting_str("layout").trim();
+        if !layout.is_empty() {
+            m.layout = layout.to_string();
+        }
+        m.prune = r.setting_bool("prune");
+        m.max_delete = int_of(r, "max_delete", 10_000).max(0) as usize;
+        m.parallel = int_of(r, "parallel", 8).clamp(1, 64) as usize;
+        let rep = pkgpod_mirror::arch::sync(&m, &ctx).map_err(interrupted)?;
+        let mut s = format!(
+            "{} file(s) downloaded ({}), {} deleted",
+            rep.downloaded,
+            crate::serve::human(rep.downloaded_bytes),
+            rep.deleted
+        );
+        if rep.would_delete > 0 {
+            s.push_str(&format!(", {} unreferenced left", rep.would_delete));
+        }
+        for x in rep.repos.iter().filter(|x| !x.ok) {
+            s.push_str(&format!(
+                "; {} ({}): {}",
+                x.repo,
+                x.arch,
+                x.error.as_deref().unwrap_or("failed")
+            ));
+        }
+        return Ok((rep.ok(), s, json!(rep)));
     }
     let dists = list_of(r, "dists");
     if dists.is_empty() {
@@ -650,16 +733,6 @@ fn sync(
     } else {
         log("no keyring: the upstream's signature is not checked");
     }
-    let http = pkgpod_mirror::fetch::Http::new(Duration::from_secs(60))
-        .map_err(|e| e.to_string())?
-        .with_limit(bwlimit);
-    let ctx = pkgpod_mirror::http::Ctx {
-        http: &http,
-        dest: &dest,
-        state_dir: &state,
-        cancel,
-        log,
-    };
     let rep = pkgpod_mirror::http::sync(&m, &ctx).map_err(interrupted)?;
     let mut s = format!(
         "{} file(s) downloaded ({}), {} deleted",

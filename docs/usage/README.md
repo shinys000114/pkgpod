@@ -40,7 +40,7 @@ create and delete repositories.
 | Kind | What it is | Versions | Formats |
 | --- | --- | --- | --- |
 | hosted | Filled by uploads, operations, imports and promotions. | yes | all |
-| mirror | Follows an upstream (sync jobs); its received tree is served in place. | no | deb, files |
+| mirror | Follows an upstream (sync jobs); its received tree is served in place. | no | deb, rpm, arch, files |
 | group | Reads other repositories of its format in order; holds nothing itself. | no | files, oci, npm, pypi, maven, go, cargo |
 | proxy | Fetches from an upstream registry when asked, and keeps what it fetched (a cache, managed by hand). | no | oci, npm, pypi, maven, go, cargo, files |
 

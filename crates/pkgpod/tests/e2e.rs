@@ -10975,6 +10975,71 @@ fn rpm_packages_with_dnf() {
         .send()
         .unwrap();
     assert!(r.text().unwrap().contains("BEGIN PGP SIGNATURE"));
+
+    // A mirror of it over http: its signature checked against the key,
+    // dnf installing from it as from upstream.
+    s.cli(&["repo", "set", "rpms", "public=true"]).unwrap();
+    let key = reqwest::blocking::get(s.url("/rpms/key.asc"))
+        .unwrap()
+        .text()
+        .unwrap();
+    s.cli(&[
+        "repo",
+        "create",
+        "rpmmir",
+        "-f",
+        "rpm",
+        "-k",
+        "mirror",
+        "-s",
+        &format!("source={base}"),
+        "-s",
+        "repos=el",
+        "-s",
+        &format!("keyring={key}"),
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let out = s.cli(&["sync", "rpmmir", "--wait"]).unwrap();
+    assert!(out.contains("ok:"), "{out}");
+    let st: Value = reqwest::blocking::get(format!("{}/api/v1/repos/rpmmir/status", s.api))
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(
+        st["packages"], 3,
+        "the mirror counts what its indexes name: {st}"
+    );
+    let out = s.cli(&["sync", "rpmmir", "--wait"]).unwrap();
+    assert!(out.contains("0 file(s) downloaded"), "{out}");
+    let mbase = s.url("/rpmmir/el/");
+    let (ok, out) = docker_sh(
+        images[0],
+        &format!(
+            "set -e\ncat > /etc/yum.repos.d/mir.repo <<'EOF'\n[mir]\nname=mir\nbaseurl={mbase}\n\
+             enabled=1\ngpgcheck=0\nrepo_gpgcheck=1\ngpgkey={}\nEOF\n\
+             dnf -y --disablerepo='*' --enablerepo=mir install tool-rpm\ntool-rpm",
+            s.url("/rpms/key.asc")
+        ),
+    );
+    assert!(ok && out.contains("tool-rpm 0.1"), "{out}");
+    // A keyring that is not upstream's: nothing switched, as it was.
+    s.cli(&[
+        "repo",
+        "set",
+        "rpmmir",
+        "keyring=-----BEGIN PGP PUBLIC KEY BLOCK-----\nbroken\n-----END PGP PUBLIC KEY BLOCK-----",
+    ])
+    .unwrap();
+    assert!(s.cli(&["sync", "rpmmir", "--wait"]).is_err());
+    assert_eq!(
+        reqwest::blocking::get(format!("{mbase}repodata/repomd.xml"))
+            .unwrap()
+            .status()
+            .as_u16(),
+        200
+    );
 }
 
 #[test]
@@ -11652,6 +11717,43 @@ fn arch_packages_with_pacman() {
     let (ok, out) =
         ctr.sh("P='pacman --config /tmp/pacman.conf --noconfirm'; $P -Syu >/dev/null && hello-pk");
     assert!(ok && out.contains("hello-pk 1.2-1"), "{out}");
+
+    // A mirror of it over http: packages, their signatures and the
+    // signed database, pacman installing from it as from upstream.
+    s.cli(&["repo", "set", "archrepo", "public=true"]).unwrap();
+    s.cli(&[
+        "repo",
+        "create",
+        "archmir",
+        "-f",
+        "arch",
+        "-k",
+        "mirror",
+        "-s",
+        &format!("source={}", s.url("/archrepo/")),
+        "-s",
+        "repos=pk",
+        "-s",
+        "architectures=x86_64",
+        "-s",
+        "layout=$repo/$arch",
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let out = s.cli(&["sync", "archmir", "--wait"]).unwrap();
+    assert!(out.contains("ok:"), "{out}");
+    let mserver = format!("Server = {}$repo/$arch", s.url("/archmir/"));
+    let script = setup("", true).replace(&format!("Server = {base}$repo/$arch"), &mserver);
+    assert!(script.contains(&mserver));
+    let (ok, out) = docker_sh(
+        ARCH_IMAGE,
+        &format!("{script}$P -Sy tool-pk >/dev/null\nhello-pk; tool-pk"),
+    );
+    assert!(
+        ok && out.contains("hello-pk 1.2-1") && out.contains("tool-pk 0.1-1"),
+        "{out}"
+    );
 }
 
 const DOTNET_IMAGE: &str = "mcr.microsoft.com/dotnet/sdk:10.0";

@@ -70,6 +70,37 @@ RPM repositories have no format operations. A package is removed with
 lists them) or the console's Packages tab; `pkgpod promote` copies
 paths into another RPM repository.
 
+## Mirrors
+
+A mirror follows dnf repositories upstream (Rocky, Alma, EPEL,
+Fedora) and serves them as received, upstream's signatures included:
+
+```sh
+pkgpod repo create rocky -f rpm -k mirror \
+  -s source=https://dl.rockylinux.org/pub/rocky/9/ \
+  -s repos=BaseOS/x86_64/os,AppStream/x86_64/os \
+  -s "keyring=$(curl -fsS https://dl.rockylinux.org/pub/rocky/RPM-GPG-KEY-Rocky-9)" \
+  -s schedule='0 */6 * * *'
+pkgpod sync rocky -w
+```
+
+Over http(s), each repository (a directory with `repodata/`) is
+followed through its metadata: `repomd.xml`, its signature checked
+against the keyring when one is set, the files it names checked
+against it, then every package `primary` names checked against that;
+the new `repodata/` is switched in last, so dnf never reads metadata
+whose packages are not there yet. A repository that fails keeps its
+previous metadata. `repos` empty: the source itself is one. Only
+sha256 checksums are taken, and metadata on another base (`xml:base`)
+is refused. An http source takes the packages and the metadata; with
+`rsync://…` the whole tree is copied (installer images too), the
+packages first and every `repodata/` after them.
+
+`prune` deletes packages no repository names any more (only in those
+that synced well); `max_delete` stops it when more would go. dnf uses
+the mirror as upstream (`baseurl` its address and the repository's
+path), with the distribution's own key: How to use gives the file.
+
 ## Clients
 
 As the How to use tab gives it for the group `el9`,

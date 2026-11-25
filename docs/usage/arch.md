@@ -70,6 +70,34 @@ Arch repositories have no format operations. A package is removed with
 `pkgpod rm` and its state path (`<repository>/<arch>/<file>`, as
 `pkgpod ls` lists them) or the console's Packages tab.
 
+## Mirrors
+
+A mirror follows an Arch Linux (or Arch Linux ARM) mirror and serves
+it as received, upstream's signatures included:
+
+```sh
+pkgpod repo create archlinux -f arch -k mirror \
+  -s source=https://geo.mirror.pkgbuild.com/ \
+  -s repos=core,extra -s architectures=x86_64 \
+  -s schedule='0 */6 * * *'
+pkgpod sync archlinux -w
+# Arch Linux ARM: -s layout='$arch/$repo' -s architectures=aarch64
+```
+
+Over http(s), each repository and architecture (where `layout` puts
+it: `$repo/os/$arch` by default) is followed through its database: the
+packages it names checked against it (size and sha256) with their
+signatures, then the database (`<repo>.db`, `<repo>.files` and their
+signatures when upstream has them), last, so pacman never reads one
+whose packages are not there yet. A repository that fails keeps its
+previous database. With `rsync://…` the whole tree is copied, the
+packages first and the databases after them.
+
+`prune` deletes packages (and their signatures) no database names any
+more; `max_delete` stops it when more would go. pacman uses the mirror
+as any other: `Server = <its address>$repo/os/$arch` first in
+`/etc/pacman.d/mirrorlist` (How to use gives the line).
+
 ## Clients
 
 As the How to use tab gives them:
