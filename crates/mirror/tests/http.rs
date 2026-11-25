@@ -777,17 +777,24 @@ fn files_of_a_dist_that_failed_survive_and_are_not_fetched_again() {
 #[test]
 fn stalled_connection_times_out_and_resumes() {
     let Some(mut e) = Env::new() else { return };
-    e.http = Http::new(Duration::from_millis(500))
+    let timeout = Duration::from_millis(500);
+    e.http = Http::new(timeout)
         .unwrap()
         .with_backoff(Duration::from_millis(10));
     let a = e.up.deb("aa", "1.0", "amd64", "a");
     e.up.publish("stable", &["amd64"], &[("main", vec![a.clone()])]);
     let pa = e.up.pool_of("main", &a);
     e.srv.faults().stall_once.insert(pa.clone(), 200);
-    let t = std::time::Instant::now();
     let r = e.run(&e.mirror(&["stable"]));
     ok(&r);
-    assert!(t.elapsed() < Duration::from_secs(4), "{:?}", t.elapsed());
+    // The client hung up on the stall itself, once its read timeout had
+    // passed and long before the server would have ended it. Timed at
+    // the stall, not over the whole run, which a loaded machine slows.
+    let stalls = e.srv.faults().stalls.clone();
+    assert!(
+        stalls.len() == 1 && stalls[0] >= timeout && stalls[0] < timeout * 10,
+        "{stalls:?}"
+    );
     assert_eq!(r.resumed, 1, "{r:#?}");
     let ranges: Vec<_> = e
         .srv

@@ -5,11 +5,18 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Whether tests must have their tools and images rather than skip
+/// without them (`PKGPOD_REQUIRE_TOOLS=1`, set in CI). Read here only, so
+/// that every check takes the switch the same way.
+pub fn require_tools() -> bool {
+    std::env::var("PKGPOD_REQUIRE_TOOLS").is_ok_and(|v| v == "1")
+}
+
 /// Called when a test cannot run because a tool is missing. With
 /// `PKGPOD_REQUIRE_TOOLS=1` (set in CI) this fails the test instead of
 /// letting it pass vacuously.
 pub fn missing_tool(tool: &str) {
-    if std::env::var("PKGPOD_REQUIRE_TOOLS").is_ok_and(|v| v == "1") {
+    if require_tools() {
         panic!("{tool} is required (PKGPOD_REQUIRE_TOOLS=1)");
     }
     eprintln!("skipping: {tool} not installed");

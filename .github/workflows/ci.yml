@@ -97,6 +97,17 @@ jobs:
                    ubuntu:jammy ubuntu:noble; do
             docker pull -q "$i"
           done
+      # The images the tests build from those when missing (conan_images
+      # and swift_image in crates/cli/tests/e2e.rs, the same Dockerfiles):
+      # built here, so that the tests themselves fetch nothing.
+      - name: Helper images
+        run: |
+          for v in 2.34.0 2.0.17; do
+            printf 'FROM python:3.12-slim\nRUN pip install --no-cache-dir conan==%s\n' "$v" |
+              docker build -q -t "pkgpod-e2e/conan:$v" -
+          done
+          printf 'FROM swift:6.1\nRUN apt-get update -qq && apt-get install -y -qq zip unzip >/dev/null && rm -rf /var/lib/apt/lists/*\n' |
+            docker build -q -t pkgpod-e2e/swift:6.1 -
       - name: Tests with real apt
         env:
           PKGPOD_REQUIRE_TOOLS: "1"

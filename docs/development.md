@@ -94,15 +94,18 @@ cargo test -p pkgpod-engine --release --test scale -- --ignored --nocapture
 `Server::start()` makes a temporary directory, takes two free ports
 (never the same one twice in a process: tests run in parallel), writes a
 configuration there (`data_dir`, the management listener on the first
-port, `log = "warn"`) and starts `pkgpod serve`. It waits for
-`/api/v1/status`, logs in as `admin` with the password from
-`admin-password` (the CLI's saved login is kept in the temporary
-directory: `XDG_CONFIG_HOME`), and moves the serving listener `default`
-to the second port. A test then uses `s.cli(...)` and `s.json(...)` (the
+port, `log = "warn"`) and starts `pkgpod serve`. It waits until the
+server itself listens on the first port (another program may hold a
+port given out, and answer in its place) and answers `/api/v1/status`,
+logs in as `admin` with the password from `admin-password` (the CLI's
+saved login is kept in the temporary directory: `XDG_CONFIG_HOME`),
+and moves the serving listener `default` to the second port, waiting
+for it the same way and failing with the server's reason if it cannot
+listen there. A test then uses `s.cli(...)` and `s.json(...)` (the
 CLI, the second with `--json`), `s.url(path)` (the serving listener) and
 `s.api` (the management listener). `s.restart()` starts the server again
-on the same data, nothing cached. The server is killed when `Server` is
-dropped.
+on the same data, nothing cached, and waits for both listeners the same
+way. The server is killed when `Server` is dropped.
 
 Tests that need a tool on the host (`dpkg-deb`, `gpg`, `apt-get`,
 `rsync`, `npm`, `go`, `cargo`, `python3`, `docker`, ...) check for it
@@ -113,19 +116,21 @@ registry (below) are the exception: they return early whenever `docker
 info` fails.
 
 Other clients run in containers. Images are never pulled by the tests:
-a test none of whose images is there is skipped, and with
-`PKGPOD_REQUIRE_TOOLS` set, fails. The images CI pulls are listed in
-the "Client images" step of `.github/workflows/ci.yml`; `docker pull`
-them to run those tests. Some images are built by the tests when they
-are missing, from pulled ones:
+a test skips the clients whose images are not there (or itself, when
+it needs them all), and with `PKGPOD_REQUIRE_TOOLS=1` any image missing
+fails it. The images CI pulls are listed in the "Client images" step
+of `.github/workflows/ci.yml`; `docker pull` them to run those tests.
+Some images are built by the tests when they are missing, from pulled
+ones (CI builds them beforehand, in its "Helper images" step):
 
 - `pkgpod-e2e/conan:2.34.0` and `pkgpod-e2e/conan:2.0.17`
   (`python:3.12-slim` with Conan from PyPI);
 - `pkgpod-e2e/swift:6.1` (`swift:6.1` with zip and unzip).
 
 The Maven tests keep the plugins they download in the docker volume
-`pkgpod-e2e-m2`. The tests of docker against the OCI registry run only
-when `docker info` succeeds, with or without `PKGPOD_REQUIRE_TOOLS`.
+`pkgpod-e2e-m2`, each test in a directory of its own there. The tests
+of docker against the OCI registry run only when `docker info`
+succeeds, with or without `PKGPOD_REQUIRE_TOOLS`.
 
 `crates/mirror/tests/apt_mirror.rs` runs apt in Debian and Ubuntu
 containers against a mirrored subset, only with `PKGPOD_E2E=1`.
