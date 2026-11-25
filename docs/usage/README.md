@@ -220,7 +220,10 @@ other OIDC issuer (GitLab, a Gitea or Forgejo runner) works with
 `--read-only` gives a token that only reads. In the console: Server,
 Trusted publishing.
 
-In the workflow, the job asks GitHub for its token and exchanges it:
+In the workflow, the job asks GitHub for its token and exchanges it.
+pkgpod's own action does all of it: it installs the `pkgpod` command
+from the server, logs in, and uploads (`action.yml` at the top of
+pkgpod's repository):
 
 ```yaml
 permissions:
@@ -228,10 +231,29 @@ permissions:
   contents: read
 steps:
   - uses: actions/checkout@v4
+  - uses: <owner>/pkgpod@master
+    with:
+      url: https://pkg.example.org
+      repository: ppa
+      files: dist/*.deb
+      params: dists=noble        # upload parameters, a line each
+      # path: master/${{ github.sha }}/   link: master/latest   (files)
+```
+
+Or by hand:
+
+```yaml
   - run: |
+      curl -fsSL https://pkg.example.org/cli/install.sh | sh
       pkgpod --url https://pkg.example.org login --oidc
       pkgpod upload ppa dist/*.deb -s dists=noble
 ```
+
+The server hands out its own binary as the command: `GET
+/cli/pkgpod`, with its version, platform and SHA-256 at `GET
+/api/v1/cli`; `/cli/install.sh` downloads it, checks the SHA-256 and
+puts it in `$PKGPOD_BIN` (default `~/.local/bin`). It is the server's
+platform only (a static build runs on any Linux of that architecture).
 
 `pkgpod login --oidc` asks the runner for a token made for the
 audience `pkgpod` (`--audience` otherwise; the rule names the same),

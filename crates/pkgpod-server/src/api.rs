@@ -308,6 +308,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/api/v1/trust", get(trust_rules).post(trust_put))
         .route("/api/v1/trust/{name}", delete(trust_delete))
         .route("/api/v1/oidc/token", post(oidc_token))
+        .route("/api/v1/cli", get(crate::cli_dl::cli_info))
         .route("/api/v1/listeners", get(listeners))
         .route(
             "/api/v1/listeners/{name}",

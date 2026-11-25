@@ -25,23 +25,23 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    env:
-      PKGPOD_URL: ${{ vars.PKGPOD_URL }}
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/build
         with:
           version: 0.0.0-ci
-      - name: Publish to pkgpod
-        run: |
-          set -euo pipefail
-          p=dist/pkgpod_0.0.0-ci_linux_x86_64
-          chmod +x "$p"
-          "$p" login --oidc
-          at="master/${GITHUB_SHA::7}/"
-          # One upload: the run's files are one version of the repository
-          # (one request: a CDN in front may limit its size, 100 MB at
-          # Cloudflare's free plan; this is about 66 MiB).
-          "$p" upload "${{ vars.PKGPOD_REPO }}" dist/*.deb dist/pkgpod_0.0.0-ci_linux_* \
-            dist/checksums.txt -s "path=$at" -s link=master/latest
-          echo "published to ${{ vars.PKGPOD_REPO }} at $at" >> "$GITHUB_STEP_SUMMARY"
+      - name: Where
+        id: at
+        run: echo "dir=master/${GITHUB_SHA::7}/" >> "$GITHUB_OUTPUT"
+      # The action in this repository: the pkgpod command from the server,
+      # the job's OIDC token, one upload (one version; one request, which a
+      # CDN in front may limit: 100 MB at Cloudflare's free plan, this is
+      # about 66 MiB).
+      - uses: ./
+        with:
+          url: ${{ vars.PKGPOD_URL }}
+          repository: ${{ vars.PKGPOD_REPO }}
+          files: dist/*.deb dist/pkgpod_0.0.0-ci_linux_* dist/checksums.txt
+          path: ${{ steps.at.outputs.dir }}
+          link: master/latest
+      - run: echo "published to ${{ vars.PKGPOD_REPO }} at ${{ steps.at.outputs.dir }}" >> "$GITHUB_STEP_SUMMARY"
