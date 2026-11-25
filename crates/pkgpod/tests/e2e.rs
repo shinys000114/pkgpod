@@ -3985,8 +3985,18 @@ fn group_of_pypi_repositories() {
     // Uploads go to a member.
     std::fs::create_dir_all(d.join("g")).unwrap();
     let f = make_dist(&d.join("g"), "new-pkg", "1.0", "wheel", "", 0);
-    let (st, _) = twine_upload(&s.url("/pyg/"), Some(("__token__", &w)), &f);
-    assert_ne!(st, 200);
+    let (st, body) = twine_upload(&s.url("/pyg/"), Some(("__token__", &w)), &f);
+    // Refused (the token cannot see the group), and answered: not a
+    // connection closed under the upload.
+    assert_eq!(st, 404, "{body}");
+    let gt2 = s
+        .cli(&["token", "create", "gw", "--repos", "pyg", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let (st, body) = twine_upload(&s.url("/pyg/"), Some(("__token__", &gt2)), &f);
+    assert_eq!(st, 405, "{body}");
+    assert!(body.contains("publish to its member"), "{body}");
 }
 
 /// A group of cargo registries with cargo.

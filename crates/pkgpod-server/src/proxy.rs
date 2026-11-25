@@ -954,6 +954,9 @@ pub async fn has_name(app: &Arc<App>, m: &Served, name: &str) -> bool {
 pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
     let r = at.served.repo.clone();
     if at.role.is_none() {
+        if !matches!(*req.method(), Method::GET | Method::HEAD) {
+            crate::serve::drain(req).await;
+        }
         return crate::serve::deny(&at.caller);
     }
     let method = req.method().clone();
@@ -962,6 +965,7 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
         if r.format == "npm" && at.rel.first().map(String::as_str) == Some("-") {
             return status(StatusCode::NOT_FOUND);
         }
+        crate::serve::drain(req).await;
         return text(
             StatusCode::METHOD_NOT_ALLOWED,
             format!(

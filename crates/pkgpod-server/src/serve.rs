@@ -247,6 +247,17 @@ pub(crate) fn client_note(st: StatusCode, text: String) -> Response {
         .into_response()
 }
 
+/// Reads (and drops) what a client sends with a request about to be
+/// refused, up to `DRAIN_BODY`: a refusal sent while the client is still
+/// uploading closes the connection under it, and the client then reports
+/// a reset instead of the refusal's reason.
+pub(crate) async fn drain(req: Request) {
+    let _ = axum::body::to_bytes(req.into_body(), DRAIN_BODY).await;
+}
+
+/// The most of a refused request's body read before answering.
+const DRAIN_BODY: usize = 16 << 20;
+
 pub(crate) fn status(s: StatusCode) -> Response {
     (s, s.canonical_reason().unwrap_or("")).into_response()
 }

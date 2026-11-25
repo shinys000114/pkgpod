@@ -216,6 +216,9 @@ async fn json_of(r: Response) -> Option<Value> {
 pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
     let g = at.served.repo.clone();
     if at.role.is_none() {
+        if !matches!(*req.method(), Method::GET | Method::HEAD) {
+            crate::serve::drain(req).await;
+        }
         return crate::serve::deny(&at.caller);
     }
     let method = req.method().clone();
@@ -228,6 +231,7 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
             .setting_list("members")
             .into_iter()
             .find(|m| app.engine.repo(m).is_ok_and(|r| r.kind.versioned()));
+        crate::serve::drain(req).await;
         return text(
             StatusCode::METHOD_NOT_ALLOWED,
             format!(
