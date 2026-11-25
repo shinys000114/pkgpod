@@ -100,6 +100,31 @@ wget -m -np -nH --cut-dirs=1 --user=token --password=<token> https://pkg.example
 `-u token:<token>` and `--user`, `--password` are not needed for a
 public repository. A labelled version: `https://pkg.example.org/tools/@<label>/<path>`.
 
+## Directory notes
+
+A directory's listing shows its `.HEADER.md` above the files and its
+`.FOOTER.md` below them, rendered from Markdown (CommonMark with tables,
+strikethrough, task lists and footnotes): what the directory holds, how
+to use it, a status table. Each directory has its own; a subdirectory
+does not inherit its parent's.
+
+```sh
+pkgpod upload tools HEADER.md -s path=.HEADER.md
+pkgpod upload tools monthly-notes.md -s path=monthly/.HEADER.md
+```
+
+- They are files of the repository like any other: each change is a
+  version, and a labelled version shows its own notes. They are left
+  out of the listing they are shown in, but can still be downloaded by
+  their address.
+- Raw HTML in them is shown as text, and links and images may only go
+  to relative, http(s) and mailto addresses (images also to inline
+  PNG, GIF, JPEG or WebP data); the listing page runs no script.
+- A note larger than 64 KiB is not rendered (it is listed as a file).
+- A files mirror shows the notes its upstream has (regular files in its
+  tree only). An HTTP-listing mirror of a pkgpod files repository does
+  not receive them, as they are not in the listing it reads.
+
 ## Mirrors
 
 A mirror copies a directory of a file server and serves it where it is
