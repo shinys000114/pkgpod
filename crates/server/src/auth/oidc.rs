@@ -498,8 +498,8 @@ impl Verifier {
         Ok(claims)
     }
 
-    /// Whether a token (by its issuer and what it signs) was exchanged
-    /// before; remembers it until it expires.
+    /// Whether a token (by its issuer and what it signs, or its jti) was
+    /// exchanged before; remembers it until it expires.
     fn used_before(&self, id: &str, exp: i64) -> bool {
         let now = pkgpod_base::now();
         let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
@@ -610,11 +610,18 @@ pub async fn exchange(app: &Arc<App>, jwt: &str, rule: Option<&str>) -> Result<V
         }
     };
     let exp = claims["exp"].as_i64().unwrap_or(0);
-    // By what is signed, not by the signature or a jti: a signature can
-    // be written in more than one way for the same token.
+    // By what is signed, not by the signature (it can be written in more
+    // than one way for the same token), and by its jti if it has one (the
+    // issuer's word that it is one token, whatever else differs).
     let signed = jwt.trim().rsplit_once('.').map_or("", |x| x.0);
     let id = pkgpod_base::digest::hex(&sha2::Sha256::digest(signed.as_bytes()));
-    if app.oidc.used_before(&format!("{iss} {id}"), exp) {
+    let mut ids = vec![format!("{iss} {id}")];
+    if let Some(j) = claims["jti"].as_str() {
+        ids.push(format!("{iss} jti {j}"));
+    }
+    // Every id is remembered, whichever was seen.
+    let seen: Vec<bool> = ids.iter().map(|i| app.oidc.used_before(i, exp)).collect();
+    if seen.contains(&true) {
         return Err(Error::Forbidden(
             "this OIDC token was exchanged already: ask the CI for a new one".into(),
         ));
