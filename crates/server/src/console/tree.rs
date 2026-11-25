@@ -10,6 +10,8 @@ pub struct TreeRow {
     /// The path as an address's end: each segment encoded (a#b, 50%).
     pub url: String,
     pub dir: bool,
+    /// A value a format keeps in its tree: no file to download.
+    pub value: bool,
     pub size: String,
     pub detail: String,
     /// A link: "dir" or "file" (where it leads, in this tree), "broken";
@@ -114,6 +116,7 @@ pub(crate) async fn tree_part(
                 },
                 to: s(&e["resolved"]),
                 dir: ty == "dir",
+                value: ty == "value",
                 size: e["size"]
                     .as_u64()
                     .map(crate::serving::human)
