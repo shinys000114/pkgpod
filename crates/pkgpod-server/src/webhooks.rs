@@ -167,7 +167,21 @@ pub fn put_hook(app: &App, mut h: Hook) -> Result<Hook> {
             EVENTS.join(", ")
         )));
     }
-    for r in &h.repos {
+    // Names it already had stay, a repository deleted since included
+    // (one made again by that name is sent for again).
+    let had: Vec<String> = app
+        .db
+        .read(|c| {
+            c.query_row(
+                "SELECT repos FROM webhooks WHERE name = ?1",
+                [&h.name],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+        })?
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    for r in h.repos.iter().filter(|r| !had.contains(r)) {
         app.engine
             .repo(r)
             .map_err(|_| Error::NotFound(format!("no repository {r:?}")))?;

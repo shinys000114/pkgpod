@@ -1,0 +1,32 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+{# A trust rule's form: on the Server page (any repositories, picked;
+   an existing name fills it), or on a repository's page (fixed_repo:
+   a new rule for it). #}
+<form hx-post="/c/trust" hx-target="next .result">
+  {% if !fixed_repo.is_empty() %}<input type="hidden" name="repos" value="{{ fixed_repo }}"><input type="hidden" name="new" value="1">{% endif %}
+  <div class="fields">
+    <label class="field"><span>Name</span><input{% if fixed_repo.is_empty() %} id="trust-name" data-prefill="{{ trust_prefill }}" list="dl-trust-names"{% endif %} name="name" required placeholder="release" autocomplete="off" autocapitalize="off" spellcheck="false">{% if fixed_repo.is_empty() %}<datalist id="dl-trust-names">{% for r in trust %}<option value="{{ r.name }}">{% endfor %}</datalist>{% endif %}<small>{% if fixed_repo.is_empty() %}The same name replaces a rule (picking one fills the form).{% else %}A new rule's name.{% endif %}</small></label>
+    <label class="field"><span>GitHub repository</span><input name="github" placeholder="owner/name" autocomplete="off" autocapitalize="off" spellcheck="false"><small>The repository whose Actions jobs are trusted.</small></label>
+    <label class="field"><span>Ref</span><input name="ref" placeholder="refs/tags/v*" autocomplete="off" spellcheck="false"><small>Branch or tag the job runs for; * matches the rest. Empty: any.</small></label>
+    <label class="field"><span>Workflow</span><input name="workflow" placeholder="release.yml" autocomplete="off" spellcheck="false"><small>Its file in .github/workflows. Empty: any.</small></label>
+    <label class="field"><span>Environment</span><input name="environment" placeholder="production" autocomplete="off" spellcheck="false"><small>A deployment environment the job must run in (its reviewers then guard publishing).</small></label>
+    <label class="field"><span>As user</span><select name="user" required>{% for u in trust_users %}<option>{{ u }}</option>{% endfor %}</select><small>Whose rights the token has, at most: a user for CI, with grants on the repositories.</small></label>
+    <label class="field"><span>Minutes</span><input name="minutes" type="number" min="1" max="60" value="15"><small>How long a token lasts.</small></label>
+    <label class="check field"><span class="check-line"><input type="checkbox" name="read_only"> <span>Read only</span></span><small>A token that reads (a private repository in a build).</small></label>
+    {% if fixed_repo.is_empty() %}
+    <fieldset class="field wide repo-pick"><span>Repositories</span>
+      <div class="pick-list">{% for r in repo_names %}<label class="check-line"><input type="checkbox" name="repos" value="{{ r }}"> <span>{{ r }}</span></label>{% endfor %}</div>
+      <small>The tokens are for these only.</small>
+    </fieldset>
+    {% endif %}
+  </div>
+  <details class="more"><summary>Another CI (any OIDC issuer)</summary>
+  <div class="fields">
+    <label class="field"><span>Issuer</span><input name="issuer" placeholder="https://gitlab.example.org" autocomplete="off" spellcheck="false"><small>Empty: GitHub Actions'.</small></label>
+    <label class="field"><span>Audience</span><input name="audience" placeholder="pkgpod" autocomplete="off" spellcheck="false"><small>What the job asks its token for.</small></label>
+    <label class="field wide"><span>Claims</span><textarea name="claims" rows="3" spellcheck="false" placeholder="project_path=team/app&#10;ref_protected=true"></textarea><small>A claim=pattern a line; all must match.</small></label>
+  </div>
+  </details>
+  <div class="form-foot"><button type="submit">Save rule</button></div>
+</form>
+<div class="result"></div>

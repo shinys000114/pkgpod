@@ -81,8 +81,15 @@
     el.dataset.filled = el.value;
     Object.keys(vals).forEach(function (k) {
       var f = el.form && el.form.elements[k];
-      if (!f || f === el || f.length !== undefined && !f.tagName) return;
       var v = vals[k];
+      // Checkboxes of one name: those whose values are listed.
+      if (f && f.length !== undefined && !f.tagName && Array.isArray(v)) {
+        Array.prototype.forEach.call(f, function (box) {
+          if (box.type === "checkbox") box.checked = v.indexOf(box.value) >= 0;
+        });
+        return;
+      }
+      if (!f || f === el || f.length !== undefined && !f.tagName) return;
       if (f.type === "checkbox") {
         f.checked = v === true;
       } else if (Array.isArray(v)) {
