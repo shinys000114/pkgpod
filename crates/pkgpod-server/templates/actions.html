@@ -11,7 +11,7 @@
 {% endif %}
 {% if can_write %}
 {% if format != "oci" && format != "npm" %}
-<details class="card panel">
+<details class="card panel" open>
   <summary>Upload <span class="hint">files into the repository; each upload is a version</span></summary>
   <div class="panel-body">
   <form class="upload-form" hx-post="/c/r/{{ name }}/upload" hx-encoding="multipart/form-data" hx-target="next .result">
@@ -23,8 +23,11 @@
   </div>
 </details>
 {% endif %}
+{% if !ops.is_empty() %}
+<div class="card ops">
+<div class="card-head"><h2>Change</h2><span class="hint">each is shown as a plan first, applied when you confirm it</span></div>
 {% for o in ops %}
-<details class="card panel">
+<details class="panel">
   <summary>{{ o.title }} <code class="op-id">{{ o.name }}</code>{% if !o.help.is_empty() %} <span class="hint">{{ o.help }}</span>{% endif %}</summary>
   <div class="panel-body">
   <form hx-post="/c/r/{{ name }}/ops/{{ o.name }}" hx-target="next .result" data-sparse>
@@ -35,8 +38,13 @@
   </div>
 </details>
 {% endfor %}
+</div>
+{% endif %}
+{% if format == "deb" || format == "oci" || format == "files" || !other_repos.is_empty() %}
+<div class="card">
+<div class="card-head"><h2>Import and promote</h2><span class="hint">from elsewhere into here, from here into another repository</span></div>
 {% if format == "deb" %}
-<details class="card panel">
+<details class="panel">
   <summary>Import <span class="hint">take in an existing apt repository (aptly, reprepro, another server) as one version</span></summary>
   <div class="panel-body">
   <form hx-post="/c/r/{{ name }}/import" hx-target="next .result">
@@ -57,7 +65,7 @@
 </details>
 {% endif %}
 {% if format == "oci" %}
-<details class="card panel">
+<details class="panel">
   <summary>Import <span class="hint">take chosen images in from another registry as one version</span></summary>
   <div class="panel-body">
   <form hx-post="/c/r/{{ name }}/import" hx-target="next .result">
@@ -77,7 +85,7 @@
 </details>
 {% endif %}
 {% if format == "files" %}
-<details class="card panel">
+<details class="panel">
   <summary>Import <span class="hint">take in a tree from a file server (rsync, HTTP listings) or the server's disk as one version</span></summary>
   <div class="panel-body">
   <form hx-post="/c/r/{{ name }}/import" hx-target="next .result">
@@ -95,7 +103,7 @@
 </details>
 {% endif %}
 {% if !other_repos.is_empty() %}
-<details class="card panel">
+<details class="panel">
   <summary>Promote <span class="hint">copy paths of this repository into another of the same format</span></summary>
   <div class="panel-body">
   <form hx-post="/c/r/{{ name }}/promote" hx-target="next .result">
@@ -109,6 +117,8 @@
   <div class="result"></div>
   </div>
 </details>
+{% endif %}
+</div>
 {% endif %}
 {% endif %}
 {% if !mirror && !can_write %}<p class="empty">Changing this repository needs write access.</p>{% endif %}

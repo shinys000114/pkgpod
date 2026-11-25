@@ -9,18 +9,26 @@
   </div>
   <div id="pkg-detail"></div>
 {% endif %}
-  {% if rows.is_empty() %}<p class="empty">{% if !q.is_empty() || !at.is_empty() %}Nothing matches.{% else %}Nothing here yet{% if !show_repo %}: see How to use for uploading{% endif %}.{% endif %}</p>{% else %}
+  {% if groups.is_empty() %}<p class="empty">{% if !q.is_empty() || !at.is_empty() %}Nothing matches.{% else %}Nothing here yet{% if !show_repo %}: see How to use for uploading{% endif %}.{% endif %}</p>{% else %}
   <form id="pkg-pick" hx-target="#pkg-result">
-  <div class="table-wrap"><table class="sortable">
+  <div class="table-wrap"><table class="{% if grouped %}pkg-groups{% else %}sortable{% endif %}">
     <thead><tr>{% if can_write %}<th class="pick"><input type="checkbox" class="pick-all" aria-label="choose all"></th>{% endif %}{% if show_repo %}<th>Repository</th>{% endif %}<th>{{ cols[0] }}</th><th>{{ cols[1] }}</th><th>{{ cols[2] }}</th>{% if show_size %}<th class="num">Size</th>{% endif %}{% if show_downloads %}<th class="num" title="Downloads in the last 30 days">Downloads</th>{% endif %}<th></th></tr></thead>
-    <tbody>
-    {% for r in rows %}<tr>
+    {% for g in groups %}
+    <tbody class="pkg-group{% if !q.is_empty() || !at.is_empty() %} open{% endif %}">
+    {% if g.rows.len() > 1 %}<tr class="pkg-sum">
+      {% if can_write %}<td class="pick"><input type="checkbox" class="pick-group" aria-label="choose every file of {{ g.name }}"></td>{% endif %}
+      {% if show_repo %}<td></td>{% endif %}
+      <td><button type="button" class="link pkg-toggle" aria-expanded="false"><span class="caret" aria-hidden="true"></span><b>{{ g.name }}</b></button></td>
+      <td class="muted">{{ g.versions }} version{% if g.versions != 1 %}s{% endif %}</td><td class="muted">{{ g.rows.len() }} files</td>{% if show_size %}<td class="num muted">{{ g.size }}</td>{% endif %}{% if show_downloads %}<td class="num muted">{{ g.downloads }}</td>{% endif %}<td></td>
+    </tr>{% endif %}
+    {% for r in g.rows %}<tr{% if g.rows.len() > 1 %} class="pkg-child"{% endif %}>
       {% if can_write %}<td class="pick"><input type="checkbox" name="path" value="{{ r.path }}" aria-label="choose {{ r.name }} {{ r.version }}"></td>{% endif %}
       {% if show_repo %}<td><a href="/r/{{ r.repo }}">{{ r.repo }}</a></td>{% endif %}
-      <td>{% if show_repo %}<b>{{ r.name }}</b>{% else %}<button type="button" class="link pkg-name" hx-get="/r/{{ repo }}/pkg?path={{ r.file|urlencode }}" hx-target="#pkg-detail" title="Details">{{ r.name }}</button>{% endif %}</td><td class="mono wrap">{{ r.version }}</td><td class="muted mono-wrap">{{ r.extra }}</td>{% if show_size %}<td class="num" data-sort="{{ r.size }}">{{ r.size }}</td>{% endif %}{% if show_downloads %}<td class="num">{{ r.downloads }}</td>{% endif %}
+      <td class="name-cell">{% if show_repo %}<b>{{ r.name }}</b>{% else %}<button type="button" class="link pkg-name" hx-get="/r/{{ repo }}/pkg?path={{ r.file|urlencode }}" hx-target="#pkg-detail" title="Details">{{ r.name }}</button>{% endif %}</td><td class="mono wrap">{{ r.version }}</td><td class="muted mono-wrap">{{ r.extra }}</td>{% if show_size %}<td class="num" data-sort="{{ r.bytes }}">{{ r.size }}</td>{% endif %}{% if show_downloads %}<td class="num">{{ r.downloads }}</td>{% endif %}
       <td class="acts nowrap"><a href="/r/{% if show_repo %}{{ r.repo }}{% else %}{{ repo }}{% endif %}/file?path={{ r.file|urlencode }}" download title="Download">download</a></td>
     </tr>{% endfor %}
     </tbody>
+    {% endfor %}
   </table></div>
   {% if can_write %}
   <div class="card-body bulk">
@@ -31,7 +39,7 @@
   </div>
   {% endif %}
   </form>
-  {% if limit_hit %}<p class="muted card-body">Only the first {{ rows.len() }} are shown; narrow the filter.</p>{% endif %}
+  {% if limit_hit %}<p class="muted card-body">Only the first {{ total }} are shown; narrow the filter.</p>{% endif %}
   {% endif %}
 {% if !show_repo %}
   <div id="pkg-result" class="card-body results"></div>

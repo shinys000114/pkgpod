@@ -12693,6 +12693,16 @@ fn console_packages_filter_download_details_bulk() {
         "{fc}"
     );
     assert!(text("/r/r/packages").contains("<option>fc43 (x86_64)</option>"));
+    // A name with several files is folded under one row, which chooses
+    // them all; one with a single file is a row of its own.
+    let all = text("/r/r/packages");
+    assert!(
+        all.contains(r#"<tr class="pkg-sum">"#)
+            && all.contains(r#"aria-label="choose every file of hello-rpm""#)
+            && all.contains("2 versions")
+            && !all.contains("choose every file of tool-rpm"),
+        "{all}"
+    );
     // Downloaded through the console, as an attachment.
     let (st, cd, body) = page("/r/r/file?path=el9%2Fhello-rpm-1.0-1.noarch.rpm");
     assert_eq!(st, 200);

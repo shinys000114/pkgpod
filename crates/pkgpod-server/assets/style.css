@@ -634,3 +634,11 @@ table.repos details.addr-more > summary { cursor: pointer; color: var(--muted); 
 table.repos details.addr-more > span { display: block; overflow-wrap: break-word; }
 fieldset.settings-group { border: 0; padding: 0; margin: 0 0 1.2rem; }
 fieldset.settings-group > legend { font-weight: 650; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); padding: 0 0 .5rem; border-bottom: 1px solid var(--line); width: 100%; margin-bottom: .6rem; }
+
+/* Packages folded by name */
+table.pkg-groups tbody.pkg-group:not(.open) tr.pkg-child { display: none; }
+table.pkg-groups tr.pkg-child td.name-cell .pkg-name { padding-left: 1.1rem; font-weight: 400; color: var(--muted); }
+table.pkg-groups .pkg-toggle { display: inline-flex; align-items: center; gap: .4rem; }
+table.pkg-groups .pkg-toggle .caret { width: 6px; height: 6px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(-45deg); transition: transform .15s; }
+table.pkg-groups tbody.open .pkg-toggle .caret { transform: rotate(45deg); }
+table.pkg-groups tbody.pkg-group + tbody.pkg-group { border-top: 1px solid var(--line); }

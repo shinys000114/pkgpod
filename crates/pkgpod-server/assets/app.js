@@ -244,7 +244,14 @@
     var form = ev.target.closest && ev.target.closest("#pkg-pick");
     if (!form) return;
     if (ev.target.classList.contains("pick-all")) {
-      form.querySelectorAll("input[name=path]").forEach(function (c) {
+      form.querySelectorAll("input[name=path], input.pick-group").forEach(function (c) {
+        c.checked = ev.target.checked;
+      });
+    }
+    // A package's row: every file of it.
+    if (ev.target.classList.contains("pick-group")) {
+      var body = ev.target.closest("tbody");
+      body.querySelectorAll("input[name=path]").forEach(function (c) {
         c.checked = ev.target.checked;
       });
     }
@@ -422,6 +429,14 @@
     var th = ev.target.closest("table.sortable th");
     if (th && !th.classList.contains("pick")) {
       sortBy(th);
+      return;
+    }
+    // A package's files, folded under its name.
+    var toggle = ev.target.closest("button.pkg-toggle");
+    if (toggle) {
+      var group = toggle.closest("tbody");
+      var open = group.classList.toggle("open");
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
       return;
     }
     // "change…" on a row: its name into the form, which fills the rest.
