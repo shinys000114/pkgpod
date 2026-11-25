@@ -161,6 +161,26 @@ pub fn parse_pkginfo(text: &str) -> BTreeMap<String, Vec<String>> {
     m
 }
 
+/// The checksum an APKINDEX gives a package (`C:`): `Q1` and the base64
+/// SHA-1 of its control part, the gzip stream after the signature's.
+pub fn control_checksum(data: &[u8]) -> Result<String> {
+    let mut at = 0;
+    while at < data.len() {
+        let (tar, used) = gzip_member(&data[at..], MAX_CONTROL)?;
+        let files = tar_files(&tar)?;
+        if !files.is_empty() && files.iter().all(|(n, _)| n.starts_with(".SIGN.")) {
+            at += used;
+            continue;
+        }
+        return Ok(format!(
+            "Q1{}",
+            base64::engine::general_purpose::STANDARD
+                .encode(sha1::Sha1::digest(&data[at..at + used]))
+        ));
+    }
+    Err(invalid("the package has no control part"))
+}
+
 /// Reads an apk (v2: gzip streams of an optional signature, the control
 /// part with .PKGINFO, the data): its name, version, arch and APKINDEX
 /// stanza. A `datahash` in .PKGINFO must match the data part.
@@ -328,10 +348,50 @@ impl Format for Apk {
     }
 
     fn kinds(&self) -> &'static [Kind] {
-        &[Kind::Hosted]
+        &[Kind::Hosted, Kind::Mirror]
     }
 
-    fn settings(&self, _kind: Kind) -> Vec<Field> {
+    fn check_settings(&self, kind: Kind, settings: &Value) -> Result<()> {
+        if kind != Kind::Mirror {
+            return Ok(());
+        }
+        let source = pkgpod_engine::settings::check_mirror_source(settings)?;
+        let list = |k: &str| -> Vec<String> {
+            settings[k]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        };
+        for k in ["branches", "repos", "architectures"] {
+            for v in list(k) {
+                check_place(k, &v)?;
+            }
+            if source.starts_with("http") && list(k).is_empty() {
+                return Err(invalid(
+                    "an http(s) source needs the branches, repositories and architectures to mirror (an rsync one takes the whole tree)",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn settings(&self, kind: Kind) -> Vec<Field> {
+        if kind == Kind::Mirror {
+            let mut v = vec![
+                Field::text(
+                    "source",
+                    "",
+                    "The upstream: http(s)://dl-cdn.alpinelinux.org/alpine/ (its indexes below are followed: packages and indexes) or rsync://host/alpine/ (the whole tree, releases too).",
+                ),
+                Field::list("branches", "Branches to mirror (http): v3.22, edge."),
+                Field::list("repos", "Repositories (http): main, community."),
+                Field::list("architectures", "Architectures (http): x86_64, aarch64."),
+            ];
+            v.extend(pkgpod_engine::settings::mirror_common());
+            return v;
+        }
         vec![Field::list(
             "architectures",
             "Architectures that get an index in every branch and repository (noarch packages are in each); empty: x86_64, aarch64.",
@@ -613,6 +673,12 @@ mod tests {
         );
         assert_eq!(p.file_name(), "hello-1.0-r0.apk");
         assert!(p.stanza.starts_with("C:Q1"), "{}", p.stanza);
+        let c = control_checksum(&a).unwrap();
+        assert!(
+            p.stanza.starts_with(&format!("C:{c}\n")),
+            "{c} {}",
+            p.stanza
+        );
         assert!(p.stanza.contains(&format!("\nS:{}\n", a.len())));
         assert!(p.stanza.contains("\nD:/bin/sh so:libc.musl-x86_64.so.1"));
         assert_eq!(Package::from_json(&p.to_json()).unwrap(), p);

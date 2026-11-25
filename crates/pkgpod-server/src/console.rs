@@ -1058,6 +1058,9 @@ async fn new_repo_page(State(app): St, v: Viewer, headers: HeaderMap) -> Result<
                         ("rpm", Kind::Mirror) => {
                             "follow dnf repositories (Rocky, Alma, EPEL, Fedora); served as received"
                         }
+                        ("apk", Kind::Mirror) => {
+                            "follow an Alpine mirror (branches, main, community); served as received"
+                        }
                         ("arch", Kind::Mirror) => {
                             "follow an Arch Linux (or Arch Linux ARM) mirror; served as received"
                         }
@@ -2142,6 +2145,35 @@ fn usage(
         out.push(UseLine {
             label: "A labelled version".into(),
             text: format!("{base}@<label>/index.json   (read-only)"),
+        });
+        return out;
+    }
+    if r.format == "apk" && r.kind == Kind::Mirror {
+        let src = if r.setting_bool("public") {
+            base.clone()
+        } else {
+            let (scheme, rest) = base.split_once("://").unwrap_or(("https", &base));
+            format!("{scheme}://token:<token>@{rest}")
+        };
+        let mut lines = Vec::new();
+        for b in r.setting_list("branches") {
+            for repo in r.setting_list("repos") {
+                lines.push(format!("{src}{b}/{repo}"));
+            }
+        }
+        if lines.is_empty() {
+            lines.push(format!("{src}<branch>/<repository>"));
+        }
+        out.push(UseLine {
+            label: "/etc/apk/repositories".into(),
+            text: format!(
+                "{}\n# the index is upstream's, signed with Alpine's keys (in /etc/apk/keys)",
+                lines.join("\n")
+            ),
+        });
+        out.push(UseLine {
+            label: "Install".into(),
+            text: "apk update && apk add <package>".into(),
         });
         return out;
     }
