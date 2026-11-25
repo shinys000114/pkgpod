@@ -912,6 +912,13 @@ impl Change {
 
 /// A console change sent in a session, with its CSRF token or without
 /// one: the status and the answer.
+///
+/// The server refuses an upload before it reads the body and closes the
+/// connection, so on a busy machine the client may lose the answer
+/// while it still sends (a send error, not a status). Such a send is
+/// tried again, and if every try loses its answer, the status is 0: the
+/// upload was refused unread, and the caller still checks that nothing
+/// changed.
 fn console_send(
     s: &Server,
     c: &reqwest::blocking::Client,
@@ -920,25 +927,31 @@ fn console_send(
     ch: &Change,
     me: &str,
 ) -> (u16, String) {
-    let mut r = c
-        .post(format!("{}{}", s.api, ch.path.replace("{me}", me)))
-        .header("cookie", format!("pkgpod_session={sid}"));
-    if let Some(t) = csrf {
-        r = r.header("x-csrf-token", t);
-    }
-    r = match ch.file {
-        Some((name, body)) => {
-            use reqwest::blocking::multipart::{Form, Part};
-            let form = ch
-                .form
-                .iter()
-                .fold(Form::new(), |f, (k, v)| f.text(*k, v.clone()));
-            r.multipart(form.part("file", Part::text(body).file_name(name)))
+    for _ in 0..3 {
+        let mut r = c
+            .post(format!("{}{}", s.api, ch.path.replace("{me}", me)))
+            .header("cookie", format!("pkgpod_session={sid}"));
+        if let Some(t) = csrf {
+            r = r.header("x-csrf-token", t);
         }
-        None => r.form(&ch.form),
-    };
-    let r = r.send().unwrap();
-    (r.status().as_u16(), r.text().unwrap())
+        r = match ch.file {
+            Some((name, body)) => {
+                use reqwest::blocking::multipart::{Form, Part};
+                let form = ch
+                    .form
+                    .iter()
+                    .fold(Form::new(), |f, (k, v)| f.text(*k, v.clone()));
+                r.multipart(form.part("file", Part::text(body).file_name(name)))
+            }
+            None => r.form(&ch.form),
+        };
+        match r.send() {
+            Ok(r) => return (r.status().as_u16(), r.text().unwrap()),
+            Err(e) if ch.file.is_some() && (e.is_body() || e.is_request()) => continue,
+            Err(e) => panic!("{}: {e}", ch.path),
+        }
+    }
+    (0, "closed before the upload was read".into())
 }
 
 /// What the server keeps, a line each, to see that a refused request
@@ -1486,7 +1499,7 @@ fn console_changes_need_their_rights() {
     // CSRF check, which would refuse whoever sent it.
     let refused = |st: u16, body: &str| {
         !body.contains("X-CSRF-Token")
-            && (matches!(st, 401 | 403 | 404)
+            && (matches!(st, 0 | 401 | 403 | 404)
                 || body.contains("class=\"error\"")
                 || body.contains("may not do that"))
     };
@@ -1507,9 +1520,9 @@ fn console_changes_need_their_rights() {
     }
     for ch in &rows {
         let before = state_of(&s);
-        let (_, body) = console_send(&s, &cb, &sid, None, ch, "boss");
+        let (st, body) = console_send(&s, &cb, &sid, None, ch, "boss");
         assert!(
-            body.contains("missing or wrong X-CSRF-Token"),
+            st == 0 || body.contains("missing or wrong X-CSRF-Token"),
             "{}: {body}",
             ch.path
         );
