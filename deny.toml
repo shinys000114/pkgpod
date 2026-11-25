@@ -18,6 +18,12 @@ ignore = [
     # never to decrypt, and signs when a repository changes, not for each
     # request; for OIDC tokens it only verifies.
     { id = "RUSTSEC-2023-0071", reason = "no fixed rsa release; RSA private keys only sign pkgpod's own indexes, nothing is decrypted" },
+    # Timing leaks in crypto-bigint 0.5, fixed in 0.7, which pgp 0.21 cannot
+    # take yet (through cx448 and elliptic-curve). It is reached only with
+    # an imported NIST-curve or X448/Ed448 OpenPGP key (pkgpod makes Ed25519
+    # keys), which then signs a dist when a repository changes: not for each
+    # request, and nothing is decrypted.
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 is held by pgp 0.21; reached only when an imported ECDSA/Ed448 key signs a changed repository's index" },
 ]
 
 [licenses]
