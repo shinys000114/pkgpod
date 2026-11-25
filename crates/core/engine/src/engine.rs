@@ -396,7 +396,7 @@ impl Engine {
                 ))
             }),
             Kind::Group | Kind::Proxy => Ok(()),
-            Kind::Hosted | Kind::Import => self
+            Kind::Hosted => self
                 .commit(
                     &repo,
                     None,

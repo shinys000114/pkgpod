@@ -35,14 +35,16 @@ fn yes() -> bool {
     true
 }
 
-/// A running listener: its configuration, stop signal and generation.
-type Task = (Listener, watch::Sender<bool>, u64);
+/// A running listener: its configuration, stop signal, generation and
+/// whether it listens yet (it may wait for its address).
+type Task = (Listener, watch::Sender<bool>, u64, bool);
 
 /// The listener tasks running now.
 #[derive(Default)]
 pub struct Running {
-    /// By name: the configuration, the stop signal, and the task's
-    /// generation (a task that ends tells only on its own behalf).
+    /// By name: the configuration, the stop signal, the task's
+    /// generation (a task that ends tells only on its own behalf), and
+    /// whether it listens.
     tasks: Mutex<HashMap<String, Task>>,
     /// The tasks of listeners told to stop, until they have drained.
     handles: Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -59,11 +61,23 @@ impl Running {
             .cloned()
     }
 
+    /// Whether a listener listens on its address.
     pub fn is_running(&self, name: &str) -> bool {
         self.tasks
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .contains_key(name)
+            .get(name)
+            .is_some_and(|t| t.3)
+    }
+
+    /// Whether a listener is started but does not listen yet: its
+    /// address may be held a while (one moving off it), or for good.
+    pub fn is_starting(&self, name: &str) -> bool {
+        self.tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(name)
+            .is_some_and(|t| !t.3)
     }
 }
 
@@ -151,7 +165,7 @@ pub fn reconcile(app: &Arc<App>) {
         .tasks
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    tasks.retain(|name, (cfg, stop, _)| {
+    tasks.retain(|name, (cfg, stop, ..)| {
         let keep = want.iter().any(|w| w == cfg && w.enabled);
         if !keep {
             tracing::info!("listener {name}: stopping");
@@ -166,7 +180,7 @@ pub fn reconcile(app: &Arc<App>) {
         let (tx, rx) = watch::channel(false);
         static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        tasks.insert(l.name.clone(), (l.clone(), tx, generation));
+        tasks.insert(l.name.clone(), (l.clone(), tx, generation, false));
         let app2 = app.clone();
         let h = tokio::spawn(async move {
             let name = l.name.clone();
@@ -187,12 +201,13 @@ pub fn reconcile(app: &Arc<App>) {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&name);
-            if let Err(e) = serve_router(
+            if let Err(e) = serve(
                 &format!("listener {}: serving", l.name),
                 &l.addr,
                 tls,
                 router,
                 rx,
+                || listening(&app2, &name, generation),
             )
             .await
             {
@@ -206,6 +221,19 @@ pub fn reconcile(app: &Arc<App>) {
             .unwrap_or_else(|e| e.into_inner());
         hs.retain(|h| !h.is_finished());
         hs.push(h);
+    }
+}
+
+/// A listener task of `generation` listens: unless the listener has
+/// been started anew since (as in [`fail`]).
+fn listening(app: &App, name: &str, generation: u64) {
+    let mut tasks = app
+        .listeners
+        .tasks
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(t) = tasks.get_mut(name).filter(|t| t.2 == generation) {
+        t.3 = true;
     }
 }
 
@@ -234,7 +262,7 @@ fn fail(app: &App, name: &str, generation: u64, e: String) {
 /// Tells every listener to stop; returns their tasks, which end once
 /// the requests in flight are answered.
 pub fn stop_all(app: &App) -> Vec<tokio::task::JoinHandle<()>> {
-    for (_, (_, stop, _)) in app
+    for (_, (_, stop, ..)) in app
         .listeners
         .tasks
         .lock()
@@ -306,6 +334,18 @@ pub async fn serve_router(
     router: Router,
     stop: watch::Receiver<bool>,
 ) -> Result<(), String> {
+    serve(what, addr, tls, router, stop, || {}).await
+}
+
+/// [`serve_router`], calling `listening` once `addr` is bound.
+async fn serve(
+    what: &str,
+    addr: &str,
+    tls: Option<tokio_rustls::TlsAcceptor>,
+    router: Router,
+    stop: watch::Receiver<bool>,
+    listening: impl FnOnce(),
+) -> Result<(), String> {
     let listener = bind(addr, &stop).await.map_err(|e| {
         if !e.ends_with("another program has that address") {
             e
@@ -315,6 +355,7 @@ pub async fn serve_router(
             format!("{e} (choose another with pkgpod listener set)")
         }
     })?;
+    listening();
     tracing::info!(
         "{what} on {}{}",
         listener
@@ -545,6 +586,19 @@ pub fn tls_acceptor(cert: &Path, key: &Path) -> Result<tokio_rustls::TlsAcceptor
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
 }
 
+/// Whether listening on `a` would take the port of one listening on
+/// `b`: the same address, or an unspecified one that covers the other.
+/// [`bind`] leaves IPV6_V6ONLY as the system has it, off on Linux, so
+/// `[::]` takes IPv4 too, while `0.0.0.0` takes only IPv4 (and does not
+/// clash with `[::1]`). A mapped address is its IPv4 one.
+pub fn clash(a: std::net::SocketAddr, b: std::net::SocketAddr) -> bool {
+    let covers = |x: std::net::IpAddr, y: std::net::IpAddr| {
+        x == y || (x.is_unspecified() && (x.is_ipv6() || y.is_ipv4()))
+    };
+    let (x, y) = (a.ip().to_canonical(), b.ip().to_canonical());
+    a.port() == b.port() && (covers(x, y) || covers(y, x))
+}
+
 /// Paths a listener names, for checks.
 pub fn files(l: &Listener) -> Vec<PathBuf> {
     [&l.cert, &l.key]
@@ -736,6 +790,28 @@ mod tests {
             let r = c.get(format!("http://{a}/{path}")).send().await.unwrap();
             assert_eq!(r.version(), reqwest::Version::HTTP_2);
             assert_eq!(r.text().await.unwrap(), want);
+        }
+    }
+
+    #[test]
+    fn addresses_clash_as_binding_them_does() {
+        // As Linux binds them (IPV6_V6ONLY off): [::] takes IPv4 too,
+        // 0.0.0.0 only IPv4; a mapped address is its IPv4 one.
+        for (a, b, clashes) in [
+            ("0.0.0.0:80", "[::1]:80", false),
+            ("127.0.0.1:80", "[::1]:80", false),
+            ("0.0.0.0:80", "0.0.0.0:81", false),
+            ("10.0.0.1:80", "10.0.0.2:80", false),
+            ("127.0.0.1:80", "127.0.0.1:80", true),
+            ("0.0.0.0:80", "127.0.0.1:80", true),
+            ("[::]:80", "127.0.0.1:80", true),
+            ("[::]:80", "0.0.0.0:80", true),
+            ("[::]:80", "[::1]:80", true),
+            ("[::ffff:127.0.0.1]:80", "127.0.0.1:80", true),
+        ] {
+            let (a, b) = (a.parse().unwrap(), b.parse().unwrap());
+            assert_eq!(clash(a, b), clashes, "{a} {b}");
+            assert_eq!(clash(b, a), clashes, "{b} {a}");
         }
     }
 

@@ -53,10 +53,8 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
-    /// Filled by uploads and operations; versioned.
+    /// Filled by uploads and operations (and imports); versioned.
     Hosted,
-    /// Copied once from an upstream, then like hosted; versioned.
-    Import,
     /// Follows an upstream; its received tree is served in place, with
     /// no versions.
     Mirror,
@@ -72,7 +70,6 @@ impl Kind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Kind::Hosted => "hosted",
-            Kind::Import => "import",
             Kind::Mirror => "mirror",
             Kind::Group => "group",
             Kind::Proxy => "proxy",
@@ -82,13 +79,12 @@ impl Kind {
     pub fn parse(s: &str) -> Result<Kind> {
         Ok(match s {
             "hosted" => Kind::Hosted,
-            "import" => Kind::Import,
             "mirror" => Kind::Mirror,
             "group" => Kind::Group,
             "proxy" => Kind::Proxy,
             _ => {
                 return Err(Error::Invalid(format!(
-                    "unknown repository kind {s:?}: hosted, import, mirror, group or proxy"
+                    "unknown repository kind {s:?}: hosted, mirror, group or proxy"
                 )));
             }
         })
@@ -131,5 +127,23 @@ pub fn check_label(s: &str) -> Result<()> {
         Err(Error::Invalid(format!(
             "label {s:?}: use letters, digits, '.', '_', '-' and '+', starting with a letter or digit"
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kinds_are_those_a_format_can_offer() {
+        for k in [Kind::Hosted, Kind::Mirror, Kind::Group, Kind::Proxy] {
+            assert_eq!(Kind::parse(k.as_str()).unwrap(), k);
+            let v = serde_json::to_value(k).unwrap();
+            assert_eq!(serde_json::from_value::<Kind>(v).unwrap(), k);
+        }
+        // Imports are jobs that fill a hosted repository, not a kind.
+        let e = Kind::parse("import").unwrap_err().to_string();
+        assert!(!e.contains("import,"), "{e}");
+        assert!(serde_json::from_value::<Kind>(serde_json::json!("import")).is_err());
     }
 }

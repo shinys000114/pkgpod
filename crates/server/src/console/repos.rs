@@ -112,7 +112,6 @@ pub struct KindChoices {
 pub(crate) fn kind_rank(kind: &str) -> u8 {
     match kind {
         "hosted" => 0,
-        "import" => 1,
         "mirror" => 2,
         "proxy" => 3,
         _ => 4,
@@ -125,7 +124,6 @@ pub(crate) fn kind_words(kind: &str) -> (&'static str, &'static str) {
             "Your own packages",
             "uploaded by you and your CI; every change a version",
         ),
-        "import" => ("Imported", "copied once from elsewhere, then yours"),
         "mirror" => (
             "Mirrors",
             "follow an upstream archive or file server, served as received",
