@@ -407,8 +407,9 @@ pkgpod import images https://registry.example.org --image team/app:1.0 --platfor
 ## The web console
 
 The console is at the management listener's `/`. Its home page lists
-the repositories you may read; server admins make new ones there (New
-repository: a format and kind, a name, then the settings). Search finds
+the repositories you may read, found by name, format or kind; server
+admins make new ones from its New repository page (a format and kind, a
+name, then the settings). Search finds
 packages across repositories. Schedules shows every mirror's schedule
 on one page, with the syncs of the next day (see
 [operations](../operations.md#scheduled-mirror-syncs)). Account holds

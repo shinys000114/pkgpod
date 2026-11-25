@@ -256,6 +256,7 @@
   function filterRepos() {
     var q = document.getElementById("repo-q");
     var f = document.getElementById("repo-format");
+    var k = document.getElementById("repo-kind");
     if (!q || !f) return;
     var words = q.value.toLowerCase().split(/\s+/).filter(Boolean);
     var shown = 0, all = 0;
@@ -263,6 +264,7 @@
       all++;
       var text = (tr.getAttribute("data-find") || "").toLowerCase();
       var ok = (!f.value || tr.getAttribute("data-format") === f.value) &&
+        (!k || !k.value || tr.getAttribute("data-kind") === k.value) &&
         words.every(function (w) { return text.indexOf(w) >= 0; });
       tr.hidden = !ok;
       if (ok) shown++;
@@ -273,7 +275,7 @@
     if (c) c.textContent = shown === all ? "" : shown + " of " + all;
   }
   document.addEventListener("input", function (ev) {
-    if (ev.target.id === "repo-q" || ev.target.id === "repo-format") filterRepos();
+    if (ev.target.id === "repo-q" || ev.target.id === "repo-format" || ev.target.id === "repo-kind") filterRepos();
   });
   // Mirrors' sync states on the list follow the jobs: every 10 s while
   // one runs, every minute otherwise, not while the tab is hidden. Only
@@ -319,7 +321,7 @@
     later();
   });
   document.addEventListener("change", function (ev) {
-    if (ev.target.id === "repo-format") filterRepos();
+    if (ev.target.id === "repo-format" || ev.target.id === "repo-kind") filterRepos();
   });
   // Files dropped on an upload form, listed; its progress while sent.
   function listFiles(input) {
