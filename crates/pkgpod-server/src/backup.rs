@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Backup and restore of a server's data: the database (a consistent
-//! copy, taken first), the server's signing keys (OpenPGP and RSA), every
+//! copy, taken first), the server's signing keys (OpenPGP and RSA), the
+//! jobs' logs, every
 //! storage's content store, and with `mirrors` the mirrors' received
 //! trees (which can otherwise be synced again).
 //!
@@ -156,6 +157,14 @@ pub fn backup(app: &App, to: &Path, mirrors: bool, log: &mut dyn FnMut(&str)) ->
         }
     }
     log("signing keys copied");
+    // Jobs' logs, as the copied database lists the jobs.
+    copy_tree(
+        &app.cfg.data_dir.join("jobs"),
+        &to.join("jobs"),
+        &[],
+        &mut rep,
+    )?;
+    log("job logs copied");
     let live = storages(&app.db)?;
     for (name, path) in &live {
         copy_tree(

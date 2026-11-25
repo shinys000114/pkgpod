@@ -100,6 +100,7 @@ What is in the database, and the commands that change it:
 | Signing keys | `pkgpod key list\|generate\|import\|default\|public\|delete` | Server |
 | Download statistics kept | `pkgpod settings --downloads-days <n>` | Server |
 | Syncs at once per storage | `pkgpod settings --syncs-per-storage <n>` | Server, Storages |
+| Jobs and logs kept | `pkgpod settings --jobs-days <n>` | Server, Garbage collection |
 | Users, teams, rights | `pkgpod user`, `pkgpod team`, `pkgpod grant` | Users & teams; a repository's members |
 | Tokens | `pkgpod token list\|create\|delete` | Account & tokens |
 | Repositories | `pkgpod repo create\|set\|show\|delete` | Repositories |
@@ -320,8 +321,9 @@ database names is in its stores (a garbage collection running meanwhile
 could have removed some) and prints warnings: those files, keys without
 a secret key file, and that mirrors' trees are left out.
 
-Not in a backup: the configuration file, TLS files, `admin-password`,
-the job logs (`jobs/`) and mirrors' `state/` (a sync makes it again).
+The job logs (`jobs/`) are in it, copied. Not in a backup: the
+configuration file, TLS files, `admin-password` and mirrors' `state/`
+(a sync makes it again).
 
 To restore, stop the server and restore into an empty data directory:
 
@@ -428,9 +430,20 @@ pkgpod job 42                    # its state, summary and log
 pkgpod job 42 --cancel
 ```
 
-A job ends `ok`, `failed` or `cancelled`. The console's job page streams
-its log while it runs. Logs are kept in `<data_dir>/jobs/<id>.log`;
-pkgpod does not remove them, and they are not in backups.
+A job ends `ok`, `failed` or `cancelled` (a sync waiting for a slot on
+its storage is `queued`). The console's job page streams its log while
+it runs. Logs are kept in `<data_dir>/jobs/<id>.log`, and are in
+backups.
+
+Ended jobs older than `jobs_days` (default 90) go with their logs in
+the daily run, except each repository's newest ten; a log whose job is
+gone goes too. A full rsync mirror's log lists every file it moved and
+can be large: fewer days keep the data directory small.
+
+```sh
+pkgpod settings --jobs-days 30   # 0: keep all
+pkgpod cleanup                   # the daily run now: cleanup rules and old jobs
+```
 
 When the server stops, it asks running jobs to stop. On the next start,
 a job still recorded as running is marked failed ("the server stopped

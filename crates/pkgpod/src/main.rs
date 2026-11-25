@@ -329,6 +329,9 @@ pub(crate) enum Cmd {
         /// Mirror syncs that run at once on one storage (0: no limit).
         #[arg(long)]
         syncs_per_storage: Option<i64>,
+        /// Days ended jobs and their logs are kept (0: all).
+        #[arg(long)]
+        jobs_days: Option<i64>,
     },
     /// Collect garbage.
     Gc {

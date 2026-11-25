@@ -334,6 +334,31 @@ pub fn propose(app: &App, r: &RepoInfo, actor: &str) -> Result<Proposal> {
 /// what happened to each.
 pub fn daily(app: &App) -> Vec<Value> {
     let mut out = Vec::new();
+    // Ended jobs past jobs_days, and their logs.
+    match crate::jobs::prune(app) {
+        Ok((n, bytes)) => {
+            if n > 0 || bytes > 0 {
+                app.auth.audit(
+                    "cleanup",
+                    "jobs pruned",
+                    "",
+                    &format!("{n} jobs, {bytes} bytes of logs"),
+                );
+            }
+            out.push(json!({
+                "repo": "(job logs)",
+                "state": if n > 0 || bytes > 0 { "applied" } else { "nothing" },
+                "detail": format!(
+                    "{n} jobs older than {} days and {} of logs removed",
+                    crate::jobs::jobs_days(app),
+                    crate::serve::human(bytes)
+                ),
+            }));
+        }
+        Err(e) => {
+            out.push(json!({"repo": "(job logs)", "state": "failed", "detail": e.to_string()}))
+        }
+    }
     let Ok(repos) = app.engine.repos() else {
         return out;
     };

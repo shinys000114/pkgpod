@@ -84,6 +84,72 @@ pub fn log_path(app: &App, id: i64) -> PathBuf {
     app.cfg.data_dir.join("jobs").join(format!("{id}.log"))
 }
 
+/// The server setting: days ended jobs (and their logs) are kept.
+pub const DAYS_SETTING: &str = "jobs_days";
+const DAYS_DEFAULT: i64 = 90;
+/// Each repository's newest jobs are kept whatever their age.
+const KEEP_EACH: i64 = 10;
+
+pub fn jobs_days(app: &App) -> i64 {
+    crate::keys::get_setting(&app.db, DAYS_SETTING)
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DAYS_DEFAULT)
+        .max(0)
+}
+
+/// Removes ended jobs older than `jobs_days` (0: none), with their logs,
+/// keeping each repository's newest ten; and logs no job names any
+/// more. Returns (jobs removed, log bytes freed).
+pub fn prune(app: &App) -> Result<(usize, u64)> {
+    let days = jobs_days(app);
+    let dir = app.cfg.data_dir.join("jobs");
+    let mut gone: Vec<i64> = Vec::new();
+    if days > 0 {
+        let before = now() - days * 86400;
+        gone = app.db.read(|c| {
+            let mut st = c.prepare(
+                "SELECT id FROM jobs j WHERE finished IS NOT NULL AND finished < ?1
+                   AND id NOT IN (SELECT id FROM jobs k WHERE k.repo = j.repo ORDER BY id DESC LIMIT ?2)",
+            )?;
+            st.query_map(params![before, KEEP_EACH], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<i64>>>()
+        })?;
+        for chunk in gone.chunks(500) {
+            app.db.write(|tx| {
+                for id in chunk {
+                    tx.execute("DELETE FROM jobs WHERE id = ?1", [id])?;
+                }
+                Ok::<_, rusqlite::Error>(())
+            })?;
+        }
+    }
+    // Logs of jobs that are gone (removed now, or before this ran).
+    let known: std::collections::HashSet<i64> = app.db.read(|c| {
+        let mut st = c.prepare("SELECT id FROM jobs")?;
+        st.query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<std::collections::HashSet<i64>>>()
+    })?;
+    let mut bytes = 0;
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let Some(id) = name
+                .strip_suffix(".log")
+                .and_then(|n| n.parse::<i64>().ok())
+            else {
+                continue;
+            };
+            if !known.contains(&id) {
+                bytes += e.metadata().map(|m| m.len()).unwrap_or(0);
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    Ok((gone.len(), bytes))
+}
+
 /// The job's log so far.
 pub fn log(app: &App, id: i64) -> String {
     std::fs::read_to_string(log_path(app, id)).unwrap_or_default()

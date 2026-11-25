@@ -659,6 +659,7 @@ fn settings_json(app: &App) -> Value {
     json!({
         "downloads_days": crate::stats::days_kept(app),
         "syncs_per_storage": crate::jobs::syncs_per_storage(app),
+        "jobs_days": crate::jobs::jobs_days(app),
     })
 }
 
@@ -675,6 +676,8 @@ pub(crate) struct SettingsReq {
     pub(crate) downloads_days: Option<i64>,
     #[serde(default)]
     pub(crate) syncs_per_storage: Option<i64>,
+    #[serde(default)]
+    pub(crate) jobs_days: Option<i64>,
 }
 
 pub(crate) async fn settings_patch(
@@ -701,6 +704,14 @@ pub(crate) async fn settings_patch(
             crate::keys::set_setting(&app.db, crate::jobs::SYNCS_SETTING, Some(&n.to_string()))?;
             app.auth
                 .audit(c.name(), "settings", "", &format!("syncs_per_storage={n}"));
+        }
+        if let Some(d) = req.jobs_days {
+            if !(0..=3650).contains(&d) {
+                return Err(Error::Invalid("jobs_days: 0 (keep all) to 3650".into()));
+            }
+            crate::keys::set_setting(&app.db, crate::jobs::DAYS_SETTING, Some(&d.to_string()))?;
+            app.auth
+                .audit(c.name(), "settings", "", &format!("jobs_days={d}"));
         }
         Ok(Json(settings_json(app)))
     })

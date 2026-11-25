@@ -5707,6 +5707,69 @@ fn files_hosted() {
     );
 }
 
+/// Ended jobs past jobs_days go with their logs (each repository's
+/// newest ten stay); logs are in backups.
+#[test]
+fn job_logs_are_pruned_and_backed_up() {
+    let s = Server::start();
+    s.cli(&[
+        "repo",
+        "create",
+        "m",
+        "-f",
+        "files",
+        "-k",
+        "mirror",
+        "-s",
+        "source=http://127.0.0.1:1/x/",
+    ])
+    .unwrap();
+    // One real job, and twelve more as the server would have recorded them.
+    let _ = s.cli(&["sync", "m", "--wait"]);
+    let logs = s.dir.path().join("data/jobs");
+    for i in 0..12 {
+        sql(
+            &s,
+            "INSERT INTO jobs (repo, kind, state, actor, created, started, finished, summary)
+             SELECT 'm', 'sync', 'failed', 'admin', created, started, finished, 'old' FROM jobs LIMIT 1",
+        );
+        let id = s.json(&["jobs", "m"])[0]["id"].as_i64().unwrap();
+        std::fs::write(logs.join(format!("{id}.log")), format!("log {i}")).unwrap();
+    }
+    let count = || std::fs::read_dir(&logs).unwrap().count();
+    assert_eq!(count(), 13);
+    std::fs::write(logs.join("99999.log"), "a job long gone").unwrap();
+    // Nothing is old yet.
+    let out = s.cli(&["cleanup"]).unwrap();
+    assert!(out.contains("(job logs): applied 0 jobs"), "{out}");
+    assert_eq!(count(), 13, "only the orphan went");
+    // Old: all but the newest ten go, logs too.
+    sql(&s, "UPDATE jobs SET finished = finished - 100 * 86400");
+    let out = s.cli(&["settings", "--jobs-days", "30"]).unwrap();
+    assert!(out.contains("jobs_days = 30"), "{out}");
+    let out = s.cli(&["cleanup"]).unwrap();
+    assert!(
+        out.contains("(job logs): applied 3 jobs older than 30 days"),
+        "{out}"
+    );
+    assert_eq!(s.json(&["jobs", "m"]).as_array().unwrap().len(), 10);
+    assert_eq!(count(), 10);
+    // 0 keeps all.
+    s.cli(&["settings", "--jobs-days", "0"]).unwrap();
+    let out = s.cli(&["cleanup"]).unwrap();
+    assert!(out.contains("(job logs): nothing 0 jobs"), "{out}");
+    // A backup has the logs; a restore brings them back.
+    let backup = s.dir.path().join("backup");
+    let (ok, out) = s.admin(&["backup", backup.to_str().unwrap()]);
+    assert!(ok, "{out}");
+    assert_eq!(std::fs::read_dir(backup.join("jobs")).unwrap().count(), 10);
+    let id = s.json(&["jobs", "m"])[0]["id"].as_i64().unwrap();
+    assert_eq!(
+        std::fs::read(backup.join(format!("jobs/{id}.log"))).unwrap(),
+        std::fs::read(logs.join(format!("{id}.log"))).unwrap()
+    );
+}
+
 /// A file server that answers every request after `delay`: a listing of
 /// one file at a directory, the file's content otherwise.
 fn slow_files(delay: Duration) -> String {
