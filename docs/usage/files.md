@@ -3,8 +3,9 @@
 A plain tree of files, served as it is, with directory listings: tools,
 images, documents. Format id `files`; kinds **hosted** (filled by
 uploads to a path; every change a version), **mirror** (follows a file
-server over rsync or HTTP listings, served where it is received) and
-**group** (several repositories read as one tree). Imports take a whole
+server over rsync or HTTP listings, served where it is received),
+**proxy** (a file server's files fetched when first asked for, and
+kept) and **group** (several repositories read as one tree). Imports take a whole
 tree into a hosted repository as one version.
 
 See [Using pkgpod](README.md) for what is common to every format.
@@ -160,6 +161,33 @@ read where it is and left as it was; symbolic links there are left
 out. `--exclude` takes the same patterns as a mirror's `excludes`;
 `--replace` replaces files at the same path with other content. In the
 console: Upload & change, Import.
+
+## Proxies
+
+A proxy reads a file server (cloud images, ISOs) when a client asks,
+and keeps what it fetched; nothing is synced ahead.
+
+```sh
+pkgpod repo create debian-cloud -f files -k proxy \
+  -s upstream=https://cloud.debian.org/ -s public=true -s max_mib=102400
+curl -fLO https://pkg.example.org/debian-cloud/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2
+```
+
+- A directory is the upstream's own listing, read and shown as pkgpod
+  lists a tree; files kept here show their size. A directory the
+  upstream moves elsewhere within itself (`/` to `/images/cloud/`) is
+  redirected to the same place through the proxy.
+- A file not kept yet is passed to the client as it arrives and kept
+  once it is all in, so a large image starts at once; a download that
+  breaks off keeps nothing. A part (`Range`) of a file not kept yet is
+  fetched whole first.
+- A kept file is asked for again, with its validators, once it is older
+  than `metadata_minutes`: a file replaced upstream under the same name
+  (`latest/`) is fetched again, and one the upstream dropped answers
+  404. While the upstream is not there, the kept file is served.
+- `max_mib` bounds what is kept (the least recently used unpinned files
+  go first); `pkgpod cache <name>` lists, pins, evicts and prefetches.
+- A files proxy cannot be a group's member yet, and takes no uploads.
 
 ## Groups
 

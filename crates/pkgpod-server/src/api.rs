@@ -410,6 +410,9 @@ pub(crate) async fn repo_create(
         }
         if req.kind == "proxy" {
             crate::proxy::check_settings(&req.format, &req.settings)?;
+            if req.format == "files" && req.settings.get("upstream").is_none() {
+                crate::proxy::check_settings(&req.format, &json!({"upstream": ""}))?;
+            }
         }
         let r = app.engine.create_repo(
             NewRepo {

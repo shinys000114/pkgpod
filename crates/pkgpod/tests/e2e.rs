@@ -5613,6 +5613,128 @@ fn files_hosted() {
     );
 }
 
+/// A files proxy of a file server: its directories listed as the
+/// upstream lists them, files streamed through and kept, renewed when the
+/// upstream changes them, gone when it drops them.
+#[test]
+fn files_proxy() {
+    let s = Server::start();
+    s.cli(&["repo", "create", "src", "-f", "files", "-s", "public=true"])
+        .unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "src", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let c = reqwest::blocking::Client::new();
+    let put = |path: &str, body: Vec<u8>| {
+        let r = c
+            .put(s.url(&format!("/src/{path}?replace=1")))
+            .basic_auth("token", Some(&tok))
+            .body(body)
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 201, "{path}");
+    };
+    let image: Vec<u8> = (0..(3u32 << 20)).map(|i| (i % 251) as u8).collect();
+    put("img/disk.qcow2", image.clone());
+    put("img/latest/SHA256SUMS", b"one".to_vec());
+    put("README.txt", b"read me".to_vec());
+
+    let e = s
+        .cli(&["repo", "create", "nop", "-f", "files", "-k", "proxy"])
+        .unwrap_err();
+    assert!(e.contains("needs upstream"), "{e}");
+    s.cli(&[
+        "repo",
+        "create",
+        "p",
+        "-f",
+        "files",
+        "-k",
+        "proxy",
+        "-s",
+        &format!("upstream={}", s.url("/src/")),
+        "-s",
+        "public=true",
+        "-s",
+        "metadata_minutes=0",
+    ])
+    .unwrap();
+
+    // Listed as the upstream lists it; nothing kept yet, so no sizes.
+    let (st, root) = get(&s.url("/p/"), None);
+    assert_eq!(st, 200, "{root}");
+    assert!(
+        root.contains(r#"href="img/""#) && root.contains(r#"href="README.txt""#),
+        "{root}"
+    );
+    // Not fetched: a HEAD asks the upstream and keeps nothing.
+    let r = c.head(s.url("/p/img/disk.qcow2")).send().unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(r.headers()["content-length"], "3145728");
+    assert!(!s.cli(&["cache", "p"]).unwrap().contains("disk.qcow2"));
+    // A part of what is not here: fetched whole, then the part.
+    let r = c
+        .get(s.url("/p/README.txt"))
+        .header("range", "bytes=0-3")
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 206);
+    assert_eq!(r.text().unwrap(), "read");
+    // Streamed through, kept, then served from here.
+    let r = c.get(s.url("/p/img/disk.qcow2")).send().unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(r.headers()["content-length"], "3145728");
+    assert_eq!(r.headers()["content-security-policy"], "sandbox");
+    assert!(r.bytes().unwrap().as_ref() == image.as_slice());
+    let cache = s.cli(&["cache", "p"]).unwrap();
+    assert!(cache.contains("img/disk.qcow2"), "{cache}");
+    let (_, img) = get(&s.url("/p/img/"), None);
+    assert!(
+        img.contains("3.0 MiB") && img.contains(r#"href="latest/""#),
+        "{img}"
+    );
+    let r = c
+        .get(s.url("/p/img/disk.qcow2"))
+        .header("range", "bytes=10-19")
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 206);
+    assert_eq!(r.bytes().unwrap().as_ref(), &image[10..20]);
+
+    // Replaced upstream under the same name: the new one (renewed at
+    // once here, metadata_minutes=0).
+    assert_eq!(get(&s.url("/p/img/latest/SHA256SUMS"), None).1, "one");
+    put("img/latest/SHA256SUMS", b"two".to_vec());
+    assert_eq!(get(&s.url("/p/img/latest/SHA256SUMS"), None).1, "two");
+    assert_eq!(get(&s.url("/p/img/latest/SHA256SUMS"), None).1, "two");
+    // Dropped upstream: gone here too.
+    s.cli(&[
+        "op",
+        "src",
+        "move",
+        "from=img/latest/SHA256SUMS",
+        "to=old/SHA256SUMS",
+        "-y",
+    ])
+    .unwrap();
+    assert_eq!(get(&s.url("/p/img/latest/SHA256SUMS"), None).0, 404);
+    assert_eq!(get(&s.url("/p/nowhere/x"), None).0, 404);
+    assert_eq!(get(&s.url("/p/nowhere/"), None).0, 404);
+    // Read only.
+    let r = c
+        .put(s.url("/p/x"))
+        .basic_auth("token", Some(&tok))
+        .body("x")
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 405);
+    // Downloads counted by path.
+    let d = s.json(&["downloads", "p"]);
+    assert!(d.to_string().contains("img/disk.qcow2"), "{d}");
+}
+
 /// `.HEADER.md` and `.FOOTER.md` in a files repository's directory are
 /// rendered above and below its listing, safely, per version.
 #[test]

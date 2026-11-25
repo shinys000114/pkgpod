@@ -175,6 +175,10 @@ impl Format for Files {
         true
     }
 
+    fn proxy(&self) -> bool {
+        true
+    }
+
     fn id(&self) -> &'static str {
         "files"
     }

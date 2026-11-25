@@ -966,6 +966,9 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                             "proxy.golang.org: modules fetched through here and kept"
                         }
                         ("cargo", Kind::Proxy) => "crates.io: crates fetched through here and kept",
+                        ("files", Kind::Proxy) => {
+                            "a file server (cloud images, ISOs): files fetched through here and kept"
+                        }
                         (_, Kind::Proxy) => "fetch from a registry when asked, and keep it",
                         ("deb", Kind::Mirror) => "follow an apt archive; served as received",
                         ("deb", _) => "apt packages you upload, signed per version",
