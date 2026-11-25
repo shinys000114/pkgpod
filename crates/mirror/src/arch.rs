@@ -168,6 +168,7 @@ pub fn sync(m: &ArchMirror, ctx: &Ctx) -> Result<ArchReport, Error> {
     let mut cache = HashCache::load(ctx.state_dir);
     let mut keep = BTreeSet::new();
     let mut ok_dirs = BTreeSet::new();
+    let mut failed_dirs = BTreeSet::new();
     for repo in &m.repos {
         for arch in &m.arches {
             if ctx.cancel.load(Ordering::Relaxed) {
@@ -199,6 +200,8 @@ pub fn sync(m: &ArchMirror, ctx: &Ctx) -> Result<ArchReport, Error> {
                         packages: 0,
                         error: Some(e.to_string()),
                     });
+                    // Also when another database there went well.
+                    failed_dirs.insert(dir);
                 }
             }
         }
@@ -207,6 +210,7 @@ pub fn sync(m: &ArchMirror, ctx: &Ctx) -> Result<ArchReport, Error> {
     let p = prune(
         ctx.dest,
         &ok_dirs,
+        &failed_dirs,
         &keep,
         |n| n.contains(".pkg.tar"),
         m.prune,

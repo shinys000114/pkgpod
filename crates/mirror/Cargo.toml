@@ -23,7 +23,7 @@ tar.workspace = true
 glob.workspace = true
 httpdate.workspace = true
 rustix.workspace = true
-time.workspace = true
+time = { workspace = true, features = ["parsing"] }
 sha2.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -4344,6 +4344,376 @@ fn group_of_pypi_repositories() {
     assert!(body.contains("publish to its member"), "{body}");
 }
 
+/// A port nothing listens on.
+fn dead_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// A project page in PEP 691 JSON, as a PyPI upstream serves it.
+fn pypi_doc(name: &str, file: &str) -> Vec<u8> {
+    json!({
+        "meta": {"api-version": "1.0"}, "name": name,
+        "files": [{"filename": file, "url": format!("../../files/{file}"),
+                   "hashes": {"sha256": "0".repeat(64)}}],
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// A pypi and a cargo group whose last member is a proxy: a package of
+/// the proxy's upstream through the group, then from the proxy itself.
+#[test]
+fn group_with_a_proxy_member() {
+    let s = Server::start();
+    let port = stub_upstream_on(
+        0,
+        vec![
+            (
+                "/simple/remote-pkg/".into(),
+                pypi_doc("remote-pkg", "remote_pkg-1.0.tar.gz"),
+            ),
+            (
+                "/re/mo/remote_crate".into(),
+                format!(
+                    "{}\n",
+                    json!({"name": "remote_crate", "vers": "1.0.0", "deps": [],
+                           "cksum": "0".repeat(64), "features": {}, "yanked": false})
+                )
+                .into_bytes(),
+            ),
+        ],
+    );
+    for (f, hosted, proxy, group, upstream) in [
+        (
+            "pypi",
+            "ph",
+            "pp",
+            "pg",
+            format!("http://127.0.0.1:{port}/simple/"),
+        ),
+        (
+            "cargo",
+            "ch",
+            "cp",
+            "cg",
+            format!("http://127.0.0.1:{port}/"),
+        ),
+    ] {
+        s.cli(&["repo", "create", hosted, "-f", f, "-s", "public=true"])
+            .unwrap();
+        s.cli(&[
+            "repo",
+            "create",
+            proxy,
+            "-f",
+            f,
+            "-k",
+            "proxy",
+            "-s",
+            &format!("upstream={upstream}"),
+            "-s",
+            "public=true",
+        ])
+        .unwrap();
+        s.cli(&[
+            "repo",
+            "create",
+            group,
+            "-f",
+            f,
+            "-k",
+            "group",
+            "-s",
+            &format!("members={hosted},{proxy}"),
+            "-s",
+            "public=true",
+        ])
+        .unwrap();
+    }
+    let get = |p: &str| {
+        let r = reqwest::blocking::get(s.url(p)).unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    for repo in ["pg", "pp"] {
+        let (st, body) = get(&format!("/{repo}/simple/remote-pkg/"));
+        assert_eq!(st, 200, "{repo}: {body}");
+        assert!(body.contains("remote_pkg-1.0.tar.gz"), "{repo}: {body}");
+    }
+    for repo in ["cg", "cp"] {
+        let (st, body) = get(&format!("/{repo}/index/re/mo/remote_crate"));
+        assert_eq!(st, 200, "{repo}: {body}");
+        assert!(body.contains("\"remote_crate\""), "{repo}: {body}");
+    }
+}
+
+/// A proxy member whose upstream fails stops a group's search for that
+/// name: a later member's package of the same name is not served in
+/// its place.
+#[test]
+fn group_stops_at_a_failing_proxy_member() {
+    let s = Server::start();
+    let port = stub_upstream_on(
+        0,
+        vec![(
+            "/simple/shared-pkg/".into(),
+            pypi_doc("shared-pkg", "shared_pkg-9.9.tar.gz"),
+        )],
+    );
+    for (r, port) in [("pdown", dead_port()), ("pup", port)] {
+        s.cli(&[
+            "repo",
+            "create",
+            r,
+            "-f",
+            "pypi",
+            "-k",
+            "proxy",
+            "-s",
+            &format!("upstream=http://127.0.0.1:{port}/simple/"),
+            "-s",
+            "public=true",
+        ])
+        .unwrap();
+    }
+    for (g, members) in [("pg", "pdown,pup"), ("pg1", "pdown")] {
+        s.cli(&[
+            "repo",
+            "create",
+            g,
+            "-f",
+            "pypi",
+            "-k",
+            "group",
+            "-s",
+            &format!("members={members}"),
+            "-s",
+            "public=true",
+        ])
+        .unwrap();
+    }
+    let get = |p: &str| {
+        let r = reqwest::blocking::get(s.url(p)).unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    assert_eq!(get("/pup/simple/shared-pkg/").0, 200);
+    for g in ["pg", "pg1"] {
+        let (st, body) = get(&format!("/{g}/simple/shared-pkg/"));
+        assert_eq!(st, 502, "{g}: {body}");
+        assert!(
+            body.contains("pdown") && !body.contains("shared_pkg-9.9"),
+            "{g}: {body}"
+        );
+    }
+}
+
+/// A Maven group does not ask a proxy member's upstream for an
+/// artifact the proxy excludes (`groupId:artifactId`).
+#[test]
+fn maven_group_keeps_its_proxy_member_s_exclude() {
+    let s = Server::start();
+    let (port, log) = stub_upstream_log(
+        0,
+        vec![(
+            "/org/example/public-tool/maven-metadata.xml".into(),
+            b"<metadata><groupId>org.example</groupId><artifactId>public-tool</artifactId></metadata>"
+                .to_vec(),
+        )],
+    );
+    s.cli(&[
+        "repo",
+        "create",
+        "mp",
+        "-f",
+        "maven",
+        "-k",
+        "proxy",
+        "-s",
+        &format!("upstream=http://127.0.0.1:{port}/"),
+        "-s",
+        "exclude=org.example:secret-tool",
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    s.cli(&[
+        "repo",
+        "create",
+        "mg",
+        "-f",
+        "maven",
+        "-k",
+        "group",
+        "-s",
+        "members=mp",
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let st = |p: &str| reqwest::blocking::get(s.url(p)).unwrap().status().as_u16();
+    assert_eq!(st("/mg/org/example/public-tool/maven-metadata.xml"), 200);
+    assert_eq!(st("/mg/org/example/secret-tool/maven-metadata.xml"), 404);
+    assert_eq!(
+        st("/mg/org/example/secret-tool/1.0/secret-tool-1.0.jar"),
+        404
+    );
+    let asked = log.lock().unwrap().clone();
+    assert!(asked.iter().any(|p| p.contains("public-tool")), "{asked:?}");
+    assert!(
+        !asked.iter().any(|p| p.contains("secret-tool")),
+        "{asked:?}"
+    );
+}
+
+/// While the upstream does not answer, a proxy serves the metadata it
+/// keeps after a short wait, and for a while then without asking.
+#[test]
+fn proxy_serves_kept_metadata_soon_while_its_upstream_hangs() {
+    use std::io::{BufRead, Write};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let hang = Arc::new(AtomicBool::new(false));
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let doc = pypi_doc("slow-pkg", "slow_pkg-1.0.tar.gz");
+    let h = hang.clone();
+    std::thread::spawn(move || {
+        for mut c in l.incoming().flatten() {
+            let (h, doc) = (h.clone(), doc.clone());
+            std::thread::spawn(move || {
+                let mut r = std::io::BufReader::new(c.try_clone().unwrap());
+                loop {
+                    let mut line = String::new();
+                    if r.read_line(&mut line).is_err() || line.trim().is_empty() {
+                        break;
+                    }
+                }
+                if h.load(Ordering::Relaxed) {
+                    // Connected, never answered.
+                    std::thread::sleep(Duration::from_secs(300));
+                    return;
+                }
+                let _ = c.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        doc.len()
+                    )
+                    .as_bytes(),
+                );
+                let _ = c.write_all(&doc);
+            });
+        }
+    });
+    let s = Server::start();
+    s.cli(&[
+        "repo",
+        "create",
+        "sp",
+        "-f",
+        "pypi",
+        "-k",
+        "proxy",
+        "-s",
+        &format!("upstream=http://127.0.0.1:{port}/simple/"),
+        "-s",
+        "metadata_minutes=0",
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let c = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .unwrap();
+    let get = || {
+        let t = Instant::now();
+        let r = c.get(s.url("/sp/simple/slow-pkg/")).send().unwrap();
+        let st = r.status().as_u16();
+        let body = r.text().unwrap();
+        assert!(body.contains("slow_pkg-1.0.tar.gz"), "{body}");
+        (st, t.elapsed())
+    };
+    assert_eq!(get().0, 200);
+    hang.store(true, Ordering::Relaxed);
+    let (st, took) = get();
+    assert_eq!(st, 200);
+    assert!(took < Duration::from_secs(20), "{took:?}");
+    let (st, took) = get();
+    assert_eq!(st, 200);
+    assert!(took < Duration::from_secs(3), "asked again: {took:?}");
+}
+
+/// A deb mirror does not take an older Release than the one it serves
+/// (here: its source moved to an upstream that is behind) unless
+/// allowed to.
+#[test]
+fn deb_mirror_of_an_upstream_that_is_behind() {
+    if !have("dpkg-deb") || !have("gpg") {
+        return;
+    }
+    let s = Server::start();
+    s.cli(&[
+        "key",
+        "generate",
+        "main",
+        "pkgpod e2e <e2e@example.invalid>",
+    ])
+    .unwrap();
+    let debs = s.dir.path().join("debs");
+    std::fs::create_dir_all(&debs).unwrap();
+    for (r, pkgs) in [("behind", &["one"][..]), ("up", &["one", "two"][..])] {
+        s.cli(&["repo", "create", r, "-s", "public=true"]).unwrap();
+        s.cli(&["op", r, "dist-set", "name=stable", "components=main", "-y"])
+            .unwrap();
+        for p in pkgs {
+            let d = build_deb(&debs.join(r), p, "1.0", "amd64", "xz", "");
+            s.cli(&["upload", r, d.to_str().unwrap()]).unwrap();
+        }
+        // Release dates are in seconds.
+        std::thread::sleep(Duration::from_millis(1100));
+    }
+    let (_, key) = get(&s.url("/up/key.asc"), None);
+    s.cli(&[
+        "repo",
+        "create",
+        "mir",
+        "-k",
+        "mirror",
+        "-s",
+        &format!("source={}", s.url("/up/")),
+        "-s",
+        "dists=stable",
+        "-s",
+        &format!("keyring={key}"),
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    s.cli(&["sync", "mir", "--wait"]).unwrap();
+    let packages = || get(&s.url("/mir/dists/stable/main/binary-amd64/Packages"), None).1;
+    assert!(packages().contains("Package: two"));
+    s.cli(&[
+        "repo",
+        "set",
+        "mir",
+        &format!("source={}", s.url("/behind/")),
+    ])
+    .unwrap();
+    let err = s.cli(&["sync", "mir", "--wait"]).unwrap_err();
+    assert!(err.contains("older than the one served"), "{err}");
+    assert!(packages().contains("Package: two"));
+    s.cli(&["repo", "set", "mir", "allow_older=true"]).unwrap();
+    s.cli(&["sync", "mir", "--wait"]).unwrap();
+    let p = packages();
+    assert!(
+        p.contains("Package: one") && !p.contains("Package: two"),
+        "{p}"
+    );
+}
+
 /// A group of cargo registries with cargo.
 #[test]
 fn group_of_cargo_registries() {

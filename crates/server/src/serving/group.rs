@@ -25,6 +25,7 @@ use pkgpod_engine::Kind;
 use serde_json::{Value, json};
 
 use crate::auth::Role;
+use crate::serving::proxy::Has;
 use crate::serving::{At, ListEntry};
 use crate::{App, Served};
 
@@ -257,8 +258,16 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
             for m in ms {
                 let found = if m.repo.kind == Kind::Proxy {
                     // A proxy has what its upstream has (and is not
-                    // asked for an excluded name).
-                    crate::serving::proxy::has_name(&app, &m, &key).await
+                    // asked for an excluded name). An upstream that
+                    // cannot say ends the search: a later member's
+                    // package of the same name is not served instead.
+                    match crate::serving::proxy::has_name(&app, &m, &key).await {
+                        Has::Yes => true,
+                        Has::No => false,
+                        Has::Failed(e) => {
+                            return text(StatusCode::BAD_GATEWAY, format!("{}: {e}", m.repo.name));
+                        }
+                    }
                 } else {
                     let (app2, m2, key2) = (app.clone(), m.clone(), key.clone());
                     tokio::task::spawn_blocking(move || has(&app2, &m2, &key2))

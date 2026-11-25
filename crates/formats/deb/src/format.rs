@@ -107,6 +107,11 @@ pub fn mirror_settings() -> Vec<Field> {
             "ignore_missing",
             "Pool files the indexes list but upstream does not serve, accepted as missing.",
         ),
+        Field::bool(
+            "allow_older",
+            false,
+            "Take an upstream Release older than the one served (an upstream that went back on purpose); otherwise that dist fails (http).",
+        ),
     ]
 }
 

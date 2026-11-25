@@ -51,7 +51,10 @@ an upstream's content into a hosted repository as one version (see
 A **group** answers, for each package, from the first member that has
 it, alone: a package's versions are not merged with a later member's,
 so a package of the same name further down (a public registry's,
-through a proxy) never adds to or outranks it. What names no package
+through a proxy) never adds to or outranks it. A proxy member whose
+upstream fails (not there, or an error) and that keeps nothing for the
+name ends the search: the group answers 502 for it, rather than serve
+a later member's package of the same name. What names no package
 (a file of a files repository) comes from the first member that has it;
 directory listings show every member's. Its readers read the members
 through it (a token for the group alone is enough; anonymous readers of
@@ -64,7 +67,9 @@ A **proxy** fetches a file the first time it is asked for and keeps it
 until it is evicted (by hand, or for the size limit `max_mib`, unless
 pinned). Documents that change upstream (a package's version list) are
 asked for again when older than `metadata_minutes`; while the upstream
-is not there, the last one is served. Names in `exclude` are never
+is not there, the last one is served (an upstream that does not answer
+is waited for 5 seconds, and then not asked again for what is kept for
+a minute). Names in `exclude` are never
 asked for upstream, so your own packages' names are not looked up in a
 public registry. A proxy is usable as the last member of a group.
 `pkgpod cache <repo> [list|pin|unpin|evict|prefetch] [paths]` and the

@@ -14,7 +14,8 @@
 //! registry. Downloads count by package and version, as for hosted
 //! repositories.
 
-use std::sync::{Arc, OnceLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use axum::body::Body;
@@ -770,6 +771,22 @@ fn client() -> &'static reqwest::Client {
     })
 }
 
+/// How long the upstream is waited for when what it is asked for again
+/// is kept: then the kept copy is served (shorter than clients' own
+/// timeouts, pip's 15 s, and than the connect timeout).
+const STALE_WAIT: Duration = Duration::from_secs(5);
+
+/// For how long, after the upstream did not answer in time, what a
+/// proxy keeps is served without asking it, so that not every request
+/// waits during an outage.
+const QUIET_SECS: i64 = 60;
+
+/// Proxies whose upstream did not answer in time, and until when.
+fn quiet() -> &'static Mutex<HashMap<String, i64>> {
+    static Q: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
+    Q.get_or_init(Default::default)
+}
+
 /// Fetched, or what was there before.
 enum Got {
     Row(Box<CacheRow>),
@@ -804,6 +821,16 @@ async fn get(app: &Arc<App>, r: &RepoInfo, up: &Upstream, a: &Asked) -> Result<G
             _ => {}
         }
     }
+    let stale = have.clone().filter(|row| renews(row));
+    if let Some(row) = &stale
+        && quiet()
+            .lock()
+            .unwrap()
+            .get(&r.name)
+            .is_some_and(|until| now < *until)
+    {
+        return Ok(Got::Row(Box::new(row.clone())));
+    }
     let url = a
         .url
         .clone()
@@ -820,7 +847,20 @@ async fn get(app: &Arc<App>, r: &RepoInfo, up: &Upstream, a: &Asked) -> Result<G
             req = req.header(header::IF_MODIFIED_SINCE, &row.last_modified);
         }
     }
-    let resp = match req.send().await {
+    let sent = match &stale {
+        // A copy to serve: not waited for long.
+        Some(row) => match tokio::time::timeout(STALE_WAIT, req.send()).await {
+            Ok(sent) => sent,
+            Err(_) => {
+                let mut q = quiet().lock().unwrap();
+                q.retain(|_, until| now < *until);
+                q.insert(r.name.clone(), now + QUIET_SECS);
+                return Ok(Got::Row(Box::new(row.clone())));
+            }
+        },
+        None => req.send().await,
+    };
+    let resp = match sent {
         Ok(r) => r,
         Err(e) => {
             // Not there: the metadata as it was.
@@ -927,28 +967,59 @@ async fn get(app: &Arc<App>, r: &RepoInfo, up: &Upstream, a: &Asked) -> Result<G
     Ok(Got::Row(Box::new(row)))
 }
 
+/// Whether a proxy has a package, as a group asks.
+pub enum Has {
+    Yes,
+    No,
+    /// The upstream could not say (not there, or an error): the group
+    /// answers with this rather than ask a later member, whose package
+    /// of the same name is not the one meant.
+    Failed(String),
+}
+
 /// Whether the upstream has package `name` (for groups): its metadata,
 /// as cached; never asked for an excluded name.
-pub async fn has_name(app: &Arc<App>, m: &Served, name: &str) -> bool {
-    let Ok(up) = Upstream::of(&m.repo) else {
-        return false;
+pub async fn has_name(app: &Arc<App>, m: &Served, name: &str) -> Has {
+    let up = match Upstream::of(&m.repo) {
+        Ok(u) => u,
+        Err(e) => return Has::Failed(e.to_string()),
     };
     let Some(path) = name_doc(&m.repo.format, name) else {
-        return false;
+        return Has::No;
     };
-    if up.excluded(name) {
-        return false;
+    // Groups name a Maven artifact by its directory; the proxy (and its
+    // exclude list) by groupId:artifactId.
+    let name = match m.repo.format.as_str() {
+        "maven" => match name.rsplit_once('/') {
+            Some((group, artifact)) => format!("{}:{artifact}", group.replace('/', ".")),
+            None => return Has::No,
+        },
+        _ => name.to_string(),
+    };
+    if up.excluded(&name) {
+        return Has::No;
     }
-    let a = Asked {
+    let mut a = Asked {
         path,
         kind: CacheKind::Meta,
-        name: name.to_string(),
+        name,
         version: String::new(),
         count: false,
         url: None,
         expect: None,
     };
-    matches!(get(app, &m.repo, &up, &a).await, Ok(Got::Row(_)))
+    // Where the upstream has it, as for a request to the proxy itself
+    // (pypi and cargo metadata is not at the path under the base).
+    match prepare(app, &m.repo, &up, &mut a).await {
+        Ok(true) => {}
+        Ok(false) => return Has::No,
+        Err(e) => return Has::Failed(e.to_string()),
+    }
+    match get(app, &m.repo, &up, &a).await {
+        Ok(Got::Row(_)) => Has::Yes,
+        Ok(Got::Missing | Got::Moved(_)) => Has::No,
+        Err(e) => Has::Failed(e.to_string()),
+    }
 }
 
 pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {

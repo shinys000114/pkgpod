@@ -65,6 +65,16 @@ impl Release {
             .unwrap_or_default()
     }
 
+    /// `Date:` (RFC 2822; apt and others write the zone as UTC or GMT).
+    pub fn date(&self) -> Option<time::OffsetDateTime> {
+        let d = self.fields.get("Date")?.trim();
+        let d = [" UTC", " GMT", " UT"]
+            .iter()
+            .find_map(|z| d.strip_suffix(z))
+            .map_or_else(|| d.to_string(), |b| format!("{b} +0000"));
+        time::OffsetDateTime::parse(&d, &time::format_description::well_known::Rfc2822).ok()
+    }
+
     pub fn by_hash(&self) -> bool {
         self.fields
             .get("Acquire-By-Hash")
@@ -217,6 +227,24 @@ mod tests {
         assert!(Release::parse("Origin: X\n").is_err());
         let evil = format!("SHA256:\n {h} 1 ../../etc/passwd\n");
         assert!(Release::parse(&evil).is_err());
+    }
+
+    #[test]
+    fn release_dates() {
+        let date = |d: &str| {
+            Release::parse(&format!("Date: {d}\nSHA256:\n"))
+                .unwrap()
+                .date()
+                .map(|t| t.unix_timestamp())
+        };
+        let t = Some(1_763_457_718);
+        assert_eq!(date("Tue, 18 Nov 2025 09:21:58 UTC"), t);
+        assert_eq!(date("Tue, 18 Nov 2025 09:21:58 GMT"), t);
+        assert_eq!(date("Tue, 18 Nov 2025 09:21:58 +0000"), t);
+        assert_eq!(date("Tue, 18 Nov 2025 10:21:58 +0100"), t);
+        assert_eq!(date("Sat, 5 Jul 2025 07:00:00 UTC"), Some(1_751_698_800));
+        assert_eq!(date("yesterday"), None);
+        assert_eq!(Release::parse("SHA256:\n").unwrap().date(), None);
     }
 
     #[test]

@@ -94,6 +94,9 @@ pub struct Pass {
     pub files_transferred: u64,
     pub bytes_transferred: u64,
     pub files_deleted: u64,
+    /// rsync's first error lines, which say why it failed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -168,9 +171,22 @@ pub fn sync(m: &RsyncMirror, ctx: &Ctx) -> Result<RsyncReport, Error> {
                 Mode::Apk => &APK_INDEX_EXCLUDES,
                 _ => &INDEX_EXCLUDES,
             };
-            let mut first: Vec<String> =
-                excludes.iter().map(|e| format!("--exclude={e}")).collect();
-            first.extend(temp.clone());
+            let mut first = temp.clone();
+            if m.mode == Mode::Apt {
+                // Every other index under dists/ (Translation, Contents,
+                // dep11, cnf) comes with the Release that names it;
+                // by-hash files, named by their content, may come first.
+                // rsync takes the first rule that matches.
+                first.extend(
+                    [
+                        "--include=/dists/**/by-hash/***",
+                        "--include=/dists/**/",
+                        "--exclude=/dists/**",
+                    ]
+                    .map(String::from),
+                );
+            }
+            first.extend(excludes.iter().map(|e| format!("--exclude={e}")));
             let mut second = temp.clone();
             if let Some(h) = &m.trace_host {
                 second.push(format!("--exclude=project/trace/{h}"));
@@ -205,7 +221,18 @@ pub fn sync(m: &RsyncMirror, ctx: &Ctx) -> Result<RsyncReport, Error> {
                 return Ok(report);
             }
             c => {
-                report.error = Some(format!("{stage}: rsync exited {c} ({})", exit_meaning(c)));
+                // The cause is in rsync's first error line ("rsync exited
+                // 23" alone does not say which file, or why).
+                let why = report
+                    .passes
+                    .last()
+                    .and_then(|p| p.errors.first())
+                    .map(|e| format!(": {e}"))
+                    .unwrap_or_default();
+                report.error = Some(format!(
+                    "{stage}: rsync exited {c} ({}){why}",
+                    exit_meaning(c)
+                ));
                 return Ok(report);
             }
         }
@@ -318,7 +345,11 @@ fn run_pass(
     ])
     .arg(format!("--timeout={}", m.io_timeout))
     .arg(format!("--contimeout={}", m.connect_timeout))
-    .arg(format!("--max-delete={}", m.max_delete))
+    // rsync refuses a number beyond an int (no limit, as imports ask).
+    .arg(format!(
+        "--max-delete={}",
+        m.max_delete.min(i32::MAX as usize)
+    ))
     .arg("--exclude=/Archive-Update-in-Progress-*");
     if m.hard_links {
         cmd.arg("--hard-links");
@@ -353,15 +384,26 @@ fn run_pass(
         ..Default::default()
     };
     let stats = std::sync::Mutex::new(Vec::<String>::new());
+    let errors = std::sync::Mutex::new(Vec::<String>::new());
     let code = std::thread::scope(|s| -> Result<i32, Error> {
         let pump = |r: Box<dyn Read + Send>, err: bool| {
-            let stats = &stats;
+            let (stats, errors) = (&stats, &errors);
             s.spawn(move || {
                 for line in BufReader::new(r).lines().map_while(Result::ok) {
                     if line.starts_with("Number of ")
                         || line.starts_with("Total transferred file size")
                     {
                         stats.lock().unwrap().push(line.clone());
+                    }
+                    if err
+                        && ["rsync: ", "rsync error:", "@ERROR"]
+                            .iter()
+                            .any(|p| line.starts_with(p))
+                    {
+                        let mut e = errors.lock().unwrap();
+                        if e.len() < 3 {
+                            e.push(line.clone());
+                        }
                     }
                     (ctx.log)(&if err { format!("rsync: {line}") } else { line });
                 }
@@ -372,6 +414,7 @@ fn run_pass(
         wait(&mut child, ctx.cancel)
     })?;
     pass.exit_code = code;
+    pass.errors = errors.into_inner().unwrap();
     for line in stats.into_inner().unwrap() {
         let num = |l: &str| -> u64 {
             // "Number of deleted files: 2 (reg: 1, dir: 1)"

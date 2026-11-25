@@ -433,6 +433,131 @@ fn by_hash_and_upstream_changing_mid_sync() {
     assert!(e.same("dists/stable/main/binary-amd64/Packages.gz"));
 }
 
+/// A validly signed Release older than the one served is not taken
+/// (unless allowed): the dist stays, and prune keeps what it names.
+#[test]
+fn an_older_release_is_not_taken() {
+    let Some(e) = Env::new() else { return };
+    let a = e.up.deb("aa", "1.0", "amd64", "a");
+    let b = e.up.deb("bb", "1.0", "amd64", "b");
+    e.up.publish(
+        "stable",
+        &["amd64"],
+        &[("main", vec![a.clone(), b.clone()])],
+    );
+    let mut m = e.mirror(&["stable"]);
+    ok(&e.run(&m));
+    let served = read(&e.dest().join("dists/stable/InRelease"));
+    // The upstream as it was two years ago, without bb.
+    e.up.publish("stable", &["amd64"], &[("main", vec![a.clone()])]);
+    e.up.resign(
+        "stable",
+        &["amd64"],
+        &["main"],
+        &Resign {
+            date: Some(time::OffsetDateTime::now_utc() - time::Duration::days(730)),
+            ..Default::default()
+        },
+    );
+    let r = e.run(&m);
+    assert!(!r.ok(), "{r:#?}");
+    let err = r.dists[0].error.clone().unwrap();
+    assert!(err.contains("older than the one served"), "{err}");
+    assert_eq!(read(&e.dest().join("dists/stable/InRelease")), served);
+    assert_eq!(r.deleted, 0, "{r:#?}");
+    assert!(e.dest().join(e.up.pool_of("main", &b)).exists());
+    m.allow_older = true;
+    ok(&e.run(&m));
+    assert!(e.same("dists/stable/InRelease"));
+}
+
+/// The by-hash files of the Release a switch replaces stay until the
+/// next switch, however old they are: a client that read that Release
+/// just before still finds the indexes it names.
+#[test]
+fn by_hash_keeps_the_previous_generation() {
+    let Some(e) = Env::new() else { return };
+    let m = e.mirror(&["stable"]);
+    let mut debs = Vec::new();
+    let mut gens = Vec::new();
+    for marker in ["a", "b", "c"] {
+        debs.push(e.up.deb(&format!("p{marker}"), "1.0", "amd64", marker));
+        e.up.publish("stable", &["amd64"], &[("main", debs.clone())]);
+        e.up.resign(
+            "stable",
+            &["amd64"],
+            &["main"],
+            &Resign {
+                by_hash: true,
+                ..Default::default()
+            },
+        );
+        let gz = read(
+            &e.up
+                .dist_dir("stable")
+                .join("main/binary-amd64/Packages.gz"),
+        );
+        let path = format!(
+            "dists/stable/main/binary-amd64/by-hash/SHA256/{}",
+            pkgpod_mirror::fetch::sha256_hex(&gz)
+        );
+        ok(&e.run(&m));
+        assert_eq!(read(&e.dest().join(&path)), gz);
+        // Old: kept for what the served Release names, not for its age.
+        std::fs::File::options()
+            .write(true)
+            .open(e.dest().join(&path))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(30 * 86400))
+            .unwrap();
+        gens.push((path, gz));
+    }
+    assert_eq!(read(&e.dest().join(&gens[1].0)), gens[1].1, "kept");
+    assert!(!e.dest().join(&gens[0].0).exists(), "two switches ago");
+    // A sync with nothing new upstream is no switch.
+    ok(&e.run(&m));
+    assert_eq!(read(&e.dest().join(&gens[1].0)), gens[1].1, "still kept");
+    assert_eq!(read(&e.dest().join(&gens[2].0)), gens[2].1);
+    assert!(!e.dest().join(&gens[0].0).exists());
+}
+
+/// A pool file upstream rebuilt under the same name is put in place only
+/// when its dist switches: while the dist fails, the file served is the
+/// one its indexes name.
+#[test]
+fn a_rebuilt_pool_file_waits_for_its_dist() {
+    let Some(e) = Env::new() else { return };
+    let a = e.up.deb("aa", "1.0", "amd64", "a");
+    e.up.publish("stable", &["amd64"], &[("main", vec![a.clone()])]);
+    let m = e.mirror(&["stable"]);
+    ok(&e.run(&m));
+    let pa = e.up.pool_of("main", &a);
+    let before = read(&e.dest().join(&pa));
+    let a2 = e.up.deb("aa", "1.0", "amd64", "rebuilt");
+    let c = e.up.deb("cc", "1.0", "amd64", "c");
+    e.up.publish(
+        "stable",
+        &["amd64"],
+        &[("main", vec![a2.clone(), c.clone()])],
+    );
+    assert_eq!(e.up.pool_of("main", &a2), pa);
+    e.srv.faults().missing.insert(e.up.pool_of("main", &c));
+    let r = e.run(&m);
+    assert!(!r.ok(), "{r:#?}");
+    assert_eq!(read(&e.dest().join(&pa)), before, "what the indexes name");
+    assert!(
+        tree(&e.dest()).iter().all(|p| !p.contains(".pkgpod-")),
+        "{:?}",
+        tree(&e.dest())
+    );
+    e.srv.faults().missing.clear();
+    let r = e.run(&m);
+    ok(&r);
+    assert_eq!(r.replaced, 1, "{r:#?}");
+    assert!(e.same(&pa));
+    assert!(e.same("dists/stable/InRelease"));
+}
+
 #[test]
 fn unsafe_upstream_paths() {
     let Some(e) = Env::new() else { return };

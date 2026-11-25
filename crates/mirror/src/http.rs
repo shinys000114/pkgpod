@@ -55,6 +55,9 @@ pub struct HttpMirror {
     pub prune: bool,
     /// Delete nothing when more than this many files would go.
     pub max_delete: usize,
+    /// Take a Release older than the one served (an upstream that went
+    /// back on purpose); otherwise that dist fails.
+    pub allow_older: bool,
 }
 
 impl HttpMirror {
@@ -75,6 +78,7 @@ impl HttpMirror {
             verify_all: false,
             prune: false,
             max_delete: 10_000,
+            allow_older: false,
         }
     }
 }
@@ -132,6 +136,8 @@ impl SyncReport {
 
 const STAGING: &str = ".pkgpod-tmp-";
 const OLD: &str = ".pkgpod-old-";
+/// A pool file's replacement, until its dist switches.
+const NEXT: &str = ".pkgpod-next";
 
 /// Mirrors `m` into `ctx.dest`. Returns `Err` only for problems that stop
 /// the whole run (configuration, the destination, interruption); a failed
@@ -340,7 +346,8 @@ fn run(
     }
     let staged = keep;
     report.pool_files = wanted.len();
-    let failures = match fetch_pool(m, ctx, cache, &wanted, report) {
+    let replacements = Replacements::default();
+    let failures = match fetch_pool(m, ctx, cache, &wanted, &replacements, report) {
         Ok(f) => f,
         Err(e) => {
             remove_staging(&staged, Path::new(""));
@@ -390,10 +397,23 @@ fn run(
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
+        // Its pool files of new content under an old name, in place only
+        // now: until this switch the indices served named the old content.
+        for f in s.files.values() {
+            if let Some(n) = replacements.take(&f.path) {
+                let full = ctx.dest.join(&f.path);
+                fs::rename(&n, &full).inspect_err(|_| {
+                    let _ = fs::remove_file(&n);
+                })?;
+                cache.put(&f.path, &full, &f.sha256);
+            }
+        }
         crate::swap_dir(&s.staging, &target)?;
         (ctx.log)(&format!("{}: switched to the new indices", s.dist));
         report.dists.push(s.report);
     }
+    // Replacements no switched dist lists.
+    drop(replacements);
     // A configured dist with neither new nor old indices: what it would
     // reference is unknown (e.g. an adopted tree), so nothing is deleted.
     let unknown: Vec<String> = failed
@@ -572,6 +592,23 @@ pub(crate) fn index_groups(
 fn stage_dist(m: &HttpMirror, ctx: &Ctx, dist: &str, staging: &Path) -> Result<Staging, DistErr> {
     let base = join_url(&m.url, &format!("dists/{dist}")) + "/";
     let (rel, raw) = release_of(m, ctx, &base)?;
+    let current = ctx.dest.join("dists").join(dist);
+    let served = served_release(&current);
+    // A validly signed but older Release (a stale upstream mirror, or a
+    // replay) would roll the dist back, and prune would then delete the
+    // newer packages.
+    if !m.allow_older
+        && let Some(served) = &served
+        && let (Some(new), Some(old)) = (rel.date(), served.date())
+        && new < old
+    {
+        let date = |r: &Release| r.fields.get("Date").unwrap_or("").trim().to_string();
+        return Err(DistErr::Fatal(format!(
+            "the upstream's Release (Date: {}) is older than the one served ({}); if the upstream went back on purpose, set allow_older=true and sync again",
+            date(&rel),
+            date(served)
+        )));
+    }
     let (_, groups) = index_groups(m, &rel)?;
     let mut todo: BTreeSet<String> = BTreeSet::new();
     for (dir, base_name, _) in &groups {
@@ -603,7 +640,6 @@ fn stage_dist(m: &HttpMirror, ctx: &Ctx, dist: &str, staging: &Path) -> Result<S
     // trusted).
     fs::create_dir_all(staging).map_err(|e| DistErr::Fatal(e.to_string()))?;
     let by_hash = rel.by_hash();
-    let current = ctx.dest.join("dists").join(dist);
     let parse: BTreeSet<String> = groups
         .iter()
         .flat_map(|(dir, base_name, _)| {
@@ -777,6 +813,43 @@ fn stage_dist(m: &HttpMirror, ctx: &Ctx, dist: &str, staging: &Path) -> Result<S
             files.insert(f.path.clone(), f);
         }
     }
+    // The by-hash files of the Release this one replaces stay until the
+    // next switch: a client that read it a moment before asks for them.
+    // The same indices again (every run stages the dist anew) keep all
+    // there is: the previous generation is not dropped by a sync that
+    // brought nothing new.
+    if by_hash && let Some(old) = &served {
+        let mut kept: Vec<PathBuf> = old
+            .files
+            .iter()
+            .map(|(path, entry)| {
+                let dir = path.rsplit_once('/').map_or("", |(d, _)| d);
+                let sep = if dir.is_empty() { "" } else { "/" };
+                PathBuf::from(format!("{dir}{sep}by-hash/SHA256/{}", entry.sha256))
+            })
+            .collect();
+        if old.files == rel.files {
+            for d in dirs.iter().filter(|d| d.ends_with("by-hash/SHA256")) {
+                let Ok(d) = d.strip_prefix(staging) else {
+                    continue;
+                };
+                let Ok(rd) = fs::read_dir(current.join(d)) else {
+                    continue;
+                };
+                kept.extend(rd.flatten().map(|e| d.join(e.file_name())));
+            }
+        }
+        for bh in kept {
+            let (from, to) = (current.join(&bh), staging.join(&bh));
+            if !from.is_file() || to.exists() || !to.parent().is_some_and(Path::is_dir) {
+                continue;
+            }
+            if fs::hard_link(&from, &to).is_err() {
+                fs::copy(&from, &to)
+                    .map_err(|e| DistErr::Fatal(format!("{}: {e}", to.display())))?;
+            }
+        }
+    }
     for (name, data) in raw {
         fs::write(staging.join(name), data).map_err(|e| DistErr::Fatal(e.to_string()))?;
     }
@@ -787,6 +860,17 @@ fn stage_dist(m: &HttpMirror, ctx: &Ctx, dist: &str, staging: &Path) -> Result<S
         reused,
         packages: n,
     })
+}
+
+/// The Release a dist is served with now (in `dir`, `dists/<dist>/`),
+/// read without checking its signature again: it was checked when it
+/// came.
+fn served_release(dir: &Path) -> Option<Release> {
+    let text = match fs::read(dir.join("Release")) {
+        Ok(b) => String::from_utf8(b).ok()?,
+        Err(_) => inrelease_text_unverified(&fs::read(dir.join("InRelease")).ok()?).ok()?,
+    };
+    Release::parse(&text).ok()
 }
 
 /// What [`stage_dist`] staged.
@@ -823,12 +907,35 @@ pub(crate) fn par_map<T: Sync, R: Send>(
         .collect()
 }
 
-/// Brings every wanted pool file in place; returns the ones that failed.
+/// Pool files fetched to replace present ones of other content: kept
+/// beside them (`<file>.pkgpod-next`) until a dist that lists them
+/// switches, since the indices served until then name the old content.
+/// Those left are removed when this is dropped (on every return).
+#[derive(Default)]
+struct Replacements(Mutex<BTreeMap<String, PathBuf>>);
+
+impl Replacements {
+    fn take(&self, rel: &str) -> Option<PathBuf> {
+        self.0.lock().unwrap().remove(rel)
+    }
+}
+
+impl Drop for Replacements {
+    fn drop(&mut self) {
+        for p in self.0.get_mut().unwrap().values() {
+            let _ = fs::remove_file(p);
+        }
+    }
+}
+
+/// Brings every wanted pool file in place (a replacement beside it, in
+/// `replacements`); returns the ones that failed.
 fn fetch_pool(
     m: &HttpMirror,
     ctx: &Ctx,
     cache: &mut HashCache,
     wanted: &BTreeMap<String, PoolFile>,
+    replacements: &Replacements,
     report: &mut SyncReport,
 ) -> Result<BTreeMap<String, String>, Error> {
     enum Outcome {
@@ -881,12 +988,23 @@ fn fetch_pool(
                             replaced = true;
                         }
                         let url = join_url(&m.url, &f.path);
+                        let to = if replaced {
+                            let mut n = full.clone().into_os_string();
+                            n.push(NEXT);
+                            PathBuf::from(n)
+                        } else {
+                            full.clone()
+                        };
                         match ctx
                             .http
-                            .download(&url, &full, f.size, &f.sha256, m.retries, ctx.cancel)
+                            .download(&url, &to, f.size, &f.sha256, m.retries, ctx.cancel)
                         {
                             Ok(d) => {
-                                cache.lock().unwrap().put(&f.path, &full, &f.sha256);
+                                if replaced {
+                                    replacements.0.lock().unwrap().insert(f.path.clone(), to);
+                                } else {
+                                    cache.lock().unwrap().put(&f.path, &full, &f.sha256);
+                                }
                                 Ok(Outcome::Downloaded {
                                     bytes: d.bytes,
                                     resumed: d.resumed,

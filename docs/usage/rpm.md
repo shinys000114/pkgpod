@@ -90,7 +90,9 @@ against the keyring when one is set, the files it names checked
 against it, then every package `primary` names checked against that;
 the new `repodata/` is switched in last, so dnf never reads metadata
 whose packages are not there yet. A repository that fails keeps its
-previous metadata. `repos` empty: the source itself is one. Only
+previous metadata; so does one whose `repomd.xml` is older than the
+one served, unless `allow_older` is set (an upstream that went back on
+purpose). `repos` empty: the source itself is one. Only
 sha256 checksums are taken, and metadata on another base (`xml:base`)
 is refused. An http source takes the packages and the metadata; with
 `rsync://…` the whole tree is copied (installer images too), the
