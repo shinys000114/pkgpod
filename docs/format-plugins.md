@@ -1,7 +1,7 @@
 # Writing a format
 
 A format is a crate compiled into pkgpod that implements
-`pkgpod_engine::Format` (`crates/pkgpod-engine/src/format.rs`). The
+`pkgpod_engine::Format` (`crates/core/engine/src/format.rs`). The
 engine keeps every repository's versions, labels, history, catalog and
 garbage; the format says what the paths of its trees mean, how uploads
 and operations change them, and what clients are served for a
@@ -34,7 +34,7 @@ holds and what each version publishes. Follow that convention: it is
 the format's contract with the engine, the console's tree browser and
 the next reader.
 
-`pkgpod-deb` (`crates/pkgpod-deb/src/format.rs`): packages by dist and
+`pkgpod-deb` (`crates/formats/deb/src/format.rs`): packages by dist and
 component in the state, apt's layout in the served tree.
 
 ```text
@@ -72,7 +72,7 @@ files/<project>/<filename>[.metadata]
 ```
 
 `pkgpod-npm`: state only; the registry protocol answers from it per
-request (`crates/pkgpod-server/src/npm.rs`), since packuments carry
+request (`crates/server/src/npm.rs`), since packuments carry
 absolute tarball URLs that follow the address asked.
 
 ```text
@@ -220,16 +220,16 @@ implement `publish` for that, and return `Ok(None)`.
 
 ## Registering a format
 
-1. Make `crates/pkgpod-<id>/` (the workspace takes every crate under
-   `crates/`).
-2. Add `pkgpod-<id> = { path = "crates/pkgpod-<id>" }` to
+1. Make `crates/formats/<id>/`, a crate named `pkgpod-<id>` (the
+   workspace takes every crate under `crates/formats/`).
+2. Add `pkgpod-<id> = { path = "crates/formats/<id>" }` to
    `[workspace.dependencies]` in the root `Cargo.toml`, and
-   `pkgpod-<id>.workspace = true` to `crates/pkgpod-server/Cargo.toml`.
+   `pkgpod-<id>.workspace = true` to `crates/server/Cargo.toml`.
 3. Add `Arc::new(pkgpod_<id>::<Type>)` to `pkgpod_server::formats()`
-   in `crates/pkgpod-server/src/lib.rs`. From then on the engine
+   in `crates/server/src/lib.rs`. From then on the engine
    accepts `-f <id>`, the API lists it at `GET /api/v1/formats`, and
    the console offers its settings, operations and upload form.
-4. In `crates/pkgpod-server/src/console.rs`: the line describing the
+4. In `crates/server/src/console.rs`: the line describing the
    format when a repository is made (the `blurb` in `index`), the words
    for its catalog (`catalog_words`), and its "How to use" lines
    (`usage`, below).
@@ -251,7 +251,7 @@ segment is the file name), and the API's
 `POST /api/v1/repos/<repo>/upload` (used by `pkgpod upload` and the
 console).
 
-A module `crates/pkgpod-server/src/<id>.rs` is needed when clients
+A module `crates/server/src/<id>.rs` is needed when clients
 speak an API: publishing in their own protocol (npm's JSON with a
 base64 tarball, NuGet's multipart push, cargo's framed body), documents
 made per request with absolute URLs (npm packuments, cargo's index
@@ -290,7 +290,7 @@ repositories, and share a shape:
 
 ## The console's "How to use"
 
-`usage()` in `crates/pkgpod-server/src/console.rs` returns a format's
+`usage()` in `crates/server/src/console.rs` returns a format's
 lines (`UseLine`: a label and the text to copy) for a repository: its
 address (`base`, from the first of its `urls`, else the listener), the
 client configuration, how to log in, publish and install, and a
@@ -325,7 +325,7 @@ of those kinds; serving them is the server's:
 ## Mirrors and imports
 
 Listing `Kind::Mirror` in `kinds()` is not enough either. A mirror's
-sync (`jobs::sync` in `crates/pkgpod-server/src/jobs.rs`) runs the
+sync (`jobs::sync` in `crates/server/src/jobs.rs`) runs the
 plain-tree engines for files and treats every other format as an apt
 archive, and imports (`import::start`) take deb, files and OCI only. A
 new format with mirrors or imports needs its own branch there (and an
@@ -337,10 +337,10 @@ fits); a received tree is then served as it lies, by `serve_mirror`.
 **Unit tests** in the format crate: parsing real packages (and broken
 ones), index output, and the format through an engine. The engine
 opens on a temporary database with `NoSigner` (or a test key) and only
-your format, as `crates/pkgpod-engine/tests/engine.rs` does with its
+your format, as `crates/core/engine/tests/engine.rs` does with its
 toy format.
 
-**End-to-end tests** in `crates/pkgpod/tests/e2e.rs` drive the real
+**End-to-end tests** in `crates/cli/tests/e2e.rs` drive the real
 server binary and the format's real client:
 
 - `Server::start()` runs `pkgpod serve` on a temporary data directory
@@ -448,7 +448,7 @@ A format for a made-up package type, `.widget` files named
 semantic versions with cleanup rules, and a served tree with an index
 per package, reused when the package did not change.
 
-`crates/pkgpod-widget/Cargo.toml`:
+`crates/formats/widget/Cargo.toml`:
 
 ```toml
 [package]
@@ -470,7 +470,7 @@ serde_json.workspace = true
 tempfile.workspace = true
 ```
 
-`crates/pkgpod-widget/src/lib.rs`:
+`crates/formats/widget/src/lib.rs`:
 
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-only

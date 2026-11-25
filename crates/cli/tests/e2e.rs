@@ -1329,7 +1329,7 @@ fn console_login_pages_and_csrf() {
     );
     let rpm = std::fs::read(
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../pkgpod-rpm/tests/fixtures/hello-rpm-1.0-1.noarch.rpm"),
+            .join("../formats/rpm/tests/fixtures/hello-rpm-1.0-1.noarch.rpm"),
     )
     .unwrap();
     // (sign is on unless said otherwise; the form above sent no box.)
@@ -10992,7 +10992,7 @@ fn rpm_packages_with_dnf() {
         .unwrap()
         .trim()
         .to_string();
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../pkgpod-rpm/tests/fixtures");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../formats/rpm/tests/fixtures");
     let c = reqwest::blocking::Client::new();
     let upload = |file: &str| {
         let r = c
@@ -12917,7 +12917,7 @@ fn console_how_to_use_places_names_and_a_token() {
     // An rpm repository's groups to choose, the packages named.
     s.cli(&["repo", "create", "r", "-f", "rpm", "-s", "sign=false"])
         .unwrap();
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../pkgpod-rpm/tests/fixtures");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../formats/rpm/tests/fixtures");
     for (f, g) in [
         ("hello-rpm-1.0-1.noarch.rpm", "el9"),
         ("tool-rpm-0.1-1.x86_64.rpm", "fc43"),
@@ -12999,7 +12999,7 @@ fn console_packages_filter_download_details_bulk() {
     let text = |p: &str| String::from_utf8(page(p).2).unwrap();
     s.cli(&["repo", "create", "r", "-f", "rpm", "-s", "sign=false"])
         .unwrap();
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../pkgpod-rpm/tests/fixtures");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../formats/rpm/tests/fixtures");
     for (f, g) in [
         ("hello-rpm-1.0-1.noarch.rpm", "el9"),
         ("hello-rpm-1.1-1.noarch.rpm", "el9"),
