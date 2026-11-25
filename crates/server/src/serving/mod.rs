@@ -1394,8 +1394,12 @@ async fn serve_tagged(
     files: bool,
     mut req: Request,
 ) -> Response {
-    let modified =
-        mtime.map(|t| std::time::UNIX_EPOCH + std::time::Duration::from_secs(t.max(0) as u64));
+    // Within what an HTTP date can say, for a time stored before that
+    // was checked: a later one panics where it is formatted.
+    let modified = mtime.map(|t| {
+        std::time::UNIX_EPOCH
+            + std::time::Duration::from_secs(t.clamp(0, pkgpod_files::MAX_MTIME) as u64)
+    });
     let inm = req
         .headers()
         .get(header::IF_NONE_MATCH)
@@ -2334,5 +2338,36 @@ mod tests {
             content_type("pool/a/b.deb"),
             "application/vnd.debian.binary-package"
         );
+    }
+
+    /// A time stored before uploads were held to what an HTTP date can
+    /// say is served as the last one it can.
+    #[tokio::test]
+    async fn times_after_the_year_9999_are_served() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("f");
+        std::fs::write(&file, "x").unwrap();
+        for t in [253_402_300_800, i64::MAX] {
+            for since in [None, Some("Fri, 31 Dec 9999 23:59:59 GMT")] {
+                let mut req = Request::new(Body::empty());
+                if let Some(v) = since {
+                    req.headers_mut()
+                        .insert(header::IF_MODIFIED_SINCE, HeaderValue::from_static(v));
+                }
+                let r = serve_tagged(&file, "\"e\"", "f", Some(t), true, req).await;
+                assert_eq!(
+                    r.status(),
+                    if since.is_some() {
+                        StatusCode::NOT_MODIFIED
+                    } else {
+                        StatusCode::OK
+                    }
+                );
+                assert_eq!(
+                    r.headers()[header::LAST_MODIFIED],
+                    "Fri, 31 Dec 9999 23:59:59 GMT"
+                );
+            }
+        }
     }
 }

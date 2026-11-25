@@ -89,6 +89,8 @@ askama = "0.16"
 getrandom = "0.4"
 futures-util = "0.3"
 reqwest = { version = "0.13", features = ["blocking", "json", "multipart", "stream", "query"] }
+# reqwest's URL parser: addresses are checked as it reads them.
+url = "2"
 
 [profile.release]
 lto = "thin"

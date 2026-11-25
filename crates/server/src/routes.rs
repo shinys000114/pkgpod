@@ -36,6 +36,11 @@ impl Route {
 
 /// Parses `scheme://host[:port]/path`.
 pub fn parse_url(u: &str) -> Result<(String, String, Vec<String>), String> {
+    // Before any error that echoes the address, a user or a password
+    // however it is written (http:///u:p@h/ has no host here).
+    if pkgpod_engine::settings::has_credentials(u, false) {
+        return Err("an address takes no user or password".into());
+    }
     let (scheme, rest) = u
         .split_once("://")
         .ok_or_else(|| format!("{u:?}: an address is scheme://host/path"))?;
@@ -43,9 +48,10 @@ pub fn parse_url(u: &str) -> Result<(String, String, Vec<String>), String> {
         Some((h, p)) => (h, p),
         None => (rest, ""),
     };
-    if host.contains('@') {
+    if scheme.contains('@') || host.contains('@') {
         // Before any error that echoes the address: what is before the
-        // @ may be a password.
+        // @ may be a password (a registry named by its host may have a
+        // :// further on: u:p@ghcr.io/x://y).
         return Err("an address takes no user or password".into());
     }
     if scheme != "http" && scheme != "https" {
@@ -413,6 +419,9 @@ mod tests {
             "https://user:secret@h/",
             "https://user:se#cret@h/",
             "ftp://user:secret@h/",
+            "http:///user:secret@h/",
+            "http:/user:secret@h/",
+            "user:secret@ghcr.io/x://y",
         ] {
             let e = parse_url(u).unwrap_err();
             assert!(

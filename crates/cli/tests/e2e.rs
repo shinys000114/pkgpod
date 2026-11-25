@@ -5028,8 +5028,20 @@ fn imports_from_addresses_with_secrets_are_refused() {
             &["--dists", "stable"][..],
         ),
         ("d", "HTTPS://u:secret@127.0.0.1:9/", &["--dists", "stable"]),
+        // A user to the HTTP client, which skips the extra slash.
+        ("d", "http:///u:secret@127.0.0.1:9/", &["--dists", "stable"]),
+        // Port 12 and a fragment to the HTTP client, which still hold
+        // the password.
+        (
+            "d",
+            "http:///u:12#secret@127.0.0.1:9/",
+            &["--dists", "stable"],
+        ),
         ("f", "https://u:secret@127.0.0.1:9/d/", &[]),
+        // A / in the password: no address, but one that may hold it.
+        ("f", "https://u:a/secret@127.0.0.1:9/d/", &[]),
         ("o", "u:secret@127.0.0.1:9", &["--image", "app:1"]),
+        ("o", "u:a/secret@127.0.0.1:9", &["--image", "app:1"]),
         ("o", "https://u:secret@127.0.0.1:9", &["--image", "app:1"]),
     ] {
         let e = s
@@ -12542,12 +12554,61 @@ fn misspelt_parameters_and_secrets_in_addresses_are_refused() {
             .unwrap();
         assert_eq!(r.headers()["last-modified"], when, "{path}");
     }
+    // But not one after what an HTTP date can say: the file could not
+    // be served.
+    let e = s
+        .cli(&[
+            "upload",
+            "t",
+            f,
+            "-s",
+            "path=y/",
+            "-s",
+            "mtime=253402300800",
+        ])
+        .unwrap_err();
+    assert!(e.contains("9999"), "{e}");
+    let r = c
+        .put(s.url("/t/y/f.txt?mtime=9223372036854775807"))
+        .basic_auth("admin", Some(pw.trim()))
+        .body("y")
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 400);
+    s.cli(&[
+        "upload",
+        "t",
+        f,
+        "-s",
+        "path=y/",
+        "-s",
+        "mtime=253402300799",
+    ])
+    .unwrap();
+    let r = c
+        .get(s.url("/t/y/f.txt"))
+        .basic_auth("admin", Some(pw.trim()))
+        .send()
+        .unwrap();
+    assert_eq!(
+        r.headers()["last-modified"],
+        "Fri, 31 Dec 9999 23:59:59 GMT"
+    );
     // And operations.
     let e = s
         .cli(&["op", "t", "move", "from=a", "too=c", "-y"])
         .unwrap_err();
     assert!(e.contains("no parameter \"too\""), "{e}");
-    for (kind, setting) in [("mirror", "source"), ("proxy", "upstream")] {
+    for (kind, setting, address) in [
+        ("mirror", "source", "https://u:secret@files.example.org/"),
+        ("mirror", "source", "http:///u:secret@files.example.org/"),
+        ("mirror", "source", "https://u:a/secret@files.example.org/"),
+        ("mirror", "source", "http:///u:12#secret@files.example.org/"),
+        ("proxy", "upstream", "https://u:secret@files.example.org/"),
+        ("proxy", "upstream", "http:///u:secret@files.example.org/"),
+        ("proxy", "upstream", "http:/u:secret@files.example.org/"),
+        ("proxy", "upstream", "https://u:a/secret@files.example.org/"),
+    ] {
         let e = s
             .cli(&[
                 "repo",
@@ -12558,7 +12619,7 @@ fn misspelt_parameters_and_secrets_in_addresses_are_refused() {
                 "-k",
                 kind,
                 "-s",
-                &format!("{setting}=https://u:secret@files.example.org/"),
+                &format!("{setting}={address}"),
             ])
             .unwrap_err();
         assert!(
@@ -12566,6 +12627,24 @@ fn misspelt_parameters_and_secrets_in_addresses_are_refused() {
             "{e}"
         );
     }
+    // A registry named by its host, with a :// further on.
+    let e = s
+        .cli(&[
+            "repo",
+            "create",
+            "proxy",
+            "-f",
+            "oci",
+            "-k",
+            "proxy",
+            "-s",
+            "upstream=u:secret@ghcr.io/x://y",
+        ])
+        .unwrap_err();
+    assert!(
+        e.contains("no user or password") && !e.contains("secret"),
+        "{e}"
+    );
     let e = s
         .cli(&["gc", "--grace-hours", "3000000000000000"])
         .unwrap_err();

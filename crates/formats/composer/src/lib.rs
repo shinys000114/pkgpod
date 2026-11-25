@@ -170,12 +170,15 @@ pub fn read_package(data: &[u8], version: Option<&str>) -> Result<Package> {
         .unwrap_or("")
         .to_string();
     check_name(&name)?;
-    let version = match version.filter(|v| !v.is_empty()) {
+    // White space around it is not part of it (normalize leaves it out
+    // too): the version names the zip's path and its dist URL, which
+    // composer cannot fetch with a space in it.
+    let version = match version.map(str::trim).filter(|v| !v.is_empty()) {
         Some(v) => v.to_string(),
         None => composer
             .get("version")
             .and_then(Value::as_str)
-            .map(String::from)
+            .map(|v| v.trim().to_string())
             .ok_or_else(|| {
                 invalid("no version: give one (?version=1.0.0) or put it in composer.json")
             })?,
@@ -447,5 +450,26 @@ mod tests {
         ] {
             assert!(normalize(v).is_err(), "{v:?}");
         }
+    }
+
+    /// White space around a version is not part of it: the version is
+    /// in the zip's path and its dist URL, which composer cannot fetch
+    /// with a space in it.
+    #[test]
+    fn versions_without_white_space_around() {
+        let z = |json: &[u8]| zip::make(&[("composer.json", json, true)]);
+        let named = z(br#"{"name": "acme/hello"}"#);
+        for v in [" 1.0.0", "1.0.0 ", "\t1.0.0\n"] {
+            let p = read_package(&named, Some(v)).unwrap();
+            assert_eq!(
+                (p.version.as_str(), p.normalized.as_str()),
+                ("1.0.0", "1.0.0.0")
+            );
+        }
+        let given = z(br#"{"name": "acme/hello", "version": " 2.0.0 "}"#);
+        assert_eq!(read_package(&given, None).unwrap().version, "2.0.0");
+        // Only white space is no version given: the composer.json's.
+        assert_eq!(read_package(&given, Some("  ")).unwrap().version, "2.0.0");
+        assert!(read_package(&named, Some(" ")).is_err());
     }
 }

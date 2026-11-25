@@ -215,18 +215,49 @@ pub fn check_no_credentials(kind: crate::Kind, settings: &Value) -> Result<()> {
 /// host alone (docker.io, ghcr.io/team), holds a user or a password.
 pub fn has_credentials(address: &str, bare: bool) -> bool {
     let s = address.trim();
-    let rest = match s.split_once("://") {
-        Some((scheme, rest))
-            if matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") =>
-        {
-            rest
-        }
-        None if bare => s,
-        _ => return false,
+    // As the HTTP client reads it (reqwest parses with url), which skips
+    // extra slashes (http:///u:p@h/ is u:p@h), takes \ for / and drops
+    // tabs and newlines: what is a user to it is one here. One that does
+    // not parse but has an @ may hold a password with a / in it
+    // (https://u:a/b@h/), and cannot be told from one. A registry is
+    // fetched from with https:// put before it unless it starts with
+    // http(s)://, whatever else it holds: both readings.
+    let mut readings = vec![s.to_string()];
+    if bare {
+        readings.push(format!("https://{s}"));
+    }
+    // What follows an http(s) scheme, found as the parser finds it.
+    let http = |a: &str| {
+        let a: String = a
+            .chars()
+            .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+            .collect();
+        let (scheme, rest) = a.trim_start_matches(|c: char| c <= ' ').split_once(':')?;
+        (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+            .then(|| rest.to_string())
     };
-    // Up to the path, as routes take an address apart: a password may
-    // hold a ? or a #.
-    rest.split('/').next().unwrap_or("").contains('@')
+    readings.iter().any(|a| {
+        let rest = http(a);
+        let parsed = match url::Url::parse(a) {
+            Ok(u) => {
+                matches!(u.scheme(), "http" | "https")
+                    && (!u.username().is_empty() || u.password().is_some())
+            }
+            Err(_) => rest.is_some() && a.contains('@'),
+        };
+        // Up to the path, after the slashes the parser skips, as routes
+        // take an address apart: a password may hold a ? or a #
+        // (https://u:12#p@h/ is port 12 to the parser, and so is
+        // http:///u:12#p@h/).
+        parsed
+            || rest.is_some_and(|r| {
+                r.trim_start_matches(['/', '\\'])
+                    .split('/')
+                    .next()
+                    .unwrap_or("")
+                    .contains('@')
+            })
+    })
 }
 
 /// Settings every repository of a kind has, whatever its format.
@@ -531,5 +562,94 @@ mod tests {
         assert!(check(&p, &json!({"metadata_minutes": -1})).is_err());
         assert!(check(&cleanup_fields(), &json!({"cleanup_unused_days": -1})).is_err());
         assert!(check(&mirror_common(), &json!({"bwlimit": -1})).is_err());
+    }
+
+    /// A user or a password however it is written: the HTTP client
+    /// reads these as one, or they do not parse and may hold one.
+    #[test]
+    fn addresses_with_a_user_or_password_however_written() {
+        for a in [
+            "http://u:secret@h.example.org/",
+            "http:///u:secret@h.example.org/",
+            "HTTPS:///u:secret@h.example.org/",
+            "http:/u:secret@h.example.org/",
+            "http:u:secret@h.example.org/",
+            "http:\\\\u:secret@h.example.org\\",
+            "ht\ttp://u:secret@h.example.org/",
+            " https://u:secret@h.example.org/ ",
+            "https://u:ab/secret@h.example.org/d/",
+            "https://u:ab?secret@h.example.org/",
+            "https://u:12#secret@h.example.org/",
+            "https://u:12?secret@h.example.org/",
+            "http:///u:12#secret@h.example.org/",
+            "http:/u:12?secret@h.example.org/",
+            "http:u:12#secret@h.example.org/",
+            "http:\\\\u:12#secret@h.example.org/",
+            "ht\ttp:///u:12#secret@h.example.org/",
+            "\u{1}http://u:12#secret@h.example.org/",
+            "https://u%3Asecret@h.example.org/",
+            "https://u:se%2Fcret@h.example.org/",
+            "https://u@h.example.org/",
+        ] {
+            assert!(has_credentials(a, false), "{a:?}");
+            assert!(has_credentials(a, true), "{a:?}");
+        }
+        // A registry named by its host alone, which is fetched from with
+        // https:// before it unless it starts with http(s)://.
+        for a in [
+            "u:secret@ghcr.io/team",
+            "u:a/secret@ghcr.io",
+            "/u:secret@ghcr.io",
+            "u:secret@ghcr.io/x://y",
+            "/u:12#secret@ghcr.io",
+            "u:12#secret@ghcr.io/x://y",
+        ] {
+            assert!(has_credentials(a, true), "{a:?}");
+        }
+        for a in [
+            "",
+            "https://deb.example.org/debian",
+            "https://deb.example.org/debian?a@b",
+            "https://deb.example.org/a@b/",
+            "https://exa mple.org/",
+            "rsync://user@h.example.org/m/",
+            "user@h.example.org::mod",
+            "/srv/dir",
+            "file:///srv/dir",
+        ] {
+            assert!(!has_credentials(a, false), "{a:?}");
+        }
+        for a in [
+            "",
+            "docker.io",
+            "up.example.org/team",
+            "localhost:5000/team",
+            "127.0.0.1:5000",
+            "https://ghcr.io",
+        ] {
+            assert!(!has_credentials(a, true), "{a:?}");
+        }
+        // Mirrors' sources and proxies' upstreams, not echoed.
+        for (kind, name, a) in [
+            (
+                crate::Kind::Mirror,
+                "source",
+                "http:///u:secret@h.example.org/",
+            ),
+            (
+                crate::Kind::Mirror,
+                "source",
+                "https://u:a/secret@h.example.org/",
+            ),
+            (crate::Kind::Proxy, "upstream", "u:a/secret@ghcr.io"),
+        ] {
+            let e = check_no_credentials(kind, &json!({ name: a }))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                e.contains("no user or password") && !e.contains("secret"),
+                "{e}"
+            );
+        }
     }
 }

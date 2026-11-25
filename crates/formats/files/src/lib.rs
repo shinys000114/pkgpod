@@ -18,6 +18,10 @@ use serde_json::{Value, json};
 
 pub struct Files;
 
+/// The latest modification time a file may have, unix seconds: the end
+/// of the year 9999, the last an HTTP date (its Last-Modified) can say.
+pub const MAX_MTIME: i64 = 253_402_300_799;
+
 /// Is `p` a path a file may have: segments that are not empty, `.` or
 /// `..`, no control characters or backslashes (no URL can fetch them),
 /// a first segment not starting with `@` (`@label` addresses a
@@ -340,6 +344,12 @@ impl Format for Files {
             .get("mtime")
             .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
             .unwrap_or_else(pkgpod_base::now);
+        // A later one could not be served (see MAX_MTIME).
+        if mtime > MAX_MTIME {
+            return Err(Error::Invalid(format!(
+                "{t}: mtime {mtime}, at most {MAX_MTIME} (the end of the year 9999)"
+            )));
+        }
         match e.get(&t)? {
             Some(Entry::Blob { sha256, .. }) if sha256 == up.sha256 => {
                 return Ok(format!("{t} unchanged"));

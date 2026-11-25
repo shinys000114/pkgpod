@@ -55,7 +55,7 @@ A file goes to a path. Upload parameters:
 | --- | --- | --- |
 | `path` | the top | Where: a directory ending in `/` (the file keeps its name) or the file's whole path. |
 | `replace` | false | Replace a file at the same path with other content. |
-| `mtime` | now | The file's modification time, unix seconds. |
+| `mtime` | now | The file's modification time, unix seconds: at most 253402300799, the end of the year 9999 (the last an HTTP date can say). |
 
 ```sh
 pkgpod upload tools tool-1.0.tar.gz -s path=tool/1.0/
