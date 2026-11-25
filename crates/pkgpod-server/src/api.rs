@@ -305,6 +305,9 @@ pub fn router() -> Router<Arc<App>> {
         )
         .route("/api/v1/tokens", get(tokens).post(token_create))
         .route("/api/v1/tokens/{id}", delete(token_delete))
+        .route("/api/v1/trust", get(trust_rules).post(trust_put))
+        .route("/api/v1/trust/{name}", delete(trust_delete))
+        .route("/api/v1/oidc/token", post(oidc_token))
         .route("/api/v1/listeners", get(listeners))
         .route(
             "/api/v1/listeners/{name}",
@@ -1607,6 +1610,72 @@ pub(crate) async fn token_create(
     Ok((
         StatusCode::CREATED,
         Json(json!({"token": token, "info": info})),
+    ))
+}
+
+// ---- trusted publishing ----
+
+pub(crate) async fn trust_rules(State(app): St, Who(c): Who) -> Result<Json<Value>> {
+    app.require_admin(&c)?;
+    let app2 = app.clone();
+    Ok(Json(json!(
+        blocking(&app, move |_| crate::oidc::rules(&app2)).await?
+    )))
+}
+
+/// Adds a trust rule, or replaces the one of the same name.
+pub(crate) async fn trust_put(
+    State(app): St,
+    Who(c): Who,
+    Json(rule): Json<crate::oidc::Rule>,
+) -> Result<(StatusCode, Json<Value>)> {
+    app.require_admin(&c)?;
+    let app2 = app.clone();
+    let r = blocking(&app, move |_| crate::oidc::put_rule(&app2, rule)).await?;
+    app.auth.audit(
+        c.name(),
+        "trust rule",
+        &r.name,
+        &format!(
+            "{} -> {} on {}",
+            r.claims
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+            r.user,
+            r.repos.join(",")
+        ),
+    );
+    Ok((StatusCode::CREATED, Json(json!(r))))
+}
+
+pub(crate) async fn trust_delete(
+    State(app): St,
+    Who(c): Who,
+    Path(name): Path<String>,
+) -> Result<StatusCode> {
+    app.require_admin(&c)?;
+    let (app2, n2) = (app.clone(), name.clone());
+    blocking(&app, move |_| crate::oidc::remove_rule(&app2, &n2)).await?;
+    app.auth.audit(c.name(), "trust rule remove", &name, "");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub(crate) struct OidcReq {
+    /// The CI's OIDC token.
+    token: String,
+    /// The rule to use when several match.
+    #[serde(default)]
+    rule: Option<String>,
+}
+
+/// A CI's OIDC token for a short-lived pkgpod token: no other
+/// credential; the token is the proof.
+pub(crate) async fn oidc_token(State(app): St, Json(req): Json<OidcReq>) -> Result<Json<Value>> {
+    Ok(Json(
+        crate::oidc::exchange(&app, &req.token, req.rule.as_deref()).await?,
     ))
 }
 

@@ -137,6 +137,23 @@ CREATE TABLE badge_tokens (
     created INTEGER NOT NULL
 );
 ",
+    // Trusted publishing: which CI identities (claims of an OIDC token)
+    // get a short-lived token of which user, for which repositories.
+    "
+CREATE TABLE trust_rules (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    issuer TEXT NOT NULL,
+    audience TEXT NOT NULL,
+    claims TEXT NOT NULL,
+    user INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    repos TEXT NOT NULL,
+    write INTEGER NOT NULL,
+    minutes INTEGER NOT NULL,
+    created INTEGER NOT NULL,
+    used INTEGER
+);
+",
 ];
 
 pub fn migrate(db: &Db) -> pkgpod_base::Result<()> {
@@ -158,6 +175,7 @@ mod tests {
             "af0a60b7120d6678",
             "ecf508f3a5114520",
             "c4eb88395a908cdd",
+            "fcc2c4368702bf38",
         ];
         let got: Vec<String> = super::STEPS
             .iter()

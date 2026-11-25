@@ -29,6 +29,7 @@ rustix.workspace = true
 jiff.workspace = true
 
 [dev-dependencies]
+pkgpod-server = { workspace = true, features = ["testutil"] }
 rusqlite.workspace = true
 pkgpod-deb = { workspace = true, features = ["testutil"] }
 pkgpod-apk = { workspace = true, features = ["testutil"] }
@@ -36,3 +37,4 @@ pkgpod-ipk.workspace = true
 tempfile.workspace = true
 reqwest = { workspace = true, features = ["form"] }
 serde_json.workspace = true
+base64.workspace = true

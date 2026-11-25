@@ -563,6 +563,74 @@ fn schemas() -> Value {
             ),
         ),
         (
+            "TrustRule",
+            object(
+                "Trusted publishing: a CI job whose OIDC token carries these claims gets a short-lived token of user for repos.",
+                vec![
+                    ("name", string()),
+                    (
+                        "issuer",
+                        text(
+                            "The OIDC issuer (default: GitHub Actions', https://token.actions.githubusercontent.com).",
+                        ),
+                    ),
+                    (
+                        "audience",
+                        text("The audience the token must be made for (default: pkgpod)."),
+                    ),
+                    (
+                        "claims",
+                        json!({"type": "object", "additionalProperties": {"type": "string"}, "description": "Claim -> pattern (* matches any run of characters); all must match."}),
+                    ),
+                    ("user", text("The pkgpod user whose token is given.")),
+                    ("repos", strings()),
+                    ("write", boolean()),
+                    (
+                        "minutes",
+                        json!({"type": "integer", "description": "How long a token lasts, 1 to 60 (default 15)."}),
+                    ),
+                    ("created", integer()),
+                    (
+                        "used",
+                        nullable("integer", "When a token was last given by it."),
+                    ),
+                ],
+                &["name", "claims", "user", "repos"],
+            ),
+        ),
+        (
+            "OidcExchange",
+            object(
+                "",
+                vec![
+                    ("token", text("The CI's OIDC token (a JWT).")),
+                    (
+                        "rule",
+                        nullable("string", "The rule to use when several match."),
+                    ),
+                ],
+                &["token"],
+            ),
+        ),
+        (
+            "OidcToken",
+            object(
+                "",
+                vec![
+                    (
+                        "token",
+                        text("A pkgpod token, as a bearer or Basic password."),
+                    ),
+                    ("expires", integer()),
+                    ("user", string()),
+                    ("repos", strings()),
+                    ("write", boolean()),
+                    ("rule", string()),
+                ],
+                &["token", "expires", "user", "repos", "write", "rule"],
+            ),
+        ),
+        (
             "TokenCreated",
             object(
                 "",
@@ -1253,6 +1321,16 @@ fn ops() -> Vec<Op> {
             .reply(201, "The token and its description.", sref("TokenCreated")),
         op("delete", "/api/v1/tokens/{id}", "token_delete", "Delete a token.")
             .empty(204, "Deleted."),
+        op("get", "/api/v1/trust", "trust_rules", "Trust rules for CI jobs' OIDC tokens (server admin).")
+            .reply(200, "The rules.", array(sref("TrustRule"))),
+        op("post", "/api/v1/trust", "trust_put", "Add a trust rule, or replace the one of the same name (server admin).")
+            .body("TrustRule")
+            .reply(201, "The rule.", sref("TrustRule")),
+        op("delete", "/api/v1/trust/{name}", "trust_delete", "Remove a trust rule (server admin).")
+            .empty(204, "Removed."),
+        op("post", "/api/v1/oidc/token", "oidc_token", "A CI job's OIDC token for a short-lived pkgpod token, as a trust rule allows; no other credential.")
+            .body("OidcExchange")
+            .reply(200, "The token.", sref("OidcToken")),
         op("get", "/api/v1/listeners", "listeners", "Serving listeners (server admin).")
             .reply(200, "The listeners.", array(sref("Listener"))),
         op("put", "/api/v1/listeners/{name}", "listener_set", "Add or change {addr, cert?, key?, enabled?, proto?, passive?} (server admin).")

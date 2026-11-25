@@ -59,6 +59,7 @@ thiserror.workspace = true
 sha2.workspace = true
 sha1.workspace = true
 rsa.workspace = true
+p256.workspace = true
 jiff.workspace = true
 glob.workspace = true
 base64.workspace = true
@@ -71,3 +72,7 @@ reqwest.workspace = true
 [dev-dependencies]
 pkgpod-deb = { workspace = true, features = ["testutil"] }
 reqwest.workspace = true
+
+[features]
+# A fake OIDC issuer for tests of trusted publishing.
+testutil = []

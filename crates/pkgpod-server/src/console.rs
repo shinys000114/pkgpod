@@ -122,6 +122,8 @@ pub fn router() -> Router<Arc<App>> {
         .route("/c/teams/{team}/delete", post(team_delete))
         .route("/c/teams/{team}/members", post(member))
         .route("/admin/server", get(server_page))
+        .route("/c/trust", post(trust_set))
+        .route("/c/trust/{name}/delete", post(trust_delete))
         .route("/c/listeners", post(listener_set))
         .route("/c/listeners/{name}/delete", post(listener_delete))
         .route("/c/keys/generate", post(key_generate))
@@ -4979,6 +4981,17 @@ pub struct ListenerRow {
     pub ok: bool,
 }
 
+/// A trust rule as the Server page lists it.
+pub struct TrustRow {
+    pub name: String,
+    /// The claims a line each (and the issuer, when not GitHub's).
+    pub trusts: Vec<String>,
+    pub user: String,
+    pub repos: String,
+    pub token: String,
+    pub used: String,
+}
+
 pub struct KeyRow {
     pub name: String,
     pub fingerprint: String,
@@ -5019,6 +5032,9 @@ struct ServerPage {
     data_dir: String,
     management: String,
     downloads_days: i64,
+    trust: Vec<TrustRow>,
+    users: Vec<String>,
+    repo_names: Vec<String>,
 }
 
 async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
@@ -5078,6 +5094,27 @@ async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
         .collect();
     let audit: Vec<AuditRow> = app.auth.audit_log(100)?.iter().map(audit_row).collect();
     let glance = server_glance(&app, &listeners, &keys, &storages);
+    let trust = crate::oidc::rules(&app)?
+        .into_iter()
+        .map(|r| TrustRow {
+            trusts: (r.issuer != crate::oidc::GITHUB)
+                .then(|| format!("issuer {}", r.issuer))
+                .into_iter()
+                .chain(r.claims.iter().map(|(k, v)| format!("{k}={v}")))
+                .collect(),
+            user: r.user,
+            repos: r.repos.join(", "),
+            token: format!(
+                "{} min{}",
+                r.minutes,
+                if r.write { ", writes" } else { ", reads" }
+            ),
+            used: when(r.used),
+            name: r.name,
+        })
+        .collect();
+    let users = app.auth.users()?.into_iter().map(|u| u.name).collect();
+    let repo_names = app.engine.repos()?.into_iter().map(|r| r.name).collect();
     Ok(render(&ServerPage {
         s: v.shell("server"),
         glance,
@@ -5089,7 +5126,75 @@ async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
         data_dir: app.cfg.data_dir.display().to_string(),
         management: app.cfg.listen.clone(),
         downloads_days: crate::stats::days_kept(&app),
+        trust,
+        users,
+        repo_names,
     }))
+}
+
+/// A trust rule from the Server page's form: GitHub's fields, or claims
+/// of another issuer a line each.
+async fn trust_set(State(app): St, v: Viewer, Form(form): Form<Vec<(String, String)>>) -> Response {
+    let f = |k: &str| form_get(&form, k).trim().to_string();
+    let mut claims = std::collections::BTreeMap::new();
+    let github = f("github");
+    if !github.is_empty() {
+        claims.insert("repository".to_string(), github.clone());
+        let w = f("workflow");
+        if !w.is_empty() {
+            claims.insert(
+                "workflow_ref".to_string(),
+                format!(
+                    "{github}/.github/workflows/{}@*",
+                    w.trim_start_matches(".github/workflows/")
+                ),
+            );
+        }
+    }
+    for (k, val) in [("ref", f("ref")), ("environment", f("environment"))] {
+        if !val.is_empty() {
+            claims.insert(k.to_string(), val);
+        }
+    }
+    for line in form_get(&form, "claims").lines() {
+        if let Some((k, val)) = line.split_once('=') {
+            claims.insert(k.trim().to_string(), val.trim().to_string());
+        }
+    }
+    let issuer = match f("issuer") {
+        i if i.is_empty() => crate::oidc::GITHUB.to_string(),
+        i => i,
+    };
+    let rule = crate::oidc::Rule {
+        name: f("name"),
+        issuer,
+        audience: match f("audience") {
+            a if a.is_empty() => crate::oidc::AUDIENCE.to_string(),
+            a => a,
+        },
+        claims,
+        user: f("user"),
+        repos: f("repos")
+            .split([',', ' '])
+            .filter(|r| !r.is_empty())
+            .map(String::from)
+            .collect(),
+        write: form_get(&form, "read_only") != "on",
+        minutes: f("minutes").parse().unwrap_or(15),
+        created: 0,
+        used: None,
+    };
+    match api::trust_put(State(app), v.who(), Json(rule)).await {
+        Ok(_) => refresh(),
+        Err(e) => err_part(e),
+    }
+}
+
+async fn trust_delete(State(app): St, v: Viewer, Path(name): Path<String>) -> Response {
+    match api::trust_delete(State(app), v.who(), Path(name)).await {
+        Ok(_) => refresh(),
+        Err(e) => err_part(e),
+    }
 }
 
 async fn listener_set(

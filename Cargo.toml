@@ -63,6 +63,7 @@ glob = "0.3"
 semver = "1"
 crc32fast = "1"
 rsa = "0.9"
+p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
 yaml-rust2 = "0.13"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 quick-xml = "0.42"

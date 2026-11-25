@@ -70,6 +70,9 @@ Status: in development, nothing released.
 - Management: a web console, a JSON API (`/api/v1`, described at
   `/api/v1/openapi.json`) and the `pkgpod` command, with one rights
   model (users, teams, roles per repository, scoped tokens).
+- Trusted publishing: CI jobs (GitHub Actions, any OIDC issuer) log in
+  with their OIDC token, as a trust rule allows, for a token that lasts
+  minutes; no secret is kept in the CI.
 - Download statistics by package, version and day (`pkgpod downloads
   <repo>`), kept a year unless set otherwise; a status API, SVG badges
   for READMEs (`/.well-known/pkgpod/badges/<repo>/status.svg`; private
