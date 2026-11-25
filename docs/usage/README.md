@@ -396,8 +396,11 @@ on one page, with the syncs of the next day (see
 [operations](../operations.md#scheduled-mirror-syncs)). Account holds
 your tokens and password;
 server admins also have Users & teams (users, teams, grants on `*`) and
-Server (serving listeners, signing keys, storages, storage use, garbage
-collection, download statistics, recent changes).
+Server, in sections: Overview (at a glance, recent changes), Jobs (every
+repository's, filtered), Logs (the server's recent events), Listeners &
+hosts (serving listeners, host pages), Storage (storages, storage use,
+garbage collection, download statistics), Signing keys, and CI &
+webhooks (trusted publishing, webhooks).
 
 A repository's page has these tabs (which ones depends on its kind and
 your role):

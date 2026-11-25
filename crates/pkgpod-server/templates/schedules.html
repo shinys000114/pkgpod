@@ -30,7 +30,7 @@
   {% endif %}
 </div>
 <div class="card">
-  <div class="card-head"><h2>Next 24 hours</h2><span class="hint">the syncs the schedules start; each runs about as long as its last good sync{% if slots > 0 %}, at most {{ slots }} at once on a storage{% endif %}{% if s.admin %} (<a href="/admin/server#storages">Server, Storages</a>){% endif %}</span></div>
+  <div class="card-head"><h2>Next 24 hours</h2><span class="hint">the syncs the schedules start; each runs about as long as its last good sync{% if slots > 0 %}, at most {{ slots }} at once on a storage{% endif %}{% if s.admin %} (<a href="/admin/server/storage">Server, Storage</a>){% endif %}</span></div>
   {% if paused %}<p class="empty">None: schedules are paused.</p>
   {% else if planned.is_empty() %}<p class="empty">{% if any %}No scheduled sync in the next 24 hours.{% else %}No mirror has a schedule: they sync only when asked.{% endif %}</p>
   {% else %}

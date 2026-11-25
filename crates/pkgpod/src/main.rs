@@ -282,7 +282,31 @@ pub(crate) enum Cmd {
         wait: bool,
     },
     /// Recent jobs (of one repository, or all).
-    Jobs { repo: Option<String> },
+    Jobs {
+        repo: Option<String>,
+        /// Only those in this state: queued, running, ok, failed,
+        /// cancelled, or active (queued or running); server admins.
+        #[arg(long)]
+        state: Option<String>,
+        /// Only syncs or imports (server admins).
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// The server's recent log, since it started (server admins).
+    Logs {
+        /// error, warn, info, debug: that or more severe.
+        #[arg(long, default_value = "info")]
+        level: String,
+        /// Only events with this text.
+        #[arg(long)]
+        grep: Option<String>,
+        /// How many of the newest.
+        #[arg(short = 'n', long, default_value_t = 100)]
+        lines: usize,
+        /// Keep printing new events as they come.
+        #[arg(short, long)]
+        follow: bool,
+    },
     /// A job and its log.
     Job {
         id: i64,
@@ -414,12 +438,17 @@ fn load(a: &ServerArgs) -> Result<pkgpod_server::config::Config, client::CliErro
 
 fn serve(a: &ServerArgs) -> Result<(), client::CliError> {
     let cfg = load(a)?;
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    // To stderr (the journal), and the recent events kept for the
+    // console's Logs page.
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    tracing_subscriber::registry()
+        .with(
             tracing_subscriber::EnvFilter::try_from_env("PKGPOD_LOG")
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&cfg.log)),
         )
-        .with_target(false)
+        .with(tracing_subscriber::fmt::layer().with_target(false))
+        .with(pkgpod_server::logs::layer())
         .init();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

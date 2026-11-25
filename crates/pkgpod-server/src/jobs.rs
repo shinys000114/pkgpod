@@ -72,6 +72,56 @@ pub fn list(db: &Db, repo: Option<&str>, limit: usize) -> Result<Vec<Job>> {
     })?)
 }
 
+/// Which jobs [`find`] lists; empty fields match all.
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+pub struct Filter {
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// sync, import
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// queued, running, ok, failed, cancelled; "active": queued or running
+    #[serde(default)]
+    pub state: Option<String>,
+    /// Only jobs older than this one (the next page).
+    #[serde(default)]
+    pub before: Option<i64>,
+}
+
+/// Jobs as the filter says, newest first.
+pub fn find(db: &Db, f: &Filter, limit: usize) -> Result<Vec<Job>> {
+    fn some(s: &Option<String>) -> Option<&str> {
+        s.as_deref().map(str::trim).filter(|s| !s.is_empty())
+    }
+    let (active, state) = match some(&f.state) {
+        Some("active") => (true, None),
+        s => (false, s),
+    };
+    Ok(db.read(|c| {
+        let mut st = c.prepare(&format!(
+            "SELECT {COLS} FROM jobs
+             WHERE (?1 IS NULL OR repo = ?1) AND (?2 IS NULL OR kind = ?2)
+               AND (?3 IS NULL OR state = ?3) AND (?4 = 0 OR state IN ('queued', 'running'))
+               AND (?5 IS NULL OR id < ?5)
+             ORDER BY id DESC LIMIT ?6"
+        ))?;
+        let v = st
+            .query_map(
+                params![
+                    some(&f.repo),
+                    some(&f.kind),
+                    state,
+                    active,
+                    f.before,
+                    limit as i64
+                ],
+                row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok::<_, rusqlite::Error>(v)
+    })?)
+}
+
 pub fn get(db: &Db, id: i64) -> Result<Job> {
     db.read(|c| {
         c.query_row(&format!("SELECT {COLS} FROM jobs WHERE id = ?1"), [id], row)
@@ -346,6 +396,7 @@ pub fn start(app: &Arc<App>, r: RepoInfo, kind: &str, actor: &str, work: Work) -
                 }
             };
             log(&format!("{kind2} of {} started by {actor2}", r.name));
+            tracing::info!("job {id}: {kind2} of {} started by {actor2}", r.name);
             // Syncs wait for a slot on their storage.
             let mut held = None;
             if kind2 == "sync" {
@@ -388,6 +439,11 @@ pub fn start(app: &Arc<App>, r: RepoInfo, kind: &str, actor: &str, work: Work) -
                 Err(e) => ("failed", e, Value::Null),
             };
             log(&format!("{state}: {summary}"));
+            if state == "failed" {
+                tracing::warn!("job {id}: {kind2} of {} failed: {summary}", r.name);
+            } else {
+                tracing::info!("job {id}: {kind2} of {}: {state}: {summary}", r.name);
+            }
             let _ = app2.db.write(|tx| {
                 tx.execute(
                     "UPDATE jobs SET state = ?1, finished = ?2, summary = ?3, report = ?4 WHERE id = ?5",

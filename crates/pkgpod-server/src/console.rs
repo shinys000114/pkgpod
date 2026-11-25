@@ -126,6 +126,9 @@ pub fn router() -> Router<Arc<App>> {
         .route("/c/schedules/pause", post(schedules_pause))
         .route("/c/schedules/{repo}", post(schedule_set))
         .route("/admin/server", get(server_page))
+        .route("/admin/server/jobs", get(server_jobs))
+        .route("/admin/server/logs", get(server_logs))
+        .route("/admin/server/{tab}", get(server_tab))
         .route("/c/hosts/{host}", post(host_set))
         .route("/c/hosts/{host}/clear", post(host_clear))
         .route("/c/webhooks", post(hook_set))
@@ -1331,14 +1334,36 @@ fn server_glance(
     let day_ago = pkgpod_base::now() - 86400;
     let jobs = crate::jobs::list(&app.db, None, 500).unwrap_or_default();
     let running = jobs.iter().filter(|j| j.state == "running").count();
+    let queued = jobs.iter().filter(|j| j.state == "queued").count();
     let failed = jobs
         .iter()
         .filter(|j| j.state == "failed" && j.finished.unwrap_or(0) > day_ago)
         .count();
     g.push((
         "Syncs and imports".to_string(),
-        format!("{running} running, {failed} failed in the last day"),
+        format!(
+            "{running} running{}, {failed} failed in the last day",
+            if queued > 0 {
+                format!(", {queued} queued")
+            } else {
+                String::new()
+            }
+        ),
         if failed > 0 { "bad" } else { "ok" }.to_string(),
+    ));
+    let logged = crate::logs::read(0, "warn", "", usize::MAX).entries;
+    let errors = logged.iter().filter(|e| e.level == "error").count();
+    g.push((
+        "Logged since the start".to_string(),
+        format!("{errors} errors, {} warnings", logged.len() - errors),
+        if errors > 0 {
+            "bad"
+        } else if logged.is_empty() {
+            "ok"
+        } else {
+            ""
+        }
+        .to_string(),
     ));
     g
 }
@@ -5120,6 +5145,8 @@ fn audit_row(a: &Value) -> AuditRow {
 #[template(path = "server.html")]
 struct ServerPage {
     s: Shell,
+    /// The section shown: overview, serving, storage, keys, publishing.
+    tab: &'static str,
     /// At a glance: (label, value, state).
     glance: Vec<(String, String, String)>,
     listener_prefill: String,
@@ -5131,7 +5158,6 @@ struct ServerPage {
     management: String,
     downloads_days: i64,
     syncs_per_storage: i64,
-    jobs_days: i64,
     trust: Vec<TrustRow>,
     users: Vec<String>,
     repo_names: Vec<String>,
@@ -5139,7 +5165,22 @@ struct ServerPage {
     hosts: Vec<HostRow>,
 }
 
+/// The Server pages' sections other than the overview (jobs and logs
+/// have their own pages).
+const SERVER_TABS: [&str; 4] = ["serving", "storage", "keys", "publishing"];
+
 async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
+    server_tab_page(app, v, "overview").await
+}
+
+async fn server_tab(State(app): St, v: Viewer, Path(tab): Path<String>) -> Result<Response> {
+    let Some(tab) = SERVER_TABS.iter().find(|t| **t == tab) else {
+        return Err(Error::NotFound(format!("no server page {tab}")));
+    };
+    server_tab_page(app, v, tab).await
+}
+
+async fn server_tab_page(app: Arc<App>, v: Viewer, tab: &'static str) -> Result<Response> {
     app.require_admin(&v.caller)?;
     let all = crate::listeners::list(&app.db)?;
     // Picking a listener's name in the form fills in its settings.
@@ -5194,80 +5235,98 @@ async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
         .into_iter()
         .map(|(n, p)| (n, p.display().to_string()))
         .collect();
-    let audit: Vec<AuditRow> = app.auth.audit_log(100)?.iter().map(audit_row).collect();
+    let audit: Vec<AuditRow> = if tab == "overview" {
+        app.auth.audit_log(100)?.iter().map(audit_row).collect()
+    } else {
+        Vec::new()
+    };
     let glance = server_glance(&app, &listeners, &keys, &storages);
-    let trust = crate::oidc::rules(&app)?
-        .into_iter()
-        .map(|r| TrustRow {
-            trusts: (r.issuer != crate::oidc::GITHUB)
-                .then(|| format!("issuer {}", r.issuer))
-                .into_iter()
-                .chain(r.claims.iter().map(|(k, v)| format!("{k}={v}")))
-                .collect(),
-            user: r.user,
-            repos: r.repos.join(", "),
-            token: format!(
-                "{} min{}",
-                r.minutes,
-                if r.write { ", writes" } else { ", reads" }
-            ),
-            used: when(r.used),
-            name: r.name,
-        })
-        .collect();
+    let publishing = tab == "publishing";
+    let trust = if publishing {
+        crate::oidc::rules(&app)?
+    } else {
+        Vec::new()
+    }
+    .into_iter()
+    .map(|r| TrustRow {
+        trusts: (r.issuer != crate::oidc::GITHUB)
+            .then(|| format!("issuer {}", r.issuer))
+            .into_iter()
+            .chain(r.claims.iter().map(|(k, v)| format!("{k}={v}")))
+            .collect(),
+        user: r.user,
+        repos: r.repos.join(", "),
+        token: format!(
+            "{} min{}",
+            r.minutes,
+            if r.write { ", writes" } else { ", reads" }
+        ),
+        used: when(r.used),
+        name: r.name,
+    })
+    .collect();
     let users = app.auth.users()?.into_iter().map(|u| u.name).collect();
-    let hosts = crate::hosts::list(&app)?
-        .iter()
-        .map(|h| HostRow {
-            host: s(&h["host"]),
-            url: s(&h["url"]),
-            repos: h["repos"].as_array().map_or(0, Vec::len),
-            root_repo: h["root_repo"].as_str().unwrap_or("").to_string(),
-            title: h["page"]["title"].as_str().unwrap_or("").to_string(),
-            header: h["page"]["header"].as_str().unwrap_or("").to_string(),
-            footer: h["page"]["footer"].as_str().unwrap_or("").to_string(),
-            updated: h["page"]["updated"]
-                .as_i64()
-                .map(|t| when(Some(t)))
-                .unwrap_or_default(),
-        })
-        .collect();
-    let hooks = crate::webhooks::hooks(&app)?
-        .into_iter()
-        .map(|h| HookRow {
-            deliveries: crate::webhooks::deliveries(&app, &h.name, 8)
-                .unwrap_or_default()
-                .iter()
-                .map(|d| {
-                    (
-                        d["id"].as_i64().unwrap_or(0),
-                        s(&d["event"]),
-                        s(&d["state"]),
-                        match (d["status"].as_i64(), d["error"].as_str()) {
-                            (_, Some(e)) if !e.is_empty() => e.to_string(),
-                            (Some(st), _) => st.to_string(),
-                            _ => String::new(),
-                        },
-                        when(d["done"].as_i64().or(d["created"].as_i64())),
-                    )
-                })
-                .collect(),
-            events: h.events.join(", "),
-            repos: if h.repos.is_empty() {
-                "all".into()
-            } else {
-                h.repos.join(", ")
-            },
-            name: h.name,
-            kind: h.kind,
-            url: h.url,
-            active: h.active,
-            has_secret: h.has_secret,
-        })
-        .collect();
+    let hosts = if tab == "serving" {
+        crate::hosts::list(&app)?
+    } else {
+        Vec::new()
+    }
+    .iter()
+    .map(|h| HostRow {
+        host: s(&h["host"]),
+        url: s(&h["url"]),
+        repos: h["repos"].as_array().map_or(0, Vec::len),
+        root_repo: h["root_repo"].as_str().unwrap_or("").to_string(),
+        title: h["page"]["title"].as_str().unwrap_or("").to_string(),
+        header: h["page"]["header"].as_str().unwrap_or("").to_string(),
+        footer: h["page"]["footer"].as_str().unwrap_or("").to_string(),
+        updated: h["page"]["updated"]
+            .as_i64()
+            .map(|t| when(Some(t)))
+            .unwrap_or_default(),
+    })
+    .collect();
+    let hooks = if publishing {
+        crate::webhooks::hooks(&app)?
+    } else {
+        Vec::new()
+    }
+    .into_iter()
+    .map(|h| HookRow {
+        deliveries: crate::webhooks::deliveries(&app, &h.name, 8)
+            .unwrap_or_default()
+            .iter()
+            .map(|d| {
+                (
+                    d["id"].as_i64().unwrap_or(0),
+                    s(&d["event"]),
+                    s(&d["state"]),
+                    match (d["status"].as_i64(), d["error"].as_str()) {
+                        (_, Some(e)) if !e.is_empty() => e.to_string(),
+                        (Some(st), _) => st.to_string(),
+                        _ => String::new(),
+                    },
+                    when(d["done"].as_i64().or(d["created"].as_i64())),
+                )
+            })
+            .collect(),
+        events: h.events.join(", "),
+        repos: if h.repos.is_empty() {
+            "all".into()
+        } else {
+            h.repos.join(", ")
+        },
+        name: h.name,
+        kind: h.kind,
+        url: h.url,
+        active: h.active,
+        has_secret: h.has_secret,
+    })
+    .collect();
     let repo_names = app.engine.repos()?.into_iter().map(|r| r.name).collect();
     Ok(render(&ServerPage {
         s: v.shell("server"),
+        tab,
         glance,
         listener_prefill,
         listeners,
@@ -5278,12 +5337,188 @@ async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
         management: app.cfg.listen.clone(),
         downloads_days: crate::stats::days_kept(&app),
         syncs_per_storage: crate::jobs::syncs_per_storage(&app),
-        jobs_days: crate::jobs::jobs_days(&app),
         trust,
         users,
         repo_names,
         hooks,
         hosts,
+    }))
+}
+
+// ---- the server's jobs ----
+
+pub struct AllJobRow {
+    pub id: i64,
+    pub repo: String,
+    pub kind: String,
+    pub state: String,
+    pub actor: String,
+    pub started: String,
+    pub took: String,
+    pub summary: String,
+}
+
+#[derive(Template)]
+#[template(path = "server_jobs.html")]
+struct ServerJobsPage {
+    s: Shell,
+    tab: &'static str,
+    data_dir: String,
+    management: String,
+    rows: Vec<AllJobRow>,
+    repos: Vec<String>,
+    repo: String,
+    kind: String,
+    state: String,
+    /// The next page: jobs older than this one.
+    older: Option<i64>,
+    /// This page's query, to follow it while jobs run.
+    query: String,
+    active: bool,
+    jobs_days: i64,
+}
+
+/// Jobs per page.
+const JOBS_PAGE: usize = 100;
+
+/// Every repository's syncs and imports, filtered, newest first.
+async fn server_jobs(
+    State(app): St,
+    v: Viewer,
+    Query(f): Query<crate::jobs::Filter>,
+) -> Result<Response> {
+    app.require_admin(&v.caller)?;
+    let f2 = f.clone();
+    let app2 = app.clone();
+    let jobs = api::blocking(&app, move |_| {
+        crate::jobs::find(&app2.db, &f2, JOBS_PAGE + 1)
+    })
+    .await?;
+    let older = (jobs.len() > JOBS_PAGE).then(|| jobs[JOBS_PAGE - 1].id);
+    let rows: Vec<AllJobRow> = jobs
+        .iter()
+        .take(JOBS_PAGE)
+        .map(|j| AllJobRow {
+            id: j.id,
+            repo: j.repo.clone(),
+            kind: j.kind.clone(),
+            state: j.state.clone(),
+            actor: j.actor.clone(),
+            started: when(j.started.or(Some(j.created))),
+            took: match (j.started, j.finished) {
+                (Some(a), Some(b)) if b >= a => took(b - a),
+                _ => String::new(),
+            },
+            summary: j.summary.clone(),
+        })
+        .collect();
+    let opt = |s: &Option<String>| s.as_deref().unwrap_or("").trim().to_string();
+    let (repo, kind, state) = (opt(&f.repo), opt(&f.kind), opt(&f.state));
+    let query = [("repo", &repo), ("kind", &kind), ("state", &state)]
+        .iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(k, v)| format!("{k}={}", crate::serve::percent_encode(v)))
+        .collect::<Vec<_>>()
+        .join("&");
+    Ok(render(&ServerJobsPage {
+        s: v.shell("server"),
+        tab: "jobs",
+        data_dir: app.cfg.data_dir.display().to_string(),
+        management: app.cfg.listen.clone(),
+        active: rows
+            .iter()
+            .any(|r| r.state == "running" || r.state == "queued"),
+        rows,
+        repos: app.engine.repos()?.into_iter().map(|r| r.name).collect(),
+        repo,
+        kind,
+        state,
+        older,
+        query,
+        jobs_days: crate::jobs::jobs_days(&app),
+    }))
+}
+
+// ---- the server's log ----
+
+pub struct LogRow {
+    pub time: String,
+    pub level: &'static str,
+    pub message: String,
+}
+
+#[derive(Template)]
+#[template(path = "server_logs.html")]
+struct ServerLogsPage {
+    s: Shell,
+    tab: &'static str,
+    data_dir: String,
+    management: String,
+    rows: Vec<LogRow>,
+    level: String,
+    q: String,
+    follow: bool,
+    query: String,
+    started: String,
+    /// Events dropped to keep the newest: the journal has them.
+    dropped: bool,
+}
+
+/// Events shown at most.
+const LOG_PAGE: usize = 500;
+
+/// The server's recent events, newest first.
+async fn server_logs(
+    State(app): St,
+    v: Viewer,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Response> {
+    app.require_admin(&v.caller)?;
+    let level = match q.get("level").map(String::as_str) {
+        Some(l @ ("error" | "warn" | "info" | "debug" | "trace")) => l.to_string(),
+        _ => "info".to_string(),
+    };
+    let text = q.get("q").map(|s| s.trim().to_string()).unwrap_or_default();
+    let follow = q.get("follow").is_some_and(|f| f == "1");
+    let r = crate::logs::read(0, &level, &text, LOG_PAGE);
+    let time = |ms: i64| {
+        jiff::Timestamp::from_millisecond(ms)
+            .map(|t| {
+                t.to_zoned_datetime(jiff::tz::TimeZone::system())
+                    .strftime("%m-%d %H:%M:%S")
+                    .to_string()
+            })
+            .unwrap_or_default()
+    };
+    let rows = r
+        .entries
+        .iter()
+        .rev()
+        .map(|e| LogRow {
+            time: time(e.time),
+            level: e.level,
+            message: e.message.clone(),
+        })
+        .collect();
+    let mut query = vec![format!("level={level}")];
+    if !text.is_empty() {
+        query.push(format!("q={}", crate::serve::percent_encode(&text)));
+    }
+    if follow {
+        query.push("follow=1".into());
+    }
+    Ok(render(&ServerLogsPage {
+        s: v.shell("server"),
+        tab: "logs",
+        data_dir: app.cfg.data_dir.display().to_string(),
+        management: app.cfg.listen.clone(),
+        rows,
+        level,
+        q: text,
+        follow,
+        query: query.join("&"),
+        started: when(Some(r.started / 1000)),
+        dropped: r.oldest > 1,
     }))
 }
 
@@ -5436,7 +5671,12 @@ async fn schedules_page(State(app): St, v: Viewer) -> Result<Response> {
 }
 
 /// The next runs of a schedule as it is typed.
-async fn schedule_preview(Query(q): Query<HashMap<String, String>>) -> Response {
+async fn schedule_preview(v: Viewer, Query(q): Query<HashMap<String, String>>) -> Response {
+    // For those who may set a schedule: an expression that never runs
+    // is looked for a year ahead.
+    if v.caller.user.is_none() {
+        return err_part(Error::Unauthorized);
+    }
     let expr = q.get("schedule").map(|s| s.trim()).unwrap_or_default();
     let text = if expr.is_empty() {
         "empty: syncs only when asked".to_string()

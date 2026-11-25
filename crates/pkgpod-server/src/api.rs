@@ -342,6 +342,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/api/v1/repos/{repo}/import", post(import))
         .route("/api/v1/repos/{repo}/jobs", get(repo_jobs))
         .route("/api/v1/jobs", get(all_jobs))
+        .route("/api/v1/logs", get(logs))
         .route("/api/v1/jobs/{id}", get(job))
         .route("/api/v1/jobs/{id}/cancel", post(job_cancel))
         .route("/api/v1/gc", post(gc))
@@ -2157,9 +2158,63 @@ pub(crate) async fn repo_jobs(
     .await
 }
 
-pub(crate) async fn all_jobs(State(app): St, Who(c): Who) -> Result<Json<Value>> {
+#[derive(Deserialize, Default)]
+pub(crate) struct LogsQ {
+    /// Events after this id (following).
+    #[serde(default)]
+    pub(crate) after: Option<u64>,
+    /// error, warn, info (default), debug, trace: that or more severe.
+    #[serde(default)]
+    pub(crate) level: Option<String>,
+    /// Text the events have (any case).
+    #[serde(default)]
+    pub(crate) q: Option<String>,
+    #[serde(default)]
+    pub(crate) limit: Option<usize>,
+}
+
+/// The server's recent log, since it started (server admins: it names
+/// upstreams, paths and errors).
+pub(crate) async fn logs(
+    State(app): St,
+    Who(c): Who,
+    Query(q): Query<LogsQ>,
+) -> Result<Json<Value>> {
     app.require_admin(&c)?;
-    Ok(Json(json!(crate::jobs::list(&app.db, None, 200)?)))
+    let level = q.level.as_deref().unwrap_or("info");
+    if !["error", "warn", "info", "debug", "trace"].contains(&level) {
+        return Err(Error::Invalid(format!(
+            "level {level:?}: error, warn, info, debug or trace"
+        )));
+    }
+    let r = crate::logs::read(
+        q.after.unwrap_or(0),
+        level,
+        q.q.as_deref().unwrap_or(""),
+        q.limit.unwrap_or(500).clamp(1, 5000),
+    );
+    Ok(Json(json!(r)))
+}
+
+#[derive(Deserialize, Default)]
+pub(crate) struct JobsQ {
+    #[serde(flatten)]
+    pub(crate) filter: crate::jobs::Filter,
+    #[serde(default)]
+    pub(crate) limit: Option<usize>,
+}
+
+pub(crate) async fn all_jobs(
+    State(app): St,
+    Who(c): Who,
+    Query(q): Query<JobsQ>,
+) -> Result<Json<Value>> {
+    app.require_admin(&c)?;
+    blocking(&app, move |app| {
+        let limit = q.limit.unwrap_or(200).clamp(1, 500);
+        Ok(Json(json!(crate::jobs::find(&app.db, &q.filter, limit)?)))
+    })
+    .await
 }
 
 pub(crate) async fn job(State(app): St, Who(c): Who, Path(id): Path<i64>) -> Result<Json<Value>> {

@@ -1662,10 +1662,86 @@ pub fn run(
             )?;
             follow(&x, &v, wait)?;
         }
-        Cmd::Jobs { repo } => {
-            let v = match repo {
-                Some(r) => c.get(&format!("/api/v1/repos/{}/jobs", enc(&r)))?,
-                None => c.get("/api/v1/jobs")?,
+        Cmd::Logs {
+            level,
+            grep,
+            lines,
+            follow,
+        } => {
+            let q = |after: u64, limit: usize| {
+                let mut p = format!("/api/v1/logs?level={}&limit={limit}", enc(&level));
+                if after > 0 {
+                    p.push_str(&format!("&after={after}"));
+                }
+                if let Some(g) = &grep {
+                    p.push_str(&format!("&q={}", enc(g)));
+                }
+                p
+            };
+            let line = |e: &Value| {
+                let t = e["time"]
+                    .as_i64()
+                    .and_then(|ms| jiff::Timestamp::from_millisecond(ms).ok())
+                    .map(|t| {
+                        t.to_zoned_datetime(jiff::tz::TimeZone::system())
+                            .strftime("%Y-%m-%d %H:%M:%S")
+                            .to_string()
+                    })
+                    .unwrap_or_default();
+                format!(
+                    "{t} {:>5} {}",
+                    s(&e["level"]).to_uppercase(),
+                    s(&e["message"])
+                )
+            };
+            let v = c.get(&q(0, lines))?;
+            if !follow {
+                x.print(&v, |v| {
+                    for e in v["entries"].as_array().into_iter().flatten() {
+                        println!("{}", line(e));
+                    }
+                });
+                return Ok(());
+            }
+            let mut started = v["started"].as_i64();
+            let mut last = 0;
+            for e in v["entries"].as_array().into_iter().flatten() {
+                println!("{}", line(e));
+                last = e["id"].as_u64().unwrap_or(last);
+            }
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let v = match c.get(&q(last, 5000)) {
+                    Ok(v) => v,
+                    // Restarting: try again.
+                    Err(_) => continue,
+                };
+                if v["started"].as_i64() != started {
+                    println!("-- the server started again --");
+                    started = v["started"].as_i64();
+                    last = 0;
+                    continue;
+                }
+                for e in v["entries"].as_array().into_iter().flatten() {
+                    println!("{}", line(e));
+                    last = e["id"].as_u64().unwrap_or(last);
+                }
+            }
+        }
+        Cmd::Jobs { repo, state, kind } => {
+            let v = if state.is_none() && kind.is_none() {
+                match repo {
+                    Some(r) => c.get(&format!("/api/v1/repos/{}/jobs", enc(&r)))?,
+                    None => c.get("/api/v1/jobs")?,
+                }
+            } else {
+                let mut p = vec![];
+                for (k, v) in [("repo", &repo), ("state", &state), ("kind", &kind)] {
+                    if let Some(v) = v {
+                        p.push(format!("{k}={}", enc(v)));
+                    }
+                }
+                c.get(&format!("/api/v1/jobs?{}", p.join("&")))?
             };
             x.print(&v, |v| {
                 let mut rows = vec![vec![

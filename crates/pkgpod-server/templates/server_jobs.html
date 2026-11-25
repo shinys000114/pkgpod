@@ -1,0 +1,45 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+{% extends "base.html" %}
+{% block title %}Jobs · Server · pkgpod{% endblock %}
+{% block main %}
+{% include "server_tabs.html" %}
+<div id="server-result"></div>
+<div class="card">
+  <div class="card-head"><h2>Jobs</h2><span class="hint">every repository's syncs and imports, newest first; a job's page has its log</span></div>
+  <form class="toolbar jobs-filter" method="get" action="/admin/server/jobs">
+    <select name="repo" aria-label="Repository"><option value="">all repositories</option>{% for r in repos %}<option{% if *r == repo %} selected{% endif %}>{{ r }}</option>{% endfor %}</select>
+    <select name="kind" aria-label="Kind"><option value="">syncs and imports</option><option value="sync"{% if kind == "sync" %} selected{% endif %}>syncs</option><option value="import"{% if kind == "import" %} selected{% endif %}>imports</option></select>
+    <select name="state" aria-label="State"><option value="">any state</option>{% for (v, l) in [("active", "queued or running"), ("failed", "failed"), ("cancelled", "cancelled"), ("ok", "ok")] %}<option value="{{ v }}"{% if *v == state %} selected{% endif %}>{{ l }}</option>{% endfor %}</select>
+    <button type="submit">Show</button>{% if !query.is_empty() %} <a class="small" href="/admin/server/jobs">all</a>{% endif %}
+  </form>
+  <div id="jobs-rows"{% if active %} hx-get="/admin/server/jobs?{{ query }}" hx-trigger="every 10s" hx-select="#jobs-rows" hx-swap="outerHTML"{% endif %}>
+  {% if rows.is_empty() %}<p class="empty">No job{% if !query.is_empty() %} like that{% endif %}.</p>{% else %}
+  <div class="table-wrap"><table class="all-jobs">
+    <thead><tr><th class="num">Job</th><th>Repository</th><th>State</th><th>Started</th><th>Took</th><th>Summary</th><th></th></tr></thead>
+    <tbody>
+    {% for j in rows %}<tr>
+      <td class="num"><a href="/jobs/{{ j.id }}">{{ j.id }}</a></td>
+      <td class="nowrap"><a href="/r/{{ j.repo }}">{{ j.repo }}</a> <span class="muted small">{{ j.kind }}</span></td>
+      <td><span class="badge {% if j.state == "ok" %}ok{% else if j.state == "running" || j.state == "queued" %}run{% else %}bad{% endif %}">{{ j.state }}</span></td>
+      <td class="nowrap">{{ j.started }}<div class="muted small">by {{ j.actor }}</div></td>
+      <td class="nowrap">{{ j.took }}</td>
+      <td class="summary"><div title="{{ j.summary }}">{{ j.summary }}</div></td>
+      <td class="acts nowrap">{% if j.state == "running" || j.state == "queued" %}<button class="link danger" hx-post="/c/jobs/{{ j.id }}/cancel" hx-target="#server-result" hx-confirm="Stop job {{ j.id }} ({{ j.repo }})?">stop</button>{% endif %}</td>
+    </tr>{% endfor %}
+    </tbody>
+  </table></div>
+  {% endif %}
+  {% if let Some(o) = older %}<div class="card-body"><a href="/admin/server/jobs?{% if !query.is_empty() %}{{ query }}&amp;{% endif %}before={{ o }}">older →</a></div>{% endif %}
+  </div>
+</div>
+<div class="card">
+  <div class="card-head"><h2>Keeping jobs</h2></div>
+  <div class="card-body">
+  <form class="inline" hx-post="/c/settings" hx-target="next .result">
+    Keep ended jobs and their logs <input type="number" name="jobs_days" value="{{ jobs_days }}" min="0" max="3650" size="5"> days <span class="muted small">(each repository's newest ten stay; 0 keeps all; pruned daily)</span>
+    <button type="submit">Save</button>
+  </form>
+  <div class="result"></div>
+  </div>
+</div>
+{% endblock %}
