@@ -249,9 +249,10 @@ install script and its download (`/cli/install.sh`, `/api/v1/cli`) and
 the CI examples in the console. By default that is the address each
 request names (its `Host`, and the scheme a proxy reports in
 `X-Forwarded-Proto`), which is right for whoever asks but is only
-what the request says. Set the public address once and it is named
-whatever a request says; these answers are never kept by caches
-(`no-store`):
+what the request says. Set the public address once (a server setting, kept with the others
+in the database: the console's Server page, Listeners & hosts, or the
+CLI) and it is named whatever a request says; these answers are never
+kept by caches (`no-store`):
 
 ```sh
 pkgpod settings --console-url https://pkg.example.org

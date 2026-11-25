@@ -5850,6 +5850,7 @@ struct ServerJobsPage {
     tab: &'static str,
     data_dir: String,
     management: String,
+    console_url: String,
     rows: Vec<AllJobRow>,
     repos: Vec<String>,
     repo: String,
@@ -5910,6 +5911,7 @@ async fn server_jobs(
         tab: "jobs",
         data_dir: app.cfg.data_dir.display().to_string(),
         management: app.cfg.listen.clone(),
+        console_url: crate::cli_dl::console_url(&app).unwrap_or_default(),
         active: rows
             .iter()
             .any(|r| r.state == "running" || r.state == "queued"),
@@ -5939,6 +5941,7 @@ struct ServerLogsPage {
     tab: &'static str,
     data_dir: String,
     management: String,
+    console_url: String,
     rows: Vec<LogRow>,
     level: String,
     q: String,
@@ -5997,6 +6000,7 @@ async fn server_logs(
         tab: "logs",
         data_dir: app.cfg.data_dir.display().to_string(),
         management: app.cfg.listen.clone(),
+        console_url: crate::cli_dl::console_url(&app).unwrap_or_default(),
         rows,
         level,
         q: text,
@@ -6589,20 +6593,27 @@ async fn settings_save_server(
     }
 }
 
-/// The console's public address and the action's place, from the CI
-/// example's form.
+/// The console's public address (Listeners & hosts) or the action's
+/// place (beside the CI example).
 async fn settings_save_ci(
     State(app): St,
     v: Viewer,
     Form(form): Form<Vec<(String, String)>>,
 ) -> Response {
+    // Only what the form sent: the console's address and the action's
+    // place are set in different places.
+    let sent = |k: &str| {
+        form.iter()
+            .any(|(n, _)| n == k)
+            .then(|| form_get(&form, k).to_string())
+    };
     let req = api::SettingsReq {
         downloads_days: None,
         syncs_per_storage: None,
         jobs_days: None,
         schedules_paused: None,
-        console_url: Some(form_get(&form, "console_url").to_string()),
-        ci_action: Some(form_get(&form, "ci_action").to_string()),
+        console_url: sent("console_url"),
+        ci_action: sent("ci_action"),
     };
     match api::settings_patch(State(app), v.who(), Json(req)).await {
         Ok(_) => refresh(),
