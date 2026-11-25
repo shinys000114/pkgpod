@@ -503,6 +503,38 @@ fn stop_does_not_wait_for_a_stalled_server() {
     assert!(!dir.path().join("f.part").exists());
 }
 
+/// A tree file with a time no HTTP date can say (rsync keeps an
+/// upstream's, from before 1970 too) is fetched again and gets the
+/// upstream's time. A time past the year 9999 needs a filesystem that
+/// keeps it (tmpfs, as with TMPDIR=/dev/shm; ext4 stops at 2446).
+#[test]
+fn local_times_no_http_date_can_say() {
+    let up = upstream();
+    let url = http_server(up.path(), Arc::default());
+    let out = tempfile::tempdir().unwrap();
+    let m = FilesMirror::new(&url);
+    assert!(run(&m, out.path()).ok);
+    let p = out.path().join("README");
+    for t in [
+        // 1960-01-01, 10000-01-01
+        SystemTime::UNIX_EPOCH - Duration::from_secs(315_619_200),
+        SystemTime::UNIX_EPOCH + Duration::from_secs(253_402_300_800),
+    ] {
+        let f = std::fs::File::options().write(true).open(&p).unwrap();
+        f.set_modified(t).unwrap();
+        if f.metadata().unwrap().modified().unwrap() != t {
+            continue;
+        }
+        drop(f);
+        let r = run(&m, out.path());
+        assert!(r.ok && r.transferred == 1, "{r:?}");
+        assert_eq!(
+            httpdate::fmt_http_date(mtime(&p)),
+            httpdate::fmt_http_date(mtime(&up.path().join("README")))
+        );
+    }
+}
+
 /// A server without Last-Modified: the ETags kept in the state dir make an
 /// idle sync idle; a bandwidth limit holds over all downloads.
 #[test]

@@ -1719,7 +1719,7 @@ async fn serve_mirror(
         Err(_) => return status(StatusCode::BAD_REQUEST),
     };
     *req.uri_mut() = uri;
-    let mut r = match ServeDir::new(tree)
+    let mut r = match ServeDir::with_backend(tree, MirrorFs)
         .with_buf_chunk_size(256 << 10)
         .append_index_html_on_directories(false)
         .oneshot(req)
@@ -1753,6 +1753,93 @@ async fn serve_mirror(
     }
     sandbox(r.headers_mut());
     r
+}
+
+/// The file system as [`serve_mirror`] reads it: a file's time within
+/// what an HTTP date can say. rsync keeps an upstream's times, from
+/// before 1970 too, and ServeDir's Last-Modified panics on one out of
+/// that range (the connection dropped, on every GET and HEAD of it).
+#[derive(Clone)]
+struct MirrorFs;
+
+struct MirrorMeta(std::fs::Metadata);
+
+struct MirrorFile(tokio::fs::File);
+
+/// `t` from 1970 to the end of the year 9999; to the nanosecond within,
+/// as ServeDir's ETag has it.
+fn http_time(t: std::time::SystemTime) -> std::time::SystemTime {
+    let max =
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(pkgpod_files::MAX_MTIME as u64);
+    t.clamp(std::time::UNIX_EPOCH, max)
+}
+
+impl tower_http::services::fs::Metadata for MirrorMeta {
+    fn is_dir(&self) -> bool {
+        self.0.is_dir()
+    }
+
+    fn modified(&self) -> std::io::Result<std::time::SystemTime> {
+        self.0.modified().map(http_time)
+    }
+
+    fn len(&self) -> u64 {
+        self.0.len()
+    }
+}
+
+impl tokio::io::AsyncRead for MirrorFile {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.0).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncSeek for MirrorFile {
+    fn start_seek(
+        mut self: std::pin::Pin<&mut Self>,
+        position: std::io::SeekFrom,
+    ) -> std::io::Result<()> {
+        std::pin::Pin::new(&mut self.0).start_seek(position)
+    }
+
+    fn poll_complete(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<u64>> {
+        std::pin::Pin::new(&mut self.0).poll_complete(cx)
+    }
+}
+
+type MetaFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<MirrorMeta>> + Send + 'a>>;
+
+impl tower_http::services::fs::File for MirrorFile {
+    type Metadata = MirrorMeta;
+    type MetadataFuture<'a> = MetaFuture<'a>;
+
+    fn metadata(&self) -> MetaFuture<'_> {
+        Box::pin(async move { self.0.metadata().await.map(MirrorMeta) })
+    }
+}
+
+impl tower_http::services::fs::Backend for MirrorFs {
+    type File = MirrorFile;
+    type Metadata = MirrorMeta;
+    type OpenFuture =
+        std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<MirrorFile>> + Send>>;
+    type MetadataFuture = MetaFuture<'static>;
+
+    fn open(&self, path: PathBuf) -> Self::OpenFuture {
+        Box::pin(async move { tokio::fs::File::open(path).await.map(MirrorFile) })
+    }
+
+    fn metadata(&self, path: PathBuf) -> MetaFuture<'static> {
+        Box::pin(async move { tokio::fs::metadata(path).await.map(MirrorMeta) })
+    }
 }
 
 /// The entries of directory `rel` of what a repository serves (its
@@ -2347,6 +2434,88 @@ mod tests {
         assert!(mirror_hidden(false, ".treeinfo"));
         assert!(!mirror_hidden(true, ".treeinfo"));
         assert!(!mirror_hidden(false, "f_1_amd64.deb"));
+    }
+
+    /// rsync keeps an upstream's file times, from before 1970 too: such a
+    /// file is served with the nearest time an HTTP date can say, and
+    /// HEAD, ranges and 304 as for any other. A time past the year 9999
+    /// needs a filesystem that keeps it (tmpfs; ext4 stops at 2446), as
+    /// with TMPDIR=/dev/shm; elsewhere it is served with what was kept.
+    #[tokio::test]
+    async fn mirror_files_of_any_time_are_served() {
+        let secs = std::time::Duration::from_secs;
+        let at = |s| std::time::UNIX_EPOCH + secs(s);
+        assert_eq!(http_time(at(253_402_300_800)), at(253_402_300_799));
+        let t = std::time::UNIX_EPOCH + std::time::Duration::new(1_700_000_000, 123);
+        assert_eq!(http_time(t), t);
+        let d = tempfile::tempdir().unwrap();
+        let tree = d.path().to_path_buf();
+        let name = "f_1_amd64.deb";
+        let rel = [name.to_string()];
+        let file = tree.join(name);
+        let path = format!("/m/{name}");
+        for (t, want) in [
+            // 1960-01-01
+            (
+                std::time::UNIX_EPOCH - secs(315_619_200),
+                "Thu, 01 Jan 1970 00:00:00 GMT",
+            ),
+            // 10000-01-01
+            (at(253_402_300_800), "Fri, 31 Dec 9999 23:59:59 GMT"),
+        ] {
+            std::fs::write(&file, "hello").unwrap();
+            let f = std::fs::File::options().write(true).open(&file).unwrap();
+            f.set_modified(t).unwrap();
+            let kept = f.metadata().unwrap().modified().unwrap();
+            drop(f);
+            let want = if kept == t {
+                want.to_string()
+            } else {
+                httpdate::fmt_http_date(kept)
+            };
+            let get = |h: &[(header::HeaderName, &str)], m: Method| {
+                let mut req = Request::builder().method(m).uri(&path);
+                for (k, v) in h {
+                    req = req.header(k, *v);
+                }
+                serve_mirror(
+                    tree.clone(),
+                    &rel,
+                    &path,
+                    false,
+                    req.body(Body::empty()).unwrap(),
+                )
+            };
+            let r = get(&[], Method::GET).await;
+            assert_eq!(r.status(), StatusCode::OK);
+            assert_eq!(r.headers()[header::LAST_MODIFIED], want.as_str());
+            assert_eq!(
+                r.headers()[header::CONTENT_TYPE],
+                "application/vnd.debian.binary-package"
+            );
+            assert_eq!(r.headers()[header::CACHE_CONTROL], cache_control(name));
+            let etag = r.headers()[header::ETAG].to_str().unwrap().to_string();
+            let body = axum::body::to_bytes(r.into_body(), 64).await.unwrap();
+            assert_eq!(&body[..], b"hello");
+
+            let r = get(&[], Method::HEAD).await;
+            assert_eq!(r.status(), StatusCode::OK);
+            assert_eq!(r.headers()[header::CONTENT_LENGTH], "5");
+            assert_eq!(r.headers()[header::LAST_MODIFIED], want.as_str());
+
+            let r = get(&[(header::RANGE, "bytes=1-2")], Method::GET).await;
+            assert_eq!(r.status(), StatusCode::PARTIAL_CONTENT);
+            let body = axum::body::to_bytes(r.into_body(), 64).await.unwrap();
+            assert_eq!(&body[..], b"el");
+
+            for h in [
+                (header::IF_MODIFIED_SINCE, want.as_str()),
+                (header::IF_NONE_MATCH, etag.as_str()),
+            ] {
+                let r = get(&[h], Method::GET).await;
+                assert_eq!(r.status(), StatusCode::NOT_MODIFIED);
+            }
+        }
     }
 
     #[test]

@@ -602,7 +602,13 @@ impl Http {
                 .header(RANGE, format!("bytes={}-", p.got))
                 .header(IF_RANGE, p.validator.clone().expect("checked"));
         } else if let Some(h) = have {
-            req = req.header(IF_MODIFIED_SINCE, httpdate::fmt_http_date(h.modified));
+            // A local time no HTTP date can say (before 1970 or past the
+            // year 9999, as rsync may have kept one) is no upstream's:
+            // not asked by, and formatting it would panic.
+            let max = SystemTime::UNIX_EPOCH + Duration::from_secs(253_402_300_800);
+            if (SystemTime::UNIX_EPOCH..max).contains(&h.modified) {
+                req = req.header(IF_MODIFIED_SINCE, httpdate::fmt_http_date(h.modified));
+            }
             if let Some(e) = &h.etag {
                 req = req.header(IF_NONE_MATCH, e.as_str());
             }
