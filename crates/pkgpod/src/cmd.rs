@@ -1582,22 +1582,28 @@ pub fn run(
         Cmd::Settings {
             downloads_days,
             syncs_per_storage,
+            jobs_days,
         } => {
-            let v = if downloads_days.is_some() || syncs_per_storage.is_some() {
-                let mut b = serde_json::Map::new();
-                if let Some(d) = downloads_days {
-                    b.insert("downloads_days".into(), json!(d));
-                }
-                if let Some(n) = syncs_per_storage {
-                    b.insert("syncs_per_storage".into(), json!(n));
-                }
-                c.send(Method::PATCH, "/api/v1/settings", &Value::Object(b))?
-            } else {
-                c.get("/api/v1/settings")?
-            };
+            let v =
+                if downloads_days.is_some() || syncs_per_storage.is_some() || jobs_days.is_some() {
+                    let mut b = serde_json::Map::new();
+                    if let Some(d) = downloads_days {
+                        b.insert("downloads_days".into(), json!(d));
+                    }
+                    if let Some(n) = syncs_per_storage {
+                        b.insert("syncs_per_storage".into(), json!(n));
+                    }
+                    if let Some(d) = jobs_days {
+                        b.insert("jobs_days".into(), json!(d));
+                    }
+                    c.send(Method::PATCH, "/api/v1/settings", &Value::Object(b))?
+                } else {
+                    c.get("/api/v1/settings")?
+                };
             x.print(&v, |v| {
                 println!("downloads_days = {}", s(&v["downloads_days"]));
                 println!("syncs_per_storage = {}", s(&v["syncs_per_storage"]));
+                println!("jobs_days = {}", s(&v["jobs_days"]));
             });
         }
         Cmd::Gc {

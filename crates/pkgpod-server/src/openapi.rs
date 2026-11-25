@@ -470,6 +470,10 @@ fn schemas() -> Value {
                         json!({"type": "integer", "minimum": 0, "maximum": 3650, "description": "Days download counts are kept (default 365); fewer removes the older ones, 0 counts nothing and removes them all."}),
                     ),
                     (
+                        "jobs_days",
+                        json!({"type": "integer", "minimum": 0, "maximum": 3650, "description": "Days ended jobs and their logs are kept (default 90; 0: all kept); each repository's newest ten stay whatever their age. Pruned daily."}),
+                    ),
+                    (
                         "syncs_per_storage",
                         json!({"type": "integer", "minimum": 0, "maximum": 64, "description": "Mirror syncs that run at once on one storage (default 2; 0: no limit); others wait, queued."}),
                     ),

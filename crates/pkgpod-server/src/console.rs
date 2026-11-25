@@ -5049,6 +5049,7 @@ struct ServerPage {
     management: String,
     downloads_days: i64,
     syncs_per_storage: i64,
+    jobs_days: i64,
     trust: Vec<TrustRow>,
     users: Vec<String>,
     repo_names: Vec<String>,
@@ -5178,6 +5179,7 @@ async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
         management: app.cfg.listen.clone(),
         downloads_days: crate::stats::days_kept(&app),
         syncs_per_storage: crate::jobs::syncs_per_storage(&app),
+        jobs_days: crate::jobs::jobs_days(&app),
         trust,
         users,
         repo_names,
@@ -5455,18 +5457,29 @@ async fn settings_save_server(
         }
         v.parse::<i64>().map(Some).map_err(|_| ())
     };
-    let (days, syncs) = match (num("downloads_days"), num("syncs_per_storage")) {
-        (Ok(d), Ok(n)) => (d, n),
+    let (days, syncs, jobs) = match (
+        num("downloads_days"),
+        num("syncs_per_storage"),
+        num("jobs_days"),
+    ) {
+        (Ok(d), Ok(n), Ok(j)) => (d, n, j),
         _ => return msg(false, "A whole number, please."),
     };
     let req = api::SettingsReq {
         downloads_days: days,
         syncs_per_storage: syncs,
+        jobs_days: jobs,
     };
     match api::settings_patch(State(app), v.who(), Json(req)).await {
         Ok(Json(r)) => msg(
             true,
-            if syncs.is_some() {
+            if jobs.is_some() {
+                match r["jobs_days"].as_i64() {
+                    Some(0) => "Ended jobs and their logs are all kept.".to_string(),
+                    Some(d) => format!("Ended jobs and their logs are kept {d} days."),
+                    None => "Saved.".to_string(),
+                }
+            } else if syncs.is_some() {
                 match r["syncs_per_storage"].as_i64() {
                     Some(0) => "Syncs are not limited per storage.".to_string(),
                     Some(n) => format!("At most {n} syncs run at once on a storage."),

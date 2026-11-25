@@ -155,6 +155,11 @@ steps:
     <button type="submit" name="dry_run" value="1" title="Only count what would go">Count</button> <button type="submit" class="danger" name="dry_run" value="0">Collect</button>
   </form>
   <div class="result"></div>
+  <form class="inline mt" hx-post="/c/settings" hx-target="next .result">
+    Keep ended jobs and their logs <input type="number" name="jobs_days" value="{{ jobs_days }}" min="0" max="3650" size="5"> days <span class="muted small">(each repository's newest ten stay; 0 keeps all; pruned daily)</span>
+    <button type="submit">Save</button>
+  </form>
+  <div class="result"></div>
   </div>
 </div>
 <div class="card">
