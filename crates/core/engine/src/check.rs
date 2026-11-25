@@ -20,12 +20,20 @@ pub struct CheckReport {
     pub objects: usize,
     pub blobs: usize,
     pub deep: bool,
+    /// The first problems found (at most 200).
     pub problems: Vec<String>,
+    /// How many problems there are.
+    pub total: usize,
 }
 
 impl CheckReport {
     pub fn ok(&self) -> bool {
-        self.problems.is_empty()
+        self.total == 0
+    }
+
+    /// The problems not listed.
+    pub fn more(&self) -> usize {
+        self.total - self.problems.len()
     }
 }
 
@@ -39,9 +47,8 @@ impl Engine {
             deep,
             ..Default::default()
         };
-        let mut problems = 0usize;
-        let mut note = |rep: &mut CheckReport, p: String| {
-            problems += 1;
+        let note = |rep: &mut CheckReport, p: String| {
+            rep.total += 1;
             if rep.problems.len() < SHOWN {
                 rep.problems.push(p);
             }
@@ -168,10 +175,6 @@ impl Engine {
             }
         }
         rep.objects = seen.into_values().flatten().collect::<HashSet<_>>().len();
-        if problems > rep.problems.len() {
-            rep.problems
-                .push(format!("... and {} more", problems - rep.problems.len()));
-        }
         Ok(rep)
     }
 }

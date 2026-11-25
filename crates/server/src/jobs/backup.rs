@@ -191,6 +191,10 @@ pub fn backup(app: &App, to: &Path, mirrors: bool, log: &mut dyn FnMut(&str)) ->
     for p in &check.problems {
         rep.warnings.push(p.clone());
     }
+    if check.more() > 0 {
+        rep.warnings
+            .push(format!("... and {} more problems", check.more()));
+    }
     for (name, _) in storages(&bdb)? {
         set_storage(&bdb, &name, &format!("storages/{name}"))?;
     }
@@ -235,6 +239,10 @@ pub fn restore(from: &Path, data_dir: &Path, log: &mut dyn FnMut(&str)) -> Resul
     let engine = engine_at(db, data_dir)?;
     log("restored; checking");
     let check = engine.check(false)?;
+    let more = check.more();
     rep.warnings.extend(check.problems);
+    if more > 0 {
+        rep.warnings.push(format!("... and {more} more problems"));
+    }
     Ok(rep)
 }

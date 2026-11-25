@@ -16,7 +16,10 @@ use pkgpod_base::{Digest, now};
 use serde::Serialize;
 
 use crate::tree::Entry;
-use crate::{Engine, Result};
+use crate::{Engine, Error, Result};
+
+/// The longest grace period taken: ten years.
+const MAX_GRACE: Duration = Duration::from_secs(87_600 * 3600);
 
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct GcReport {
@@ -30,18 +33,28 @@ pub struct GcReport {
 impl Engine {
     /// Collects garbage; with `dry_run` only counts it.
     pub fn gc(&self, grace: Duration, dry_run: bool) -> Result<GcReport> {
+        if grace > MAX_GRACE {
+            return Err(Error::Invalid(format!(
+                "a grace period is at most {} hours",
+                MAX_GRACE.as_secs() / 3600
+            )));
+        }
         let mut rep = GcReport {
             dry_run,
             ..Default::default()
         };
         let repos = self.repos()?;
-        if !dry_run {
-            for r in &repos {
-                if r.kind.versioned() {
-                    rep.versions += self.prune(r)?;
-                }
+        // A dry run leaves retention's versions in place but counts them,
+        // and what only they keep.
+        let mut pruned: HashSet<i64> = HashSet::new();
+        for r in repos.iter().filter(|r| r.kind.versioned()) {
+            if dry_run {
+                pruned.extend(self.prunable(r)?);
+            } else {
+                rep.versions += self.prune(r)?;
             }
         }
+        rep.versions += pruned.len();
         let _g = self.gc_lock.write().unwrap_or_else(|e| e.into_inner());
         let storages: HashMap<String, PathBuf> = self.storages()?.into_iter().collect();
         // Objects reached, by storage: a directory two repositories on
@@ -66,6 +79,9 @@ impl Engine {
             let keep = blobs.entry(r.storage.clone()).or_default();
             let objects = seen.entry(r.storage.clone()).or_default();
             for v in self.versions(&r.name)? {
+                if pruned.contains(&v.id) {
+                    continue;
+                }
                 for root in [Some(v.root), v.view].into_iter().flatten() {
                     self.objects().reach(&root, objects, &mut |e| {
                         if let Entry::Blob { sha256, .. } = e {
@@ -92,13 +108,17 @@ impl Engine {
         if !dry_run {
             for chunk in dead.chunks(500) {
                 self.db().write(|tx| {
-                    let mut st = tx.prepare_cached("DELETE FROM objects WHERE id = ?1")?;
+                    // Not one written again since it was listed (a plan
+                    // computed meanwhile names it).
+                    let mut st =
+                        tx.prepare_cached("DELETE FROM objects WHERE id = ?1 AND created <= ?2")?;
                     for d in chunk {
-                        st.execute([d])?;
+                        st.execute(rusqlite::params![d, cutoff])?;
                     }
                     Ok::<_, rusqlite::Error>(())
                 })?;
             }
+            self.objects().forget(&dead);
         }
         // A blob any storage keeps stays in every one: two storages may
         // be one directory (a link or mount made after they were set),

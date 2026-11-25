@@ -567,10 +567,13 @@ fn admin(a: &ServerArgs, cmd: AdminCmd) -> Result<(), client::CliError> {
             for p in &rep.problems {
                 println!("problem: {p}");
             }
+            if rep.more() > 0 {
+                println!("... and {} more", rep.more());
+            }
             if !rep.ok() {
                 return Err(client::CliError::other(format!(
                     "{} problem(s) found",
-                    rep.problems.len()
+                    rep.total
                 )));
             }
             println!("ok");

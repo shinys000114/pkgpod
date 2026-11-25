@@ -2530,7 +2530,9 @@ pub(crate) async fn gc(
     app.require_admin(&c)?;
     let req = body.map(|b| b.0).unwrap_or_default();
     blocking(&app, move |app| {
-        let grace = Duration::from_secs(req.grace_hours.unwrap_or(24) * 3600);
+        // Too long a grace period is the engine's to refuse, not an
+        // overflow here.
+        let grace = Duration::from_secs(req.grace_hours.unwrap_or(24).saturating_mul(3600));
         let r = app.engine.gc(grace, req.dry_run)?;
         if !req.dry_run {
             app.auth.audit(

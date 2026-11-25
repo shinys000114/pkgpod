@@ -39,14 +39,19 @@ pub fn parse_url(u: &str) -> Result<(String, String, Vec<String>), String> {
     let (scheme, rest) = u
         .split_once("://")
         .ok_or_else(|| format!("{u:?}: an address is scheme://host/path"))?;
-    if scheme != "http" && scheme != "https" {
-        return Err(format!("{u:?}: use http:// or https://"));
-    }
     let (host, path) = match rest.split_once('/') {
         Some((h, p)) => (h, p),
         None => (rest, ""),
     };
-    if host.is_empty() || host.contains(['@', '?', '#', ' ']) {
+    if host.contains('@') {
+        // Before any error that echoes the address: what is before the
+        // @ may be a password.
+        return Err("an address takes no user or password".into());
+    }
+    if scheme != "http" && scheme != "https" {
+        return Err(format!("{u:?}: use http:// or https://"));
+    }
+    if host.is_empty() || host.contains(['?', '#', ' ']) {
         return Err(format!("{u:?}: no host"));
     }
     if path.contains(['?', '#']) {
@@ -404,5 +409,16 @@ mod tests {
             assert!(parse_url(u).is_err(), "{u}");
         }
         assert_eq!(parse_url("https://H/a/b/").unwrap().2, ["a", "b"]);
+        for u in [
+            "https://user:secret@h/",
+            "https://user:se#cret@h/",
+            "ftp://user:secret@h/",
+        ] {
+            let e = parse_url(u).unwrap_err();
+            assert!(
+                e.contains("no user or password") && !e.contains("secret"),
+                "{e}"
+            );
+        }
     }
 }

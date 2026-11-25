@@ -108,20 +108,28 @@ impl Store {
             )));
         }
         let to = self.path(&d);
-        if to.is_file() {
+        if whole(&to, inc.len) {
             touch(&to);
             return Ok((d, inc.len));
         }
         let dir = to.parent().expect("blob path has a parent");
         fs::create_dir_all(dir).map_err(|e| Error::io(dir, e))?;
         set_mode(inc.file.path(), 0o644)?;
+        // On the disk before it has its name: the database may name it
+        // as soon as this returns, and a crash must not leave the name
+        // without the bytes.
+        inc.file
+            .as_file()
+            .sync_all()
+            .map_err(|e| Error::io(inc.file.path(), e))?;
         inc.file.persist(&to).map_err(|e| Error::io(&to, e.error))?;
+        sync_dir(dir);
         Ok((d, inc.len))
     }
 
     pub fn put_bytes(&self, data: &[u8]) -> Result<(Digest, u64)> {
         let d = Digest::of(data);
-        if self.has(&d) {
+        if whole(&self.path(&d), data.len() as u64) {
             touch(&self.path(&d));
             return Ok((d, data.len() as u64));
         }
@@ -161,7 +169,7 @@ impl Store {
         drop(f);
         let d = Digest(h.finalize().into());
         let to = self.path(&d);
-        if to.is_file() {
+        if whole(&to, len) {
             touch(&to);
             let _ = fs::remove_file(src);
             return Ok((d, len));
@@ -173,6 +181,10 @@ impl Store {
         // upstream's): garbage collection's grace period starts now. Set
         // before the move, so there is no moment with the old time.
         touch(src);
+        // Its bytes on the disk before it has its name (see commit).
+        fs::File::open(src)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| Error::io(src, e))?;
         if fs::rename(src, &to).is_err() {
             let (d2, n) = self.put_file(src)?;
             if d2 != d {
@@ -184,6 +196,7 @@ impl Store {
             let _ = fs::remove_file(src);
             return Ok((d2, n));
         }
+        sync_dir(dir);
         Ok((d, len))
     }
 
@@ -229,6 +242,20 @@ impl Store {
             }
         }
         Ok(out)
+    }
+}
+
+/// Whether the blob at `p` is there whole: a file of its length (one
+/// cut short by a crash is not, and is written again).
+fn whole(p: &Path, len: u64) -> bool {
+    fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() == len)
+}
+
+/// Makes a name given in `dir` survive a crash. Best effort: some file
+/// systems cannot sync a directory, and the bytes are synced already.
+fn sync_dir(dir: &Path) {
+    if let Ok(d) = fs::File::open(dir) {
+        let _ = d.sync_all();
     }
 }
 
@@ -298,6 +325,28 @@ mod tests {
         let (d, _) = s.put_owned(&src).unwrap();
         let t = fs::metadata(s.path(&d)).unwrap().modified().unwrap();
         assert!(t > SystemTime::now() - std::time::Duration::from_secs(60));
+    }
+
+    #[test]
+    fn a_damaged_blob_is_replaced_when_stored_again() {
+        // A blob cut short (a crash before its bytes reached the disk) is
+        // not taken for the one stored again: each way in writes it anew.
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::new(dir.path().join("store"));
+        let (d, _) = s.put_bytes(b"whole").unwrap();
+        let cut = |s: &Store| fs::write(s.path(&d), b"").unwrap();
+        cut(&s);
+        s.put_bytes(b"whole").unwrap();
+        assert_eq!(s.read(&d).unwrap(), b"whole");
+        cut(&s);
+        s.put_reader(&b"whole"[..]).unwrap();
+        assert_eq!(s.read(&d).unwrap(), b"whole");
+        cut(&s);
+        let src = dir.path().join("staged");
+        fs::write(&src, b"whole").unwrap();
+        s.put_owned(&src).unwrap();
+        assert_eq!(s.read(&d).unwrap(), b"whole");
+        assert!(!src.exists());
     }
 
     #[test]

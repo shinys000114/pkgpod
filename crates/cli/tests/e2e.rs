@@ -8732,6 +8732,72 @@ fn files_links_and_cleanup() {
     assert_eq!(get(&s.url("/b/master/r1/app.bin"), None).1, "app r1");
 }
 
+/// What the server would otherwise ignore or take as it is: a misspelt
+/// upload or operation parameter (left out, it widens what is done), a
+/// password in a mirror's source or a proxy's upstream (settings are
+/// shown to readers), a grace period that overflows.
+#[test]
+fn misspelt_parameters_and_secrets_in_addresses_are_refused() {
+    let s = Server::start();
+    s.cli(&["repo", "create", "t", "-f", "files"]).unwrap();
+    let f = s.dir.path().join("f.txt");
+    std::fs::write(&f, "x").unwrap();
+    let f = f.to_str().unwrap();
+    let e = s.cli(&["upload", "t", f, "-s", "pth=a/"]).unwrap_err();
+    assert!(
+        e.contains("no parameter \"pth\"") && e.contains("path, replace, link"),
+        "{e}"
+    );
+    let e = s
+        .cli(&["upload", "t", f, "-s", "path=a/", "-s", "replace=maybe"])
+        .unwrap_err();
+    assert!(e.contains("true or false"), "{e}");
+    s.cli(&["upload", "t", f, "-s", "path=a/"]).unwrap();
+    // The same over PUT.
+    let pw = std::fs::read_to_string(s.dir.path().join("data/admin-password")).unwrap();
+    let put = |q: &str| {
+        reqwest::blocking::Client::new()
+            .put(s.url(&format!("/t/b/f.txt{q}")))
+            .basic_auth("admin", Some(pw.trim()))
+            .body("y")
+            .send()
+            .unwrap()
+    };
+    let r = put("?rplace=true");
+    assert_eq!(r.status().as_u16(), 400);
+    let body = r.text().unwrap();
+    assert!(body.contains("rplace"), "{body}");
+    assert_eq!(put("?replace=true").status().as_u16(), 201);
+    // And operations.
+    let e = s
+        .cli(&["op", "t", "move", "from=a", "too=c", "-y"])
+        .unwrap_err();
+    assert!(e.contains("no parameter \"too\""), "{e}");
+    for (kind, setting) in [("mirror", "source"), ("proxy", "upstream")] {
+        let e = s
+            .cli(&[
+                "repo",
+                "create",
+                kind,
+                "-f",
+                "files",
+                "-k",
+                kind,
+                "-s",
+                &format!("{setting}=https://u:secret@files.example.org/"),
+            ])
+            .unwrap_err();
+        assert!(
+            e.contains("no user or password") && !e.contains("secret"),
+            "{e}"
+        );
+    }
+    let e = s
+        .cli(&["gc", "--grace-hours", "3000000000000000"])
+        .unwrap_err();
+    assert!(e.contains("at most"), "{e}");
+}
+
 /// A fake OIDC issuer on the loopback: its discovery document, its keys,
 /// and GitHub Actions' token endpoint (`/gha`, which wants bearer
 /// `ci-secret` and makes a token with `claims` for the audience asked).

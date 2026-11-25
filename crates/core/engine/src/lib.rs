@@ -86,7 +86,11 @@ impl Kind {
             "mirror" => Kind::Mirror,
             "group" => Kind::Group,
             "proxy" => Kind::Proxy,
-            _ => return Err(Error::Invalid(format!("unknown repository kind {s:?}"))),
+            _ => {
+                return Err(Error::Invalid(format!(
+                    "unknown repository kind {s:?}: hosted, import, mirror, group or proxy"
+                )));
+            }
         })
     }
 

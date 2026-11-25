@@ -92,6 +92,20 @@ impl Fx {
 }
 
 #[test]
+fn numbers_out_of_range_are_refused() {
+    // Valid-Until that many days on is past what a date holds: every
+    // publish of the repository would fail.
+    use pkgpod_engine::Format as _;
+    use pkgpod_engine::settings::check;
+    let hosted = pkgpod_deb::Deb.settings(Kind::Hosted);
+    assert!(check(&hosted, &json!({"valid_days": 1_000_000_000i64})).is_err());
+    assert!(check(&hosted, &json!({"valid_days": 36500})).is_ok());
+    let mirror = pkgpod_deb::Deb.settings(Kind::Mirror);
+    assert!(check(&mirror, &json!({"bwlimit": -1})).is_err());
+    assert!(check(&mirror, &json!({"parallel": 1_000_000})).is_err());
+}
+
+#[test]
 fn publish_signed_indexes_and_reuse() {
     let Some(f) = fx() else { return };
     // No dists yet: uploads are refused.

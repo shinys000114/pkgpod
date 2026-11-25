@@ -349,7 +349,8 @@ object reachable from the root and view of every version that is left,
 every blob those name, what `Format::references` says those blobs
 reference (an OCI manifest's layers), and every blob a proxy's cache
 names. Tree objects and blobs younger than the grace period stay too,
-since a plan computed a moment ago may name them. The rest is removed.
+since a plan computed a moment ago may name them. The rest is removed;
+a plan applied later that names what was removed is refused as stale.
 Mirrors' received trees are not the collector's.
 
 The server runs the cleanup rules and then GC daily, the first time an

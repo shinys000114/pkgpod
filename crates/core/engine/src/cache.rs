@@ -8,11 +8,47 @@
 //! not there. A miss records that the upstream had nothing there, for
 //! the same time. Garbage collection keeps every blob a row names.
 
+use std::collections::HashMap;
+
 use pkgpod_base::{Digest, now};
 use rusqlite::{OptionalExtension, params};
 use serde::Serialize;
 
-use crate::{Engine, Result};
+use crate::{Engine, Error, Result};
+
+/// When rows were served, by repository and path, since that was last
+/// written: written together every few seconds, not a write for each
+/// hit (which would queue behind any long write).
+pub(crate) struct Used {
+    at: HashMap<(String, String), i64>,
+    written: i64,
+}
+
+impl Used {
+    pub(crate) fn new() -> Used {
+        Used {
+            at: HashMap::new(),
+            written: now(),
+        }
+    }
+}
+
+/// Seconds between writes of when rows were used.
+const USED_EVERY: i64 = 10;
+/// Rows kept waiting at most.
+const USED_MAX: usize = 10_000;
+
+/// Writes when rows were used (never back to an earlier time).
+fn write_used(tx: &rusqlite::Transaction, due: &HashMap<(String, String), i64>) -> Result<()> {
+    let mut st = tx.prepare_cached(
+        "UPDATE cache SET used = ?3
+         WHERE repo = (SELECT id FROM repos WHERE name = ?1) AND path = ?2 AND used < ?3",
+    )?;
+    for ((repo, path), t) in due {
+        st.execute(params![repo, path, t])?;
+    }
+    Ok(())
+}
 
 /// What a cache row holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -82,8 +118,15 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<CacheRow> {
 }
 
 impl Engine {
+    /// The id alone: a lookup on every hit, so not the whole row.
     fn repo_id(&self, repo: &str) -> Result<i64> {
-        Ok(self.repo(repo)?.id)
+        self.db()
+            .read(|c| {
+                c.prepare_cached("SELECT id FROM repos WHERE name = ?1")?
+                    .query_row([repo], |r| r.get(0))
+                    .optional()
+            })?
+            .ok_or_else(|| Error::NotFound(format!("no repository {repo}")))
     }
 
     pub fn cache_get(&self, repo: &str, path: &str) -> Result<Option<CacheRow>> {
@@ -140,19 +183,55 @@ impl Engine {
         Ok(())
     }
 
+    /// Notes that a row was served; written with others later.
     pub fn cache_used(&self, repo: &str, path: &str) -> Result<()> {
-        let id = self.repo_id(repo)?;
-        self.db().write(|tx| {
-            tx.execute(
-                "UPDATE cache SET used = ?3 WHERE repo = ?1 AND path = ?2",
-                params![id, path, now()],
-            )
-        })?;
+        let t = now();
+        let due = {
+            let mut u = self.used.lock().unwrap_or_else(|e| e.into_inner());
+            u.at.insert((repo.to_string(), path.to_string()), t);
+            // Sooner when many wait, but once a second at most: a busy
+            // writer gives them all back each time.
+            let many = u.at.len() >= USED_MAX && t > u.written;
+            if t - u.written < USED_EVERY && !many {
+                return Ok(());
+            }
+            u.written = t;
+            std::mem::take(&mut u.at)
+        };
+        // Not behind another write either (a sync's, a collection's):
+        // then they wait for the next time.
+        if self
+            .db()
+            .try_write(|tx| write_used(tx, &due))
+            .transpose()?
+            .is_none()
+        {
+            let mut u = self.used.lock().unwrap_or_else(|e| e.into_inner());
+            for (k, t) in due {
+                let at = u.at.entry(k).or_insert(t);
+                *at = (*at).max(t);
+            }
+        }
+        Ok(())
+    }
+
+    /// Writes when rows were used now, before they are read in that
+    /// order.
+    fn flush_used(&self) -> Result<()> {
+        let due = {
+            let mut u = self.used.lock().unwrap_or_else(|e| e.into_inner());
+            u.written = now();
+            std::mem::take(&mut u.at)
+        };
+        if !due.is_empty() {
+            self.db().write(|tx| write_used(tx, &due))?;
+        }
         Ok(())
     }
 
     /// Rows whose path starts with `prefix`, newest use first.
     pub fn cache_list(&self, repo: &str, prefix: &str, limit: usize) -> Result<Vec<CacheRow>> {
+        self.flush_used()?;
         let id = self.repo_id(repo)?;
         let like = format!(
             "{}%",
@@ -243,6 +322,7 @@ impl Engine {
         if files <= max {
             return Ok(Vec::new());
         }
+        self.flush_used()?;
         let id = self.repo_id(repo)?;
         let mut over = files - max;
         let rows: Vec<(String, u64)> = self.db().read(|c| {

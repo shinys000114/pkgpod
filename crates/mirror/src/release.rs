@@ -4,7 +4,6 @@
 //! files a selection needs, and reading package lists.
 
 use std::collections::BTreeMap;
-use std::io::Read;
 
 use pkgpod_deb::control::{Paragraph, parse_paragraph, parse_paragraphs};
 
@@ -104,10 +103,10 @@ pub fn decompress(ext: &str, data: &[u8]) -> Result<String, Error> {
     match ext {
         "" => out.extend_from_slice(data),
         "gz" => {
-            flate2::read::GzDecoder::new(data).read_to_end(&mut out)?;
+            crate::pkgs::read_index(flate2::read::GzDecoder::new(data), &mut out)?;
         }
         "xz" => {
-            liblzma::read::XzDecoder::new(data).read_to_end(&mut out)?;
+            crate::pkgs::read_index(liblzma::read::XzDecoder::new(data), &mut out)?;
         }
         _ => return Err(Error::Upstream(format!("cannot read .{ext} indices"))),
     }

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use pkgpod_base::Digest;
 use pkgpod_base::db::Db;
-use pkgpod_engine::format::NoSigner;
+use pkgpod_engine::format::{NoSigner, OpSpec};
 use pkgpod_engine::settings::Field;
 use pkgpod_engine::tree::{Edit, Entry};
 use pkgpod_engine::{Cx, Engine, Error, Format, Item, Kind, NewRepo, PublishCx, Upload};
@@ -26,8 +26,34 @@ impl Format for Toy {
     fn kinds(&self) -> &'static [Kind] {
         &[Kind::Hosted, Kind::Mirror]
     }
-    fn settings(&self, _: Kind) -> Vec<Field> {
-        vec![Field::text("greeting", "hello", "A test setting.")]
+    fn settings(&self, k: Kind) -> Vec<Field> {
+        let mut v = vec![Field::text("greeting", "hello", "A test setting.")];
+        if k == Kind::Mirror {
+            v.push(Field::text("source", "", "Where it mirrors from."));
+        }
+        v
+    }
+    fn ops(&self) -> Vec<OpSpec> {
+        vec![OpSpec {
+            name: "mark",
+            help: "Put a value at a path.",
+            params: vec![
+                Field::text("path", "", "Where."),
+                Field::bool("loud", false, "In capitals."),
+            ],
+        }]
+    }
+    fn op(&self, _: &Cx, op: &str, p: &Value, e: &mut Edit) -> pkgpod_engine::Result<String> {
+        assert_eq!(op, "mark");
+        let path = p["path"].as_str().unwrap_or("mark");
+        e.put(path, Entry::Value { value: json!(1) })?;
+        Ok(format!("marked {path}"))
+    }
+    fn proxy(&self) -> bool {
+        true
+    }
+    fn upload_fields(&self, _: &pkgpod_engine::Objects, _: &Digest) -> Vec<Field> {
+        vec![Field::text("path", "", "Where the file goes.")]
     }
     fn ingest(
         &self,
@@ -64,13 +90,28 @@ impl Format for Toy {
     }
 }
 
+/// Another format, of hosted repositories that take nothing.
+struct Other;
+
+impl Format for Other {
+    fn id(&self) -> &'static str {
+        "other"
+    }
+    fn title(&self) -> &'static str {
+        "Other"
+    }
+    fn kinds(&self) -> &'static [Kind] {
+        &[Kind::Hosted]
+    }
+}
+
 fn engine() -> (tempfile::TempDir, Engine) {
     let dir = tempfile::tempdir().unwrap();
     let db = Arc::new(Db::open(&dir.path().join("pkgpod.db")).unwrap());
     let e = Engine::open(
         db,
         &dir.path().join("main"),
-        vec![Arc::new(Toy)],
+        vec![Arc::new(Toy), Arc::new(Other)],
         Arc::new(NoSigner),
     )
     .unwrap();
@@ -424,4 +465,297 @@ fn parallel_uploads_queue_instead_of_conflicting() {
     assert_eq!(e.objects().walk(&cur.root, "").unwrap().len(), 8);
     // Republishing what is already published makes no version.
     assert!(e.republish("busy", "t").unwrap().is_none());
+}
+
+#[test]
+fn a_plan_naming_what_gc_removed_is_stale() {
+    let (_d, e) = engine();
+    hosted(&e, "r");
+    upload(&e, "r", "f/a_1", "one");
+    upload(&e, "r", "f/a_1", "two");
+    let plan = e.plan_rollback("r", 2, "t").unwrap();
+    // Retention drops version 2 and the collection what only it named;
+    // the plan still names them.
+    e.update_settings("r", &json!({"keep_versions": 0, "keep_days": 0}))
+        .unwrap();
+    e.gc(Duration::ZERO, false).unwrap();
+    assert!(!e.repo("r").unwrap().store().has(&Digest::of(b"one")));
+    let err = e.apply(&plan, "t").unwrap_err();
+    assert!(matches!(err, Error::Conflict(_)), "{err}");
+    assert_eq!(e.versions("r").unwrap()[0].seq, 3);
+    // Every version left reads whole.
+    let cold = pkgpod_engine::Objects::new(e.db().clone());
+    for v in e.versions("r").unwrap() {
+        cold.walk(&v.served(), "").unwrap();
+    }
+}
+
+#[test]
+fn a_grace_period_too_long_is_refused() {
+    let (_d, e) = engine();
+    hosted(&e, "r");
+    for g in [Duration::from_secs(u64::MAX), Duration::from_secs(1 << 40)] {
+        assert!(matches!(e.gc(g, true), Err(Error::Invalid(_))));
+    }
+    e.gc(Duration::from_secs(87600 * 3600), true).unwrap();
+}
+
+#[test]
+fn a_plan_does_not_apply_to_a_repository_made_again() {
+    let (_d, e) = engine();
+    hosted(&e, "r");
+    let plan = e.plan_rollback("r", 1, "t").unwrap();
+    e.delete_repo("r").unwrap();
+    // Another repository takes the old one's id; "r" is made again.
+    hosted(&e, "other");
+    hosted(&e, "r");
+    let err = e.apply(&plan, "t").unwrap_err();
+    assert!(matches!(err, Error::Conflict(_)), "{err}");
+    assert_eq!(e.versions("r").unwrap().len(), 1);
+    // Made again at once with the same id (SQLite gives the last one's
+    // again), in another format.
+    let plan = e.plan_rollback("r", 1, "t").unwrap();
+    let id = e.repo("r").unwrap().id;
+    e.delete_repo("r").unwrap();
+    e.create_repo(
+        NewRepo {
+            name: "r".into(),
+            format: "other".into(),
+            kind: Kind::Hosted,
+            storage: None,
+            settings: json!({}),
+        },
+        "t",
+    )
+    .unwrap();
+    assert_eq!(e.repo("r").unwrap().id, id);
+    let err = e.apply(&plan, "t").unwrap_err();
+    assert!(matches!(err, Error::Conflict(_)), "{err}");
+}
+
+#[test]
+fn a_dry_run_counts_what_retention_would_remove() {
+    let (_d, e) = engine();
+    hosted(&e, "r");
+    for c in ["one", "two", "three"] {
+        upload(&e, "r", "f/a_1", c);
+    }
+    e.update_settings("r", &json!({"keep_versions": 0, "keep_days": 0}))
+        .unwrap();
+    let dry = e.gc(Duration::ZERO, true).unwrap();
+    assert_eq!(
+        e.versions("r").unwrap().len(),
+        4,
+        "a dry run removes nothing"
+    );
+    let real = e.gc(Duration::ZERO, false).unwrap();
+    assert_eq!(real.versions, 3);
+    assert_eq!(
+        (dry.versions, dry.objects, dry.blobs, dry.bytes),
+        (real.versions, real.objects, real.blobs, real.bytes)
+    );
+}
+
+#[test]
+fn unknown_parameters_are_refused() {
+    // A misspelt parameter is not ignored: left out, it could widen what
+    // an operation or an upload does.
+    let (_d, e) = engine();
+    hosted(&e, "r");
+    let mark = |p: Value| e.op("r", "mark", &p, "t", true).map(|_| ());
+    mark(json!({"path": "a", "loud": "yes"})).unwrap();
+    let err = mark(json!({"paht": "b"})).unwrap_err().to_string();
+    assert!(
+        err.contains("\"paht\"") && err.contains("path, loud"),
+        "{err}"
+    );
+    assert!(mark(json!({"path": "b", "loud": "maybe"})).is_err());
+    let r = e.repo("r").unwrap();
+    let (sha256, size) = r.store().put_bytes(b"up").unwrap();
+    let ups = [Upload {
+        sha256,
+        size,
+        filename: Some("x_1".into()),
+    }];
+    let up = |p: Value| e.upload_batch("r", &ups, &p, "t").map(|_| ());
+    up(json!({"path": "u/x_1", "filename": "x_1"})).unwrap();
+    let err = up(json!({"dist": "u/y_1"})).unwrap_err().to_string();
+    assert!(err.contains("\"dist\"") && err.contains("path"), "{err}");
+    assert!(e.check_upload("r", &json!({"pth": "z"})).is_err());
+    e.check_upload("r", &json!({"path": "z"})).unwrap();
+}
+
+#[test]
+fn an_address_with_a_password_is_refused() {
+    // Settings are shown to every reader of the repository: a password
+    // in a mirror's source would be too.
+    let (_d, e) = engine();
+    let mirror = |source: &str| {
+        e.create_repo(
+            NewRepo {
+                name: "m".into(),
+                format: "toy".into(),
+                kind: Kind::Mirror,
+                storage: None,
+                settings: json!({ "source": source }),
+            },
+            "t",
+        )
+    };
+    for s in [
+        "https://user:secret@deb.example.org/debian",
+        "http://user@deb.example.org/",
+        "HTTPS://user:secret@deb.example.org",
+        "https://user:se#cret@deb.example.org/",
+    ] {
+        let err = mirror(s).unwrap_err().to_string();
+        assert!(
+            err.contains("no user or password") && !err.contains("secret"),
+            "{err}"
+        );
+    }
+    mirror("https://deb.example.org/debian?a@b").unwrap();
+    let err = e
+        .update_settings("m", &json!({"source": "https://u:secret@deb.example.org/"}))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("no user or password"), "{err}");
+    // A proxy's upstream, also one named by its host alone (a registry).
+    let proxy = |upstream: &str| {
+        e.create_repo(
+            NewRepo {
+                name: "px".into(),
+                format: "toy".into(),
+                kind: Kind::Proxy,
+                storage: None,
+                settings: json!({ "upstream": upstream }),
+            },
+            "t",
+        )
+    };
+    for u in [
+        "https://u:secret@up.example.org/",
+        "u:secret@up.example.org/team",
+    ] {
+        let err = proxy(u).unwrap_err().to_string();
+        assert!(
+            err.contains("no user or password") && !err.contains("secret"),
+            "{err}"
+        );
+    }
+    proxy("up.example.org/team").unwrap();
+}
+
+#[test]
+fn the_check_counts_every_problem() {
+    let (_d, e) = engine();
+    hosted(&e, "r");
+    let store = e.repo("r").unwrap().store();
+    for i in 0..230 {
+        let c = format!("content {i}");
+        upload(&e, "r", &format!("f/p{i}_1"), &c);
+        std::fs::remove_file(store.path(&Digest::of(c.as_bytes()))).unwrap();
+    }
+    let rep = e.check(false).unwrap();
+    assert_eq!(rep.total, 230);
+    assert_eq!(rep.problems.len(), 200, "the first ones listed");
+    assert!(rep.problems.iter().all(|p| p.contains("missing")));
+    assert!(!rep.ok());
+}
+
+#[test]
+fn a_cache_hit_does_not_wait_for_the_writer() {
+    use pkgpod_engine::cache::{CacheKind, CacheRow};
+    let (_d, e) = engine();
+    e.create_repo(
+        NewRepo {
+            name: "px".into(),
+            format: "toy".into(),
+            kind: Kind::Proxy,
+            storage: None,
+            settings: json!({"upstream": "https://up.example.org/"}),
+        },
+        "t",
+    )
+    .unwrap();
+    let row = CacheRow {
+        path: "a".into(),
+        kind: CacheKind::File,
+        sha256: None,
+        size: 1,
+        content_type: String::new(),
+        etag: String::new(),
+        last_modified: String::new(),
+        fetched: 1,
+        used: 1,
+        pinned: false,
+        name: String::new(),
+        version: String::new(),
+    };
+    e.cache_put("px", &row).unwrap();
+    // A second on from the engine's start, so many rows waiting are due.
+    std::thread::sleep(Duration::from_millis(1100));
+    // A long write (a sync's, a collection's) holds the database.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            e.db()
+                .write(|_| {
+                    tx.send(()).unwrap();
+                    std::thread::sleep(Duration::from_millis(1500));
+                    Ok::<_, rusqlite::Error>(())
+                })
+                .unwrap();
+        });
+        rx.recv().unwrap();
+        let t = std::time::Instant::now();
+        e.cache_used("px", "a").unwrap();
+        // Nor one whose turn it is to write the others: they wait.
+        for i in 0..10_000 {
+            e.cache_used("px", &format!("other{i}")).unwrap();
+        }
+        assert!(
+            t.elapsed() < Duration::from_millis(1000),
+            "{:?}",
+            t.elapsed()
+        );
+    });
+    // Listing by use writes what was used first.
+    let rows = e.cache_list("px", "", 10).unwrap();
+    assert!(rows[0].used > 1, "{:?}", rows[0]);
+}
+
+#[test]
+fn errors_name_what_is_taken() {
+    let (_d, e) = engine();
+    hosted(&e, "r");
+    let err = e.format("foo").err().unwrap().to_string();
+    assert!(err.contains("toy"), "{err}");
+    let err = Kind::parse("mirrored").unwrap_err().to_string();
+    assert!(err.contains("hosted") && err.contains("proxy"), "{err}");
+    let err = e
+        .create_repo(
+            NewRepo {
+                name: "g".into(),
+                format: "toy".into(),
+                kind: Kind::Group,
+                storage: None,
+                settings: json!({}),
+            },
+            "t",
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("hosted, mirror, proxy"), "{err}");
+    // A mirror's setting on a hosted repository says so.
+    let err = e
+        .update_settings("r", &json!({"schedule": "0 * * * *"}))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("mirror"), "{err}");
+    let err = e
+        .update_settings("r", &json!({"greting": "hi"}))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("greeting"), "{err}");
 }

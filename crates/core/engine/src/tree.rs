@@ -182,17 +182,102 @@ pub fn split(path: &str) -> Result<Vec<&str>> {
 /// Tree objects in the database, with a cache (objects never change).
 pub struct Objects {
     db: Arc<Db>,
-    cache: Mutex<HashMap<Digest, Arc<Tree>>>,
+    cache: Mutex<Cache>,
 }
 
-/// Entries kept in the cache before it is emptied.
-const CACHE: usize = 50_000;
+/// Encoded bytes of the directories the cache keeps (in memory they take
+/// a few times that). Each upload into a large directory makes another
+/// one, so the cache is bounded by what it holds, not by how many.
+const CACHE_BYTES: usize = 64 << 20;
+
+/// Directories read, weighed by their encoded size; the least recently
+/// used go first when they weigh more than the budget.
+struct Cache {
+    trees: HashMap<Digest, Cached>,
+    bytes: usize,
+    budget: usize,
+    /// Counts lookups, to order the entries by their last use.
+    tick: u64,
+}
+
+struct Cached {
+    tree: Arc<Tree>,
+    bytes: usize,
+    used: u64,
+}
+
+impl Cache {
+    fn get(&mut self, id: &Digest) -> Option<Arc<Tree>> {
+        self.tick += 1;
+        let c = self.trees.get_mut(id)?;
+        c.used = self.tick;
+        Some(c.tree.clone())
+    }
+
+    fn insert(&mut self, id: Digest, tree: Arc<Tree>, bytes: usize) {
+        self.tick += 1;
+        let c = Cached {
+            tree,
+            bytes,
+            used: self.tick,
+        };
+        if let Some(old) = self.trees.insert(id, c) {
+            self.bytes -= old.bytes;
+        }
+        self.bytes += bytes;
+        if self.bytes <= self.budget {
+            return;
+        }
+        // Down to three quarters, so the sort is not paid at every
+        // insert; the one just read stays (its caller uses it).
+        let mut by_use: Vec<(u64, Digest)> = self
+            .trees
+            .iter()
+            .filter(|(k, _)| **k != id)
+            .map(|(k, c)| (c.used, *k))
+            .collect();
+        by_use.sort_unstable();
+        for (_, k) in by_use {
+            if self.bytes <= self.budget / 4 * 3 {
+                break;
+            }
+            self.remove(&k);
+        }
+    }
+
+    fn remove(&mut self, id: &Digest) {
+        if let Some(old) = self.trees.remove(id) {
+            self.bytes -= old.bytes;
+        }
+    }
+}
 
 impl Objects {
     pub fn new(db: Arc<Db>) -> Self {
+        Self::with_budget(db, CACHE_BYTES)
+    }
+
+    fn with_budget(db: Arc<Db>, budget: usize) -> Self {
         Objects {
             db,
-            cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(Cache {
+                trees: HashMap::new(),
+                bytes: 0,
+                budget,
+                tick: 0,
+            }),
+        }
+    }
+
+    fn cache(&self) -> std::sync::MutexGuard<'_, Cache> {
+        self.cache.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Drops objects from the cache (garbage collection removed them).
+    pub fn forget(&self, ids: &[Digest]) {
+        let mut c = self.cache();
+        for id in ids {
+            c.remove(id);
         }
     }
 
@@ -207,16 +292,18 @@ impl Objects {
             })
     }
 
-    /// The entries of a stored directory object, its parts merged.
-    fn load(&self, id: &Digest, into: &mut Tree) -> Result<()> {
+    /// The entries of a stored directory object, its parts merged;
+    /// returns the bytes of the objects read.
+    fn load(&self, id: &Digest, into: &mut Tree) -> Result<usize> {
         let data = self.data(id)?;
         if is_shard(&data) {
             let s: ShardObject = serde_json::from_slice(&data)
                 .map_err(|e| Error::Corrupt(format!("tree object {id}: {e}")))?;
+            let mut n = data.len();
             for p in s.shard.parts.values() {
-                self.load(p, into)?;
+                n += self.load(p, into)?;
             }
-            return Ok(());
+            return Ok(n);
         }
         let t: Tree = serde_json::from_slice(&data)
             .map_err(|e| Error::Corrupt(format!("tree object {id}: {e}")))?;
@@ -225,7 +312,7 @@ impl Objects {
         } else {
             into.extend(t);
         }
-        Ok(())
+        Ok(data.len())
     }
 
     /// The part objects a directory object is made of (none if it is
@@ -248,20 +335,16 @@ impl Objects {
     }
 
     pub fn get(&self, id: &Digest) -> Result<Arc<Tree>> {
-        if let Some(t) = self.cache.lock().unwrap_or_else(|e| e.into_inner()).get(id) {
-            return Ok(t.clone());
+        if let Some(t) = self.cache().get(id) {
+            return Ok(t);
         }
         if *id == empty() {
             return Ok(Arc::new(Tree::new()));
         }
         let mut t = Tree::new();
-        self.load(id, &mut t)?;
+        let bytes = self.load(id, &mut t)?;
         let t = Arc::new(t);
-        let mut c = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        if c.len() >= CACHE {
-            c.clear();
-        }
-        c.insert(*id, t.clone());
+        self.cache().insert(*id, t.clone(), bytes);
         Ok(t)
     }
 
@@ -368,6 +451,50 @@ impl Objects {
             }
         }
         Ok(())
+    }
+
+    /// What `b` names that `a` does not and that is no longer stored: a
+    /// tree object missing from the database (not looked up in this
+    /// cache, which may still hold it) or a blob `has` says is gone. The
+    /// first one found, described.
+    pub fn missing(
+        &self,
+        a: &Digest,
+        b: &Digest,
+        has: &dyn Fn(&Digest) -> bool,
+    ) -> Result<Option<String>> {
+        if a == b || *b == empty() {
+            return Ok(None);
+        }
+        // The directory object and its parts, read from the database.
+        match self.parts(b) {
+            Ok(_) => {}
+            Err(Error::Corrupt(_)) => return Ok(Some(format!("tree object {b}"))),
+            Err(e) => return Err(e),
+        }
+        let ta = self.get(a)?;
+        for (name, e) in self.get(b)?.iter() {
+            let old = ta.get(name);
+            if old == Some(e) {
+                continue;
+            }
+            match e {
+                Entry::Dir { id } => {
+                    let was = match old {
+                        Some(Entry::Dir { id }) => *id,
+                        _ => empty(),
+                    };
+                    if let Some(m) = self.missing(&was, id, has)? {
+                        return Ok(Some(m));
+                    }
+                }
+                Entry::Blob { sha256, .. } if !has(sha256) => {
+                    return Ok(Some(format!("blob {sha256} ({name})")));
+                }
+                _ => {}
+            }
+        }
+        Ok(None)
     }
 
     /// What differs between two trees, as leaf changes in path order.
@@ -926,6 +1053,41 @@ mod tests {
         // A cold reader still reads it all.
         let cold = Objects::new(o.db.clone());
         assert_eq!(cold.walk(&r, "").unwrap().len(), 1500);
+    }
+
+    #[test]
+    fn the_cache_keeps_what_it_holds_under_its_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Db::open(&dir.path().join("t.db")).unwrap());
+        crate::schema::migrate(&db).unwrap();
+        let o = Objects::with_budget(db, 200_000);
+        // A large directory, then one more entry at a time: each upload
+        // into it makes another directory of about the same size.
+        let mut e = Edit::new(&o, empty());
+        for i in 0..1000 {
+            e.put(&format!("big/f{i}"), blob(&format!("{i}"))).unwrap();
+        }
+        let mut root = e.finish().unwrap();
+        let mut ids = Vec::new();
+        for i in 0..40 {
+            let mut e = Edit::new(&o, root);
+            e.put(&format!("big/new{i}"), blob("n")).unwrap();
+            root = e.finish().unwrap();
+            let Some(Entry::Dir { id }) = o.resolve(&root, "big").unwrap() else {
+                panic!("no big");
+            };
+            assert_eq!(o.get(&id).unwrap().len(), 1001 + i);
+            ids.push(id);
+            let c = o.cache();
+            assert!(c.bytes <= 200_000, "{} bytes cached", c.bytes);
+            assert_eq!(c.bytes, c.trees.values().map(|t| t.bytes).sum::<usize>());
+        }
+        // The newest stays; what went is read again when asked for.
+        assert!(o.cache().trees.contains_key(&ids[39]));
+        assert!(!o.cache().trees.contains_key(&ids[0]));
+        assert_eq!(o.get(&ids[0]).unwrap().len(), 1001);
+        o.forget(&[ids[0]]);
+        assert!(!o.cache().trees.contains_key(&ids[0]));
     }
 
     #[test]

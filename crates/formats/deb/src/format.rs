@@ -101,8 +101,8 @@ pub fn mirror_settings() -> Vec<Field> {
             10000,
             "Delete nothing when more files than this would go.",
         ),
-        Field::int("bwlimit", 0, "Bandwidth limit in KiB/s; 0: none."),
-        Field::int("parallel", 8, "Parallel downloads (http)."),
+        Field::int("bwlimit", 0, "Bandwidth limit in KiB/s; 0: none.").at_most(u32::MAX as i64),
+        Field::int("parallel", 8, "Parallel downloads (http).").at_most(1000),
         Field::list(
             "ignore_missing",
             "Pool files the indexes list but upstream does not serve, accepted as missing.",
@@ -915,7 +915,8 @@ impl Format for Deb {
                 "valid_days",
                 0,
                 "Valid-Until this many days after publishing; 0: none.",
-            ),
+            )
+            .at_most(pkgpod_engine::settings::DAYS),
             Field::bool(
                 "by_hash",
                 true,

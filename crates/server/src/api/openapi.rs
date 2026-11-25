@@ -119,6 +119,14 @@ fn schemas() -> Value {
                     ),
                     ("help", string()),
                     ("default", any("The value when not given.")),
+                    (
+                        "min",
+                        json!({"type": "integer", "description": "For integer: the least value taken."}),
+                    ),
+                    (
+                        "max",
+                        json!({"type": "integer", "description": "For integer: the greatest value taken, if bounded."}),
+                    ),
                 ],
                 &["name", "type", "help", "default"],
             ),

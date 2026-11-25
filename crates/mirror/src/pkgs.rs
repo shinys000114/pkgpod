@@ -182,18 +182,38 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), Error> {
     Ok(())
 }
 
+/// An index decompressed is at most this, far more than any real one: a
+/// small file that inflates without end is refused, not held whole.
+pub const MAX_INDEX: u64 = 2 << 30;
+
+/// Reads a decompressing `r` whole into `out`, at most [`MAX_INDEX`]
+/// bytes.
+pub fn read_index(r: impl Read, out: &mut Vec<u8>) -> std::io::Result<usize> {
+    read_at_most(r, MAX_INDEX, out)
+}
+
+fn read_at_most(r: impl Read, max: u64, out: &mut Vec<u8>) -> std::io::Result<usize> {
+    let n = r.take(max + 1).read_to_end(out)?;
+    if n as u64 > max {
+        return Err(std::io::Error::other(format!(
+            "more than {max} bytes when decompressed"
+        )));
+    }
+    Ok(n)
+}
+
 /// A compressed index read whole: gzip, xz, zstd or bzip2 by its name or
 /// its first bytes; anything else as it is.
 pub fn decompress_any(name: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
     let mut out = Vec::new();
     let r: std::io::Result<usize> = if name.ends_with(".gz") || data.starts_with(&[0x1f, 0x8b]) {
-        flate2::read::MultiGzDecoder::new(data).read_to_end(&mut out)
+        read_index(flate2::read::MultiGzDecoder::new(data), &mut out)
     } else if name.ends_with(".xz") || data.starts_with(&[0xfd, b'7', b'z', b'X', b'Z']) {
-        liblzma::read::XzDecoder::new(data).read_to_end(&mut out)
+        read_index(liblzma::read::XzDecoder::new(data), &mut out)
     } else if name.ends_with(".zst") || data.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
-        zstd::stream::read::Decoder::new(data).and_then(|mut d| d.read_to_end(&mut out))
+        zstd::stream::read::Decoder::new(data).and_then(|d| read_index(d, &mut out))
     } else if name.ends_with(".bz2") || data.starts_with(b"BZh") {
-        bzip2::read::MultiBzDecoder::new(data).read_to_end(&mut out)
+        read_index(bzip2::read::MultiBzDecoder::new(data), &mut out)
     } else {
         out.extend_from_slice(data);
         Ok(out.len())
@@ -301,6 +321,21 @@ mod tests {
         let zst = zstd::encode_all(&b"hello"[..], 3).unwrap();
         assert_eq!(decompress_any("core.db", &zst).unwrap(), b"hello");
         assert_eq!(decompress_any("plain.xml", b"hello").unwrap(), b"hello");
+    }
+
+    #[test]
+    fn decompressing_stops_at_the_limit() {
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(&[0u8; 100]).unwrap();
+        let gz = gz.finish().unwrap();
+        let mut out = Vec::new();
+        assert!(read_at_most(flate2::read::GzDecoder::new(&gz[..]), 10, &mut out).is_err());
+        assert!(out.len() <= 11);
+        out.clear();
+        assert_eq!(
+            read_at_most(flate2::read::GzDecoder::new(&gz[..]), 100, &mut out).unwrap(),
+            100
+        );
     }
 
     #[test]

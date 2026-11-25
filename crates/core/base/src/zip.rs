@@ -114,9 +114,12 @@ pub fn read(data: &[u8], m: &Member, max: u64) -> Result<Vec<u8>> {
     let out = match m.method {
         0 => raw.to_vec(),
         8 => {
+            // No further than the size it claims (checked against the
+            // limit above): a member that inflates to more is refused
+            // without being held whole.
             let mut v = Vec::new();
             flate2::read::DeflateDecoder::new(raw)
-                .take(max + 1)
+                .take(m.size + 1)
                 .read_to_end(&mut v)
                 .map_err(|e| bad(format!("{}: {e}", m.name)))?;
             v
@@ -211,5 +214,18 @@ mod tests {
             "CRC"
         );
         assert!(members(&z[..z.len() - 3]).is_err());
+    }
+
+    #[test]
+    fn a_member_inflates_no_further_than_its_size() {
+        // The directory says 5 bytes; the data inflates to 4 MiB. Reading
+        // stops after the size it gave, whatever the caller allows.
+        let mut z = make(&[("big", &vec![0u8; 4 << 20], true)]);
+        let cd = z.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        z[cd + 24..cd + 28].copy_from_slice(&5u32.to_le_bytes());
+        let m = &members(&z).unwrap()[0];
+        assert_eq!(m.size, 5);
+        let e = read(&z, m, u64::MAX).unwrap_err();
+        assert!(e.0.contains("size or CRC"), "{e}");
     }
 }

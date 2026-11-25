@@ -13,8 +13,9 @@ use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 
 use crate::{Error, Result};
 
-/// Readers kept open for concurrent reads.
-const READERS: usize = 4;
+/// Readers kept open for concurrent reads: as many as requests at once
+/// commonly need (each one opened anew costs more than the read).
+const READERS: usize = 32;
 
 pub struct Db {
     path: PathBuf,
@@ -22,8 +23,11 @@ pub struct Db {
     readers: Mutex<Vec<Connection>>,
 }
 
+/// How long a connection waits for another's write.
+const BUSY: std::time::Duration = std::time::Duration::from_secs(30);
+
 fn configure(c: &Connection) -> rusqlite::Result<()> {
-    c.busy_timeout(std::time::Duration::from_secs(30))?;
+    c.busy_timeout(BUSY)?;
     c.execute_batch(
         "PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL; PRAGMA temp_store = MEMORY;",
     )?;
@@ -100,6 +104,39 @@ impl Db {
         Ok(v)
     }
 
+    /// [`Db::write`], unless another write is under way: then nothing
+    /// is done and `None` returned. For bookkeeping that may be skipped
+    /// (when a token was last used), which must not wait behind a long
+    /// write.
+    pub fn try_write<T, E: From<rusqlite::Error>>(
+        &self,
+        f: impl FnOnce(&Transaction) -> Result<T, E>,
+    ) -> Option<Result<T, E>> {
+        let mut c = match self.writer.try_lock() {
+            Ok(c) => c,
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        // Nor behind another process's write (an admin command's).
+        if c.busy_timeout(std::time::Duration::ZERO).is_err() {
+            return None;
+        }
+        let out = match c.transaction_with_behavior(TransactionBehavior::Immediate) {
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::DatabaseBusy =>
+            {
+                None
+            }
+            Err(e) => Some(Err(e.into())),
+            Ok(tx) => Some(f(&tx).and_then(|v| {
+                tx.commit()?;
+                Ok(v)
+            })),
+        };
+        let _ = c.busy_timeout(BUSY);
+        out
+    }
+
     /// Runs `f` on a read-only connection (a consistent snapshot while it
     /// runs in a transaction it opens itself).
     pub fn read<T, E: From<rusqlite::Error>>(
@@ -150,6 +187,51 @@ mod tests {
             .unwrap();
         assert_eq!(n, 1);
         assert!(db.migrate("t", &steps[..1]).is_err());
+    }
+
+    #[test]
+    fn readers_are_kept_for_many_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("t.db")).unwrap();
+        let barrier = std::sync::Barrier::new(16);
+        std::thread::scope(|s| {
+            for _ in 0..16 {
+                s.spawn(|| {
+                    db.read(|_| {
+                        barrier.wait();
+                        Ok::<_, rusqlite::Error>(())
+                    })
+                    .unwrap()
+                });
+            }
+        });
+        // Opened once, then reused: not opened again for each request.
+        assert_eq!(db.readers.lock().unwrap().len(), 16);
+    }
+
+    #[test]
+    fn a_write_that_may_be_skipped_does_not_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("t.db")).unwrap();
+        db.migrate("t", &["CREATE TABLE a (x INTEGER)"]).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                db.write(|_| {
+                    tx.send(()).unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    Ok::<_, Error>(())
+                })
+                .unwrap()
+            });
+            rx.recv().unwrap();
+            let skipped: Option<Result<usize, Error>> =
+                db.try_write(|tx| Ok(tx.execute("INSERT INTO a VALUES (1)", [])?));
+            assert!(skipped.is_none());
+        });
+        let done: Option<Result<usize, Error>> =
+            db.try_write(|tx| Ok(tx.execute("INSERT INTO a VALUES (2)", [])?));
+        assert_eq!(done.unwrap().unwrap(), 1);
     }
 
     #[test]
