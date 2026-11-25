@@ -117,7 +117,7 @@ jobs:
       - name: lintian
         run: |
           lintian --fail-on error dist/*.dsc dist/*.deb
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v4
         with:
           platforms: arm64
       # The package in fresh containers: the server as its service user, a
