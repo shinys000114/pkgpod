@@ -37,8 +37,10 @@ jobs:
           p=dist/pkgpod_0.0.0-ci_linux_x86_64
           chmod +x "$p"
           "$p" login --oidc
-          at="master/${GITHUB_SHA::7}"
-          for f in dist/*.deb dist/pkgpod_0.0.0-ci_linux_* dist/checksums.txt; do
-            "$p" upload "${{ vars.PKGPOD_REPO }}" "$f" -s "path=$at/$(basename "$f")"
-          done
+          at="master/${GITHUB_SHA::7}/"
+          # One upload: the run's files are one version of the repository
+          # (one request: a CDN in front may limit its size, 100 MB at
+          # Cloudflare's free plan; this is about 66 MiB).
+          "$p" upload "${{ vars.PKGPOD_REPO }}" dist/*.deb dist/pkgpod_0.0.0-ci_linux_* \
+            dist/checksums.txt -s "path=$at"
           echo "published to ${{ vars.PKGPOD_REPO }} at $at" >> "$GITHUB_STEP_SUMMARY"
