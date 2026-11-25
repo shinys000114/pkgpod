@@ -92,6 +92,9 @@ impl ArchReport {
 /// One package a database names.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Package {
+    pub name: String,
+    pub version: String,
+    pub arch: String,
     pub filename: String,
     pub sha256: String,
     pub size: u64,
@@ -141,6 +144,9 @@ pub fn parse_db(data: &[u8]) -> Result<Vec<Package>, Error> {
                 }
                 safe_rel(&filename)?;
                 out.push(Package {
+                    name: field("NAME").unwrap_or_default(),
+                    version: field("VERSION").unwrap_or_default(),
+                    arch: field("ARCH").unwrap_or_default(),
                     filename,
                     sha256,
                     size,
@@ -350,6 +356,9 @@ mod tests {
         assert_eq!(
             parse_db(&d).unwrap(),
             vec![Package {
+                name: "acl".into(),
+                version: String::new(),
+                arch: String::new(),
                 filename: "acl-2.4.0-1-x86_64.pkg.tar.zst".into(),
                 sha256: sha.clone(),
                 size: 150821

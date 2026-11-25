@@ -84,6 +84,9 @@ impl ApkReport {
 /// One package an index names.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Package {
+    pub name: String,
+    pub version: String,
+    pub arch: String,
     /// `<name>-<version>.apk`
     pub file: String,
     pub size: u64,
@@ -149,6 +152,9 @@ pub fn parse_index(data: &[u8]) -> Result<Vec<Package>, Error> {
             )));
         }
         out.push(Package {
+            name: p,
+            version: v,
+            arch: field('A').unwrap_or_default(),
             file,
             size,
             checksum: c,
@@ -347,6 +353,9 @@ mod tests {
         assert_eq!(
             p[0],
             Package {
+                name: "2bwm".into(),
+                version: "0.3-r2".into(),
+                arch: "x86_64".into(),
                 file: "2bwm-0.3-r2.apk".into(),
                 size: 22857,
                 checksum: "Q100eg1kKEqP5BEuJ8JXPN20E4TME=".into()

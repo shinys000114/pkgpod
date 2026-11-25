@@ -1,0 +1,21 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+<div class="card" id="mpk">
+  <div class="card-head"><h2>Packages</h2><span class="hint">from the mirror's own indexes</span></div>
+  {% if !places.is_empty() %}<div class="card-body">
+  <form class="inline" hx-get="/r/{{ repo }}/packages" hx-target="#tab" hx-trigger="change, input from:find input[name=q] delay:300ms">
+    {% if places.len() > 1 %}<select name="place" aria-label="Index">{% for (p, on) in places %}<option{% if on %} selected{% endif %}>{{ p }}</option>{% endfor %}</select>{% endif %}
+    <input type="search" name="q" value="{{ q }}" placeholder="filter by name" aria-label="Name">
+  </form>
+  </div>{% endif %}
+  {% if !note.is_empty() %}<p class="empty">{{ note }}</p>
+  {% else if rows.is_empty() %}<p class="empty">No package matches.</p>
+  {% else %}
+  <div class="table-wrap"><table>
+    <thead><tr><th>Package</th><th>Version</th><th>Arch</th><th class="num">Size</th><th>File</th></tr></thead>
+    <tbody>
+    {% for r in rows %}<tr><td><b>{{ r.name }}</b></td><td class="mono wrap">{{ r.version }}</td><td>{{ r.extra }}</td><td class="num nowrap" data-sort="{{ r.bytes }}">{{ r.size }}</td><td class="mono wrap"><a href="{{ r.file }}" download>{{ r.path }}</a></td></tr>{% endfor %}
+    </tbody>
+  </table></div>
+  <p class="muted card-body">{% if total > rows.len() %}The first {{ rows.len() }} of {{ total }}; narrow the filter.{% else %}{{ total }} package(s).{% endif %}</p>
+  {% endif %}
+</div>
