@@ -419,7 +419,8 @@ Operations:
   its metadata asked for again after `metadata_minutes` and served as it
   was while the upstream is not there (after waiting 5 s for it, then
   without asking it for a minute or until its late answer, which is
-  kept all the same); names in `exclude` are never asked
+  kept all the same when it is in whole within that minute and nothing
+  newer was kept meanwhile); names in `exclude` are never asked
   upstream; only the upstream and URLs its own metadata named are
   fetched, and a file whose digest is not the one its metadata gives is
   refused and not kept. The cache is managed by hand (`pkgpod cache

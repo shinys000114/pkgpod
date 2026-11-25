@@ -78,10 +78,11 @@ pinned). Documents that change upstream (a package's version list) are
 asked for again when older than `metadata_minutes`; while the upstream
 is not there, the last one is served (an upstream that does not answer
 is waited for 5 seconds, and then not asked again for what is kept for
-a minute, or until its late answer comes, which is kept all the same).
-Names in `exclude` are never asked for upstream, so your own packages'
-names are not looked up in a public registry. A proxy is usable as the
-last member of a group.
+a minute, or until its late answer comes, which is kept all the same
+when it is in whole within that minute and nothing newer was kept
+meanwhile). Names in `exclude` are never asked for upstream, so your
+own packages' names are not looked up in a public registry. A proxy is
+usable as the last member of a group.
 `pkgpod cache <repo> [list|pin|unpin|evict|prefetch] [paths]` and the
 console's Cache tab manage what is kept.
 

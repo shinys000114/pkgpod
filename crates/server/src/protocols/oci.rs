@@ -531,6 +531,56 @@ fn upstream_ref(r: &RepoInfo, image: &str) -> Option<pkgpod_mirror::oci::ImageRe
     pkgpod_mirror::oci::parse_ref(&source, &name).ok()
 }
 
+/// What a proxy's fetch of a manifest brings: its row, kept, or why not
+/// (`None`: the upstream not there, or not in time).
+type Fetched = Result<pkgpod_engine::cache::CacheRow, Option<(StatusCode, &'static str)>>;
+
+/// A manifest's fetch, as the requests for it wait for it.
+type Fetch =
+    futures_util::future::Shared<futures_util::future::BoxFuture<'static, Option<Fetched>>>;
+
+/// Proxies' manifests being fetched, by repository and path.
+fn fetching() -> &'static Mutex<HashMap<(String, String), Fetch>> {
+    static F: OnceLock<Mutex<HashMap<(String, String), Fetch>>> = OnceLock::new();
+    F.get_or_init(Default::default)
+}
+
+/// The fetch of `path` for proxy `repo` that runs now, or else `fetch`,
+/// run as a task of its own: a request for a manifest while it is
+/// fetched shares that fetch rather than ask again (each would hold a
+/// thread and a connection while the registry is slow, and an answer
+/// sent later could be kept first, then replaced by the earlier one).
+fn shared(
+    repo: &str,
+    path: &str,
+    fetch: impl std::future::Future<Output = Fetched> + Send + 'static,
+) -> Fetch {
+    use futures_util::FutureExt;
+    /// Forgotten when its task ends (what it brings is kept by then).
+    struct Ends((String, String));
+    impl Drop for Ends {
+        fn drop(&mut self) {
+            fetching()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&self.0);
+        }
+    }
+    let key = (repo.to_string(), path.to_string());
+    let mut m = fetching().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(f) = m.get(&key) {
+        return f.clone();
+    }
+    let ends = Ends(key.clone());
+    let task = tokio::spawn(async move {
+        let _ends = ends;
+        fetch.await
+    });
+    let f = task.map(Result::ok).boxed().shared();
+    m.insert(key, f.clone());
+    f
+}
+
 /// A proxy's answer: manifests by tag (metadata) and by digest, and
 /// blobs (files), each checked against its digest.
 async fn proxy(
@@ -625,11 +675,13 @@ async fn proxy(
             name: named.clone(),
             version,
         };
+    // Not over a row kept after this request began: a tag's fetch may
+    // land late (what a digest names is the same whoever keeps it).
     let put = {
         let (app, r) = (app.clone(), r.clone());
         move |rw: CacheRow| {
             let (app2, r2) = (app.clone(), r.clone());
-            blocking(move || crate::serving::proxy::keep(&app2, &r2, &rw))
+            blocking(move || crate::serving::proxy::keep(&app2, &r2, &rw, Some(now)))
         }
     };
     match target {
@@ -646,17 +698,22 @@ async fn proxy(
             let got = if fresh || quiet {
                 have.clone()
             } else {
-                // Fetched and kept by a task of its own: what a tag names,
-                // sent after the wait below, is kept all the same.
+                // Fetched and kept by a task of its own, which requests
+                // for it meanwhile share: what a tag names, sent after the
+                // wait below, is kept all the same.
                 let (app2, r2, reg2, up2) = (app.clone(), r.clone(), reg.clone(), up.clone());
                 let (re2, path2, image2) = (re.clone(), path.clone(), image.to_string());
                 let (row, put) = (row.clone(), put.clone());
                 let fetch = async move {
                     let re3 = re2.clone();
+                    // Given up while its path is still held for it (the
+                    // client's timeout is an hour, for blobs).
+                    let within =
+                        std::time::Duration::from_secs(crate::serving::proxy::QUIET_SECS as u64);
                     let Some(Ok((body, mt, digest))) =
-                        blocking(move || reg2.manifest(&up2, &re3)).await
+                        blocking(move || reg2.manifest_within(&up2, &re3, within)).await
                     else {
-                        // The upstream not there.
+                        // The upstream not there, or not in time.
                         return Err(None);
                     };
                     let store = r2.store();
@@ -667,16 +724,14 @@ async fn proxy(
                     })
                     .await;
                     let Some(Ok((sha, size))) = stored else {
-                        return Err(Some(oci_err(
+                        return Err(Some((
                             StatusCode::INTERNAL_SERVER_ERROR,
-                            "UNKNOWN",
                             "storing the manifest",
                         )));
                     };
                     if format!("sha256:{}", sha.hex()) != digest {
-                        return Err(Some(oci_err(
+                        return Err(Some((
                             StatusCode::BAD_GATEWAY,
-                            "UNKNOWN",
                             "the manifest is not its digest",
                         )));
                     }
@@ -701,19 +756,22 @@ async fn proxy(
                     shrink(&app2, &r2).await;
                     Ok(tagged)
                 };
+                let fetch = shared(&r.name, &path, fetch);
                 let fetched = match &have {
                     // What a tag named is kept: not waited for long.
                     Some(_) => {
-                        let then = |got: Result<CacheRow, Option<Response>>| async move {
-                            !matches!(got, Err(None))
+                        let then = |got: Option<Fetched>| async move {
+                            !matches!(got, None | Some(Err(None)))
                         };
-                        crate::serving::proxy::waited(&r.name, &path, fetch, then).await
+                        crate::serving::proxy::waited(&r.name, &path, fetch, then)
+                            .await
+                            .flatten()
                     }
-                    None => Some(fetch.await),
+                    None => fetch.await,
                 };
                 match fetched {
                     Some(Ok(tagged)) => Some(tagged),
-                    Some(Err(Some(e))) => return e,
+                    Some(Err(Some((st, why)))) => return oci_err(st, "UNKNOWN", why),
                     // The upstream not there, or not in time: as it was.
                     _ if have.is_some() => have.clone(),
                     _ => None,
@@ -1535,5 +1593,117 @@ mod tests {
         );
         assert_eq!(t("app/other/x"), None);
         assert_eq!(t("manifests/x"), None);
+    }
+
+    /// An image manifest whose config names `c`.
+    fn manifest(c: char) -> Vec<u8> {
+        format!(
+            r#"{{"schemaVersion":2,"mediaType":"{}","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:{}","size":2}},"layers":[]}}"#,
+            pkgpod_oci::OCI_MANIFEST,
+            c.to_string().repeat(64)
+        )
+        .into_bytes()
+    }
+
+    /// A stand-in registry with image `x/app`, whose tag 1.0 names the
+    /// manifest `answer` gives for the `n`th request (from 1), after its
+    /// delay. Also how many were made.
+    fn registry(
+        answer: impl Fn(usize) -> (u64, char) + Send + Sync + 'static,
+    ) -> (String, Arc<Mutex<Vec<usize>>>) {
+        use crate::serving::proxy::tests::{reply, stub};
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let asked2 = asked.clone();
+        let up = stub(move |n, path, c| {
+            if path != "/v2/x/app/manifests/1.0" {
+                return reply(c, "404 Not Found", b"");
+            }
+            asked2.lock().unwrap().push(n);
+            let (delay, m) = answer(n);
+            std::thread::sleep(std::time::Duration::from_secs(delay));
+            let head = format!("200 OK\r\nContent-Type: {}", pkgpod_oci::OCI_MANIFEST);
+            reply(c, &head, &manifest(m));
+        });
+        (format!("{up}x"), asked)
+    }
+
+    /// Tag 1.0 of proxy `r`'s image app, as it is served: the digest.
+    async fn tag(app: &Arc<App>, r: &RepoInfo) -> String {
+        let uri = format!("/v2/{}/app/manifests/1.0", r.name).parse().unwrap();
+        let t = Target::Manifest("1.0".into());
+        let resp = proxy(app, r, "app", &t, &Method::GET, uri, Default::default()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        resp.headers()["docker-content-digest"]
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn digest(m: &[u8]) -> String {
+        format!("sha256:{}", Digest::of(m).hex())
+    }
+
+    /// Requests for a tag while it is fetched again share that fetch:
+    /// each would hold a thread and a connection while the registry is
+    /// slow, for as long as its client lets it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn requests_for_a_tag_share_one_fetch() {
+        use crate::serving::proxy::tests::{app, proxy_repo};
+        let (_d, app) = app();
+        let (up, asked) = registry(|n| if n == 1 { (0, '0') } else { (8, '1') });
+        let r = proxy_repo(&app, "oci-shared", "oci", &up);
+        assert_eq!(tag(&app, &r).await, digest(&manifest('0')));
+        let all: Vec<_> = (0..10)
+            .map(|_| {
+                let (app, r) = (app.clone(), r.clone());
+                tokio::spawn(async move { tag(&app, &r).await })
+            })
+            .collect();
+        for a in all {
+            assert_eq!(a.await.unwrap(), digest(&manifest('0')));
+        }
+        assert_eq!(*asked.lock().unwrap(), [1, 2]);
+    }
+
+    /// A request that goes away while its tag is fetched leaves the fetch
+    /// to be kept; one made meanwhile waits for it rather than ask itself,
+    /// so what it would be sent is not replaced by the earlier answer when
+    /// that comes (later, and older).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tag_fetched_for_no_one_does_not_replace_a_newer_one() {
+        use crate::serving::proxy::tests::{app, proxy_repo};
+        use std::time::Duration;
+        let (_d, app) = app();
+        let (up, asked) = registry(|n| match n {
+            1 => (0, '0'),
+            2 => (10, '1'),
+            _ => (0, '2'),
+        });
+        let r = proxy_repo(&app, "oci-gone", "oci", &up);
+        tag(&app, &r).await;
+        // Its client gives up at 2 s.
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), tag(&app, &r))
+                .await
+                .is_err()
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(tag(&app, &r).await, digest(&manifest('0')));
+        let t = std::time::Instant::now();
+        while fetching().lock().unwrap().keys().any(|k| k.0 == r.name) {
+            assert!(t.elapsed() < Duration::from_secs(20), "the fetch goes on");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let (app2, name) = (app.clone(), r.name.clone());
+        let kept = blocking(move || app2.engine.cache_get(&name, "app/manifests/1.0"))
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(*asked.lock().unwrap(), [1, 2]);
+        assert_eq!(
+            format!("sha256:{}", kept.sha256.unwrap().hex()),
+            digest(&manifest('1'))
+        );
     }
 }

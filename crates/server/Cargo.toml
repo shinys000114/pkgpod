@@ -69,6 +69,10 @@ httpdate.workspace = true
 tempfile.workspace = true
 reqwest.workspace = true
 
+[dev-dependencies]
+# Paused time, for what waits a minute.
+tokio = { workspace = true, features = ["test-util"] }
+
 [features]
 # A fake OIDC issuer for tests of trusted publishing.
 testutil = []

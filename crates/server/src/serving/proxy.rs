@@ -782,7 +782,7 @@ const STALE_WAIT: Duration = Duration::from_secs(5);
 /// For how long, after the upstream did not answer in time, what a
 /// proxy keeps is served without asking it, so that not every request
 /// waits during an outage (or until the late answer comes).
-const QUIET_SECS: i64 = 60;
+pub(crate) const QUIET_SECS: i64 = 60;
 
 /// Proxies whose upstream did not answer in time, and until when. One
 /// that ended is remembered for as long again, so that an upstream slow
@@ -819,8 +819,9 @@ pub(crate) fn is_quiet(repo: &str, path: &str) -> bool {
 /// run as a task of its own and waited for [`STALE_WAIT`] at most:
 /// `None` when it did not answer in time. `repo` is then quiet for
 /// [`QUIET_SECS`], and `f` goes on: `then` gets what it brings in that
-/// time, to keep it (so a slow upstream still renews what is kept), and
-/// says whether the upstream answered, which ends the quiet.
+/// time, to keep it in what is left of it (so a slow upstream still
+/// renews what is kept), and says whether the upstream answered, which
+/// ends the quiet.
 pub(crate) async fn waited<T, F>(
     repo: &str,
     path: &str,
@@ -869,14 +870,23 @@ where
     }
     let (held, repo) = (Late(key), repo.to_string());
     tokio::spawn(async move {
-        // The path is held while its answer is waited for, a minute at
-        // most (an image's fetch may take an hour to fail): then it is
-        // asked again, and what this one brings later is not waited for.
+        // The path is held while its answer is waited for and kept, a
+        // minute at most (an image's fetch may take an hour to fail, a
+        // large file's body as long to come): then it is asked again,
+        // and what this one brings later is not kept, nor read on.
         let wait = Duration::from_secs(QUIET_SECS as u64);
-        let answered = match tokio::time::timeout(wait, task).await {
-            Ok(Ok(v)) => then(v).await,
-            _ => false,
-        };
+        let stop = task.abort_handle();
+        let answered = tokio::time::timeout(wait, async move {
+            match task.await {
+                Ok(v) => then(v).await,
+                Err(_) => false,
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            stop.abort();
+            false
+        });
         drop(held);
         if answered {
             // Slow, but there: asked again from now on.
@@ -897,14 +907,43 @@ static KEEPING: Mutex<()> = Mutex::new(());
 /// Keeps `row`, fetched for proxy `r` as it was when the fetch began,
 /// unless its upstream changed since: what the old one sent late is
 /// not kept once the new one is to be asked (it would be served from
-/// then on). Whether it was kept.
-pub(crate) fn keep(app: &App, r: &RepoInfo, row: &CacheRow) -> Result<bool> {
+/// then on). Nor is it kept over a row kept after `began`, when the
+/// fetch began (given for one that may answer late): that one is what
+/// a later request was sent, and an upstream may answer an earlier one
+/// later, with older content (a node lagging behind a balancer).
+/// Whether it was kept.
+pub(crate) fn keep(app: &App, r: &RepoInfo, row: &CacheRow, began: Option<i64>) -> Result<bool> {
     let _k = KEEPING.lock().unwrap_or_else(|e| e.into_inner());
-    if app.engine.repo(&r.name)?.setting_str("upstream") != r.setting_str("upstream") {
+    if app.engine.repo(&r.name)?.setting_str("upstream") != r.setting_str("upstream")
+        || kept_since(app, r, &row.path, began)?
+    {
         return Ok(false);
     }
     app.engine.cache_put(&r.name, row)?;
     Ok(true)
+}
+
+/// Whether a row was kept at `path` after `began`, in a later second
+/// (one of the same second may be the row the fetch was sent for: a
+/// caller that knows it is not gives the second before).
+fn kept_since(app: &App, r: &RepoInfo, path: &str, began: Option<i64>) -> Result<bool> {
+    let Some(began) = began else {
+        return Ok(false);
+    };
+    Ok(app
+        .engine
+        .cache_get(&r.name, path)?
+        .is_some_and(|row| row.fetched > began))
+}
+
+/// What is kept at `path` is fresh again (the upstream said it had not
+/// changed), unless a row was kept there after `began`, as for [`keep`].
+fn renew(app: &App, r: &RepoInfo, path: &str, began: Option<i64>) -> Result<()> {
+    let _k = KEEPING.lock().unwrap_or_else(|e| e.into_inner());
+    if !kept_since(app, r, path, began)? {
+        app.engine.cache_fresh(&r.name, path)?;
+    }
+    Ok(())
 }
 
 /// Forgets all a proxy keeps (its upstream changed); how many rows.
@@ -993,7 +1032,7 @@ async fn get(app: &Arc<App>, r: &RepoInfo, up: &Upstream, a: &Asked) -> Result<G
             let (have2, url2) = (have.clone(), url.clone());
             let then = move |sent: reqwest::Result<reqwest::Response>| async move {
                 let answered = answered(&sent);
-                let _ = got(&app2, &r2, &up2, &a2, have2, &url2, sent).await;
+                let _ = got(&app2, &r2, &up2, &a2, have2, &url2, sent, now).await;
                 answered
             };
             match waited(&r.name, &a.path, req.send(), then).await {
@@ -1003,11 +1042,12 @@ async fn get(app: &Arc<App>, r: &RepoInfo, up: &Upstream, a: &Asked) -> Result<G
         }
         None => req.send().await,
     };
-    got(app, r, up, a, have, &url, sent).await
+    got(app, r, up, a, have, &url, sent, now).await
 }
 
 /// What the upstream sent for `a` at `url` (`have`: what was kept),
-/// kept: [`get`]'s answer.
+/// asked for at `began`, kept: [`get`]'s answer.
+#[allow(clippy::too_many_arguments)]
 async fn got(
     app: &Arc<App>,
     r: &RepoInfo,
@@ -1016,6 +1056,7 @@ async fn got(
     have: Option<CacheRow>,
     url: &str,
     sent: reqwest::Result<reqwest::Response>,
+    began: i64,
 ) -> Result<Got> {
     let now = pkgpod_base::now();
     let resp = match sent {
@@ -1032,15 +1073,21 @@ async fn got(
     if r.format == "files" && a.kind == CacheKind::Meta && resp.url().as_str() != url {
         return Ok(Got::Moved(resp.url().to_string()));
     }
+    // A row of the second the fetch began in was kept since too, unless
+    // the one it was sent for is of that second.
+    let since = match &have {
+        Some(row) if row.fetched >= began => began,
+        _ => began - 1,
+    };
     let put = |row: CacheRow| {
         let (app2, r2) = (app.clone(), r.clone());
-        tokio::task::spawn_blocking(move || keep(&app2, &r2, &row))
+        tokio::task::spawn_blocking(move || keep(&app2, &r2, &row, Some(since)))
     };
     if st == reqwest::StatusCode::NOT_MODIFIED
         && let Some(row) = have.clone().filter(|row| renews(r, row))
     {
-        let (app2, name, path) = (app.clone(), r.name.clone(), a.path.clone());
-        let _ = tokio::task::spawn_blocking(move || app2.engine.cache_fresh(&name, &path)).await;
+        let (app2, r2, path) = (app.clone(), r.clone(), a.path.clone());
+        let _ = tokio::task::spawn_blocking(move || renew(&app2, &r2, &path, Some(since))).await;
         return Ok(Got::Row(Box::new(row)));
     }
     if st == reqwest::StatusCode::NOT_FOUND || st == reqwest::StatusCode::GONE {
@@ -1526,6 +1573,7 @@ async fn files_serve(app: Arc<App>, at: At, req: Request) -> Response {
         flights::Claim::Follow(f) => return follow(&app, &r, &up, &a, f, req).await,
         flights::Claim::Lead(l) => Some(l),
     };
+    let began = pkgpod_base::now();
     let mut q = client().get(&url);
     if let Some(row) = &have {
         if !row.etag.is_empty() {
@@ -1537,12 +1585,18 @@ async fn files_serve(app: Arc<App>, at: At, req: Request) -> Response {
     }
     let sent = match &have {
         // A copy to serve: not waited for long (what comes later is
-        // still kept).
-        Some(row) => {
+        // still kept). With no client to stream it to, as metadata is:
+        // not modified, fresh again; gone; changed, read whole into the
+        // store, and not read on once it cannot be kept (larger than a
+        // file is kept, or the store refusing it).
+        Some(_) => {
             let (app2, r2, up2, a2) = (app.clone(), r.clone(), up.clone(), a.clone());
-            let pinned = row.pinned;
-            let then =
-                move |sent| async move { files_late(&app2, &r2, &up2, &a2, pinned, sent).await };
+            let (have2, url2) = (have.clone(), url.clone());
+            let then = move |sent: reqwest::Result<reqwest::Response>| async move {
+                let answered = answered(&sent);
+                let _ = got(&app2, &r2, &up2, &a2, have2, &url2, sent, began).await;
+                answered
+            };
             match waited(&r.name, &a.path, q.send(), then).await {
                 Some(sent) => sent,
                 None => return files_kept(&app, &r, &a, have, req).await,
@@ -1613,41 +1667,7 @@ async fn files_gone(app: &Arc<App>, r: &RepoInfo, a: &Asked) {
         version: String::new(),
     };
     let (app2, r2) = (app.clone(), r.clone());
-    let _ = tokio::task::spawn_blocking(move || keep(&app2, &r2, &row)).await;
-}
-
-/// What the upstream sent for a kept file after its client was served
-/// the kept copy: kept as for a client (not changed: fresh again; gone;
-/// changed: read whole, into the store), no download counted. Whether
-/// the upstream answered.
-async fn files_late(
-    app: &Arc<App>,
-    r: &RepoInfo,
-    up: &Upstream,
-    a: &Asked,
-    pinned: bool,
-    sent: reqwest::Result<reqwest::Response>,
-) -> bool {
-    use futures_util::StreamExt;
-    let answered = answered(&sent);
-    let Ok(resp) = sent else {
-        return false;
-    };
-    let st = resp.status();
-    if st == reqwest::StatusCode::NOT_MODIFIED {
-        let (app2, name, path) = (app.clone(), r.name.clone(), a.path.clone());
-        let _ = tokio::task::spawn_blocking(move || app2.engine.cache_fresh(&name, &path)).await;
-    } else if st == reqwest::StatusCode::NOT_FOUND || st == reqwest::StatusCode::GONE {
-        files_gone(app, r, a).await;
-    } else if st.is_success() {
-        // Kept once its last byte is read.
-        let mut body = files_stream(app, r, up, a, pinned, resp, None)
-            .await
-            .into_body()
-            .into_data_stream();
-        while let Some(Ok(_)) = body.next().await {}
-    }
-    answered
+    let _ = tokio::task::spawn_blocking(move || keep(&app2, &r2, &row, None)).await;
 }
 
 /// Serves a file another request is fetching: from the file as it
@@ -2037,7 +2057,7 @@ async fn files_stream(
                 row.size = size;
                 // Its upstream changed meanwhile: not kept, so not done
                 // either (those following ask again).
-                if !keep(&app, &repo, &row).ok()? {
+                if !keep(&app, &repo, &row, None).ok()? {
                     return None;
                 }
                 if max > 0 {
@@ -2253,7 +2273,7 @@ pub(crate) async fn group_entries(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn v(s: &[&str]) -> Vec<String> {
@@ -2369,5 +2389,231 @@ mod tests {
         };
         assert!(up.excluded("example.com/internal/tool") && up.excluded("corp.example/x"));
         assert!(!up.excluded("corp.example/xy") && !up.excluded("example.com/greet"));
+    }
+
+    /// An app of its own, in a directory that goes with it.
+    pub(crate) fn app() -> (tempfile::TempDir, Arc<App>) {
+        let d = tempfile::tempdir().unwrap();
+        let app = App::open(crate::Config {
+            data_dir: d.path().join("data"),
+            ..Default::default()
+        })
+        .unwrap();
+        (d, app)
+    }
+
+    /// A public proxy `name` of `upstream`, whose metadata is old at once.
+    pub(crate) fn proxy_repo(app: &App, name: &str, format: &str, upstream: &str) -> RepoInfo {
+        let n = pkgpod_engine::NewRepo {
+            name: name.into(),
+            format: format.into(),
+            kind: pkgpod_engine::Kind::Proxy,
+            storage: None,
+            settings: json!({"upstream": upstream, "metadata_minutes": 0, "public": true}),
+        };
+        app.engine.create_repo(n, "test").unwrap()
+    }
+
+    /// A stand-in upstream at the address returned: `answer` writes the
+    /// reply to the `n`th request (from 1) for a path.
+    pub(crate) fn stub(
+        answer: impl Fn(usize, &str, &mut std::net::TcpStream) + Send + Sync + 'static,
+    ) -> String {
+        use std::io::BufRead;
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let answer = Arc::new(answer);
+        let asked = Arc::new(Mutex::new(HashMap::<String, usize>::new()));
+        std::thread::spawn(move || {
+            for mut c in l.incoming().flatten() {
+                let (answer, asked) = (answer.clone(), asked.clone());
+                std::thread::spawn(move || {
+                    let mut r = std::io::BufReader::new(c.try_clone().unwrap());
+                    let mut line = String::new();
+                    if r.read_line(&mut line).is_err() {
+                        return;
+                    }
+                    loop {
+                        let mut h = String::new();
+                        if r.read_line(&mut h).is_err() || h.trim().is_empty() {
+                            break;
+                        }
+                    }
+                    let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
+                    let n = {
+                        let mut a = asked.lock().unwrap();
+                        let n = a.entry(path.clone()).or_default();
+                        *n += 1;
+                        *n
+                    };
+                    answer(n, &path, &mut c);
+                });
+            }
+        });
+        format!("http://127.0.0.1:{port}/")
+    }
+
+    /// Writes a whole reply: `head` is its status and header lines.
+    pub(crate) fn reply(c: &mut std::net::TcpStream, head: &str, body: &[u8]) {
+        use std::io::Write;
+        let _ = c.write_all(
+            format!(
+                "HTTP/1.1 {head}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        let _ = c.write_all(body);
+    }
+
+    /// What the server answers to GET `path`: status and body.
+    pub(crate) async fn get(app: &Arc<App>, path: &str) -> (u16, Vec<u8>) {
+        use tower::ServiceExt;
+        let req = axum::http::Request::builder()
+            .uri(path)
+            .header(header::HOST, "localhost")
+            .body(Body::empty())
+            .unwrap();
+        let resp = crate::serving::router(app.clone())
+            .oneshot(req)
+            .await
+            .unwrap();
+        let st = resp.status().as_u16();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await;
+        (st, body.unwrap().to_vec())
+    }
+
+    /// Whether proxy `repo` holds a path for a late answer.
+    pub(crate) fn holds(repo: &str) -> bool {
+        late().lock().unwrap().iter().any(|(r, _)| r == repo)
+    }
+
+    /// What the upstream sends late for a kept file that could not be
+    /// kept (larger than any file kept, or the store refusing it) is not
+    /// read on to its end, and its path is not held meanwhile.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn late_files_that_cannot_be_kept_are_not_read() {
+        use std::time::Instant;
+        for (name, length) in [("late-big", Some(MAX_FILE + 1)), ("late-refused", None)] {
+            let (_d, app) = app();
+            // How long after its header the late answer was cut off.
+            let cut = Arc::new(Mutex::new(None));
+            let cut2 = cut.clone();
+            let up = stub(move |n, _, c| {
+                use std::io::Write;
+                if n == 1 {
+                    return reply(c, "200 OK\r\nETag: \"o\"", b"OLD");
+                }
+                std::thread::sleep(Duration::from_secs(6));
+                let mut head =
+                    "HTTP/1.1 200 OK\r\nETag: \"n\"\r\nConnection: close\r\n".to_string();
+                if let Some(n) = length {
+                    head += &format!("Content-Length: {n}\r\n");
+                }
+                head += "\r\n";
+                let t = Instant::now();
+                let _ = c.write_all(head.as_bytes());
+                // Slowly, for half a minute at most.
+                while t.elapsed() < Duration::from_secs(30) {
+                    if c.write_all(&[0; 64 << 10]).is_err() {
+                        *cut2.lock().unwrap() = Some(t.elapsed());
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            });
+            let r = proxy_repo(&app, name, "files", &up);
+            let path = format!("/{name}/f.txt");
+            assert_eq!(get(&app, &path).await, (200, b"OLD".to_vec()), "{name}");
+            if length.is_none() {
+                // The store cannot start a file.
+                let tmp = r.storage_path.join("store").join("tmp");
+                std::fs::remove_dir_all(&tmp).unwrap();
+                std::fs::write(&tmp, "").unwrap();
+            }
+            let t = Instant::now();
+            assert_eq!(get(&app, &path).await, (200, b"OLD".to_vec()), "{name}");
+            assert!(t.elapsed() < Duration::from_secs(6), "{name}");
+            while cut.lock().unwrap().is_none() {
+                assert!(
+                    t.elapsed() < Duration::from_secs(20),
+                    "{name}: the late answer is read on"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            assert!(
+                cut.lock().unwrap().unwrap() < Duration::from_secs(5),
+                "{name}"
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            assert!(!holds(name), "{name}: the path is held");
+        }
+    }
+
+    /// A late answer is not kept over one that a request made after it
+    /// kept first (a node lagging behind a balancer): what is served then
+    /// is the newer one, also when it was kept in the second the late
+    /// one was asked in.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_late_answer_does_not_replace_a_newer_one() {
+        for (name, gap) in [("late-race", 2000), ("late-race-same", 100)] {
+            let (_d, app) = app();
+            let answered = Arc::new(Mutex::new(false));
+            let answered2 = answered.clone();
+            let up = stub(move |n, path, c| {
+                if path != "/example.com/m/@v/list" {
+                    return reply(c, "404 Not Found", b"");
+                }
+                match n {
+                    1 => reply(c, "200 OK", b"v1.0.0\n"),
+                    2 => {
+                        std::thread::sleep(Duration::from_secs(8));
+                        reply(c, "200 OK", b"OLD-A\n");
+                        *answered2.lock().unwrap() = true;
+                    }
+                    3 => reply(c, "200 OK", b"NEW-B\n"),
+                    // Not there: what is kept is served.
+                    _ => reply(c, "503 Service Unavailable", b""),
+                }
+            });
+            proxy_repo(&app, name, "go", &up);
+            let path = format!("/{name}/example.com/m/@v/list");
+            assert_eq!(get(&app, &path).await.1, b"v1.0.0\n");
+            // A is asked early in a second after the first was kept.
+            let ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_millis();
+            tokio::time::sleep(Duration::from_millis(1050 - ms as u64)).await;
+            let (app2, path2) = (app.clone(), path.clone());
+            let a = tokio::spawn(async move { get(&app2, &path2).await });
+            tokio::time::sleep(Duration::from_millis(gap)).await;
+            assert_eq!(get(&app, &path).await.1, b"NEW-B\n", "{name}");
+            assert_eq!(a.await.unwrap().1, b"v1.0.0\n", "{name}");
+            let t = std::time::Instant::now();
+            while !*answered.lock().unwrap() || holds(name) {
+                assert!(
+                    t.elapsed() < Duration::from_secs(20),
+                    "{name}: no late answer"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            assert_eq!(get(&app, &path).await, (200, b"NEW-B\n".to_vec()), "{name}");
+        }
+    }
+
+    /// A late answer whose body is slow to come holds its path a minute
+    /// at most, as promised: then the upstream is asked again.
+    #[tokio::test(start_paused = true)]
+    async fn a_late_answer_holds_its_path_a_minute_at_most() {
+        let headers = tokio::time::sleep(STALE_WAIT + Duration::from_secs(1));
+        let then = |()| async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            true
+        };
+        assert!(waited("late-hold", "f", headers, then).await.is_none());
+        assert!(holds("late-hold"));
+        tokio::time::sleep(Duration::from_secs(QUIET_SECS as u64 + 1)).await;
+        assert!(!holds("late-hold"), "held while the body comes");
     }
 }

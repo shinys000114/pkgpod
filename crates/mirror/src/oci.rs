@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::StatusCode;
 use reqwest::blocking::{Client, RequestBuilder, Response};
@@ -131,8 +131,13 @@ impl Registry {
         r
     }
 
-    /// Answers a 401's challenge; whether to try again.
-    fn challenge(&self, resp: &Response, name: &str) -> Result<bool, Error> {
+    /// Answers a 401's challenge (by `until`); whether to try again.
+    fn challenge(
+        &self,
+        resp: &Response,
+        name: &str,
+        until: Option<Instant>,
+    ) -> Result<bool, Error> {
         let Some(h) = resp
             .headers()
             .get(WWW_AUTHENTICATE)
@@ -157,7 +162,7 @@ impl Registry {
                         .cloned()
                         .unwrap_or_else(|| format!("repository:{name}:pull")),
                 ));
-                let mut req = self.client.get(realm).query(&q);
+                let mut req = by(self.client.get(realm).query(&q), until);
                 if let Some((u, pw)) = &self.creds {
                     req = req.basic_auth(u, Some(pw));
                 }
@@ -185,10 +190,17 @@ impl Registry {
         }
     }
 
-    /// GET with the authentication the registry asks for.
-    fn get(&self, url: &str, name: &str, accept: Option<&str>) -> Result<Response, Error> {
+    /// GET with the authentication the registry asks for, given up at
+    /// `until` (otherwise at the client's hour).
+    fn get(
+        &self,
+        url: &str,
+        name: &str,
+        accept: Option<&str>,
+        until: Option<Instant>,
+    ) -> Result<Response, Error> {
         let build = |basic: bool| {
-            let mut r = self.client.get(url);
+            let mut r = by(self.client.get(url), until);
             if let Some(a) = accept {
                 r = r.header(ACCEPT, a);
             }
@@ -215,7 +227,7 @@ impl Registry {
             }
             return send(build(true));
         }
-        if self.challenge(&resp, name)? {
+        if self.challenge(&resp, name, until)? {
             return send(build(false));
         }
         Ok(resp)
@@ -228,8 +240,29 @@ impl Registry {
         r: &ImageRef,
         reference: &str,
     ) -> Result<(Vec<u8>, String, String), Error> {
+        self.manifest_until(r, reference, None)
+    }
+
+    /// [`Registry::manifest`], given up after `within`, a token it asks
+    /// for and all: for a caller that cannot wait the client's hour
+    /// (which is for blobs; a manifest is small).
+    pub fn manifest_within(
+        &self,
+        r: &ImageRef,
+        reference: &str,
+        within: Duration,
+    ) -> Result<(Vec<u8>, String, String), Error> {
+        self.manifest_until(r, reference, Some(Instant::now() + within))
+    }
+
+    fn manifest_until(
+        &self,
+        r: &ImageRef,
+        reference: &str,
+        until: Option<Instant>,
+    ) -> Result<(Vec<u8>, String, String), Error> {
         let url = format!("{}/v2/{}/manifests/{reference}", r.base, r.name);
-        let resp = self.get(&url, &r.name, Some(ACCEPT_MANIFESTS))?;
+        let resp = self.get(&url, &r.name, Some(ACCEPT_MANIFESTS), until)?;
         if !resp.status().is_success() {
             return Err(Error::Upstream(format!("{url}: {}", resp.status())));
         }
@@ -266,11 +299,19 @@ impl Registry {
     /// digest of what it wrote.
     pub fn blob(&self, r: &ImageRef, digest: &str, w: &mut impl Write) -> Result<u64, Error> {
         let url = format!("{}/v2/{}/blobs/{digest}", r.base, r.name);
-        let mut resp = self.get(&url, &r.name, None)?;
+        let mut resp = self.get(&url, &r.name, None, None)?;
         if !resp.status().is_success() {
             return Err(Error::Upstream(format!("{url}: {}", resp.status())));
         }
         std::io::copy(&mut resp, w).map_err(|e| Error::Upstream(format!("{url}: {e}")))
+    }
+}
+
+/// `r`, to be done by `until` (its body read too) if given.
+fn by(r: RequestBuilder, until: Option<Instant>) -> RequestBuilder {
+    match until {
+        Some(t) => r.timeout(t.saturating_duration_since(Instant::now())),
+        None => r,
     }
 }
 
@@ -305,5 +346,54 @@ mod tests {
         assert_eq!(p["realm"], "https://auth.docker.io/token");
         assert_eq!(p["service"], "registry.docker.io");
         assert_eq!(p["scope"], "repository:library/alpine:pull");
+    }
+
+    /// A registry that hangs, at its answer, at the token it asks for or
+    /// in the body: a manifest asked for within a time is given up then.
+    #[test]
+    fn manifests_given_up_in_time() {
+        use std::io::BufRead;
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
+        let realm = base.clone();
+        std::thread::spawn(move || {
+            for mut c in l.incoming().flatten() {
+                let realm = realm.clone();
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let mut r = std::io::BufReader::new(c.try_clone().unwrap());
+                    let _ = r.read_line(&mut line);
+                    let mut h = String::new();
+                    while r.read_line(&mut h).is_ok_and(|n| n > 2) {
+                        h.clear();
+                    }
+                    let head = if line.contains("/v2/token/") {
+                        format!(
+                            "401 Unauthorized\r\nWWW-Authenticate: Bearer realm=\"{realm}/token\"\r\nContent-Length: 0"
+                        )
+                    } else if line.contains("/v2/body/") {
+                        "200 OK\r\nContent-Length: 100".to_string()
+                    } else {
+                        // At its answer, or at the token.
+                        String::new()
+                    };
+                    if !head.is_empty() {
+                        let _ = write!(c, "HTTP/1.1 {head}\r\n\r\n");
+                    }
+                    std::thread::sleep(Duration::from_secs(30));
+                });
+            }
+        });
+        let reg = std::sync::Arc::new(Registry::new(None).unwrap());
+        for name in ["answer/app", "token/app", "body/app"] {
+            let r = parse_ref(&base, name).unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let reg = reg.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(reg.manifest_within(&r, "1.0", Duration::from_secs(1)));
+            });
+            let got = rx.recv_timeout(Duration::from_secs(10));
+            assert!(matches!(got, Ok(Err(_))), "{name}: {got:?}");
+        }
     }
 }
