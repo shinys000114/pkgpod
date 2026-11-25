@@ -37,6 +37,14 @@ pub struct Ipk;
 /// Largest package taken in, and largest control member.
 pub const MAX_PKG: u64 = 2 << 30;
 const MAX_CONTROL: u64 = 1 << 20;
+/// How far an OpenWrt ipk's tar is inflated to find control.tar.gz,
+/// which comes after data.tar.gz: its members are compressed already,
+/// so it is about the package's size, and twice the largest package is
+/// room enough. What inflates to more is not read to its end.
+const MAX_TAR: u64 = 2 * MAX_PKG;
+/// How far control.tar.gz is inflated to find the control file, as for
+/// a .deb: the maintainer scripts come with it, a few MiB at most.
+const MAX_CONTROL_TAR: u64 = 64 << 20;
 
 fn invalid(m: impl Into<String>) -> Error {
     Error::Invalid(m.into())
@@ -61,8 +69,8 @@ pub fn check_feed(s: &str) -> Result<()> {
 }
 
 /// The `control` file in a control tarball (gzip'd tar).
-fn control_in_tar_gz(data: &[u8]) -> Result<String> {
-    let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(data));
+fn control_in_tar_gz(data: &[u8], max_tar: u64) -> Result<String> {
+    let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(data).take(max_tar));
     // Raw entries: tar reads a GNU long name or a pax header whole,
     // whatever size it claims.
     for f in ar
@@ -90,14 +98,22 @@ fn control_in_tar_gz(data: &[u8]) -> Result<String> {
 
 /// Reads a package's control paragraph: OpenWrt's ipk (a gzip'd tar of
 /// debian-binary, control.tar.gz and data.tar.gz) or Yocto's (an ar
-/// archive, as a .deb).
-pub fn read_package(data: &[u8]) -> Result<Paragraph> {
-    let control = if data.starts_with(b"!<arch>\n") {
+/// archive, as a .deb), read as it comes.
+pub fn read_package(r: impl Read) -> Result<Paragraph> {
+    read_package_capped(r, MAX_TAR)
+}
+
+fn read_package_capped(mut r: impl Read, max_tar: u64) -> Result<Paragraph> {
+    // Its first bytes say which it is; they are read again with the rest.
+    let mut head = Vec::new();
+    r.by_ref().take(8).read_to_end(&mut head)?;
+    let data = (&head[..]).chain(r);
+    let control = if head == b"!<arch>\n" {
         pkgpod_deb::deb::read_deb_from(data)
             .map_err(|e| invalid(format!("the package: {e}")))?
             .control
-    } else if data.starts_with(&[0x1f, 0x8b]) {
-        let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(data));
+    } else if head.starts_with(&[0x1f, 0x8b]) {
+        let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(data).take(max_tar));
         let mut text = None;
         for f in ar
             .entries()
@@ -116,7 +132,7 @@ pub fn read_package(data: &[u8]) -> Result<Paragraph> {
                     .take(MAX_CONTROL)
                     .read_to_end(&mut v)
                     .map_err(|e| invalid(format!("control.tar.gz: {e}")))?;
-                text = Some(control_in_tar_gz(&v)?);
+                text = Some(control_in_tar_gz(&v, MAX_CONTROL_TAR)?);
                 break;
             }
         }
@@ -217,9 +233,8 @@ impl Format for Ipk {
             .filter(|f| !f.is_empty())
             .unwrap_or("main");
         check_feed(feed)?;
-        let data = std::fs::read(cx.store.path(&up.sha256))?;
-        let c = read_package(&data)?;
-        drop(data);
+        let f = std::fs::File::open(cx.store.path(&up.sha256))?;
+        let c = read_package(std::io::BufReader::new(f))?;
         let file = file_name(&c);
         let path = format!("{feed}/{file}");
         let (name, version, arch) = (
@@ -379,14 +394,14 @@ mod tests {
     #[test]
     fn packages_and_stanzas() {
         let ipk = make_ipk(CONTROL, &[("./usr/share/hello", b"hi")]);
-        let c = read_package(&ipk).unwrap();
+        let c = read_package(&ipk[..]).unwrap();
         assert_eq!(file_name(&c), "hello-ipk_1.0-1_all.ipk");
         let s = stanza(&c.to_text(), "hello-ipk_1.0-1_all.ipk", 99, "ab").unwrap();
         assert_eq!(
             s,
             "Package: hello-ipk\nVersion: 1.0-1\nDepends: libc\nArchitecture: all\nInstalled-Size: 10\nFilename: hello-ipk_1.0-1_all.ipk\nSize: 99\nSHA256sum: ab\nDescription: A sample.\n More of it.\n"
         );
-        assert!(read_package(b"nothing").is_err());
+        assert!(read_package(&b"nothing"[..]).is_err());
         // Yocto's: an ar archive (as a .deb).
         let tgz = |p: &str, d: &[u8]| {
             let mut b = tar::Builder::new(flate2::write::GzEncoder::new(
@@ -423,7 +438,7 @@ mod tests {
                 ar.push(b'\n');
             }
         }
-        let c = read_package(&ar).unwrap();
+        let c = read_package(&ar[..]).unwrap();
         assert_eq!(file_name(&c), "hello-ipk_1.0-1_all.ipk");
         assert!(
             check_feed("main").is_ok() && check_feed("../x").is_err() && check_feed("a/b").is_err()
@@ -470,10 +485,46 @@ mod tests {
         ar
     }
 
+    /// A gzip'd tar of `entries` (name, data), as ipkg-build packs one.
+    fn tgz(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut b = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::fast(),
+        ));
+        for (p, d) in entries {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Regular);
+            h.set_size(d.len() as u64);
+            h.set_mode(0o644);
+            b.append_data(&mut h, p, *d).unwrap();
+        }
+        b.into_inner().unwrap().finish().unwrap()
+    }
+
+    #[test]
+    fn inflating_is_bounded() {
+        // OpenWrt's: control.tar.gz comes after data.tar.gz, read through
+        // to get there. What inflates to more than the bound is refused.
+        let zeros = vec![0u8; 4 << 20];
+        let control = tgz(&[("./control", CONTROL.as_bytes())]);
+        let ipk = tgz(&[
+            ("./debian-binary", b"2.0\n"),
+            ("./data.tar.gz", &zeros),
+            ("./control.tar.gz", &control),
+        ]);
+        let c = read_package_capped(&ipk[..], 8 << 20).unwrap();
+        assert_eq!(file_name(&c), "hello-ipk_1.0-1_all.ipk");
+        assert!(read_package_capped(&ipk[..], 1 << 20).is_err());
+        // And control.tar.gz to find the control file in it.
+        let control = tgz(&[("./zeros", &zeros), ("./control", CONTROL.as_bytes())]);
+        assert!(control_in_tar_gz(&control, 8 << 20).is_ok());
+        assert!(control_in_tar_gz(&control, 1 << 20).is_err());
+    }
+
     #[test]
     fn control_is_bounded() {
         let big = format!("{CONTROL}X-Padding: {}\n", "a".repeat(1 << 20));
-        let err = read_package(&yocto_ipk(big.as_bytes())).unwrap_err();
+        let err = read_package(&yocto_ipk(big.as_bytes())[..]).unwrap_err();
         assert!(err.to_string().contains("larger than 1 MiB"), "{err}");
         // OpenWrt's (a tar.gz): a GNU long name, which tar would read
         // whole whatever size it claims, is not taken as a name.
@@ -510,6 +561,6 @@ mod tests {
             b.append(&h, data).unwrap();
         }
         let ipk = b.into_inner().unwrap().finish().unwrap();
-        assert!(read_package(&ipk).is_err());
+        assert!(read_package(&ipk[..]).is_err());
     }
 }

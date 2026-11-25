@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Upstream `Release` files: fields and the SHA256 table, which index
-//! files a selection needs, and reading package lists.
+//! Upstream `Release` files: fields and the SHA256 and SHA512 tables,
+//! which index files a selection needs, and reading package lists.
 
 use std::collections::BTreeMap;
 
 use pkgpod_deb::control::{Paragraph, parse_paragraph, parse_paragraphs};
+use sha2::Digest as _;
 
+use crate::fetch::sha256_hex;
 use crate::{Error, safe_rel};
 
 /// A checksum entry of `Release` (path relative to `dists/<dist>/`).
@@ -14,6 +16,28 @@ use crate::{Error, safe_rel};
 pub struct Entry {
     pub size: u64,
     pub sha256: String,
+    /// When Release lists one: apt then asks for the file by this hash.
+    pub sha512: Option<String>,
+}
+
+impl Entry {
+    /// Whether `data` is the file Release lists: its size and every hash
+    /// listed that is checked.
+    pub fn matches(&self, data: &[u8]) -> bool {
+        data.len() as u64 == self.size
+            && sha256_hex(data) == self.sha256
+            && self.sha512.as_ref().is_none_or(|h| sha512_hex(data) == *h)
+    }
+
+    /// Its by-hash names (`by-hash/<family>/<hash>`, relative to its
+    /// directory), one for each hash it is checked by.
+    pub fn by_hash(&self) -> Vec<String> {
+        let mut out = vec![format!("by-hash/SHA256/{}", self.sha256)];
+        if let Some(h) = &self.sha512 {
+            out.push(format!("by-hash/SHA512/{h}"));
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -23,36 +47,36 @@ pub struct Release {
 }
 
 impl Release {
-    /// Parses verified `Release` text. Only the SHA256 table is used.
+    /// Parses verified `Release` text. The SHA256 table says which files
+    /// there are; the SHA512 one, when there, adds its hashes to them.
     pub fn parse(text: &str) -> Result<Self, Error> {
         let fields = parse_paragraph(text).map_err(|e| Error::Upstream(format!("Release: {e}")))?;
         let table = fields
             .get("SHA256")
             .ok_or_else(|| Error::Upstream("Release has no SHA256 checksums".into()))?;
         let mut files = BTreeMap::new();
-        for line in table.lines().map(str::trim).filter(|l| !l.is_empty()) {
-            let mut it = line.split_whitespace();
-            let (Some(hash), Some(size), Some(path), None) =
-                (it.next(), it.next(), it.next(), it.next())
-            else {
-                return Err(Error::Upstream(format!(
-                    "Release: bad SHA256 line {line:?}"
-                )));
-            };
-            let size: u64 = size
-                .parse()
-                .map_err(|_| Error::Upstream(format!("Release: bad size in {line:?}")))?;
-            if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return Err(Error::Upstream(format!("Release: bad hash in {line:?}")));
-            }
-            safe_rel(path)?;
+        for (path, size, hash) in hash_table("SHA256", table, 64)? {
+            safe_rel(&path)?;
             files.insert(
-                path.to_string(),
+                path,
                 Entry {
                     size,
-                    sha256: hash.to_ascii_lowercase(),
+                    sha256: hash,
+                    sha512: None,
                 },
             );
+        }
+        for (path, size, hash) in hash_table("SHA512", fields.get("SHA512").unwrap_or(""), 128)? {
+            let Some(e) = files.get_mut(&path) else {
+                continue;
+            };
+            if e.size != size {
+                return Err(Error::Upstream(format!(
+                    "Release: {path} has two sizes ({} and {size})",
+                    e.size
+                )));
+            }
+            e.sha512 = Some(hash);
         }
         Ok(Self { fields, files })
     }
@@ -79,6 +103,37 @@ impl Release {
             .get("Acquire-By-Hash")
             .is_some_and(|v| v.trim().eq_ignore_ascii_case("yes"))
     }
+}
+
+fn sha512_hex(data: &[u8]) -> String {
+    sha2::Sha512::digest(data)
+        .iter()
+        .map(|x| format!("{x:02x}"))
+        .collect()
+}
+
+/// The lines of a checksum table of Release: (path, size, hash in lower
+/// case), each hash `hex` digits long.
+fn hash_table(name: &str, table: &str, hex: usize) -> Result<Vec<(String, u64, String)>, Error> {
+    let mut out = Vec::new();
+    for line in table.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let mut it = line.split_whitespace();
+        let (Some(hash), Some(size), Some(path), None) =
+            (it.next(), it.next(), it.next(), it.next())
+        else {
+            return Err(Error::Upstream(format!(
+                "Release: bad {name} line {line:?}"
+            )));
+        };
+        let size: u64 = size
+            .parse()
+            .map_err(|_| Error::Upstream(format!("Release: bad size in {line:?}")))?;
+        if hash.len() != hex || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(Error::Upstream(format!("Release: bad hash in {line:?}")));
+        }
+        out.push((path.to_string(), size, hash.to_ascii_lowercase()));
+    }
+    Ok(out)
 }
 
 /// Index base names and their compression variants, best (for parsing)
@@ -226,6 +281,39 @@ mod tests {
         assert!(Release::parse("Origin: X\n").is_err());
         let evil = format!("SHA256:\n {h} 1 ../../etc/passwd\n");
         assert!(Release::parse(&evil).is_err());
+    }
+
+    #[test]
+    fn sha512_table() {
+        let data = b"Package: a\n";
+        let h = pkgpod_deb::hash::hash_bytes(data);
+        let text = |sha512: &str, size: usize, path: &str| {
+            format!(
+                "SHA256:\n {} {} Packages\nSHA512:\n {sha512} {size} {path}\n",
+                h.sha256,
+                data.len()
+            )
+        };
+        let r = Release::parse(&text(&h.sha512, data.len(), "Packages")).unwrap();
+        let e = &r.files["Packages"];
+        assert!(e.matches(data));
+        assert_eq!(
+            e.by_hash(),
+            [
+                format!("by-hash/SHA256/{}", h.sha256),
+                format!("by-hash/SHA512/{}", h.sha512)
+            ]
+        );
+        // Checked by it too: the same sha256 with another sha512 is not it.
+        let other = Release::parse(&text(&"c".repeat(128), data.len(), "Packages")).unwrap();
+        assert!(!other.files["Packages"].matches(data));
+        // A file only the SHA512 table lists is not taken.
+        let r = Release::parse(&text(&h.sha512, 3, "Sources")).unwrap();
+        assert_eq!(r.files["Packages"].sha512, None);
+        assert_eq!(r.files["Packages"].by_hash().len(), 1);
+        assert!(!r.files.contains_key("Sources"));
+        assert!(Release::parse(&text(&h.sha256, data.len(), "Packages")).is_err());
+        assert!(Release::parse(&text(&h.sha512, 3, "Packages")).is_err());
     }
 
     #[test]

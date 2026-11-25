@@ -433,6 +433,37 @@ fn by_hash_and_upstream_changing_mid_sync() {
     assert!(e.same("dists/stable/main/binary-amd64/Packages.gz"));
 }
 
+/// apt asks by hash for the strongest hash Release lists: every one
+/// listed that the mirror checks (SHA256, SHA512) has its by-hash file,
+/// though upstream serves only some.
+#[test]
+fn by_hash_for_every_hash_release_lists() {
+    let Some(e) = Env::new() else { return };
+    let a = e.up.deb("aa", "1.0", "amd64", "a");
+    e.up.publish("stable", &["amd64"], &[("main", vec![a])]);
+    e.up.resign(
+        "stable",
+        &["amd64"],
+        &["main"],
+        &Resign {
+            by_hash: true,
+            ..Default::default()
+        },
+    );
+    ok(&e.run(&e.mirror(&["stable"])));
+    let rel = String::from_utf8(read(&e.dest().join("dists/stable/Release"))).unwrap();
+    assert!(rel.contains("\nSHA512:"), "{rel}");
+    let dir = "main/binary-amd64";
+    for index in ["Packages", "Packages.gz", "Packages.xz", "Release"] {
+        let data = read(&e.up.dist_dir("stable").join(dir).join(index));
+        let h = pkgpod_deb::hash::hash_bytes(&data);
+        for (family, hash) in [("SHA256", h.sha256), ("SHA512", h.sha512)] {
+            let p = format!("dists/stable/{dir}/by-hash/{family}/{hash}");
+            assert_eq!(read(&e.dest().join(p)), data, "{index} by {family}");
+        }
+    }
+}
+
 /// A validly signed Release older than the one served is not taken
 /// (unless allowed): the dist stays, and prune keeps what it names.
 #[test]
@@ -497,28 +528,35 @@ fn by_hash_keeps_the_previous_generation() {
                 .dist_dir("stable")
                 .join("main/binary-amd64/Packages.gz"),
         );
-        let path = format!(
-            "dists/stable/main/binary-amd64/by-hash/SHA256/{}",
-            pkgpod_mirror::fetch::sha256_hex(&gz)
-        );
+        let h = pkgpod_deb::hash::hash_bytes(&gz);
+        let paths = [("SHA256", h.sha256), ("SHA512", h.sha512)].map(|(family, hash)| {
+            format!("dists/stable/main/binary-amd64/by-hash/{family}/{hash}")
+        });
         ok(&e.run(&m));
-        assert_eq!(read(&e.dest().join(&path)), gz);
-        // Old: kept for what the served Release names, not for its age.
-        std::fs::File::options()
-            .write(true)
-            .open(e.dest().join(&path))
-            .unwrap()
-            .set_modified(std::time::SystemTime::now() - Duration::from_secs(30 * 86400))
-            .unwrap();
-        gens.push((path, gz));
+        for path in &paths {
+            assert_eq!(read(&e.dest().join(path)), gz);
+            // Old: kept for what the served Release names, not for its age.
+            std::fs::File::options()
+                .write(true)
+                .open(e.dest().join(path))
+                .unwrap()
+                .set_modified(std::time::SystemTime::now() - Duration::from_secs(30 * 86400))
+                .unwrap();
+        }
+        gens.push((paths, gz));
     }
-    assert_eq!(read(&e.dest().join(&gens[1].0)), gens[1].1, "kept");
-    assert!(!e.dest().join(&gens[0].0).exists(), "two switches ago");
+    let has = |g: &([String; 2], Vec<u8>)| {
+        g.0.iter()
+            .all(|p| e.dest().join(p).exists() && read(&e.dest().join(p)) == g.1)
+    };
+    let none = |g: &([String; 2], Vec<u8>)| g.0.iter().all(|p| !e.dest().join(p).exists());
+    assert!(has(&gens[1]), "kept");
+    assert!(none(&gens[0]), "two switches ago");
     // A sync with nothing new upstream is no switch.
     ok(&e.run(&m));
-    assert_eq!(read(&e.dest().join(&gens[1].0)), gens[1].1, "still kept");
-    assert_eq!(read(&e.dest().join(&gens[2].0)), gens[2].1);
-    assert!(!e.dest().join(&gens[0].0).exists());
+    assert!(has(&gens[1]), "still kept");
+    assert!(has(&gens[2]));
+    assert!(none(&gens[0]));
 }
 
 /// A pool file upstream rebuilt under the same name is put in place only
