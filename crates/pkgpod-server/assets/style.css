@@ -632,3 +632,5 @@ table.repos .repo-meta { margin-top: .2rem; display: flex; gap: .3rem; flex-wrap
 table.repos td.addr { min-width: 12rem; }
 table.repos details.addr-more > summary { cursor: pointer; color: var(--muted); font-family: var(--sans, inherit); font-size: 12px; margin-top: .15rem; }
 table.repos details.addr-more > span { display: block; overflow-wrap: break-word; }
+fieldset.settings-group { border: 0; padding: 0; margin: 0 0 1.2rem; }
+fieldset.settings-group > legend { font-weight: 650; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); padding: 0 0 .5rem; border-bottom: 1px solid var(--line); width: 100%; margin-bottom: .6rem; }

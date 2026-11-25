@@ -435,7 +435,8 @@ your role):
 | Sync | Mirrors: the source, the next scheduled run, Sync now, recent jobs and their logs. A job that found files gone upstream lists them and can allow them to be missing. |
 | Members | Groups: the repositories it reads, in order. |
 | Cache | Proxies: what is kept, with pin, unpin, evict, and fetching paths now. |
-| Settings & rights | The settings (changed by repository admins), Republish (indexes made and signed again, contents as they are), Cleanup preview, Badges, Rights (grants), Who has access (as the server decides it), Make a repository like this one, Delete. |
+| Settings | The settings in one form, by what they are about (the repository, versions and cleanup, a proxy's cache, the format's own; changed by repository admins), Republish (indexes made and signed again, contents as they are), Cleanup preview, Badges, Make a repository like this one, Delete. |
+| Access | Repository admins: Rights (grants), Who has access (as the server decides it), Trusted publishing (rules for CI jobs that publish here); server admins also Webhooks. |
 
 ## The API
 
