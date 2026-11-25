@@ -22,6 +22,10 @@ use crate::Error;
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     Apt,
+    /// dnf/yum repositories: packages first, then each `repodata/`.
+    Rpm,
+    /// Arch Linux repositories: packages first, then the databases.
+    Arch,
     Tree,
 }
 
@@ -108,6 +112,18 @@ pub struct Ctx<'a> {
 }
 
 const INDEX_EXCLUDES: [&str; 4] = ["Packages*", "Sources*", "Release*", "InRelease"];
+/// A dnf repository's metadata: it names the packages, so it comes last.
+const RPM_INDEX_EXCLUDES: [&str; 1] = ["repodata/"];
+/// An Arch repository's databases (and their signatures): last.
+const ARCH_INDEX_EXCLUDES: [&str; 7] = [
+    "*.db",
+    "*.db.sig",
+    "*.db.tar.*",
+    "*.files",
+    "*.files.sig",
+    "*.files.tar.*",
+    "*.links.tar.*",
+];
 const TEMP_EXCLUDES: [&str; 2] = [".~tmp~", ".*.??????"];
 
 fn exit_meaning(code: i32) -> &'static str {
@@ -141,11 +157,14 @@ pub fn sync(m: &RsyncMirror, ctx: &Ctx) -> Result<RsyncReport, Error> {
         .collect();
     let passes: Vec<(&str, Vec<String>, bool)> = match m.mode {
         Mode::Tree => vec![("tree", temp.clone(), m.delete)],
-        Mode::Apt => {
-            let mut first: Vec<String> = INDEX_EXCLUDES
-                .iter()
-                .map(|e| format!("--exclude={e}"))
-                .collect();
+        Mode::Apt | Mode::Rpm | Mode::Arch => {
+            let excludes: &[&str] = match m.mode {
+                Mode::Rpm => &RPM_INDEX_EXCLUDES,
+                Mode::Arch => &ARCH_INDEX_EXCLUDES,
+                _ => &INDEX_EXCLUDES,
+            };
+            let mut first: Vec<String> =
+                excludes.iter().map(|e| format!("--exclude={e}")).collect();
             first.extend(temp.clone());
             let mut second = temp.clone();
             if let Some(h) = &m.trace_host {

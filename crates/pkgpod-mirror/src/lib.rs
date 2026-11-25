@@ -5,12 +5,15 @@
 //! tree is served where it lies; indexes are switched in only after the
 //! files they name are in place, so a failed run leaves the old state.
 
+pub mod arch;
 pub mod cache;
 pub mod fetch;
 pub mod files;
 pub mod http;
 pub mod oci;
+pub mod pkgs;
 pub mod release;
+pub mod rpm;
 pub mod rsync;
 
 use std::fs;
