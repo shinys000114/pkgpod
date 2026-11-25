@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/core/*", "crates/formats/*", "crates/mirror", "crates/server", "crates/cli"]
 
 [workspace.package]
 version = "0.0.0"
@@ -12,33 +12,33 @@ homepage = "https://github.com/shinys000114/pkgpod"
 authors = ["shinys000114"]
 
 [workspace.dependencies]
-pkgpod-base = { path = "crates/pkgpod-base" }
-pkgpod-engine = { path = "crates/pkgpod-engine" }
-pkgpod-deb = { path = "crates/pkgpod-deb" }
-pkgpod-files = { path = "crates/pkgpod-files" }
-pkgpod-oci = { path = "crates/pkgpod-oci" }
-pkgpod-pypi = { path = "crates/pkgpod-pypi" }
-pkgpod-npm = { path = "crates/pkgpod-npm" }
-pkgpod-cargo = { path = "crates/pkgpod-cargo" }
-pkgpod-go = { path = "crates/pkgpod-go" }
-pkgpod-apk = { path = "crates/pkgpod-apk" }
-pkgpod-rpm = { path = "crates/pkgpod-rpm" }
-pkgpod-helm = { path = "crates/pkgpod-helm" }
-pkgpod-maven = { path = "crates/pkgpod-maven" }
-pkgpod-gems = { path = "crates/pkgpod-gems" }
-pkgpod-arch = { path = "crates/pkgpod-arch" }
-pkgpod-nuget = { path = "crates/pkgpod-nuget" }
-pkgpod-composer = { path = "crates/pkgpod-composer" }
-pkgpod-conda = { path = "crates/pkgpod-conda" }
-pkgpod-cran = { path = "crates/pkgpod-cran" }
-pkgpod-pub = { path = "crates/pkgpod-pub" }
-pkgpod-ipk = { path = "crates/pkgpod-ipk" }
-pkgpod-terraform = { path = "crates/pkgpod-terraform" }
-pkgpod-galaxy = { path = "crates/pkgpod-galaxy" }
-pkgpod-conan = { path = "crates/pkgpod-conan" }
-pkgpod-swift = { path = "crates/pkgpod-swift" }
-pkgpod-mirror = { path = "crates/pkgpod-mirror" }
-pkgpod-server = { path = "crates/pkgpod-server" }
+pkgpod-base = { path = "crates/core/base" }
+pkgpod-engine = { path = "crates/core/engine" }
+pkgpod-deb = { path = "crates/formats/deb" }
+pkgpod-files = { path = "crates/formats/files" }
+pkgpod-oci = { path = "crates/formats/oci" }
+pkgpod-pypi = { path = "crates/formats/pypi" }
+pkgpod-npm = { path = "crates/formats/npm" }
+pkgpod-cargo = { path = "crates/formats/cargo" }
+pkgpod-go = { path = "crates/formats/go" }
+pkgpod-apk = { path = "crates/formats/apk" }
+pkgpod-rpm = { path = "crates/formats/rpm" }
+pkgpod-helm = { path = "crates/formats/helm" }
+pkgpod-maven = { path = "crates/formats/maven" }
+pkgpod-gems = { path = "crates/formats/gems" }
+pkgpod-arch = { path = "crates/formats/arch" }
+pkgpod-nuget = { path = "crates/formats/nuget" }
+pkgpod-composer = { path = "crates/formats/composer" }
+pkgpod-conda = { path = "crates/formats/conda" }
+pkgpod-cran = { path = "crates/formats/cran" }
+pkgpod-pub = { path = "crates/formats/pub" }
+pkgpod-ipk = { path = "crates/formats/ipk" }
+pkgpod-terraform = { path = "crates/formats/terraform" }
+pkgpod-galaxy = { path = "crates/formats/galaxy" }
+pkgpod-conan = { path = "crates/formats/conan" }
+pkgpod-swift = { path = "crates/formats/swift" }
+pkgpod-mirror = { path = "crates/mirror" }
+pkgpod-server = { path = "crates/server" }
 clap = { version = "4.6", features = ["derive", "env"] }
 ar = "0.9"
 tar = { version = "0.4", default-features = false }

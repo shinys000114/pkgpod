@@ -22,16 +22,17 @@ servers). `PKGPOD_COMMIT` set at build time adds a commit to the version
 
 The workspace, in brief:
 
-- `crates/pkgpod`: the binary, both the server (`pkgpod serve`,
+- `crates/cli` (the crate `pkgpod`): the binary, both the server (`pkgpod serve`,
   `pkgpod admin`) and the client of its API (every other command).
-- `crates/pkgpod-server`: the listeners, the API, the console, rights,
+- `crates/server`: the listeners, the API, the console, rights,
   keys, jobs, and the protocol of each format's clients.
-- `crates/pkgpod-engine`: repositories, versions, labels, state trees,
+- `crates/core/engine`: repositories, versions, labels, state trees,
   retention and garbage collection; the `Format` trait.
-- `crates/pkgpod-base`: the database, the content store, digests.
-- `crates/pkgpod-mirror`: the mirror engines (apt over HTTP, rsync, file
-  trees over HTTP listings) and the registry client for OCI imports.
-- `crates/pkgpod-<format>`: one crate per format (`deb`, `files`, `oci`,
+- `crates/core/base`: the database, the content store, digests.
+- `crates/mirror`: the mirror engines (apt, dnf, Arch and Alpine
+  repositories over HTTP, rsync, file trees over HTTP listings) and
+  the registry client for OCI imports.
+- `crates/formats/<format>` (the crate `pkgpod-<format>`): one crate per format (`deb`, `files`, `oci`,
   `pypi`, `npm`, `cargo`, `go`, `apk`, `rpm`, `helm`, `maven`, `gems`,
   `arch`, `nuget`, `composer`, `conda`, `cran`, `pub`, `ipk`,
   `terraform`, `galaxy`, `conan`, `swift`).
@@ -84,7 +85,7 @@ cargo test -p pkgpod-engine --release --test scale -- --ignored --nocapture
 
 ### The end-to-end suite
 
-`crates/pkgpod/tests/e2e.rs` drives the `pkgpod` binary cargo built
+`crates/cli/tests/e2e.rs` drives the `pkgpod` binary cargo built
 (`CARGO_BIN_EXE_pkgpod`) with its own CLI and with real clients.
 
 `Server::start()` makes a temporary directory, takes two free ports
@@ -123,7 +124,7 @@ The Maven tests keep the plugins they download in the docker volume
 `pkgpod-e2e-m2`. The tests of docker against the OCI registry run only
 when `docker info` succeeds, with or without `PKGPOD_REQUIRE_TOOLS`.
 
-`crates/pkgpod-mirror/tests/apt_mirror.rs` runs apt in Debian and Ubuntu
+`crates/mirror/tests/apt_mirror.rs` runs apt in Debian and Ubuntu
 containers against a mirrored subset, only with `PKGPOD_E2E=1`.
 
 As CI runs it:
@@ -135,11 +136,11 @@ PKGPOD_REQUIRE_TOOLS=1 PKGPOD_E2E=1 cargo test --workspace --locked
 
 Some tests check the tree rather than the code:
 
-- `crates/pkgpod/tests/spdx.rs`: every file git lists (tracked, or
+- `crates/cli/tests/spdx.rs`: every file git lists (tracked, or
   untracked and not ignored) has `SPDX-License-Identifier: AGPL-3.0-only`
   in its first three lines, except Markdown, `Cargo.toml` files and the
   few others it names.
-- `crates/pkgpod-server/src/openapi.rs`: every API route is in the
+- `crates/server/src/openapi.rs`: every API route is in the
   OpenAPI description and nothing else is, every reference resolves and
   every operation is complete. A new route needs its entry there.
 
@@ -201,7 +202,7 @@ binary, for every Debian and Ubuntu release.
   A new lintian finding is fixed, or overridden with a comment saying
   why.
 - `debian/missing-sources/htmx.js` is the source of the minified htmx
-  the console ships (`crates/pkgpod-server/assets/htmx.min.js`).
+  the console ships (`crates/server/assets/htmx.min.js`).
 - `debian/tests/install-check` installs the package in a fresh system,
   checks what postinst made, runs the server as its user, makes a
   repository with the CLI and installs a package from it with apt. It
@@ -249,57 +250,57 @@ does not keep, then what no kept version uses"); a confirmation that
 says what happens, then asks ("The badges stop showing. Remove the
 token?"); a note that says what to change when something does not work.
 Settings carry their help text in the format's fields
-(`crates/pkgpod-engine/src/settings.rs` for the common ones), which the
+(`crates/core/engine/src/settings.rs` for the common ones), which the
 console and `pkgpod repo formats` show; CLI help comes from the doc
-comments of `crates/pkgpod/src/main.rs` and `cmd.rs`.
+comments of `crates/cli/src/main.rs` and `cmd.rs`.
 
 **Every source file** starts with `// SPDX-License-Identifier:
 AGPL-3.0-only` (or the comment syntax of its language).
 
 **The database.** Each component (engine, server) has its own ordered
-list of migrations (`STEPS` in `crates/pkgpod-engine/src/schema.rs` and
-`crates/pkgpod-server/src/schema.rs`). A released step is never changed;
+list of migrations (`STEPS` in `crates/core/engine/src/schema.rs` and
+`crates/server/src/schema.rs`). A released step is never changed;
 new ones are appended. A database with more steps than the binary knows
 is refused.
 
 ## Adding a format
 
 A format is a crate implementing `pkgpod_engine::Format`
-(`crates/pkgpod-engine/src/format.rs`), listed in `formats()` in
-`crates/pkgpod-server/src/lib.rs`, with what its clients speak beyond
-plain files in `crates/pkgpod-server/src/<format>.rs`, and end-to-end
+(`crates/core/engine/src/format.rs`), listed in `formats()` in
+`crates/server/src/lib.rs`, with what its clients speak beyond
+plain files in `crates/server/src/<format>.rs`, and end-to-end
 tests with its real client. See [format-plugins.md](format-plugins.md).
 
 ## Where to look
 
 | What | Where |
 |---|---|
-| CLI commands and flags | `crates/pkgpod/src/main.rs`, `cmd.rs`; the API client and saved login: `client.rs` |
-| The configuration file | `crates/pkgpod-server/src/config.rs` |
-| Starting, stopping, daily cleanup and GC | `crates/pkgpod-server/src/lib.rs` (`App::open`, `run`) |
-| Serving listeners, TLS | `crates/pkgpod-server/src/listeners.rs` |
-| Which repository a request is for | `crates/pkgpod-server/src/routes.rs`, `serve.rs` |
-| The API and its description | `crates/pkgpod-server/src/api.rs`, `openapi.rs` |
-| The console | `crates/pkgpod-server/src/console.rs`, `templates/`, `assets/` |
-| The server's recent log (for the console and API) | `crates/pkgpod-server/src/logs.rs` |
-| Users, teams, rights, tokens, sessions | `crates/pkgpod-server/src/auth.rs` |
-| Signing keys, server settings | `crates/pkgpod-server/src/keys.rs`, `rsa_key.rs`, `usign_key.rs` |
-| Jobs, mirror syncs, schedules | `crates/pkgpod-server/src/jobs.rs`, `cron.rs`, `schedules.rs` |
-| Imports | `crates/pkgpod-server/src/import.rs` |
-| Deb mirrors: their packages, re-signing, promotion | `mirror_pkgs.rs`, `resign.rs`, `promote.rs` in `crates/pkgpod-server/src/` |
-| Proxies and groups | `crates/pkgpod-server/src/proxy.rs`, `group.rs` |
-| Backup and restore | `crates/pkgpod-server/src/backup.rs` |
-| Cleanup rules | `crates/pkgpod-server/src/cleanup.rs` |
-| Statistics, status, badges, metrics | `stats.rs`, `status.rs`, `badge.rs`, `metrics.rs` in `crates/pkgpod-server/src/` |
-| Clients' protocols | `crates/pkgpod-server/src/npm.rs`, `pypi.rs`, `oci.rs`, ... |
-| Repositories, versions, labels | `crates/pkgpod-engine/src/engine.rs` |
-| State trees | `crates/pkgpod-engine/src/tree.rs` |
-| Retention, GC, the consistency check | `crates/pkgpod-engine/src/gc.rs`, `check.rs` |
-| Repository settings common to all formats | `crates/pkgpod-engine/src/settings.rs` |
-| Proxies' caches | `crates/pkgpod-engine/src/cache.rs` |
-| The database and migrations | `crates/pkgpod-base/src/db.rs`; `schema.rs` of the engine and the server |
-| The content store | `crates/pkgpod-base/src/store.rs` |
-| Mirror engines | `crates/pkgpod-mirror/src/http.rs`, `rsync.rs`, `files.rs`; OCI imports: `oci.rs` |
-| Test helpers for external tools | `crates/pkgpod-deb/src/testutil.rs` |
-| End-to-end tests | `crates/pkgpod/tests/e2e.rs` |
+| CLI commands and flags | `crates/cli/src/main.rs`, `cmd.rs`; the API client and saved login: `client.rs` |
+| The configuration file | `crates/server/src/config.rs` |
+| Starting, stopping, daily cleanup and GC | `crates/server/src/lib.rs` (`App::open`, `run`) |
+| Serving listeners, TLS | `crates/server/src/listeners.rs` |
+| Which repository a request is for | `crates/server/src/routes.rs`, `serve.rs` |
+| The API and its description | `crates/server/src/api.rs`, `openapi.rs` |
+| The console | `crates/server/src/console.rs`, `templates/`, `assets/` |
+| The server's recent log (for the console and API) | `crates/server/src/logs.rs` |
+| Users, teams, rights, tokens, sessions | `crates/server/src/auth.rs` |
+| Signing keys, server settings | `crates/server/src/keys.rs`, `rsa_key.rs`, `usign_key.rs` |
+| Jobs, mirror syncs, schedules | `crates/server/src/jobs.rs`, `cron.rs`, `schedules.rs` |
+| Imports | `crates/server/src/import.rs` |
+| Deb mirrors: their packages, re-signing, promotion | `mirror_pkgs.rs`, `resign.rs`, `promote.rs` in `crates/server/src/` |
+| Proxies and groups | `crates/server/src/proxy.rs`, `group.rs` |
+| Backup and restore | `crates/server/src/backup.rs` |
+| Cleanup rules | `crates/server/src/cleanup.rs` |
+| Statistics, status, badges, metrics | `stats.rs`, `status.rs`, `badge.rs`, `metrics.rs` in `crates/server/src/` |
+| Clients' protocols | `crates/server/src/npm.rs`, `pypi.rs`, `oci.rs`, ... |
+| Repositories, versions, labels | `crates/core/engine/src/engine.rs` |
+| State trees | `crates/core/engine/src/tree.rs` |
+| Retention, GC, the consistency check | `crates/core/engine/src/gc.rs`, `check.rs` |
+| Repository settings common to all formats | `crates/core/engine/src/settings.rs` |
+| Proxies' caches | `crates/core/engine/src/cache.rs` |
+| The database and migrations | `crates/core/base/src/db.rs`; `schema.rs` of the engine and the server |
+| The content store | `crates/core/base/src/store.rs` |
+| Mirror engines | `crates/mirror/src/http.rs`, `rsync.rs`, `files.rs`; OCI imports: `oci.rs` |
+| Test helpers for external tools | `crates/formats/deb/src/testutil.rs` |
+| End-to-end tests | `crates/cli/tests/e2e.rs` |
 | Packaging | `debian/`, `.github/actions/build/action.yml` |

@@ -7,7 +7,7 @@ Files: *
 Copyright: 2026 pkgpod contributors
 License: AGPL-3.0-only
 
-Files: crates/pkgpod-server/assets/htmx.min.js debian/missing-sources/htmx.js
+Files: crates/server/assets/htmx.min.js debian/missing-sources/htmx.js
 Copyright: 2020 Big Sky Software
 License: 0BSD
 Comment: htmx 2.0.11 from the npm package htmx.org (integrity checked);

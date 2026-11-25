@@ -6,7 +6,7 @@ module's doc comment for more.
 
 ## Crates
 
-One binary, `pkgpod`, built from a Rust workspace (`crates/*`):
+One binary, `pkgpod`, built from a Rust workspace (`crates/`: `core/` the base and the engine, `formats/` one crate per format, `mirror/`, `server/`, `cli/`):
 
 - **`pkgpod`**: the binary. `pkgpod serve` runs the server; every other
   command is a client of the JSON API (`--url`, `--token`, `--json`),
