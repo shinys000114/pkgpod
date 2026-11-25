@@ -149,6 +149,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/c/storages/{name}/delete", post(storage_delete))
         .route("/c/gc", post(gc))
         .route("/c/settings", post(settings_save_server))
+        .route("/c/settings/ci", post(settings_save_ci))
         .route(
             "/ui/htmx-2.0.11.min.js",
             get(|| asset(HTMX, "text/javascript")),
@@ -4891,7 +4892,7 @@ async fn access_part(
         repo_names: Vec::new(),
         fixed_repo: repo.clone(),
         as_user: server_admin,
-        ci_example: ci_example(&app, &crate::cli_dl::base(&headers), Some(&r)),
+        ci_example: ci_example(&app, &crate::cli_dl::console_base(&app, &headers), Some(&r)),
         trust_prefill: String::new(),
         hook_prefill: String::new(),
         access: if can_admin {
@@ -5459,9 +5460,12 @@ fn ci_example(app: &App, base: &str, r: Option<&pkgpod_engine::RepoInfo>) -> Str
         ),
         _ => ("dist/*", Vec::new(), Vec::new()),
     };
+    let action = crate::cli_dl::ci_action(app).unwrap_or_else(|| {
+        "<owner>/pkgpod@master   # the pkgpod action: its place in Settings below".into()
+    });
     let mut s = format!(
         "permissions:\n  id-token: write   # the job may ask GitHub for its OIDC token\n  contents: read\n\
-         steps:\n  - uses: actions/checkout@v4\n  - uses: <owner>/pkgpod@master   # the pkgpod action, from pkgpod's own repository\n    with:\n      \
+         steps:\n  - uses: actions/checkout@v4\n  - uses: {action}\n    with:\n      \
          url: {base}\n      repository: {name}\n      files: {files}\n"
     );
     for w in &with {
@@ -5650,6 +5654,9 @@ struct ServerPage {
     as_user: bool,
     /// A workflow that publishes here, with this server's address.
     ci_example: String,
+    /// The settings it is made with ("": not set).
+    console_url: String,
+    ci_action: String,
     trust_prefill: String,
     hook_prefill: String,
     hooks: Vec<HookRow>,
@@ -5793,6 +5800,8 @@ async fn server_tab_page(
         repo_names,
         fixed_repo: String::new(),
         as_user: true,
+        console_url: crate::cli_dl::console_url(&app).unwrap_or_default(),
+        ci_action: crate::cli_dl::ci_action(&app).unwrap_or_default(),
         ci_example: if publishing {
             // For the first rule's repository, or a hosted one.
             let rules = crate::oidc::rules(&app).unwrap_or_default();
@@ -5802,7 +5811,7 @@ async fn server_tab_page(
                 .flat_map(|r| r.repos.iter())
                 .find_map(|n| all.iter().find(|r| &r.name == n))
                 .or_else(|| all.iter().find(|r| r.kind.versioned()));
-            ci_example(&app, &crate::cli_dl::base(&headers), pick)
+            ci_example(&app, &crate::cli_dl::console_base(&app, &headers), pick)
         } else {
             String::new()
         },
@@ -6211,6 +6220,8 @@ async fn schedules_pause(
         syncs_per_storage: None,
         jobs_days: None,
         schedules_paused: Some(form_get(&form, "paused") == "true"),
+        console_url: None,
+        ci_action: None,
     };
     match api::settings_patch(State(app), v.who(), Json(req)).await {
         Ok(_) => refresh(),
@@ -6548,6 +6559,8 @@ async fn settings_save_server(
         syncs_per_storage: syncs,
         jobs_days: jobs,
         schedules_paused: None,
+        console_url: None,
+        ci_action: None,
     };
     match api::settings_patch(State(app), v.who(), Json(req)).await {
         Ok(Json(r)) => msg(
@@ -6572,6 +6585,27 @@ async fn settings_save_server(
                 }
             },
         ),
+        Err(e) => err_part(e),
+    }
+}
+
+/// The console's public address and the action's place, from the CI
+/// example's form.
+async fn settings_save_ci(
+    State(app): St,
+    v: Viewer,
+    Form(form): Form<Vec<(String, String)>>,
+) -> Response {
+    let req = api::SettingsReq {
+        downloads_days: None,
+        syncs_per_storage: None,
+        jobs_days: None,
+        schedules_paused: None,
+        console_url: Some(form_get(&form, "console_url").to_string()),
+        ci_action: Some(form_get(&form, "ci_action").to_string()),
+    };
+    match api::settings_patch(State(app), v.who(), Json(req)).await {
+        Ok(_) => refresh(),
         Err(e) => err_part(e),
     }
 }

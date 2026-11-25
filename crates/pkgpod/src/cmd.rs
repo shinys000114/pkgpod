@@ -1919,28 +1919,42 @@ pub fn run(
             downloads_days,
             syncs_per_storage,
             jobs_days,
+            console_url,
+            ci_action,
         } => {
-            let v =
-                if downloads_days.is_some() || syncs_per_storage.is_some() || jobs_days.is_some() {
-                    let mut b = serde_json::Map::new();
-                    if let Some(d) = downloads_days {
-                        b.insert("downloads_days".into(), json!(d));
-                    }
-                    if let Some(n) = syncs_per_storage {
-                        b.insert("syncs_per_storage".into(), json!(n));
-                    }
-                    if let Some(d) = jobs_days {
-                        b.insert("jobs_days".into(), json!(d));
-                    }
-                    c.send(Method::PATCH, "/api/v1/settings", &Value::Object(b))?
-                } else {
-                    c.get("/api/v1/settings")?
-                };
+            let v = if downloads_days.is_some()
+                || syncs_per_storage.is_some()
+                || jobs_days.is_some()
+                || console_url.is_some()
+                || ci_action.is_some()
+            {
+                let mut b = serde_json::Map::new();
+                if let Some(u) = console_url {
+                    b.insert("console_url".into(), json!(u));
+                }
+                if let Some(a) = ci_action {
+                    b.insert("ci_action".into(), json!(a));
+                }
+                if let Some(d) = downloads_days {
+                    b.insert("downloads_days".into(), json!(d));
+                }
+                if let Some(n) = syncs_per_storage {
+                    b.insert("syncs_per_storage".into(), json!(n));
+                }
+                if let Some(d) = jobs_days {
+                    b.insert("jobs_days".into(), json!(d));
+                }
+                c.send(Method::PATCH, "/api/v1/settings", &Value::Object(b))?
+            } else {
+                c.get("/api/v1/settings")?
+            };
             x.print(&v, |v| {
                 println!("downloads_days = {}", s(&v["downloads_days"]));
                 println!("syncs_per_storage = {}", s(&v["syncs_per_storage"]));
                 println!("jobs_days = {}", s(&v["jobs_days"]));
                 println!("schedules_paused = {}", v["schedules_paused"] == true);
+                println!("console_url = {}", v["console_url"].as_str().unwrap_or(""));
+                println!("ci_action = {}", v["ci_action"].as_str().unwrap_or(""));
             });
         }
         Cmd::Gc {

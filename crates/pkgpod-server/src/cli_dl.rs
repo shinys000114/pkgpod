@@ -57,6 +57,71 @@ fn digest() -> Option<(String, u64)> {
     .clone()
 }
 
+/// The server setting: the console's and API's public address
+/// (https://pkg.example.org), used in what the server hands out instead
+/// of the address a request names.
+pub const CONSOLE_URL: &str = "console_url";
+/// The server setting: where the pkgpod GitHub action is
+/// (owner/repository@ref), for the CI examples.
+pub const CI_ACTION: &str = "ci_action";
+
+fn setting(app: &App, name: &str) -> Option<String> {
+    crate::keys::get_setting(&app.db, name)
+        .ok()
+        .flatten()
+        .filter(|v| !v.is_empty())
+}
+
+pub fn console_url(app: &App) -> Option<String> {
+    setting(app, CONSOLE_URL)
+}
+
+pub fn ci_action(app: &App) -> Option<String> {
+    setting(app, CI_ACTION)
+}
+
+/// A console address as set: http(s), a host, no path, query or user.
+pub fn check_console_url(v: &str) -> crate::Result<String> {
+    let v = v.trim().trim_end_matches('/');
+    let u = reqwest::Url::parse(v)
+        .map_err(|e| crate::Error::Invalid(format!("console_url {v:?}: {e}")))?;
+    if !matches!(u.scheme(), "http" | "https")
+        || u.host_str().is_none()
+        || u.path() != "/"
+        || u.query().is_some()
+        || !u.username().is_empty()
+    {
+        return Err(crate::Error::Invalid(format!(
+            "console_url {v:?}: an http(s) address without a path (https://pkg.example.org)"
+        )));
+    }
+    Ok(v.to_string())
+}
+
+/// An action's place as set: owner/repository[/path]@ref.
+pub fn check_ci_action(v: &str) -> crate::Result<String> {
+    let v = v.trim();
+    let ok_part = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+    };
+    match v.split_once('@') {
+        Some((place, r)) if ok_part(place) && ok_part(r) && place.matches('/').count() >= 1 => {
+            Ok(v.to_string())
+        }
+        _ => Err(crate::Error::Invalid(format!(
+            "ci_action {v:?}: owner/repository@ref (owner/pkgpod@master)"
+        ))),
+    }
+}
+
+/// The console's address in what the server hands out: as set, or as
+/// the request names it.
+pub fn console_base(app: &App, h: &HeaderMap) -> String {
+    console_url(app).unwrap_or_else(|| base(h))
+}
+
 /// The address the request came to, as the client sees it (behind a
 /// proxy, its scheme).
 pub(crate) fn base(h: &HeaderMap) -> String {
@@ -73,8 +138,8 @@ pub(crate) fn base(h: &HeaderMap) -> String {
 }
 
 /// What CLI the server hands out, and where.
-pub(crate) async fn cli_info(State(_app): State<Arc<App>>, h: HeaderMap) -> Response {
-    let b = base(&h);
+pub(crate) async fn cli_info(State(app): State<Arc<App>>, h: HeaderMap) -> Response {
+    let b = console_base(&app, &h);
     let d = tokio::task::spawn_blocking(digest).await.ok().flatten();
     let v: Value = json!({
         "version": env!("CARGO_PKG_VERSION"),
@@ -84,7 +149,10 @@ pub(crate) async fn cli_info(State(_app): State<Arc<App>>, h: HeaderMap) -> Resp
         "url": format!("{b}/cli/pkgpod"),
         "install": format!("curl -fsSL {b}/cli/install.sh | sh"),
     });
-    axum::Json(v).into_response()
+    let mut r = axum::Json(v).into_response();
+    r.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    r
 }
 
 /// The binary itself.
@@ -132,8 +200,8 @@ fn tokio_util_stream(
 
 /// A shell script that fetches the binary, checks its SHA-256 and puts
 /// it in `$PKGPOD_BIN` (default `~/.local/bin`).
-pub(crate) async fn install_script(h: HeaderMap) -> Response {
-    let b = base(&h);
+pub(crate) async fn install_script(State(app): State<Arc<App>>, h: HeaderMap) -> Response {
+    let b = console_base(&app, &h);
     let sha = tokio::task::spawn_blocking(digest)
         .await
         .ok()
@@ -172,7 +240,11 @@ case ":$PATH:" in *":$dir:"*) ;; *) echo "(add $dir to PATH)" ;; esac
         platform = platform(),
     );
     (
-        [(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8"),
+            // It names an address: no cache keeps one for others.
+            (header::CACHE_CONTROL, "no-store"),
+        ],
         script,
     )
         .into_response()

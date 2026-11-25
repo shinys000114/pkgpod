@@ -133,8 +133,16 @@
   {% include "trust_form.html" %}
   </details>
   <details class="more"><summary>In a GitHub Actions workflow</summary>
-<p class="muted small">With this server's address as you reach it, for a repository here; the job needs a rule that trusts its GitHub repository and workflow.</p>
+<p class="muted small">For a repository here; the job needs a rule that trusts its GitHub repository and workflow. The address is {% if console_url.is_empty() %}the one your browser reached this page at (its Host): set the console's public address below, and the examples, the CLI's install script and its download name it whatever address a request comes to{% else %}the console's public address, as set below{% endif %}.</p>
 <pre class="code">{{ ci_example }}</pre>
+<form hx-post="/c/settings/ci" hx-target="next .result">
+  <div class="fields">
+    <label class="field"><span>Console address</span><input name="console_url" value="{{ console_url }}" placeholder="https://pkg.example.org" autocomplete="off" spellcheck="false"><small>Where CI jobs reach the console and API. Empty: as each request names it.</small></label>
+    <label class="field"><span>pkgpod action</span><input name="ci_action" value="{{ ci_action }}" placeholder="owner/pkgpod@master" autocomplete="off" spellcheck="false"><small>Where the action is on GitHub: owner/repository@ref.</small></label>
+  </div>
+  <div class="form-foot"><button type="submit">Save</button></div>
+</form>
+<div class="result"></div>
   </details>
   </div>
 </div>

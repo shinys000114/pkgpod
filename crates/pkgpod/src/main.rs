@@ -364,6 +364,14 @@ pub(crate) enum Cmd {
         /// Days ended jobs and their logs are kept (0: all).
         #[arg(long)]
         jobs_days: Option<i64>,
+        /// The console's public address (https://pkg.example.org), named in
+        /// the CLI's install script and CI examples; "" clears it.
+        #[arg(long)]
+        console_url: Option<String>,
+        /// Where the pkgpod GitHub action is (owner/repository@ref); ""
+        /// clears it.
+        #[arg(long)]
+        ci_action: Option<String>,
     },
     /// Collect garbage.
     Gc {

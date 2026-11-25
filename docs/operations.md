@@ -244,6 +244,21 @@ The files must be readable by the server's user. They are read when the
 listener starts: after renewing them, restart the server (a `listener
 set` with the same values leaves a running listener as it is).
 
+What the server hands out names the console's address: the CLI's
+install script and its download (`/cli/install.sh`, `/api/v1/cli`) and
+the CI examples in the console. By default that is the address each
+request names (its `Host`, and the scheme a proxy reports in
+`X-Forwarded-Proto`), which is right for whoever asks but is only
+what the request says. Set the public address once and it is named
+whatever a request says; these answers are never kept by caches
+(`no-store`):
+
+```sh
+pkgpod settings --console-url https://pkg.example.org
+pkgpod settings --ci-action org/pkgpod@master   # the GitHub action's place, for the examples
+pkgpod settings --console-url ''                # back to each request's
+```
+
 ## Storages
 
 A storage is a directory on a disk. Each repository is on one, chosen
