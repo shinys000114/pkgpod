@@ -1,0 +1,59 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+{% if can_admin %}
+<div class="card">
+  <div class="card-head"><h2>Rights</h2><span class="hint">server admins may do everything; grants on * (Users &amp; teams) cover every repository</span></div>
+  {% if grants.is_empty() %}<p class="empty">No grants on this repository.</p>{% else %}
+  <div class="table-wrap"><table><thead><tr><th>Who</th><th>Role</th><th></th></tr></thead><tbody>
+  {% for g in grants %}<tr><td>{{ g.subject }}</td><td>{{ g.role }}</td><td class="acts"><button class="link danger" hx-post="/c/r/{{ repo }}/grants/{{ g.subject|urlencode }}/delete" hx-target="#tab">remove</button></td></tr>{% endfor %}
+  </tbody></table></div>
+  {% endif %}
+  <div class="card-body">
+  {% if users.is_empty() && teams.is_empty() %}<p class="muted small">Only server admins so far, who may do everything; add users or teams in <a href="/admin/people">Users &amp; teams</a>.</p>{% else %}
+  <form class="inline" hx-post="/c/r/{{ repo }}/grants" hx-target="#tab">
+    <select name="subject">{% for u in users %}<option value="user:{{ u }}">user {{ u }}</option>{% endfor %}{% for t in teams %}<option value="team:{{ t }}">team {{ t }}</option>{% endfor %}</select>
+    <select name="role"><option>read</option><option>write</option><option>admin</option></select>
+    <button type="submit">Grant</button>
+  </form>{% endif %}
+  </div>
+</div>
+{% endif %}
+{% if can_admin %}
+<div class="card">
+  <div class="card-head"><h2>Who has access</h2><span class="hint">as the server decides it: server admins, grants here and on *, through teams{% if public %}; anyone may read (public){% endif %}</span></div>
+  {% if access.is_empty() %}<p class="empty">Nobody but anonymous readers.</p>{% else %}
+  <div class="table-wrap"><table>
+    <thead><tr><th>User</th><th>Role</th><th>From</th></tr></thead>
+    <tbody>{% for a in access %}<tr><td>{{ a.user }}</td><td><span class="tag">{{ a.role }}</span></td><td class="muted wrap">{{ a.from }}</td></tr>{% endfor %}</tbody>
+  </table></div>
+  {% endif %}
+</div>
+{% endif %}
+{% if can_admin %}
+<div class="card" id="repo-trust">
+  <div class="card-head"><h2>Trusted publishing</h2><span class="hint">CI jobs that publish here with their OIDC token, no secret kept in the CI{% if server_admin %}; a rule for several repositories, or one that acts as a user, is made and changed on <a href="/admin/server/publishing">Server, CI &amp; webhooks</a>{% endif %}</span></div>
+  {% if trust.is_empty() %}<p class="empty">No rule gives tokens for this repository.</p>{% else %}
+  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Trusts</th><th>Token</th><th>For</th><th>Used</th><th></th></tr></thead><tbody>
+  {% for r in trust %}<tr><td><b>{{ r.name }}</b></td><td class="mono small claims">{% for c in r.trusts %}<div>{{ c }}</div>{% endfor %}</td><td class="nowrap">{{ r.token }}<div class="muted small">{% if r.publisher %}as trust:{{ r.name }}{% else %}as {{ r.user }}{% endif %}</div></td><td class="wrap">{{ r.repos }}</td><td class="nowrap muted">{{ r.used }}</td>
+    <td class="acts nowrap">{% if r.can_change %}<button class="link danger" hx-post="/c/trust/{{ r.name|urlencode }}/delete" hx-target="#repo-trust-result" hx-confirm="Remove trust rule {{ r.name }}? Jobs it trusts cannot publish any more.">remove</button>{% endif %}</td></tr>{% endfor %}
+  </tbody></table></div>
+  {% endif %}
+  <div id="repo-trust-result"></div>
+  <details class="card-body more"><summary>Add one for {{ repo }}</summary>
+  {% include "trust_form.html" %}
+  </details>
+</div>
+{% endif %}
+{% if server_admin %}
+<div class="card" id="repo-webhooks">
+  <div class="card-head"><h2>Webhooks</h2><span class="hint">what happens here sent to other services; one for several repositories is made and changed on <a href="/admin/server/publishing">Server, CI &amp; webhooks</a></span></div>
+  {% if hooks.is_empty() %}<p class="empty">None sends what happens here.</p>{% else %}
+  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Sends</th><th>To</th><th>Last</th></tr></thead><tbody>
+  {% for h in hooks %}<tr><td><b>{{ h.name }}</b>{% if !h.active %} <span class="tag">off</span>{% endif %}<div class="muted small">{% if h.all_repos %}every repository{% else %}{{ h.repos }}{% endif %}</div></td><td>{{ h.events }}</td><td class="mono small claims"><div>{{ h.url }}</div></td>
+    <td class="small">{% if let Some((_, ev, st, info, at)) = h.deliveries.first() %}<span class="{% if st == "ok" %}st-ok{% else if st == "failed" %}st-bad{% else %}st-run{% endif %}">{{ st }}</span> {{ ev }} <span class="muted">{{ at }}{% if !info.is_empty() %} · {{ info }}{% endif %}</span>{% else %}<span class="muted">none yet</span>{% endif %}</td></tr>{% endfor %}
+  </tbody></table></div>
+  {% endif %}
+  <details class="card-body more"><summary>Add one for {{ repo }}</summary>
+  {% include "hook_form.html" %}
+  </details>
+</div>
+{% endif %}

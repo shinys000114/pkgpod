@@ -66,6 +66,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/r/{repo}/diff", get(diff_part))
         .route("/r/{repo}/changes", get(changes_part))
         .route("/r/{repo}/settings", get(settings_part))
+        .route("/r/{repo}/access", get(access_part))
         .route("/r/{repo}/badges", get(badges_part))
         .route("/r/{repo}/members", get(members_part))
         .route("/r/{repo}/cache", get(cache_part))
@@ -2736,7 +2737,7 @@ fn host_of(h: &HeaderMap) -> String {
 }
 
 /// The tabs of a repository's page: (id, label, fragment).
-fn repo_tabs(r: &pkgpod_engine::RepoInfo, can_write: bool) -> Vec<TabLink> {
+fn repo_tabs(r: &pkgpod_engine::RepoInfo, can_write: bool, can_admin: bool) -> Vec<TabLink> {
     let n = &r.name;
     let mirror = r.kind == Kind::Mirror;
     let t = |id: &'static str, label: &str, part: String| TabLink {
@@ -2748,22 +2749,20 @@ fn repo_tabs(r: &pkgpod_engine::RepoInfo, can_write: bool) -> Vec<TabLink> {
     if r.kind == Kind::Proxy {
         v.push(t("cache", "Cache", format!("/r/{n}/cache")));
         v.push(t("use", "How to use", format!("/r/{n}/use")));
-        v.push(t(
-            "settings",
-            "Settings & rights",
-            format!("/r/{n}/settings"),
-        ));
+        v.push(t("settings", "Settings", format!("/r/{n}/settings")));
+        if can_admin {
+            v.push(t("access", "Access", format!("/r/{n}/access")));
+        }
         return v;
     }
     if r.kind == Kind::Group {
         // A group holds nothing: what it reads, and how.
         v.push(t("members", "Members", format!("/r/{n}/members")));
         v.push(t("use", "How to use", format!("/r/{n}/use")));
-        v.push(t(
-            "settings",
-            "Settings & rights",
-            format!("/r/{n}/settings"),
-        ));
+        v.push(t("settings", "Settings", format!("/r/{n}/settings")));
+        if can_admin {
+            v.push(t("access", "Access", format!("/r/{n}/access")));
+        }
         return v;
     }
     let catalog = t(
@@ -2797,11 +2796,10 @@ fn repo_tabs(r: &pkgpod_engine::RepoInfo, can_write: bool) -> Vec<TabLink> {
     } else if can_write {
         v.push(t("actions", "Upload & change", format!("/r/{n}/actions")));
     }
-    v.push(t(
-        "settings",
-        "Settings & rights",
-        format!("/r/{n}/settings"),
-    ));
+    v.push(t("settings", "Settings", format!("/r/{n}/settings")));
+    if can_admin {
+        v.push(t("access", "Access", format!("/r/{n}/access")));
+    }
     v
 }
 
@@ -2832,6 +2830,7 @@ async fn repo_page(
     let role = s(&info["role"]);
     let mirror = r.kind == Kind::Mirror;
     let can_write = matches!(role.as_str(), "write" | "admin") && !mirror;
+    let role_admin = role == "admin";
     let noun = count_noun(&r.format);
     let stat = |label: &str, value: String, state: &str| Stat {
         label: label.to_string(),
@@ -2901,7 +2900,7 @@ async fn repo_page(
     let routed_hint = urls.is_empty();
     let shown = vec![base_url(&app, &r, &urls, &host_of(&headers))];
     let shown = if urls.is_empty() { shown } else { urls };
-    let tabs = repo_tabs(&r, can_write);
+    let tabs = repo_tabs(&r, can_write, role_admin);
     let active = tabs.iter().find(|t| t.id == q.tab).unwrap_or(&tabs[0]);
     let (active_id, active_part) = (active.id.to_string(), active.part.clone());
     let f = app.engine.format(&r.format)?;
@@ -4572,11 +4571,107 @@ async fn badge_token_drop(
     }
 }
 
+/// A part of a repository's settings form, under a heading.
+pub struct FieldGroup {
+    pub title: String,
+    pub fields: Vec<FormField>,
+}
+
+/// The settings fields by what they are about: the repository, its
+/// versions and cleanup, a proxy's cache, then the format's own.
+fn field_groups(format_title: &str, kind: Kind, fields: Vec<FormField>) -> Vec<FieldGroup> {
+    let general = |n: &str| {
+        matches!(
+            n,
+            "description" | "urls" | "public" | "upstream" | "members" | "source"
+        )
+    };
+    let keeping = |n: &str| n.starts_with("keep_") || n.starts_with("cleanup_");
+    let cache =
+        |n: &str| kind == Kind::Proxy && matches!(n, "metadata_minutes" | "max_mib" | "exclude");
+    let mut g: Vec<FieldGroup> = vec![
+        FieldGroup {
+            title: "Repository".into(),
+            fields: vec![],
+        },
+        FieldGroup {
+            title: "Versions and cleanup".into(),
+            fields: vec![],
+        },
+        FieldGroup {
+            title: "Cache".into(),
+            fields: vec![],
+        },
+        FieldGroup {
+            title: match kind {
+                Kind::Mirror => format!("{format_title} mirror"),
+                Kind::Proxy => format!("{format_title} proxy"),
+                Kind::Group => format!("{format_title} group"),
+                _ => format_title.to_string(),
+            },
+            fields: vec![],
+        },
+    ];
+    for f in fields {
+        let i = if general(&f.name) {
+            0
+        } else if keeping(&f.name) {
+            1
+        } else if cache(&f.name) {
+            2
+        } else {
+            3
+        };
+        g[i].fields.push(f);
+    }
+    g.retain(|x| !x.fields.is_empty());
+    g
+}
+
 #[derive(Template)]
 #[template(path = "settings.html")]
 struct SettingsPart {
     repo: String,
-    fields: Vec<FormField>,
+    groups: Vec<FieldGroup>,
+    can_admin: bool,
+    server_admin: bool,
+    /// Cleanup rules apply, and the viewer may preview them.
+    cleanup: bool,
+}
+
+/// A repository's settings: one form, its fields by what they are about.
+async fn settings_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> Response {
+    let r = match app.repo_for(&v.caller, &repo, Role::Read) {
+        Ok(r) => r,
+        Err(e) => return err_part(e),
+    };
+    let public = r.setting_bool("public");
+    let can_admin = app.auth.role(&v.caller, &repo, public) == Some(Role::Admin);
+    let fields = form_fields(
+        &app.engine.fields(&r.format, r.kind).unwrap_or_default(),
+        &r.settings,
+        "settings",
+        &settings_hints(&app),
+    );
+    let title = app
+        .engine
+        .format(&r.format)
+        .map(|f| f.title().to_string())
+        .unwrap_or_else(|_| r.format.clone());
+    render(&SettingsPart {
+        cleanup: crate::cleanup::supported(&app, &r)
+            && app.auth.role(&v.caller, &repo, public) >= Some(Role::Write),
+        groups: field_groups(&title, r.kind, fields),
+        can_admin,
+        server_admin: v.caller.is_admin(),
+        repo,
+    })
+}
+
+#[derive(Template)]
+#[template(path = "access.html")]
+struct AccessPart {
+    repo: String,
     grants: Vec<GrantRow>,
     can_admin: bool,
     server_admin: bool,
@@ -4585,8 +4680,6 @@ struct SettingsPart {
     /// Who may do what here, as enforced, and why.
     access: Vec<AccessRow>,
     public: bool,
-    /// Cleanup rules apply, and the viewer may preview them.
-    cleanup: bool,
     /// Server admins: the webhooks and trust rules for this repository.
     hooks: Vec<HookRow>,
     trust: Vec<TrustRow>,
@@ -4655,18 +4748,14 @@ fn access_rows(app: &App, repo: &str, public: bool) -> Vec<AccessRow> {
     out
 }
 
-async fn settings_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> Response {
-    let r = match app.repo_for(&v.caller, &repo, Role::Read) {
+/// Who may do what with a repository: rights, who has access, trusted
+/// publishing and webhooks (its admins; webhooks server admins).
+async fn access_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> Response {
+    let r = match app.repo_for(&v.caller, &repo, Role::Admin) {
         Ok(r) => r,
         Err(e) => return err_part(e),
     };
-    let can_admin = app.auth.role(&v.caller, &repo, r.setting_bool("public")) == Some(Role::Admin);
-    let fields = form_fields(
-        &app.engine.fields(&r.format, r.kind).unwrap_or_default(),
-        &r.settings,
-        "settings",
-        &settings_hints(&app),
-    );
+    let can_admin = true;
     let grants = if can_admin {
         app.auth
             .grants(Some(&repo))
@@ -4701,8 +4790,6 @@ async fn settings_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> R
         (vec![], vec![])
     };
     let public = r.setting_bool("public");
-    let cleanup = crate::cleanup::supported(&app, &r)
-        && app.auth.role(&v.caller, &repo, public) >= Some(Role::Write);
     let server_admin = v.caller.is_admin();
     let hooks = if server_admin {
         hook_rows(&app, Some(&repo)).unwrap_or_default()
@@ -4737,7 +4824,7 @@ async fn settings_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> R
     } else {
         Vec::new()
     };
-    render(&SettingsPart {
+    render(&AccessPart {
         hooks,
         trust,
         trust_users,
@@ -4746,7 +4833,6 @@ async fn settings_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> R
         as_user: server_admin,
         trust_prefill: String::new(),
         hook_prefill: String::new(),
-        cleanup,
         access: if can_admin {
             access_rows(&app, &repo, public)
         } else {
@@ -4754,7 +4840,6 @@ async fn settings_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> R
         },
         public,
         repo,
-        fields,
         grants,
         can_admin,
         server_admin: v.caller.is_admin(),
@@ -4808,7 +4893,7 @@ async fn grant(
         role: form_get(&form, "role").to_string(),
     };
     match api::grant(State(app.clone()), v.who(), Path(repo.clone()), Json(req)).await {
-        Ok(_) => settings_part(State(app), v, Path(repo)).await,
+        Ok(_) => access_part(State(app), v, Path(repo)).await,
         Err(e) => err_part(e),
     }
 }
@@ -4819,7 +4904,7 @@ async fn revoke(
     Path((repo, subject)): Path<(String, String)>,
 ) -> Response {
     match api::revoke(State(app.clone()), v.who(), Path((repo.clone(), subject))).await {
-        Ok(_) => settings_part(State(app), v, Path(repo)).await,
+        Ok(_) => access_part(State(app), v, Path(repo)).await,
         Err(e) => err_part(e),
     }
 }

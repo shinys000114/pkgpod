@@ -1126,6 +1126,7 @@ fn console_login_pages_and_csrf() {
         "/r/web/tree?path=",
         "/r/web/versions",
         "/r/web/settings",
+        "/r/web/access",
         "/r/web/packages",
         "/r/web/use",
         "/r/web/actions",
@@ -6540,12 +6541,17 @@ fn webhooks_and_trust_for_some_repositories() {
     );
     // A repository's page lists what is sent for it, and makes one for it
     // alone, new only.
-    let sa = page("/r/a/settings");
+    let set = page("/r/a/settings");
+    assert!(
+        set.contains("<legend>Repository</legend>") && !set.contains("Who has access"),
+        "{set}"
+    );
+    let sa = page("/r/a/access");
     assert!(
         sa.contains("<b>two</b>") && sa.contains("<b>every</b>"),
         "{sa}"
     );
-    let sc = page("/r/c/settings");
+    let sc = page("/r/c/access");
     assert!(
         !sc.contains("<b>two</b>") && sc.contains("<b>every</b>"),
         "{sc}"
@@ -6573,7 +6579,7 @@ fn webhooks_and_trust_for_some_repositories() {
         ],
     );
     assert!(ok);
-    assert!(page("/r/c/settings").contains("<b>c-only</b>"));
+    assert!(page("/r/c/access").contains("<b>c-only</b>"));
     // Trust rules: ticked repositories; none is refused.
     s.cli_in(&["user", "add", "ci", "--password-stdin"], "ci-password-1")
         .unwrap();
@@ -6601,8 +6607,8 @@ fn webhooks_and_trust_for_some_repositories() {
     assert!(!ok && t.contains("tick the repositories"), "{t}");
     let rules = s.json(&["trust", "list"]);
     assert_eq!(rules[0]["repos"], json!(["a", "b"]), "{rules}");
-    assert!(page("/r/b/settings").contains("<b>pub</b>"));
-    assert!(!page("/r/c/settings").contains("<b>pub</b>"));
+    assert!(page("/r/b/access").contains("<b>pub</b>"));
+    assert!(!page("/r/c/access").contains("<b>pub</b>"));
     // A repository deleted: lists that name it are kept, and save again.
     s.cli(&["repo", "delete", "b", "-y"]).unwrap();
     s.cli(&[
@@ -7332,10 +7338,26 @@ fn trusted_publishing_without_a_user() {
         .send()
         .unwrap();
     assert_eq!(r.status().as_u16(), 403);
+    // Nor sees the Access tab, nor opens it.
+    let (cd, sidd, _) = console_login(&s, "dev", "dev-password");
+    let get = |p: &str| {
+        cd.get(format!("{}{p}", s.api))
+            .header("cookie", format!("pkgpod_session={sidd}"))
+            .send()
+            .unwrap()
+            .text()
+            .unwrap()
+    };
+    assert!(!get("/r/mine").contains("tab=access"));
+    let acc = get("/r/mine/access");
+    assert!(
+        !acc.contains("Who has access") && !acc.contains("repo-trust"),
+        "{acc}"
+    );
     // The console: the card for the repository's admin, without a user.
     let (c, sid, _) = console_login(&s, "lead", "lead-password");
     let st = c
-        .get(format!("{}/r/mine/settings", s.api))
+        .get(format!("{}/r/mine/access", s.api))
         .header("cookie", format!("pkgpod_session={sid}"))
         .send()
         .unwrap()
@@ -12872,7 +12894,7 @@ fn console_copy_access_usage_and_glance() {
     s.cli(&["team", "join", "boards", "dev"]).unwrap();
     s.cli(&["grant", "set", "bsp", "team:boards", "write"])
         .unwrap();
-    let st = text("/r/bsp/settings");
+    let st = text("/r/bsp/access");
     assert!(
         st.contains("<td>dev</td><td><span class=\"tag\">write</span></td><td class=\"muted wrap\">write here, team boards</td>"),
         "{st}"
