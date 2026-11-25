@@ -11911,6 +11911,19 @@ fn console_packages_filter_download_details_bulk() {
         b.contains("badge-broken\" hidden") && b.contains("did not load from <code>http://"),
         "{b}"
     );
+    // The images come from the repository's address, another origin than
+    // the console's: its pages let them load.
+    let r = c
+        .get(format!("{}/r/r", s.api))
+        .header("cookie", format!("pkgpod_session={sid}"))
+        .send()
+        .unwrap();
+    let csp = r.headers()["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(csp.contains("img-src 'self' data: https: http:"), "{csp}");
+    assert!(csp.contains("script-src 'self';"), "{csp}");
     // Details: when it came, its digest.
     let d = text("/r/r/pkg?path=el9%2Fhello-rpm-1.0-1.noarch.rpm");
     assert!(

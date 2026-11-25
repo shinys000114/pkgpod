@@ -157,10 +157,14 @@ async fn security_headers(mut r: Response) -> Response {
     if html {
         // Pages can show secrets once (new tokens): never cache them.
         h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        // Images from anywhere: a repository's badges are shown from its
+        // own address (another origin than the console's), as a README
+        // would show them. Nothing else leaves 'self'.
         h.insert(
             header::CONTENT_SECURITY_POLICY,
             HeaderValue::from_static(
-                "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; \
+                "default-src 'self'; script-src 'self'; style-src 'self'; \
+                 img-src 'self' data: https: http:; \
                  frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
             ),
         );
