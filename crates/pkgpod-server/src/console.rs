@@ -1257,32 +1257,50 @@ pub struct UsageRow {
     pub all: String,
 }
 
-/// The server at a glance: listeners, keys, the last garbage
-/// collection, free disk, mirror syncs.
+/// One figure at a glance, linking to where it is seen whole.
+pub struct Glance {
+    pub label: String,
+    pub value: String,
+    /// ok, bad, run, or nothing.
+    pub state: &'static str,
+    pub href: &'static str,
+}
+
+/// The server at a glance: listeners, keys, free space (one figure per
+/// filesystem), the last garbage collection, jobs and what was logged.
 fn server_glance(
     app: &App,
     listeners: &[ListenerRow],
     keys: &[KeyRow],
     storages: &[(String, String)],
-) -> Vec<(String, String, String)> {
+) -> Vec<Glance> {
     let mut g = Vec::new();
+    let mut add = |label: String, value: String, state: &'static str, href: &'static str| {
+        g.push(Glance {
+            label,
+            value,
+            state,
+            href,
+        })
+    };
     let up = listeners.iter().filter(|l| l.ok).count();
     let failed: Vec<&str> = listeners
         .iter()
         .filter(|l| l.state.starts_with("failed"))
         .map(|l| l.name.as_str())
         .collect();
-    g.push((
+    add(
         "Listeners".to_string(),
         if failed.is_empty() {
             format!("{up} of {} running", listeners.len())
         } else {
             format!("{} failed", failed.join(", "))
         },
-        if failed.is_empty() { "ok" } else { "bad" }.to_string(),
-    ));
+        if failed.is_empty() { "ok" } else { "bad" },
+        "/admin/server/serving",
+    );
     let missing = keys.iter().filter(|k| k.missing).count();
-    g.push((
+    add(
         "Signing keys".to_string(),
         match (keys.len(), missing) {
             (0, _) => "none".to_string(),
@@ -1298,48 +1316,68 @@ fn server_glance(
             "bad"
         } else {
             "ok"
+        },
+        "/admin/server/keys",
+    );
+    // Storages on one filesystem share their free space: one figure.
+    let mut fs: Vec<(u64, Vec<&str>, u64, u64)> = Vec::new();
+    for (n, p) in storages {
+        if let Ok(st) = rustix::fs::statvfs(std::path::Path::new(p)) {
+            let (free, size) = (st.f_bavail * st.f_frsize, st.f_blocks * st.f_frsize);
+            match fs.iter_mut().find(|f| f.0 == st.f_fsid) {
+                Some(f) => f.1.push(n),
+                None => fs.push((st.f_fsid, vec![n], free, size)),
+            }
         }
-        .to_string(),
-    ));
+    }
+    for (_, names, free, size) in fs {
+        let low = size > 0 && free * 10 < size;
+        add(
+            format!(
+                "Free in storage{} {}",
+                if names.len() > 1 { "s" } else { "" },
+                names.join(", ")
+            ),
+            format!(
+                "{} of {}",
+                crate::serve::human(free),
+                crate::serve::human(size)
+            ),
+            if low { "bad" } else { "ok" },
+            "/admin/server/storage",
+        );
+    }
     let gc = app
         .auth
         .audit_log(2000)
         .unwrap_or_default()
         .into_iter()
         .find(|a| a["action"] == "gc");
-    g.push((
+    add(
         "Last garbage collection".to_string(),
         match &gc {
             Some(a) => format!("{} · {}", when(a["time"].as_i64()), s(&a["detail"])),
             None => "not yet (daily, from an hour after start)".to_string(),
         },
-        String::new(),
-    ));
-    for (n, p) in storages {
-        if let Ok(st) = rustix::fs::statvfs(std::path::Path::new(p)) {
-            let free = st.f_bavail * st.f_frsize;
-            let size = st.f_blocks * st.f_frsize;
-            let low = size > 0 && free * 10 < size;
-            g.push((
-                format!("Free in storage {n}"),
-                format!(
-                    "{} of {}",
-                    crate::serve::human(free),
-                    crate::serve::human(size)
-                ),
-                if low { "bad" } else { "ok" }.to_string(),
-            ));
-        }
-    }
+        "",
+        "/admin/server/storage",
+    );
     let day_ago = pkgpod_base::now() - 86400;
-    let jobs = crate::jobs::list(&app.db, None, 500).unwrap_or_default();
-    let running = jobs.iter().filter(|j| j.state == "running").count();
-    let queued = jobs.iter().filter(|j| j.state == "queued").count();
-    let failed = jobs
+    let find = |state: &str| {
+        let f = crate::jobs::Filter {
+            state: Some(state.to_string()),
+            ..Default::default()
+        };
+        crate::jobs::find(&app.db, &f, 1000).unwrap_or_default()
+    };
+    let active = find("active");
+    let running = active.iter().filter(|j| j.state == "running").count();
+    let queued = active.len() - running;
+    let failed = find("failed")
         .iter()
-        .filter(|j| j.state == "failed" && j.finished.unwrap_or(0) > day_ago)
+        .filter(|j| j.finished.unwrap_or(0) > day_ago)
         .count();
-    g.push((
+    add(
         "Syncs and imports".to_string(),
         format!(
             "{running} running{}, {failed} failed in the last day",
@@ -1349,11 +1387,22 @@ fn server_glance(
                 String::new()
             }
         ),
-        if failed > 0 { "bad" } else { "ok" }.to_string(),
-    ));
+        if failed > 0 {
+            "bad"
+        } else if running > 0 {
+            "run"
+        } else {
+            "ok"
+        },
+        if failed > 0 {
+            "/admin/server/jobs?state=failed"
+        } else {
+            "/admin/server/jobs"
+        },
+    );
     let logged = crate::logs::read(0, "warn", "", usize::MAX).entries;
     let errors = logged.iter().filter(|e| e.level == "error").count();
-    g.push((
+    add(
         "Logged since the start".to_string(),
         format!("{errors} errors, {} warnings", logged.len() - errors),
         if errors > 0 {
@@ -1362,9 +1411,9 @@ fn server_glance(
             "ok"
         } else {
             ""
-        }
-        .to_string(),
-    ));
+        },
+        "/admin/server/logs?level=warn",
+    );
     g
 }
 
@@ -5147,8 +5196,7 @@ struct ServerPage {
     s: Shell,
     /// The section shown: overview, serving, storage, keys, publishing.
     tab: &'static str,
-    /// At a glance: (label, value, state).
-    glance: Vec<(String, String, String)>,
+    glance: Vec<Glance>,
     listener_prefill: String,
     listeners: Vec<ListenerRow>,
     keys: Vec<KeyRow>,
@@ -5236,7 +5284,7 @@ async fn server_tab_page(app: Arc<App>, v: Viewer, tab: &'static str) -> Result<
         .map(|(n, p)| (n, p.display().to_string()))
         .collect();
     let audit: Vec<AuditRow> = if tab == "overview" {
-        app.auth.audit_log(100)?.iter().map(audit_row).collect()
+        app.auth.audit_log(20)?.iter().map(audit_row).collect()
     } else {
         Vec::new()
     };

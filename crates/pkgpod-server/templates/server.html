@@ -5,11 +5,11 @@
 {% include "server_tabs.html" %}
 <div id="server-result"></div>
 {% if tab == "overview" %}
-<div class="stats glance">{% for (label, value, state) in glance %}<div class="stat"><span class="k">{{ label }}</span><span class="v{% if !state.is_empty() %} st-{{ state }}{% endif %}">{{ value }}</span></div>{% endfor %}</div>
+<div class="stats glance">{% for g in glance %}<a class="stat" href="{{ g.href }}"><span class="k">{{ g.label }}</span><span class="v{% if !g.state.is_empty() %} st-{{ g.state }}{% endif %}">{{ g.value }}</span></a>{% endfor %}</div>
 <div class="card">
-  <div class="card-head"><h2>Recent changes</h2><span class="hint">who changed what, newest first</span></div>
-  <div class="table-wrap"><table><thead><tr><th>When</th><th>Who</th><th>What</th><th>On</th><th>Details</th></tr></thead><tbody>
-  {% for a in audit %}<tr><td class="nowrap">{{ a.when }}</td><td>{{ a.actor }}</td><td>{{ a.action }}</td><td>{{ a.target }}</td><td class="wrap muted">{{ a.detail }}</td></tr>{% endfor %}
+  <div class="card-head"><h2>Recent changes</h2><span class="hint">who changed what, the newest twenty (<code>GET /api/v1/audit</code> has 500)</span></div>
+  <div class="table-wrap"><table class="changes"><thead><tr><th>When</th><th>Who</th><th>What</th><th>Details</th></tr></thead><tbody>
+  {% for a in audit %}<tr><td class="nowrap">{{ a.when }}</td><td class="nowrap">{{ a.actor }}</td><td class="nowrap">{{ a.action }}{% if !a.target.is_empty() %} <b>{{ a.target }}</b>{% endif %}</td><td class="detail muted"><div title="{{ a.detail }}">{{ a.detail }}</div></td></tr>{% endfor %}
   </tbody></table></div>
 </div>
 {% else if tab == "serving" %}
