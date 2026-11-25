@@ -44,6 +44,13 @@ pub fn status(app: &App, r: &RepoInfo, package: Option<&str>) -> Result<Value> {
             Some("running" | "queued") => last_ok.is_some(),
             _ => false,
         };
+        // A mirror has no catalog: what its last good sync counted (the
+        // pool files its indexes list), or nothing when it counts none.
+        v["packages"] = syncs
+            .iter()
+            .find(|j| j.state == "ok")
+            .and_then(|j| j.report["pool_files"].as_i64())
+            .map_or(Value::Null, |n| json!(n));
         v["sync"] = json!({
             "state": last.map(|j| j.state.clone()),
             "started": last.and_then(|j| j.started),
