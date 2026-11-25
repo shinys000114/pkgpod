@@ -288,10 +288,11 @@ pub(crate) struct StreamQ {
 }
 
 /// A running job's log as it grows, as Server-Sent Events: `log` events
-/// carry the lines written after byte `from` (whole lines only), `state`
-/// events the job's state, first and whenever it changes (a queued job
-/// starts), and an `end` event its final state, after which the stream
-/// ends.
+/// carry the log as written after byte `from`, line ends and all (whole
+/// lines, or a piece of a line longer than a read, which the next goes
+/// on), `state` events the job's state, first and whenever it changes (a
+/// queued job starts), and an `end` event its final state, after which
+/// the stream ends.
 pub(crate) async fn job_stream(
     State(app): St,
     v: Viewer,
@@ -312,31 +313,23 @@ pub(crate) async fn job_stream(
     if let Err(e) = api::blocking(&app, move |app| api::job_for(app, &c, id)).await {
         return err_part(e);
     }
-    let path = crate::jobs::log_path(&app, id);
     // The state last sent: none yet, as the page may have been drawn
     // before the job started.
-    let start = (app, path, from, String::new(), false);
-    let stream = unfold(start, move |(app, path, from, sent, done)| async move {
+    let start = (app, from, String::new(), false);
+    let stream = unfold(start, move |(app, from, sent, done)| async move {
         if done {
             return None;
         }
         loop {
-            let (path2, app2) = (path.clone(), app.clone());
-            let (chunk, state) = tokio::task::spawn_blocking(move || {
-                use std::io::{Read, Seek, SeekFrom};
-                let mut buf = Vec::new();
-                if let Ok(mut f) = std::fs::File::open(&path2)
-                    && f.seek(SeekFrom::Start(from)).is_ok()
-                {
-                    let _ = f.take(1 << 20).read_to_end(&mut buf);
-                }
-                // Whole lines only: the rest comes with the next read.
-                let end = buf.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
-                buf.truncate(end);
+            let app2 = app.clone();
+            let (part, state) = tokio::task::spawn_blocking(move || {
+                // Whole lines; a line longer than the read in pieces that
+                // end at a character's end, else it would stop the stream.
+                let part = crate::jobs::log_from(&app2, id, from, 1 << 20);
                 let state = crate::jobs::get(&app2.db, id)
                     .map(|j| j.state)
                     .unwrap_or_default();
-                (buf, state)
+                (part, state)
             })
             .await
             .unwrap_or_default();
@@ -346,23 +339,23 @@ pub(crate) async fn job_stream(
                 let ev = Event::default().event("state").data(&state);
                 return Some((
                     Ok::<_, std::convert::Infallible>(ev),
-                    (app, path, from, state, false),
+                    (app, from, state, false),
                 ));
             }
-            if !chunk.is_empty() {
-                let next = from + chunk.len() as u64;
-                let text = String::from_utf8_lossy(&chunk)
-                    .trim_end_matches('\n')
-                    .to_string();
+            // From where the read ended, not the text's length: bytes not
+            // UTF-8 are shown as U+FFFD, of another length.
+            if part.next > from {
+                // The text as it is: a piece of a line ends without a
+                // newline, so the browser adds none.
                 let ev = Event::default()
                     .event("log")
-                    .id(next.to_string())
-                    .data(text);
-                return Some((Ok(ev), (app, path, next, sent, false)));
+                    .id(part.next.to_string())
+                    .data(part.text);
+                return Some((Ok(ev), (app, part.next, sent, false)));
             }
             if !on {
                 let ev = Event::default().event("end").data(state);
-                return Some((Ok(ev), (app, path, from, sent, true)));
+                return Some((Ok(ev), (app, from, sent, true)));
             }
             tokio::time::sleep(std::time::Duration::from_millis(700)).await;
         }

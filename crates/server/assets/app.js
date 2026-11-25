@@ -151,9 +151,9 @@
       var es = new EventSource(box.dataset.stream);
       es.addEventListener("log", function (ev) {
         var atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 24;
-        var text = ev.data + "\n";
-        if (pre.textContent && !/\n$/.test(pre.textContent)) text = "\n" + text;
-        pre.appendChild(document.createTextNode(text));
+        // The log as written, line ends and all: a piece of a long line
+        // ends without one, and the next event goes on with it.
+        pre.appendChild(document.createTextNode(ev.data));
         if (atBottom) pre.scrollTop = pre.scrollHeight;
       });
       es.addEventListener("state", function (ev) {
@@ -438,7 +438,11 @@
   });
   document.addEventListener("htmx:afterRequest", function (ev) {
     var note = document.getElementById("answer-note");
-    if (note && note.dataset.poll && ev.detail.successful && polled(ev.detail.elt)) note.remove();
+    // The element that asked: a poller that swaps its outerHTML is gone
+    // from the page by now, and htmx says this of an element around it.
+    var cfg = ev.detail.requestConfig;
+    var elt = (cfg && cfg.elt) || ev.detail.elt;
+    if (note && note.dataset.poll && ev.detail.successful && polled(elt)) note.remove();
   });
   document.addEventListener("click", function (ev) {
     var b = ev.target.closest("button.copy");

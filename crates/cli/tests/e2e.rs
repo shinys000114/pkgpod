@@ -10873,6 +10873,95 @@ fn job_logs_are_pruned_and_backed_up() {
     );
 }
 
+/// The console's stream of a job's log passes a line longer than one
+/// read in pieces that end at a character's end, and goes on after it.
+#[test]
+fn job_log_stream_passes_a_line_longer_than_a_read() {
+    use std::io::Write;
+    let s = Server::start();
+    s.cli(&[
+        "repo",
+        "create",
+        "m",
+        "-f",
+        "files",
+        "-k",
+        "mirror",
+        "-s",
+        "source=http://127.0.0.1:1/x/",
+    ])
+    .unwrap();
+    let _ = s.cli(&["sync", "m", "--wait"]);
+    let id = s.json(&["jobs", "m"])[0]["id"].as_i64().unwrap();
+    let log = s.dir.path().join(format!("data/jobs/{id}.log"));
+    let from = std::fs::metadata(&log).unwrap().len();
+    // Over 1 MiB of 3-byte characters: a read of 1 MiB ends inside one.
+    let long = format!("LONG {}\n", "가".repeat(400_000));
+    let added = format!("{long}after the long line\n");
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&log)
+        .unwrap()
+        .write_all(added.as_bytes())
+        .unwrap();
+    let size = from + added.len() as u64;
+    let (_, sid, _) = console_session(&s, "long", "long-password");
+    let c = reqwest::blocking::Client::new();
+    // (event, id, data) as a browser reads them.
+    let stream = |last: Option<u64>| -> Vec<(String, u64, String)> {
+        let mut r = c
+            .get(format!("{}/jobs/{id}/stream?from={from}", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"));
+        if let Some(n) = last {
+            r = r.header("last-event-id", n.to_string());
+        }
+        let text = r.send().unwrap().text().unwrap();
+        text.split("\n\n")
+            .filter(|e| !e.trim().is_empty())
+            .map(|e| {
+                let (mut ev, mut at, mut data) = (String::new(), 0, Vec::new());
+                for l in e.lines() {
+                    if let Some(v) = l.strip_prefix("event: ") {
+                        ev = v.to_string();
+                    } else if let Some(v) = l.strip_prefix("id: ") {
+                        at = v.parse().unwrap();
+                    } else if let Some(v) = l.strip_prefix("data:") {
+                        data.push(v.strip_prefix(' ').unwrap_or(v));
+                    }
+                }
+                (ev, at, data.join("\n"))
+            })
+            .collect()
+    };
+    let all = stream(None);
+    let pieces: Vec<_> = all.iter().filter(|e| e.0 == "log").collect();
+    let text: String = pieces.iter().map(|e| e.2.as_str()).collect();
+    let seen: Vec<_> = all.iter().map(|e| (&e.0, e.1, e.2.len())).collect();
+    assert!(
+        text == added,
+        "{} of {} bytes: {seen:?}",
+        text.len(),
+        added.len()
+    );
+    assert!(pieces.len() >= 2, "{}", pieces.len());
+    let first = pieces[0];
+    assert!(first.1 - from < 1 << 20, "{}", first.1 - from);
+    assert!(first.2.starts_with("LONG 가") && !first.2.contains('\n'));
+    assert!(!text.contains('\u{fffd}'));
+    assert_eq!(pieces.last().unwrap().1, size);
+    let end = all.last().unwrap();
+    assert_eq!((end.0.as_str(), end.2.as_str()), ("end", "failed"));
+    // A browser coming back goes on from the piece it had.
+    let again = stream(Some(first.1));
+    let rest: String = again
+        .iter()
+        .filter(|e| e.0 == "log")
+        .map(|e| e.2.as_str())
+        .collect();
+    assert!(rest == added[(first.1 - from) as usize..], "{}", rest.len());
+    assert_eq!(again.last().unwrap().0, "end");
+}
+
 /// A file server that answers every request after `delay`: a listing of
 /// one file at a directory, the file's content otherwise.
 fn slow_files(delay: Duration) -> String {
