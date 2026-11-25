@@ -1404,7 +1404,14 @@ async fn follow(
         return files_cached(app, r, up, a, req).await;
     }
     let Ok(file) = tokio::fs::File::open(&path).await else {
-        // Kept already (moved into the store): as any.
+        // Moved into the store: kept once the lead has put it in the
+        // cache (before, the cache does not have it and this one would
+        // fetch it again).
+        while matches!(*rx.borrow(), flights::State::Streaming { .. }) {
+            if rx.changed().await.is_err() {
+                break;
+            }
+        }
         return files_cached(app, r, up, a, req).await;
     };
     let counts = crate::stats::counts(req.method(), req.headers());
