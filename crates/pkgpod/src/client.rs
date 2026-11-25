@@ -134,12 +134,17 @@ impl Client {
     fn finish(&self, r: Result<Response, reqwest::Error>) -> Result<Value, CliError> {
         let r = r.map_err(|e| CliError::other(format!("{}: {}", self.base, chain(&e))))?;
         let status = r.status();
+        // A proxy in front answering for itself (a challenge for bots).
+        let challenged = r
+            .headers()
+            .get("cf-mitigated")
+            .is_some_and(|v| v.as_bytes() == b"challenge");
         let text = r.text().map_err(|e| CliError::other(chain(&e)))?;
         if !status.is_success() {
             let msg = serde_json::from_str::<Value>(&text)
                 .ok()
                 .and_then(|v| v["error"].as_str().map(String::from))
-                .unwrap_or_else(|| format!("{status}: {}", text.trim()));
+                .unwrap_or_else(|| not_pkgpod(status, &text, challenged, &self.base));
             return Err(CliError {
                 code: code_for(status.as_u16()),
                 message: msg,
@@ -209,4 +214,49 @@ pub fn enc(s: &str) -> String {
             }
         })
         .collect()
+}
+
+/// An error reply that is not pkgpod's (no JSON error): said shortly, and
+/// what to do when a proxy in front stopped the request.
+fn not_pkgpod(status: reqwest::StatusCode, text: &str, challenged: bool, base: &str) -> String {
+    let html = text.trim_start().starts_with('<');
+    if challenged || (html && text.contains("Just a moment") && text.contains("challenge")) {
+        return format!(
+            "{status} from a proxy in front of {base}, not from pkgpod: it asks for a browser \
+             challenge (Cloudflare's bot protection). Let API requests through it (a rule \
+             that skips the challenge for /api/), or use an address without it"
+        );
+    }
+    if html {
+        return format!("{status} from {base}, not from pkgpod (an HTML page: a proxy in front?)");
+    }
+    let t = text.trim();
+    match t.char_indices().nth(300) {
+        Some((i, _)) => format!("{status}: {}…", &t[..i]),
+        None => format!("{status}: {t}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn errors_not_from_pkgpod() {
+        let st = reqwest::StatusCode::FORBIDDEN;
+        let page = "<!DOCTYPE html><html><head><title>Just a moment...</title>\
+                    <script src=\"/cdn-cgi/challenge-platform/x\"></script>";
+        let m = not_pkgpod(st, page, false, "https://pkg.example.org");
+        assert!(m.contains("not from pkgpod") && m.contains("/api/"), "{m}");
+        assert!(!m.contains("DOCTYPE"), "{m}");
+        let m = not_pkgpod(st, "<html>nginx</html>", false, "https://x");
+        assert!(m.contains("an HTML page"), "{m}");
+        let long = "é".repeat(400);
+        let m = not_pkgpod(st, &long, false, "https://x");
+        assert!(m.ends_with('…') && m.chars().count() < 340, "{m}");
+        assert_eq!(
+            not_pkgpod(st, " short ", false, "https://x"),
+            "403 Forbidden: short"
+        );
+    }
 }
