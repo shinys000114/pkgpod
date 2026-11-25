@@ -14,7 +14,6 @@ use std::sync::Arc;
 use askama::Template;
 use axum::extract::{Form, FromRequestParts, Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header, request::Parts};
-use axum::middleware::map_response;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -194,10 +193,11 @@ pub fn router() -> Router<Arc<App>> {
         )
         .route(css_path(), get(|| asset(CSS, "text/css")))
         .route(js_path(), get(|| asset(JS, "text/javascript")))
-        .layer(map_response(security_headers))
 }
 
-async fn security_headers(mut r: Response) -> Response {
+/// The management listener's headers, on every answer (the router's,
+/// so its fallback's too).
+pub(crate) async fn security_headers(mut r: Response) -> Response {
     let html = r
         .headers()
         .get(header::CONTENT_TYPE)
@@ -457,6 +457,38 @@ mod tests {
         );
         assert_eq!(op_title("Remove manifests no tag reaches (through indexes, or as their subject's referrers).").0,
             "Remove manifests no tag reaches");
+    }
+
+    /// A Debian operation's help splits into a title and a sentence that
+    /// reads on its own, not into a title and a bracket's end.
+    #[test]
+    fn deb_operations_have_titles() {
+        use pkgpod_engine::Format;
+        for o in pkgpod_deb::Deb.ops() {
+            let (title, rest) = op_title(o.help);
+            assert!(
+                title.len() <= 48 && !title.ends_with(' ') && !rest.starts_with('('),
+                "{}: {title:?} / {rest:?}",
+                o.name
+            );
+        }
+    }
+
+    #[test]
+    fn readers_lines_leave_out_publishing() {
+        for l in [
+            "Upload",
+            "Publish",
+            "Publish and install",
+            "Push an image",
+            "Deploy (mvn deploy)",
+            "A labelled version",
+        ] {
+            assert!(for_publishing(l), "{l}");
+        }
+        for l in ["Install", "Add the repository", "Note", "Dists"] {
+            assert!(!for_publishing(l), "{l}");
+        }
     }
 
     #[test]

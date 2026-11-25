@@ -2231,6 +2231,9 @@ fn console_login_pages_and_csrf() {
     assert_eq!(r.status().as_u16(), 303);
     let r = c.get(format!("{}/login", s.api)).send().unwrap();
     let lc = cookie_of(&r, "pkgpod_login").unwrap();
+    // Where the first admin's password is: said until the first login.
+    let form = r.text().unwrap();
+    assert!(form.contains("first-login"), "{form}");
     let r = c
         .post(format!("{}/login", s.api))
         .header("cookie", format!("pkgpod_login={lc}"))
@@ -2243,6 +2246,16 @@ fn console_login_pages_and_csrf() {
         .unwrap();
     assert_eq!(r.status().as_u16(), 303);
     let sid = cookie_of(&r, "pkgpod_session").expect("session cookie");
+    let form = c
+        .get(format!("{}/login", s.api))
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(
+        !form.contains("first-login") && s.dir.path().join("data/admin-password").exists(),
+        "{form}"
+    );
     let page = |p: &str| {
         let r = c
             .get(format!("{}{p}", s.api))
@@ -2797,6 +2810,21 @@ fn console_offers_what_the_kind_has() {
     let g = row("g");
     assert!(g.contains("group") && !g.contains("0 B"), "{g}");
     assert!(usage.contains("proxies' caches"), "{usage}");
+    assert!(!usage.contains("too large to count whole"), "{usage}");
+    // A cache of more files than are counted: said to be at least that.
+    sql(
+        &s,
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i <= 100000)
+         INSERT INTO cache (repo, path, kind, sha256, size, content_type, etag,
+             last_modified, fetched, used, pinned, name, version)
+         SELECT (SELECT id FROM repos WHERE name = 'p'), 'many/' || i, 'file',
+             randomblob(32), 1, '', '', '', 0, 0, 0, '', '' FROM n;",
+    );
+    let usage = text("/admin/usage");
+    assert!(
+        usage.contains("Some mirror trees or proxy caches were too large to count whole"),
+        "{usage}"
+    );
     // Job pages, of jobs as syncs and imports leave them (a sync that
     // found files gone upstream, one waiting for a slot): written here,
     // as a test cannot wait for them.
@@ -2879,9 +2907,28 @@ fn console_errors_stay_in_place() {
             "{p}: {st} {ty} {body}"
         );
     }
+    // A path nothing has gets the console's headers too.
+    for (p, ty) in [
+        ("/no/such/page", "text/html"),
+        ("/api/v9/x", "application/json"),
+    ] {
+        let r = c.get(format!("{}{p}", s.api)).send().unwrap();
+        let h = r.headers();
+        let csp = h
+            .get("content-security-policy")
+            .map(|v| v.to_str().unwrap());
+        assert!(
+            r.status().as_u16() == 404
+                && h["content-type"].to_str().unwrap().starts_with(ty)
+                && h.get("x-content-type-options")
+                    .is_some_and(|v| v == "nosniff")
+                && (ty != "text/html" || csp.is_some_and(|v| v.contains("frame-ancestors 'none'"))),
+            "{p}: {h:?}"
+        );
+    }
     s.cli_in(&["user", "add", "rd", "--password-stdin"], "rd-password")
         .unwrap();
-    let (_, rsid, _) = console_login(&s, "rd", "rd-password");
+    let (_, rsid, rcsrf) = console_login(&s, "rd", "rd-password");
     for p in [
         "/admin/server",
         "/admin/server/jobs",
@@ -2963,6 +3010,21 @@ fn console_errors_stay_in_place() {
     s.cli(&["grant", "set", "priv", "user:rd", "read"]).unwrap();
     let rb = page(&rsid, "/r/priv/badges").2;
     assert!(!rb.contains(&bt) && !rb.contains("token="), "{rb}");
+    // A token change that fails is said in the badges card, which stays.
+    let b = c
+        .post(format!("{}/c/r/priv/badge-token", s.api))
+        .header("cookie", format!("pkgpod_session={rsid}"))
+        .header("x-csrf-token", &rcsrf)
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(
+        b.contains("<div class=\"card\" id=\"badges\">")
+            && b.contains("class=\"card-body error\"")
+            && !b.contains(&bt),
+        "{b}"
+    );
     // A cache change that fails is said in the cache card, which stays.
     s.cli(&[
         "repo",
@@ -3034,6 +3096,99 @@ fn console_errors_stay_in_place() {
         .to_string();
     let (_, body) = post(&format!("/c/tokens/{id}/delete"), &[]);
     assert_eq!(body, "", "token delete");
+}
+
+/// The console replaces a signing key, or deletes one that repositories
+/// sign with, only when its box is ticked; a refusal names the box.
+#[test]
+fn console_keys_replaced_or_deleted_when_asked() {
+    let s = Server::start();
+    let (c, sid, csrf) = console_session(&s, "kk", "kk-password");
+    let post = |p: &str, form: &[(&str, &str)]| {
+        let r = c
+            .post(format!("{}{p}", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .header("x-csrf-token", &csrf)
+            .form(form)
+            .send()
+            .unwrap();
+        let refreshed = r.headers().contains_key("hx-refresh");
+        (refreshed, r.text().unwrap())
+    };
+    let fpr = |name: &str| {
+        s.json(&["key", "list"])
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|k| k["name"] == name)
+            .map(|k| k["fingerprint"].as_str().unwrap().to_string())
+    };
+    let (ok, _) = post(
+        "/c/keys/generate",
+        &[("name", "main"), ("uid", "A <a@example.invalid>")],
+    );
+    assert!(ok);
+    let first = fpr("main").unwrap();
+    let keys = c
+        .get(format!("{}/admin/server/keys", s.api))
+        .header("cookie", format!("pkgpod_session={sid}"))
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    // The boxes come back unticked when the page reloads after a change.
+    assert!(
+        keys.matches("name=\"replace\" autocomplete=\"off\"")
+            .count()
+            == 2
+            && keys.contains("Replace the existing key")
+            && keys.contains("id=\"key-force\" name=\"force\" autocomplete=\"off\"")
+            && keys.contains("Delete although repositories sign with it")
+            && keys.contains("hx-include=\"#key-force\""),
+        "{keys}"
+    );
+    // Generate over it: refused, then replaced when asked.
+    let gen_b = [("name", "main"), ("uid", "B <b@example.invalid>")];
+    let (ok, body) = post("/c/keys/generate", &gen_b);
+    assert!(
+        !ok && body.contains("exists")
+            && body.contains("tick Replace the existing key")
+            && !body.contains("--replace"),
+        "{body}"
+    );
+    assert_eq!(fpr("main").as_deref(), Some(first.as_str()));
+    let (ok, body) = post("/c/keys/generate", &[gen_b[0], gen_b[1], ("replace", "on")]);
+    assert!(ok, "{body}");
+    let second = fpr("main").unwrap();
+    assert_ne!(second, first);
+    // Import over it: the same.
+    let other = pkgpod_deb::testutil::TestKey::new().unwrap();
+    let armored = other.key.armored_secret().unwrap();
+    let import = [("name", "main"), ("secret_key", armored.as_str())];
+    let (ok, body) = post("/c/keys", &import);
+    assert!(!ok && body.contains("exists"), "{body}");
+    assert_eq!(fpr("main").as_deref(), Some(second.as_str()));
+    let (ok, body) = post("/c/keys", &[import[0], import[1], ("replace", "on")]);
+    assert!(ok, "{body}");
+    assert_eq!(fpr("main").as_deref(), Some(other.fpr.as_str()));
+    // Delete one a repository names: refused, then deleted when asked.
+    post(
+        "/c/keys/generate",
+        &[("name", "second"), ("uid", "S <s@example.invalid>")],
+    );
+    s.cli(&["repo", "create", "named", "-s", "key=second"])
+        .unwrap();
+    let (ok, body) = post("/c/keys/second/delete", &[]);
+    assert!(
+        !ok && body.contains("named")
+            && body.contains("tick Delete although repositories sign with it")
+            && !body.contains("--force"),
+        "{body}"
+    );
+    assert!(fpr("second").is_some());
+    let (ok, body) = post("/c/keys/second/delete", &[("force", "on")]);
+    assert!(ok, "{body}");
+    assert!(fpr("second").is_none());
 }
 
 #[test]
@@ -5443,6 +5598,10 @@ fn download_counts() {
     assert_eq!(d["daily"].as_array().unwrap().len(), 30);
     let one = s.json(&["downloads", "f", "--name", "readme.txt", "--days", "1"]);
     assert_eq!(one["total"], 1, "{one}");
+    let out = s
+        .cli(&["downloads", "f", "--name", "readme.txt", "--days", "1"])
+        .unwrap();
+    assert!(out.starts_with("1 download in 1 day\n"), "{out}");
     assert_eq!(s.json(&["downloads", "other"])["total"], 0);
     // Only who may read the repository sees its counts.
     let reader = s
@@ -5538,7 +5697,13 @@ fn status_badges_and_metrics() {
     assert_eq!(st["package"]["latest"], "1.10", "{st}");
     assert_eq!(st["package"]["versions"], 3, "{st}");
     let out = s.cli(&["status", "pub"]).unwrap();
-    assert!(out.contains("3 packages, 1 downloads"), "{out}");
+    assert!(out.contains("3 packages, 1 download in 30 days"), "{out}");
+    let out = s
+        .cli(&["status", "pub", "--package", "tool.tar.gz"])
+        .unwrap();
+    let dl = &st["package"]["downloads"];
+    let dl = format!("{dl} download{}", if dl == 1 { "" } else { "s" });
+    assert!(out.contains(&format!("3 versions, {dl}\n")), "{out}");
 
     // Badges of a public repository: anyone.
     let badge = |path: &str| {
@@ -8276,17 +8441,59 @@ fn mirror_trees_hide_partial_files() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("f_1_amd64.deb"), "whole").unwrap();
     std::fs::write(dir.join("f_1_amd64.deb.pkgpod-part"), "half").unwrap();
+    // A replacement waiting for its dist to switch.
+    std::fs::write(dir.join("f_1_amd64.deb.pkgpod-next"), "other").unwrap();
     assert_eq!(get(&s.url("/mir/pool/main/f/f_1_amd64.deb"), None).0, 200);
-    assert_eq!(
-        get(&s.url("/mir/pool/main/f/f_1_amd64.deb.pkgpod-part"), None).0,
-        404
-    );
+    for name in ["f_1_amd64.deb.pkgpod-part", "f_1_amd64.deb.pkgpod-next"] {
+        assert_eq!(
+            get(&s.url(&format!("/mir/pool/main/f/{name}")), None).0,
+            404,
+            "{name}"
+        );
+    }
     let (st, list) = get(&s.url("/mir/pool/main/f/"), None);
     assert_eq!(st, 200);
     assert!(
-        list.contains("f_1_amd64.deb") && !list.contains("pkgpod-part"),
+        list.contains("f_1_amd64.deb")
+            && !list.contains("pkgpod-part")
+            && !list.contains("pkgpod-next"),
         "{list}"
     );
+    // Served with the types a hosted repository gives them.
+    let dist = s.dir.path().join("data/storages/main/trees/mir/dists/x");
+    std::fs::create_dir_all(&dist).unwrap();
+    std::fs::write(dist.join("InRelease"), "Origin: x\n").unwrap();
+    let ty = |path: &str| {
+        let r = reqwest::blocking::get(s.url(path)).unwrap();
+        assert_eq!(r.status().as_u16(), 200, "{path}");
+        r.headers()["content-type"].to_str().unwrap().to_string()
+    };
+    assert_eq!(ty("/mir/dists/x/InRelease"), "text/plain; charset=utf-8");
+    assert_eq!(
+        ty("/mir/pool/main/f/f_1_amd64.deb"),
+        "application/vnd.debian.binary-package"
+    );
+    // A files mirror keeps the types of names the table does not have.
+    s.cli(&[
+        "repo",
+        "create",
+        "fm",
+        "-f",
+        "files",
+        "-k",
+        "mirror",
+        "-s",
+        "source=http://127.0.0.1:9/",
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let fm = s.dir.path().join("data/storages/main/trees/fm");
+    std::fs::create_dir_all(&fm).unwrap();
+    std::fs::write(fm.join("logo.png"), "png").unwrap();
+    std::fs::write(fm.join("notes.txt"), "notes").unwrap();
+    assert_eq!(ty("/fm/logo.png"), "image/png");
+    assert_eq!(ty("/fm/notes.txt"), "text/plain; charset=utf-8");
     let pw = std::fs::read_to_string(s.dir.path().join("data/admin-password")).unwrap();
     let (st, tree) = get(
         &format!("{}/api/v1/repos/mir/tree?path=pool/main/f", s.api),

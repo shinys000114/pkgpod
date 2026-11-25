@@ -441,6 +441,11 @@ fn s(v: &Value) -> String {
     }
 }
 
+/// A count in words: `1 package`, `2 packages`.
+fn count(n: &Value, one: &str) -> String {
+    format!("{} {one}{}", s(n), if *n == 1 { "" } else { "s" })
+}
+
 struct Ctx {
     c: Client,
     json: bool,
@@ -614,18 +619,18 @@ pub fn run(
                     );
                 }
                 println!(
-                    "{} packages, {} downloads in {} days",
-                    s(&v["packages"]),
-                    s(&v["downloads"]),
+                    "{}, {} in {} days",
+                    count(&v["packages"], "package"),
+                    count(&v["downloads"], "download"),
                     30
                 );
                 if v["package"].is_object() {
                     println!(
-                        "{}: latest {}, {} versions, {} downloads",
+                        "{}: latest {}, {}, {}",
                         s(&v["package"]["name"]),
                         s(&v["package"]["latest"]),
-                        s(&v["package"]["versions"]),
-                        s(&v["package"]["downloads"])
+                        count(&v["package"]["versions"], "version"),
+                        count(&v["package"]["downloads"], "download")
                     );
                 }
             });
@@ -1940,7 +1945,11 @@ pub fn run(
                 enc(&name)
             ))?;
             x.print(&v, |v| {
-                println!("{} downloads in {} days", s(&v["total"]), s(&v["days"]));
+                println!(
+                    "{} in {}",
+                    count(&v["total"], "download"),
+                    count(&v["days"], "day")
+                );
                 let mut rows = vec![vec![
                     "NAME".into(),
                     "VERSION".into(),
@@ -2028,12 +2037,12 @@ pub fn run(
             )?;
             x.print(&v, |v| {
                 println!(
-                    "{}{} versions, {} tree objects, {} blobs ({} bytes)",
+                    "{}{}, {}, {} ({})",
                     if dry_run { "would remove " } else { "removed " },
-                    s(&v["versions"]),
-                    s(&v["objects"]),
-                    s(&v["blobs"]),
-                    s(&v["bytes"])
+                    count(&v["versions"], "version"),
+                    count(&v["objects"], "tree object"),
+                    count(&v["blobs"], "blob"),
+                    count(&v["bytes"], "byte")
                 )
             });
         }

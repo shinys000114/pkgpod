@@ -12,8 +12,19 @@ pub(crate) struct LoginPage {
     pub(crate) s: Shell,
     pub(crate) error: Option<String>,
     pub(crate) csrf: String,
-    /// The first admin's password file is still there.
+    /// Where the first admin's password is: said until someone logs in.
     pub(crate) first: bool,
+}
+
+/// Set at the console's first login: from then on the login page no
+/// longer tells anyone where the first admin's password is kept.
+const LOGGED_IN: &str = "console_logged_in";
+
+/// Does the login page say where the first admin's password is? While
+/// its file is there and nobody has logged in here yet.
+fn first_login(app: &App) -> bool {
+    app.cfg.data_dir.join("admin-password").exists()
+        && matches!(crate::auth::keys::get_setting(&app.db, LOGGED_IN), Ok(None))
 }
 
 #[derive(Template)]
@@ -52,7 +63,7 @@ pub(crate) async fn login_page(State(app): St, h: HeaderMap) -> Response {
         s: Shell::anon(),
         error: None,
         csrf: csrf.clone(),
-        first: app.cfg.data_dir.join("admin-password").exists(),
+        first: first_login(&app),
     });
     r.headers_mut().append(
         header::SET_COOKIE,
@@ -75,7 +86,7 @@ pub(crate) async fn login(State(app): St, h: HeaderMap, Form(f): Form<LoginForm>
             s: Shell::anon(),
             error: Some(e.to_string()),
             csrf: csrf.clone(),
-            first: app.cfg.data_dir.join("admin-password").exists(),
+            first: first_login(&app),
         });
         r.headers_mut().append(
             header::SET_COOKIE,
@@ -101,6 +112,15 @@ pub(crate) async fn login(State(app): St, h: HeaderMap, Form(f): Form<LoginForm>
         Err(e) => return again(&e.to_string()),
     };
     app.auth.audit(&u.name, "login", &u.name, "console");
+    if matches!(crate::auth::keys::get_setting(&app.db, LOGGED_IN), Ok(None))
+        && let Err(e) = crate::auth::keys::set_setting(
+            &app.db,
+            LOGGED_IN,
+            Some(&pkgpod_base::now().to_string()),
+        )
+    {
+        tracing::warn!("{LOGGED_IN}: {e}");
+    }
     let mut r = Redirect::to("/").into_response();
     let sec = secure(&app, &h);
     r.headers_mut().append(

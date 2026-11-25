@@ -306,13 +306,7 @@ fn rows(app: &App, caller: &Caller, host: &str, list: &[(String, String)]) -> Ve
             .into_iter()
             .filter(|l| {
                 // What a reader does: not publishing.
-                let w = l.label.to_lowercase();
-                !(w.starts_with("upload")
-                    || w.starts_with("publish")
-                    || w.starts_with("push")
-                    || w.contains("deploy")
-                    || w.starts_with("a labelled")
-                    || w == "note")
+                !crate::console::for_publishing(&l.label) && !l.label.eq_ignore_ascii_case("note")
             })
             .filter_map(|l| {
                 // A public repository's readers need no token: lines that

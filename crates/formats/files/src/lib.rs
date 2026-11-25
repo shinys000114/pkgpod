@@ -54,10 +54,12 @@ pub fn check_path(p: &str) -> Result<()> {
 }
 
 /// Does a mirror engine write `name` into a tree for itself (partial
-/// downloads, rsync's temporary files)? Those are not served.
+/// downloads, a pool file's replacement waiting for its dist to switch,
+/// rsync's temporary files)? Those are not served.
 pub fn engine_name(name: &str) -> bool {
     name.contains(".pkgpod-part")
         || name.contains(".pkgpod-tmp")
+        || name.ends_with(".pkgpod-next")
         || name == ".rsync-partial"
         || name == ".~tmp~"
         // rsync's temporary files: .<name>.XXXXXX
@@ -216,13 +218,13 @@ impl Format for Files {
             Field::int(
                 "cleanup_older_days",
                 0,
-                "Cleanup: remove subdirectories in for longer than this many days (0: never); the newest is always kept, and one a link points at.",
+                "Cleanup: remove subdirectories whose newest file was added more than this many days ago (0: never); the newest subdirectory is always kept, and one a link points at.",
             )
             .at_most(pkgpod_engine::settings::DAYS),
             Field::int(
                 "cleanup_max",
                 50,
-                "Cleanup: the daily run holds a cleanup that would remove more subdirectories than this, for review.",
+                "Cleanup: when the daily run would remove more subdirectories than this, it removes none; preview and apply such a cleanup by hand.",
             ),
         ]
     }
@@ -513,6 +515,7 @@ mod tests {
     fn engine_names() {
         for n in [
             "x.iso.pkgpod-part",
+            "f_1_amd64.deb.pkgpod-next",
             ".rsync-partial",
             ".~tmp~",
             ".big.iso.Ab12Cd",

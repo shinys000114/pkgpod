@@ -1229,6 +1229,17 @@ pub(crate) struct UseQ {
     pub(crate) dist: String,
 }
 
+/// Is a How to use line, by its label, for publishing (or for labels)?
+/// Readers through a proxy or a group, and of a host page, do not.
+pub(crate) fn for_publishing(label: &str) -> bool {
+    let w = label.to_lowercase();
+    w.starts_with("upload")
+        || w.starts_with("a labelled")
+        || w.starts_with("publish")
+        || w.contains("deploy")
+        || w.starts_with("push")
+}
+
 /// The How to use part for `place` (empty: the default), with `token` in
 /// place of `<token>` when one was just made.
 /// How to use a repository, as its How to use tab says it, from these
@@ -1253,14 +1264,7 @@ pub(crate) fn use_lines(
     let mut usage = with_names(app, r, usage(app, r, urls, host, &place));
     if matches!(r.kind, Kind::Proxy | Kind::Group) {
         // Read through: nothing is published here and it has no labels.
-        usage.retain(|l| {
-            let w = l.label.to_lowercase();
-            !(w.starts_with("upload")
-                || w.starts_with("a labelled")
-                || w.starts_with("publish")
-                || w.contains("deploy")
-                || w.starts_with("push"))
-        });
+        usage.retain(|l| !for_publishing(&l.label));
         usage.push(UseLine {
             label: "Note".into(),
             text: if r.kind == Kind::Proxy {

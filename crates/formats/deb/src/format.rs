@@ -1021,7 +1021,7 @@ impl Format for Deb {
             },
             OpSpec {
                 name: "file-remove",
-                help: "Remove another file (put with an upload's path), such as a README.",
+                help: "Remove a file that is not a package: one uploaded with a path, such as a README or a keyring.",
                 params: vec![Field::text("path", "", "Its path, as served.")],
             },
             OpSpec {
@@ -1031,7 +1031,7 @@ impl Format for Deb {
             },
             OpSpec {
                 name: "remove",
-                help: "Remove packages: name, name_version or name_version_arch.",
+                help: "Remove packages; give each as name, name_version or name_version_arch, a source package as name_version_source.",
                 params: vec![
                     pkg_field("packages", "Packages to remove."),
                     Field::list("dists", "Only in these dists; empty: all."),
@@ -1040,7 +1040,7 @@ impl Format for Deb {
             },
             OpSpec {
                 name: "copy",
-                help: "Copy packages from one dist to another (same component).",
+                help: "Copy packages from one dist to another; each keeps its component.",
                 params: vec![
                     pkg_field("packages", "Packages to copy; empty: all."),
                     Field::text("from", "", "Source dist."),
@@ -1050,7 +1050,7 @@ impl Format for Deb {
             },
             OpSpec {
                 name: "move",
-                help: "Move packages from one dist to another (same component).",
+                help: "Move packages from one dist to another; each keeps its component.",
                 params: vec![
                     pkg_field("packages", "Packages to move; empty: all."),
                     Field::text("from", "", "Source dist."),
