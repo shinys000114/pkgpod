@@ -477,6 +477,10 @@ fn schemas() -> Value {
                         "syncs_per_storage",
                         json!({"type": "integer", "minimum": 0, "maximum": 64, "description": "Mirror syncs that run at once on one storage (default 2; 0: no limit); others wait, queued."}),
                     ),
+                    (
+                        "schedules_paused",
+                        json!({"type": "boolean", "description": "No scheduled sync starts (the mirrors keep their schedules; syncs asked for still run)."}),
+                    ),
                 ],
                 &[],
             ),
@@ -606,6 +610,112 @@ fn schemas() -> Value {
                     ),
                 ],
                 &["name", "claims", "user", "repos"],
+            ),
+        ),
+        (
+            "Schedules",
+            object(
+                "The mirrors' schedules (cron, in the server's time zone) and the syncs they start in the next day.",
+                vec![
+                    ("paused", boolean()),
+                    ("time_zone", string()),
+                    ("now", integer()),
+                    ("syncs_per_storage", integer()),
+                    ("mirrors", array(sref("ScheduleRow"))),
+                    ("planned", array(sref("PlannedSync"))),
+                ],
+                &[
+                    "paused",
+                    "time_zone",
+                    "now",
+                    "syncs_per_storage",
+                    "mirrors",
+                    "planned",
+                ],
+            ),
+        ),
+        (
+            "ScheduleRow",
+            object(
+                "A mirror the caller may read.",
+                vec![
+                    ("repo", string()),
+                    ("format", string()),
+                    ("storage", string()),
+                    (
+                        "schedule",
+                        text("Its schedule setting; empty: syncs only when asked."),
+                    ),
+                    (
+                        "error",
+                        nullable("string", "What is wrong with the schedule."),
+                    ),
+                    (
+                        "next",
+                        nullable(
+                            "integer",
+                            "The next scheduled sync; none when the schedule is empty, wrong or paused.",
+                        ),
+                    ),
+                    (
+                        "running",
+                        nullable("integer", "The sync job running or waiting now."),
+                    ),
+                    (
+                        "last",
+                        or_null(object(
+                            "The last sync.",
+                            vec![
+                                ("job", integer()),
+                                ("state", string()),
+                                ("created", integer()),
+                                ("started", nullable("integer", "")),
+                                ("finished", nullable("integer", "")),
+                                ("summary", string()),
+                            ],
+                            &["job", "state", "created", "started", "finished", "summary"],
+                        )),
+                    ),
+                    (
+                        "took",
+                        nullable("integer", "Seconds the last good sync took."),
+                    ),
+                    (
+                        "can_edit",
+                        json!({"type": "boolean", "description": "The caller may change the schedule (repository admin)."}),
+                    ),
+                    (
+                        "can_sync",
+                        json!({"type": "boolean", "description": "The caller may start a sync (writer)."}),
+                    ),
+                ],
+                &[
+                    "repo", "format", "storage", "schedule", "error", "next", "running", "last",
+                    "took", "can_edit", "can_sync",
+                ],
+            ),
+        ),
+        (
+            "PlannedSync",
+            object(
+                "A sync a schedule starts.",
+                vec![
+                    ("at", integer()),
+                    ("repo", string()),
+                    ("storage", string()),
+                    (
+                        "until",
+                        nullable(
+                            "integer",
+                            "When it ends, if it takes as long as the last good sync.",
+                        ),
+                    ),
+                    (
+                        "meets",
+                        json!({"type": ["string", "null"], "enum": ["slot", "busy", null], "description": "slot: the storage's syncs are all taken, it waits; busy: the mirror's sync before still runs, it is skipped."}),
+                    ),
+                ],
+                &["at", "repo", "storage", "until", "meets"],
             ),
         ),
         (
@@ -1478,6 +1588,8 @@ fn ops() -> Vec<Op> {
             .reply(200, "The token.", sref("OidcToken")),
         op("get", "/api/v1/cli", "cli_info", "The pkgpod command this server hands out (its own build): version, platform, SHA-256, where to get it; no credentials needed.")
             .reply(200, "The command.", sref("Cli")),
+        op("get", "/api/v1/schedules", "schedules", "The mirrors the caller may read with their schedules, next runs and last syncs, and the syncs the schedules start in the next day. A schedule is set as the mirror's schedule setting (PATCH /api/v1/repos/{repo}); all are paused by the settings' schedules_paused.")
+            .reply(200, "The schedules.", sref("Schedules")),
         op("get", "/api/v1/hosts", "hosts", "Every host the repositories' addresses name: its repositories, the one that has its root (then it answers there, not the page) and its page (server admin).")
             .reply(200, "The hosts.", array(sref("Host"))),
         op("put", "/api/v1/hosts/{host}", "host_put", "Set a host's page: title, and Markdown above (header) and below (footer) its repositories; what is left out stays (server admin).")

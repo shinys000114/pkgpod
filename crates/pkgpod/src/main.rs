@@ -207,6 +207,10 @@ pub(crate) enum Cmd {
     /// get a short-lived token of which user (server admins).
     #[command(subcommand)]
     Trust(cmd::TrustCmd),
+    /// Mirror schedules: each mirror's, when it runs next, and the syncs
+    /// of the next day.
+    #[command(subcommand)]
+    Schedule(cmd::ScheduleCmd),
     /// Host pages: what a host's root shows (its repositories, with a
     /// title and Markdown above and below them; server admins).
     #[command(subcommand)]

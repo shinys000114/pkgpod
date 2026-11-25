@@ -38,6 +38,7 @@ pub mod pypi;
 pub mod resign;
 pub mod routes;
 pub mod rsa_key;
+pub mod schedules;
 pub mod schema;
 pub mod serve;
 pub mod stats;

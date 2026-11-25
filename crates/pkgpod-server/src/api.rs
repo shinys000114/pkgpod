@@ -134,7 +134,7 @@ impl App {
             && !c.trim().is_empty()
         {
             crate::cron::Cron::parse(c.trim())
-                .map_err(|e| Error::Invalid(format!("schedule {c:?}: {e}")))?;
+                .map_err(|e| Error::Invalid(format!("schedule {e}")))?;
         }
         let Some(urls) = settings.get("urls") else {
             return Ok(());
@@ -254,6 +254,7 @@ pub fn router() -> Router<Arc<App>> {
             "/api/v1/repos/{repo}",
             get(repo_get).patch(repo_patch).delete(repo_delete),
         )
+        .route("/api/v1/schedules", get(schedules))
         .route("/api/v1/repos/{repo}/versions", get(versions))
         .route("/api/v1/repos/{repo}/versions/{seq}", get(version))
         .route("/api/v1/repos/{repo}/diff", get(diff))
@@ -662,7 +663,18 @@ fn settings_json(app: &App) -> Value {
         "downloads_days": crate::stats::days_kept(app),
         "syncs_per_storage": crate::jobs::syncs_per_storage(app),
         "jobs_days": crate::jobs::jobs_days(app),
+        "schedules_paused": crate::jobs::schedules_paused(app),
     })
+}
+
+/// The mirrors' schedules the caller may read, and the syncs they start
+/// in the next day.
+pub(crate) async fn schedules(State(app): St, Who(c): Who) -> Result<Json<Value>> {
+    blocking(&app, move |app| {
+        let o = crate::schedules::overview(app, &c)?;
+        Ok(Json(json!(o)))
+    })
+    .await
 }
 
 /// The server's settings (admins).
@@ -680,6 +692,8 @@ pub(crate) struct SettingsReq {
     pub(crate) syncs_per_storage: Option<i64>,
     #[serde(default)]
     pub(crate) jobs_days: Option<i64>,
+    #[serde(default)]
+    pub(crate) schedules_paused: Option<bool>,
 }
 
 pub(crate) async fn settings_patch(
@@ -714,6 +728,11 @@ pub(crate) async fn settings_patch(
             crate::keys::set_setting(&app.db, crate::jobs::DAYS_SETTING, Some(&d.to_string()))?;
             app.auth
                 .audit(c.name(), "settings", "", &format!("jobs_days={d}"));
+        }
+        if let Some(p) = req.schedules_paused {
+            crate::keys::set_setting(&app.db, crate::jobs::PAUSE_SETTING, p.then_some("1"))?;
+            app.auth
+                .audit(c.name(), "settings", "", &format!("schedules_paused={p}"));
         }
         Ok(Json(settings_json(app)))
     })

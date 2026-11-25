@@ -643,6 +643,9 @@ pub fn scheduler(app: Arc<App>) -> tokio::task::JoinHandle<()> {
                 continue;
             }
             last = minute;
+            if schedules_paused(&app) {
+                continue;
+            }
             let Ok(repos) = app.engine.repos() else {
                 continue;
             };
@@ -668,10 +671,21 @@ pub fn scheduler(app: Arc<App>) -> tokio::task::JoinHandle<()> {
     })
 }
 
-/// When a mirror's schedule runs next.
-pub fn next_run(r: &RepoInfo) -> Option<String> {
+/// The server setting: no scheduled sync starts while it is set (the
+/// mirrors keep their schedules; syncs asked for still run).
+pub const PAUSE_SETTING: &str = "schedules_paused";
+
+pub fn schedules_paused(app: &App) -> bool {
+    crate::keys::get_setting(&app.db, PAUSE_SETTING)
+        .ok()
+        .flatten()
+        .is_some_and(|v| v == "1")
+}
+
+/// When a mirror's schedule runs next (none while schedules are paused).
+pub fn next_run(app: &App, r: &RepoInfo) -> Option<String> {
     let expr = r.setting_str("schedule").trim();
-    if expr.is_empty() {
+    if expr.is_empty() || schedules_paused(app) {
         return None;
     }
     let c = crate::cron::Cron::parse(expr).ok()?;

@@ -57,7 +57,7 @@ pub fn status(app: &App, r: &RepoInfo, package: Option<&str>) -> Result<Value> {
             "finished": last.and_then(|j| j.finished),
             "summary": last.map(|j| j.summary.clone()),
             "last_ok": last_ok,
-            "next": crate::jobs::next_run(r),
+            "next": crate::jobs::next_run(app, r),
         });
         v["ok"] = json!(ok);
     }

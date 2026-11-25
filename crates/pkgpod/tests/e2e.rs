@@ -3133,6 +3133,20 @@ fn openapi_describes_what_the_api_sends() {
         (&v["host"], &v["footer"]),
         (&json!("pkg.example.org"), &json!(""))
     );
+    a.ok(
+        "patch",
+        "/api/v1/repos/{repo}",
+        "/api/v1/repos/mir",
+        Some(json!({"settings": {"schedule": "0 */6 * * *"}})),
+        200,
+    );
+    let v = a.ok("get", "/api/v1/schedules", "/api/v1/schedules", None, 200);
+    let m = &v["mirrors"].as_array().unwrap()[0];
+    assert_eq!(
+        (&m["repo"], &m["schedule"]),
+        (&json!("mir"), &json!("0 */6 * * *"))
+    );
+    assert_eq!(v["planned"].as_array().unwrap().len(), 4, "{v}");
     let v = a.ok("get", "/api/v1/hosts", "/api/v1/hosts", None, 200);
     assert!(
         v.as_array()
@@ -13130,5 +13144,175 @@ fn a_management_listener_that_cannot_start_says_why() {
         err.contains("another program has that address")
             && err.contains("listen in the configuration file"),
         "{err}"
+    );
+}
+
+#[test]
+fn mirror_schedules_on_one_page() {
+    let s = Server::start();
+    let mk = |name: &str, public: bool| {
+        s.cli(&[
+            "repo",
+            "create",
+            name,
+            "-k",
+            "mirror",
+            "-s",
+            "source=http://127.0.0.1:9/",
+            "-s",
+            "dists=x",
+            "-s",
+            &format!("public={public}"),
+        ])
+        .unwrap();
+    };
+    mk("open", true);
+    mk("shut", false);
+    // Set from the command line; a wrong one is refused and nothing of
+    // the mirror changes.
+    let out = s.cli(&["schedule", "set", "open", "0 */6 * * *"]).unwrap();
+    assert!(out.contains("open: 0 */6 * * *"), "{out}");
+    let e = s
+        .cli(&["schedule", "set", "open", "every day"])
+        .unwrap_err();
+    assert!(e.contains("schedule"), "{e}");
+    let r = s.json(&["repo", "show", "open"]);
+    assert_eq!(r["settings"]["schedule"], "0 */6 * * *", "{r}");
+    assert_eq!(r["settings"]["source"], "http://127.0.0.1:9/", "{r}");
+    let l = s.cli(&["schedule", "list"]).unwrap();
+    assert!(l.contains("0 */6 * * *") && l.contains("shut"), "{l}");
+    // A day ahead: four syncs, one each six hours.
+    let p = s.cli(&["schedule", "list", "--plan"]).unwrap();
+    assert_eq!(p.lines().filter(|l| l.contains("open")).count(), 4, "{p}");
+
+    // The console page: both, editable by an admin; saved through the
+    // mirror's settings, the other settings as they were.
+    let (c, sid, csrf) = console_session(&s, "ops", "ops-password");
+    let page = || {
+        c.get(format!("{}/schedules", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .send()
+            .unwrap()
+            .text()
+            .unwrap()
+    };
+    let h = page();
+    assert!(
+        h.contains(r#"hx-post="/c/schedules/shut""#) && h.contains(r#"value="0 */6 * * *""#),
+        "{h}"
+    );
+    let post = |path: &str, form: &[(&str, &str)]| {
+        c.post(format!("{}{path}", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .header("x-csrf-token", &csrf)
+            .form(form)
+            .send()
+            .unwrap()
+    };
+    let r = post("/c/schedules/shut", &[("schedule", "@daily")]);
+    assert_eq!(r.headers()["hx-refresh"], "true");
+    let r = s.json(&["repo", "show", "shut"]);
+    assert_eq!(r["settings"]["schedule"], "@daily", "{r}");
+    assert_eq!(r["settings"]["dists"], json!(["x"]), "{r}");
+    let t = post("/c/schedules/shut", &[("schedule", "0 25 * * *")])
+        .text()
+        .unwrap();
+    assert!(t.contains("schedule") && t.contains("25"), "{t}");
+    assert_eq!(
+        s.json(&["repo", "show", "shut"])["settings"]["schedule"],
+        "@daily"
+    );
+    // As typed: the next times, or what is wrong.
+    let pv = |e: &str| {
+        c.get(format!("{}/c/schedules/preview", s.api))
+            .query(&[("schedule", e)])
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .send()
+            .unwrap()
+            .text()
+            .unwrap()
+    };
+    assert!(pv("@hourly").contains("next: "), "{}", pv("@hourly"));
+    assert!(pv("0 25 * * *").contains("not valid"));
+
+    // Readers see what they may read, and change nothing.
+    s.cli_in(&["user", "add", "dev", "--password-stdin"], "dev-password")
+        .unwrap();
+    s.cli(&["grant", "set", "shut", "user:dev", "read"])
+        .unwrap();
+    let api = reqwest::blocking::Client::new();
+    let list = |auth: bool| {
+        let mut r = api.get(format!("{}/api/v1/schedules", s.api));
+        if auth {
+            r = r.basic_auth("dev", Some("dev-password"));
+        }
+        r.send().unwrap().json::<Value>().unwrap()
+    };
+    let v = list(true);
+    let names: Vec<_> = v["mirrors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            (
+                m["repo"].as_str().unwrap().to_string(),
+                m["can_edit"] == true,
+            )
+        })
+        .collect();
+    assert_eq!(
+        names,
+        [("open".to_string(), false), ("shut".to_string(), false)],
+        "{v}"
+    );
+    let v = list(false);
+    assert_eq!(v["mirrors"].as_array().unwrap().len(), 1, "{v}");
+    let r = api
+        .patch(format!("{}/api/v1/repos/shut", s.api))
+        .basic_auth("dev", Some("dev-password"))
+        .json(&json!({"settings": {"schedule": ""}}))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 403);
+
+    // Paused: the schedules stay, nothing is planned or next.
+    s.cli(&["schedule", "pause"]).unwrap();
+    let v = s.json(&["schedule", "list"]);
+    assert_eq!(v["paused"], true);
+    assert!(v["planned"].as_array().unwrap().is_empty(), "{v}");
+    assert!(
+        v["mirrors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["next"].is_null()),
+        "{v}"
+    );
+    assert_eq!(
+        s.json(&["repo", "show", "open"])["settings"]["schedule"],
+        "0 */6 * * *"
+    );
+    assert!(page().contains("Schedules are paused"));
+    let st = api
+        .get(format!("{}/api/v1/repos/open/status", s.api))
+        .send()
+        .unwrap()
+        .json::<Value>()
+        .unwrap();
+    assert!(
+        st["sync"].is_object() && st["sync"]["next"].is_null(),
+        "{st}"
+    );
+    s.cli(&["schedule", "resume"]).unwrap();
+    let v = s.json(&["schedule", "list"]);
+    assert_eq!(v["paused"], false);
+    assert_eq!(
+        v["planned"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["repo"] == "open")
+            .count(),
+        4
     );
 }
