@@ -32,6 +32,10 @@ pub struct Faults {
     /// Send this many body bytes, then stall (until the client gives up),
     /// once.
     pub stall_once: HashMap<String, usize>,
+    /// How long each stall lasted until the client hung up, from before
+    /// its bytes were sent; a stall the client sat out to the end (30 s)
+    /// is not listed.
+    pub stalls: Vec<std::time::Duration>,
     pub ignore_range: bool,
     /// (path, Range header) of every request.
     pub requests: Vec<(String, Option<String>)>,
@@ -146,9 +150,24 @@ fn serve(conn: TcpStream, root: &Path, faults: &Mutex<Faults>) -> std::io::Resul
         .as_bytes(),
     )?;
     if let Some(n) = stall.filter(|n| *n < body.len()) {
+        // Timed from before the bytes go out: the client's wait for more
+        // can only start after it has them.
+        let t = std::time::Instant::now();
         out.write_all(&body[..n])?;
         out.flush()?;
-        std::thread::sleep(std::time::Duration::from_secs(5));
+        // The client sends nothing more: the read ends when it hangs up.
+        out.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+        let hung_up = match reader.read(&mut [0; 1]) {
+            Ok(0) => true,
+            Ok(_) => false,
+            Err(e) => !matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ),
+        };
+        if hung_up {
+            faults.lock().unwrap().stalls.push(t.elapsed());
+        }
         return Ok(());
     }
     match cut {

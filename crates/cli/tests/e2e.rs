@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use pkgpod_deb::testutil::{build_deb, have};
+use pkgpod_deb::testutil::{build_deb, have, missing_tool, require_tools};
 use serde_json::{Value, json};
 
 /// A port nothing listens on, never handed out twice in this process:
@@ -29,6 +29,30 @@ fn free_port() -> u16 {
     }
 }
 
+/// Whether process `pid` itself listens on 127.0.0.1:`port`. That a
+/// connection is accepted says less: another program may hold the port
+/// (a server of a test run beside this one, say), and this server then
+/// cannot bind it.
+fn listens(pid: u32, port: u16) -> bool {
+    // The sockets listening there, by inode (/proc/net/tcp has the
+    // address in hex as the kernel stores it; state 0A is LISTEN), and
+    // whether the process has one of them open.
+    let local = format!("{:08X}:{port:04X}", u32::from_ne_bytes([127, 0, 0, 1]));
+    let tcp = std::fs::read_to_string("/proc/net/tcp").unwrap_or_default();
+    let sockets: Vec<PathBuf> = tcp
+        .lines()
+        .skip(1)
+        .map(|l| l.split_whitespace().collect::<Vec<_>>())
+        .filter(|f| f.len() > 9 && f[1] == local && f[3] == "0A")
+        .map(|f| PathBuf::from(format!("socket:[{}]", f[9])))
+        .collect();
+    std::fs::read_dir(format!("/proc/{pid}/fd"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|f| std::fs::read_link(f.path()).is_ok_and(|t| sockets.contains(&t)))
+}
+
 struct Server {
     dir: tempfile::TempDir,
     child: Child,
@@ -38,8 +62,13 @@ struct Server {
 
 impl Server {
     fn start() -> Server {
+        Server::start_serving_on(free_port())
+    }
+
+    /// [`Server::start`] with the serving listener on `sport`.
+    fn start_serving_on(sport: u16) -> Server {
         let dir = tempfile::tempdir().unwrap();
-        let (mport, sport) = (free_port(), free_port());
+        let mport = free_port();
         let cfg = dir.path().join("pkgpod.toml");
         std::fs::write(
             &cfg,
@@ -56,38 +85,25 @@ impl Server {
             .stderr(Stdio::inherit())
             .spawn()
             .unwrap();
-        let s = Server {
+        let mut s = Server {
             api: format!("http://127.0.0.1:{mport}"),
             dir,
             child,
             serve_port: sport,
         };
-        let t = Instant::now();
-        while reqwest::blocking::get(format!("{}/api/v1/status", s.api)).is_err() {
-            assert!(
-                t.elapsed() < Duration::from_secs(20),
-                "server did not start"
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        s.wait_api();
         let pw = std::fs::read_to_string(s.dir.path().join("data/admin-password")).unwrap();
         s.cli_in(&["login", "-u", "admin", "--password-stdin"], pw.trim())
             .unwrap();
         s.cli(&["listener", "set", "default", &format!("127.0.0.1:{sport}")])
             .unwrap();
-        let t = Instant::now();
-        while std::net::TcpStream::connect(("127.0.0.1", sport)).is_err() {
-            assert!(
-                t.elapsed() < Duration::from_secs(10),
-                "listener did not start"
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        s.wait_listening(sport, Some("default"));
         s
     }
 
     /// Stops the server and starts it again on the same data (a cold
-    /// start: nothing cached).
+    /// start: nothing cached), and waits for its API and serving
+    /// listener.
     fn restart(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -98,9 +114,51 @@ impl Server {
             .stderr(Stdio::inherit())
             .spawn()
             .unwrap();
+        self.wait_api();
+        self.wait_listening(self.serve_port, Some("default"));
+    }
+
+    /// Waits for the management listener, this server's own, and the API
+    /// behind it.
+    fn wait_api(&mut self) {
+        let port = self.api.rsplit(':').next().unwrap().parse().unwrap();
+        self.wait_listening(port, None);
         let t = Instant::now();
-        while std::net::TcpStream::connect(("127.0.0.1", self.serve_port)).is_err() {
-            assert!(t.elapsed() < Duration::from_secs(20), "no restart");
+        while reqwest::blocking::get(format!("{}/api/v1/status", self.api)).is_err() {
+            assert!(
+                t.elapsed() < Duration::from_secs(20),
+                "the API does not answer"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Waits until this server listens on `port` itself (see [`listens`]).
+    /// Fails when the server exits first and, for its listener `name`,
+    /// when the server says why that one could not listen there.
+    fn wait_listening(&mut self, port: u16, name: Option<&str>) {
+        let t = Instant::now();
+        while !listens(self.child.id(), port) {
+            if let Some(st) = self.child.try_wait().unwrap() {
+                panic!("the server exited ({st}) before it listened on port {port}");
+            }
+            if let Some(name) = name {
+                let v = self.json(&["listener", "list"]);
+                let failed = v
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|l| l["name"] == name && l["running"] == false)
+                    .and_then(|l| l["error"].as_str())
+                    .filter(|e| e.contains(&format!(":{port}")));
+                if let Some(e) = failed {
+                    panic!("listener {name}: {e}");
+                }
+            }
+            assert!(
+                t.elapsed() < Duration::from_secs(20),
+                "the server does not listen on port {port}"
+            );
             std::thread::sleep(Duration::from_millis(50));
         }
     }
@@ -6123,12 +6181,7 @@ fn group_of_npm_registries() {
 /// A group of PyPI repositories with pip.
 #[test]
 fn group_of_pypi_repositories() {
-    if !have("python3")
-        || !Command::new("python3")
-            .args(["-m", "pip", "--version"])
-            .output()
-            .is_ok_and(|o| o.status.success())
-    {
+    if !have_pip() {
         return;
     }
     let s = Server::start();
@@ -6849,7 +6902,7 @@ fn group_of_maven_repositories() {
         ),
     )
     .unwrap();
-    let mvn = "mvn -B -q -s /work/settings.xml -Dmaven.repo.local=/m2 -Dmaven.test.skip=true \
+    let mvn = "mvn -B -q -s /work/settings.xml -Dmaven.repo.local=/m2/group -Dmaven.test.skip=true \
                -Daether.enhancedLocalRepository.split=true \
                -Daether.enhancedLocalRepository.splitRemoteRepository=true";
     let project = |dir: &str, artifact: &str, version: &str, body: &str, extra: &str| {
@@ -7371,10 +7424,10 @@ fn maven_proxy_cache() {
         format!("<settings><servers><server><id>up</id><username>token</username><password>{ut}</password></server></servers></settings>\n"),
     )
     .unwrap();
-    // The shared local repository, kept apart by the repository an
-    // artifact came from: another id fetches again.
+    // One local repository for both runs below, kept apart by the
+    // repository an artifact came from: another id fetches again.
     let mvn = |_: &str| {
-        "mvn -B -q -s /work/settings.xml -Dmaven.repo.local=/m2/cached -Dmaven.test.skip=true \
+        "mvn -B -q -s /work/settings.xml -Dmaven.repo.local=/m2/proxy -Dmaven.test.skip=true \
          -Daether.enhancedLocalRepository.split=true \
          -Daether.enhancedLocalRepository.splitRemoteRepository=true"
             .to_string()
@@ -7620,12 +7673,7 @@ fn npm_proxy_cache() {
 /// A PyPI proxy of another pkgpod's index, with pip.
 #[test]
 fn pypi_proxy_cache() {
-    if !have("python3")
-        || !Command::new("python3")
-            .args(["-m", "pip", "--version"])
-            .output()
-            .is_ok_and(|o| o.status.success())
-    {
+    if !have_pip() {
         return;
     }
     let up = Server::start();
@@ -12409,6 +12457,21 @@ fn twine_upload(url: &str, auth: Option<(&str, &str)>, file: &Path) -> (u16, Str
     (r.status().as_u16(), r.text().unwrap())
 }
 
+/// Whether python3 has pip, as [`have`] says of a tool.
+fn have_pip() -> bool {
+    if !have("python3") {
+        return false;
+    }
+    let ok = Command::new("python3")
+        .args(["-m", "pip", "--version"])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !ok {
+        missing_tool("pip");
+    }
+    ok
+}
+
 fn pip(args: &[&str], target: &Path) -> (bool, String) {
     let o = Command::new("python3")
         .args([
@@ -12438,12 +12501,7 @@ fn pip(args: &[&str], target: &Path) -> (bool, String) {
 
 #[test]
 fn pypi_with_pip() {
-    if !have("python3")
-        || !Command::new("python3")
-            .args(["-m", "pip", "--version"])
-            .output()
-            .is_ok_and(|o| o.status.success())
-    {
+    if !have_pip() {
         return;
     }
     let s = Server::start();
@@ -13404,14 +13462,9 @@ fn backup_while_working_then_restore() {
         .stderr(Stdio::inherit())
         .spawn()
         .unwrap();
-    let t = Instant::now();
-    while std::net::TcpStream::connect(("127.0.0.1", s.serve_port)).is_err() {
-        assert!(
-            t.elapsed() < Duration::from_secs(20),
-            "restored server did not start"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    // Its management listener is on another port, which the saved login
+    // does not know: no reason asked of it.
+    s.wait_listening(s.serve_port, None);
     // The RSA key came back: the same, and new indexes are signed with it.
     assert_eq!(rsa_key(), rsa_before);
     let admin_pw = std::fs::read_to_string(s.dir.path().join("data/admin-password")).unwrap();
@@ -13909,7 +13962,7 @@ fn go_modules_through_the_proxy() {
     if !have("go") || !have("git") || !have("openssl") {
         return;
     }
-    let s = Server::start();
+    let mut s = Server::start();
     // A private proxy is reached over https: a listener with a
     // certificate of its own for 127.0.0.1.
     let home = s.dir.path().join("gohome");
@@ -13944,11 +13997,7 @@ fn go_modules_through_the_proxy() {
         key.to_str().unwrap(),
     ])
     .unwrap();
-    let t0 = Instant::now();
-    while std::net::TcpStream::connect(("127.0.0.1", tls_port)).is_err() {
-        assert!(t0.elapsed() < Duration::from_secs(10), "the TLS listener");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    s.wait_listening(tls_port, Some("tls"));
     s.cli(&["repo", "create", "gomods", "-f", "go"]).unwrap();
     let tok = s
         .cli(&["token", "create", "ci", "--repos", "gomods", "--write"])
@@ -14081,8 +14130,6 @@ fn go_modules_through_the_proxy() {
     assert!(ok && out.trim() == "example.com/greet v1.1.0", "{out}");
 }
 
-/// The images of `wanted` that are here (none is pulled). With
-/// PKGPOD_REQUIRE_TOOLS (CI), having none fails instead of skipping.
 /// Whether docker has `image` (asked of images built here when missing:
 /// never fails for it).
 fn image_here(image: &str) -> bool {
@@ -14094,24 +14141,17 @@ fn image_here(image: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
+/// The images of `wanted` that are here (none is pulled). With
+/// PKGPOD_REQUIRE_TOOLS=1 (CI), any of them missing fails instead of
+/// skipping: a test must not pass on the clients it found alone.
 fn images_here(wanted: &[&'static str]) -> Vec<&'static str> {
     if !have("docker") {
         return Vec::new();
     }
-    let here: Vec<&'static str> = wanted
-        .iter()
-        .copied()
-        .filter(|i| {
-            Command::new("docker")
-                .args(["image", "inspect", i])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .is_ok_and(|s| s.success())
-        })
-        .collect();
-    if here.is_empty() && std::env::var_os("PKGPOD_REQUIRE_TOOLS").is_some() {
-        panic!("none of {wanted:?} is here (docker pull it)");
+    let (here, missing): (Vec<&'static str>, Vec<&'static str>) =
+        wanted.iter().copied().partition(|i| image_here(i));
+    if !missing.is_empty() && require_tools() {
+        panic!("{missing:?} not here (docker pull it)");
     }
     here
 }
@@ -14808,9 +14848,11 @@ fn helm_app_version_that_looks_like_a_number() {
 }
 
 /// Runs mvn's `script` in the Maven image with `work` at /work. Plugins
-/// from Maven Central are kept between runs in the volume pkgpod-e2e-m2;
-/// what the tests deploy has a group of its own each run, so nothing
-/// kept there stands in for the server.
+/// from Maven Central are kept between runs in the volume pkgpod-e2e-m2,
+/// in a local repository for each test (/m2/<test>): Maven does not lock
+/// one against other processes, and the tests run at once. What the
+/// tests deploy has a group of its own each run, so nothing kept there
+/// stands in for the server.
 fn mvn_sh(work: &Path, script: &str) -> (bool, String) {
     let uid = rustix::process::getuid().as_raw();
     let gid = rustix::process::getgid().as_raw();
@@ -14893,7 +14935,7 @@ fn maven_deploy_and_depend() {
     );
     // What is fetched is kept apart by the repository it came from, so
     // one repository's artifacts do not stand in for another's.
-    let mvn = "mvn -B -q -s /work/settings.xml -Dmaven.repo.local=/m2 -Dmaven.test.skip=true \
+    let mvn = "mvn -B -q -s /work/settings.xml -Dmaven.repo.local=/m2/deploy -Dmaven.test.skip=true \
                -Daether.enhancedLocalRepository.split=true \
                -Daether.enhancedLocalRepository.splitRemoteRepository=true";
     let deploy = |version: &str, method: &str| {
@@ -15021,7 +15063,7 @@ fn maven_deploy_and_depend() {
     .unwrap();
     let (ok, out) = mvn_sh(
         &work,
-        "mkdir -p empty && cd empty && mvn -B -s /work/plugins.xml -Dmaven.repo.local=/m2 \
+        "mkdir -p empty && cd empty && mvn -B -s /work/plugins.xml -Dmaven.repo.local=/m2/deploy \
          -Daether.enhancedLocalRepository.split=true \
          -Daether.enhancedLocalRepository.splitRemoteRepository=true pkhello:hello",
     );
@@ -16977,15 +17019,6 @@ fn ipk_feeds_with_opkg() {
     assert!(ok && out.ends_with("first"), "{out}");
 }
 
-/// Waits for a listener of the server (a TLS one, after a restart).
-fn wait_port(port: u16) {
-    let t0 = Instant::now();
-    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
-        assert!(t0.elapsed() < Duration::from_secs(20), "port {port}");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
 const TERRAFORM_IMAGE: &str = "hashicorp/terraform:1.13";
 const TOFU_IMAGE: &str = "ghcr.io/opentofu/opentofu:1.10";
 /// The registry's host name in the clients' containers (module sources
@@ -17062,11 +17095,7 @@ fn terraform_registry_with_terraform_and_tofu() {
         key.to_str().unwrap(),
     ])
     .unwrap();
-    let t0 = Instant::now();
-    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
-        assert!(t0.elapsed() < Duration::from_secs(10), "the TLS listener");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    s.wait_listening(port, Some("tls"));
     let host = format!("{TF_HOST}:{port}");
     s.cli(&["key", "generate", "main", "Test <t@example.invalid>"])
         .unwrap();
@@ -17268,7 +17297,7 @@ fn terraform_registry_with_terraform_and_tofu() {
     s.cli(&["rm", "tf", "modules/team/greeting/null/1.1.0.tar.gz", "-y"])
         .unwrap();
     s.restart();
-    wait_port(port);
+    s.wait_listening(port, Some("tls"));
     let (ok, out) = run(TOFU_IMAGE, "tofu", "run-after", "rc.tfrc");
     assert!(ok && out.contains("MSG=hello pkgpod 1.0.0"), "{out}");
 }
@@ -17551,6 +17580,8 @@ const CONAN_NEW: &str = "pkgpod-e2e/conan:2.34.0";
 const CONAN_OLD: &str = "pkgpod-e2e/conan:2.0.17";
 
 /// The Conan images (python with conan from PyPI), built when missing.
+/// CI builds them beforehand, in its "Helper images" step: the two
+/// Dockerfiles must stay alike.
 fn conan_images() -> Vec<&'static str> {
     if !have("docker") || images_here(&["python:3.12-slim"]).is_empty() {
         return Vec::new();
@@ -17694,7 +17725,8 @@ fn conan_remote_with_conan_2() {
 const SWIFT_IMAGE: &str = "pkgpod-e2e/swift:6.1";
 
 /// The Swift image (swift:6.1 with zip, which publishing needs), built
-/// when missing.
+/// when missing. CI builds it beforehand, in its "Helper images" step:
+/// the two Dockerfiles must stay alike.
 fn swift_image() -> bool {
     if !have("docker") || images_here(&["swift:6.1"]).is_empty() {
         return false;
@@ -17756,11 +17788,7 @@ fn swift_registry_with_swiftpm() {
         key.to_str().unwrap(),
     ])
     .unwrap();
-    let t0 = Instant::now();
-    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
-        assert!(t0.elapsed() < Duration::from_secs(10), "the TLS listener");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    s.wait_listening(port, Some("tls"));
     s.cli(&["repo", "create", "sw", "-f", "swift"]).unwrap();
     let tok = s
         .cli(&["token", "create", "ci", "--repos", "sw", "--write"])
@@ -17785,23 +17813,52 @@ fn swift_registry_with_swiftpm() {
                 )
             }
         );
-        let o = Command::new("docker")
-            .args(["run", "--rm", "--network", "host", "--entrypoint", "sh"])
-            .arg("-v")
-            .arg(format!("{}:/work:ro", work.display()))
-            .arg(SWIFT_IMAGE)
-            .arg("-c")
-            .arg(full)
-            .output()
-            .unwrap();
-        (
-            o.status.success(),
+        let run = || {
+            Command::new("docker")
+                .args(["run", "--rm", "--network", "host", "--entrypoint", "sh"])
+                .arg("-v")
+                .arg(format!("{}:/work:ro", work.display()))
+                .arg(SWIFT_IMAGE)
+                .arg("-c")
+                .arg(&full)
+                .output()
+                .unwrap()
+        };
+        let text = |o: &std::process::Output| {
             format!(
                 "{}{}",
                 String::from_utf8_lossy(&o.stdout),
                 String::from_utf8_lossy(&o.stderr)
-            ),
-        )
+            )
+        };
+        // The Swift toolchain itself sometimes crashes on a loaded machine
+        // (SIGSEGV in libcrypto as URLSession lets go of its connections;
+        // the runtime's report, on stderr or where a step sends it, names
+        // the swift binary). Such a step is run once more, saying so; a
+        // second crash fails the test, so that a step meant to be refused
+        // cannot pass by crashing. A publish that crashed after its upload
+        // is refused the second time as already published, which fails
+        // the test too.
+        let crashed = |o: &std::process::Output| {
+            let out = text(o);
+            o.status.code() == Some(139)
+                && out.contains("*** Signal 11:")
+                && out.contains("/usr/bin/swift")
+        };
+        let mut o = run();
+        if crashed(&o) {
+            eprintln!(
+                "the Swift toolchain crashed; running the step again:\n{}",
+                text(&o)
+            );
+            o = run();
+            assert!(
+                !crashed(&o),
+                "the Swift toolchain crashed again:\n{}",
+                text(&o)
+            );
+        }
+        (o.status.success(), text(&o))
     };
     let publish = |ver: &str, text: &str| {
         swift(
@@ -17866,7 +17923,7 @@ fn swift_registry_with_swiftpm() {
     s.cli(&["rm", "sw", "team/greeting/1.1.0.zip", "-y"])
         .unwrap();
     s.restart();
-    wait_port(port);
+    s.wait_listening(port, Some("tls"));
     let (ok, out) = app(&url, &tok, resolve);
     assert!(ok && out.contains("\"version\" : \"1.0.0\""), "{out}");
 }
@@ -17983,6 +18040,20 @@ fn a_management_listener_that_cannot_start_says_why() {
             && err.contains("listen in the configuration file"),
         "{err}"
     );
+}
+
+/// A test's server waits for listeners of its own: a port another
+/// program holds (a server of another test run, say) is not taken for
+/// its serving listener, and the failure says why.
+#[test]
+fn a_test_server_does_not_take_another_programs_port_for_its_own() {
+    let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = other.local_addr().unwrap().port();
+    let Err(e) = std::panic::catch_unwind(|| drop(Server::start_serving_on(port))) else {
+        panic!("started on port {port}, which another program holds");
+    };
+    let e = e.downcast_ref::<String>().map_or("", String::as_str);
+    assert!(e.contains("another program has that address"), "{e}");
 }
 
 #[test]
