@@ -204,6 +204,16 @@ impl Engine {
                 path.display()
             )));
         }
+        // Two storages in one directory would each collect the other's
+        // blobs as garbage.
+        for (other, p) in self.storages()? {
+            if other != name && same_dir(&p, path) {
+                return Err(Error::Conflict(format!(
+                    "storage {other} is in that directory ({})",
+                    p.display()
+                )));
+            }
+        }
         self.db.write(|tx| {
             tx.execute(
                 "INSERT INTO storages (name, path) VALUES (?1, ?2)
@@ -1133,4 +1143,15 @@ pub struct Found {
     pub version: String,
     pub extra: String,
     pub size: u64,
+}
+
+/// Whether two storage paths name one directory: the same directory
+/// (also through a link) when both exist, else the same path (a trailing
+/// slash or doubled separators aside).
+fn same_dir(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+        _ => a.components().eq(b.components()),
+    }
 }

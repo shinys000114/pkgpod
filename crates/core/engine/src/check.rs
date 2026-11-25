@@ -5,7 +5,7 @@
 //! what formats say those blobs reference, is in the store, with its
 //! size (and, deep, its sha256). Problems are listed, not fatal.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use pkgpod_base::Digest;
 use serde::Serialize;
@@ -46,7 +46,9 @@ impl Engine {
                 rep.problems.push(p);
             }
         };
-        let mut objects = HashSet::new();
+        // Objects walked, by storage: a directory shared by repositories
+        // on two storages is one object, but its blobs are in each.
+        let mut seen: HashMap<String, HashSet<Digest>> = HashMap::new();
         let mut checked: HashSet<(String, Digest)> = HashSet::new();
         for r in self.repos()? {
             if r.kind == crate::Kind::Proxy {
@@ -86,6 +88,7 @@ impl Engine {
             rep.repos += 1;
             let f = self.format(&r.format)?.clone();
             let store = r.store();
+            let objects = seen.entry(r.storage.clone()).or_default();
             let versions = self.versions(&r.name)?;
             if versions.is_empty() {
                 note(&mut rep, format!("{}: no versions", r.name));
@@ -97,7 +100,7 @@ impl Engine {
                         continue;
                     };
                     let mut blobs: Vec<(Digest, Option<u64>)> = Vec::new();
-                    let res = self.objects().reach(&root, &mut objects, &mut |e| {
+                    let res = self.objects().reach(&root, objects, &mut |e| {
                         if let Entry::Blob { sha256, size, .. } = e {
                             blobs.push((*sha256, Some(*size)));
                             for d in f.references(e, &store) {
@@ -164,7 +167,7 @@ impl Engine {
                 }
             }
         }
-        rep.objects = objects.len();
+        rep.objects = seen.into_values().flatten().collect::<HashSet<_>>().len();
         if problems > rep.problems.len() {
             rep.problems
                 .push(format!("... and {} more", problems - rep.problems.len()));
