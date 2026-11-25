@@ -17,7 +17,7 @@ use crate::{Error, Result};
 const FILE: &str = "server.rsa";
 
 /// DER prefix of a SHA-256 DigestInfo (PKCS#1 v1.5).
-const SHA256_PREFIX: &[u8] = &[
+pub(crate) const SHA256_PREFIX: &[u8] = &[
     0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05,
     0x00, 0x04, 0x20,
 ];
@@ -89,6 +89,25 @@ impl RsaKey {
             prefix: SHA256_PREFIX.into(),
         };
         self.key.sign(scheme, &hash).map_err(err)
+    }
+}
+
+#[cfg(test)]
+impl RsaKey {
+    /// A small key, quick to make, for tests of signatures.
+    pub fn generate_for_tests() -> RsaKey {
+        let k = rsa::RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 1024).expect("a key");
+        RsaKey::of(k).expect("a key")
+    }
+
+    pub fn n(&self) -> Vec<u8> {
+        use rsa::traits::PublicKeyParts;
+        self.key.n().to_bytes_be()
+    }
+
+    pub fn e(&self) -> Vec<u8> {
+        use rsa::traits::PublicKeyParts;
+        self.key.e().to_bytes_be()
     }
 }
 

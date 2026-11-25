@@ -7,7 +7,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use pkgpod_deb::testutil::{build_deb, have};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// A port nothing listens on, never handed out twice in this process:
 /// tests run in parallel, and the system may give a port just released
@@ -3071,6 +3071,42 @@ fn openapi_describes_what_the_api_sends() {
         None,
         204,
     );
+    // Trusted publishing: a rule, a CI's token exchanged by it, the rule
+    // removed.
+    let (issuer, iss) = fake_issuer(json!({}));
+    let trust = "/api/v1/trust";
+    let v = a.ok(
+        "post",
+        trust,
+        trust,
+        Some(
+            json!({"name": "ci", "issuer": issuer, "claims": {"repository": "org/app"},
+                    "user": "dev", "repos": ["web"]}),
+        ),
+        201,
+    );
+    assert_eq!(
+        (&v["minutes"], &v["audience"]),
+        (&json!(15), &json!("pkgpod"))
+    );
+    let v = a.ok("get", trust, trust, None, 200);
+    assert_eq!(v.as_array().unwrap().len(), 1, "{v}");
+    let oidc = "/api/v1/oidc/token";
+    let (st, v) = a.check(
+        "post",
+        oidc,
+        a.anon("post", oidc).json(&json!({
+            "token": iss.token(json!({"aud": "pkgpod", "repository": "org/app", "jti": "o"}))
+        })),
+    );
+    assert_eq!((st, &v["user"]), (200, &json!("dev")), "{v}");
+    a.ok(
+        "delete",
+        "/api/v1/trust/{name}",
+        "/api/v1/trust/ci",
+        None,
+        204,
+    );
     a.ok(
         "delete",
         member,
@@ -5621,6 +5657,314 @@ fn files_hosted() {
         found.to_string().contains("tools/v1/tool.tar.gz") && found.to_string().contains("\"v1\""),
         "{found}"
     );
+}
+
+/// A fake OIDC issuer on the loopback: its discovery document, its keys,
+/// and GitHub Actions' token endpoint (`/gha`, which wants bearer
+/// `ci-secret` and makes a token with `claims` for the audience asked).
+fn fake_issuer(
+    claims: Value,
+) -> (
+    String,
+    std::sync::Arc<pkgpod_server::oidc::testutil::Issuer>,
+) {
+    use std::io::{BufRead, BufReader, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
+    let iss = std::sync::Arc::new(pkgpod_server::oidc::testutil::Issuer::new(&url));
+    let i2 = iss.clone();
+    std::thread::spawn(move || {
+        for conn in l.incoming() {
+            let Ok(mut conn) = conn else { continue };
+            let mut r = BufReader::new(conn.try_clone().unwrap());
+            let mut line = String::new();
+            let _ = r.read_line(&mut line);
+            let mut auth = String::new();
+            loop {
+                let mut h = String::new();
+                if r.read_line(&mut h).unwrap_or(0) == 0 || h == "\r\n" {
+                    break;
+                }
+                if h.to_ascii_lowercase().starts_with("authorization:") {
+                    auth = h[14..].trim().to_string();
+                }
+            }
+            let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
+            let (code, body) = if path == "/.well-known/openid-configuration" {
+                (200, i2.discovery())
+            } else if path == "/keys" {
+                (200, i2.jwks())
+            } else if let Some(q) = path.strip_prefix("/gha?") {
+                if auth != "Bearer ci-secret" {
+                    (401, json!({}))
+                } else {
+                    let aud = q
+                        .split('&')
+                        .find_map(|kv| kv.strip_prefix("audience="))
+                        .unwrap_or("");
+                    let mut c = claims.clone();
+                    c["aud"] = json!(aud);
+                    c["jti"] = json!(format!(
+                        "gha-{}",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_nanos()
+                    ));
+                    (200, json!({"value": i2.token(c)}))
+                }
+            } else {
+                (404, json!({}))
+            };
+            let b = body.to_string();
+            let _ = write!(
+                conn,
+                "HTTP/1.1 {code} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{b}",
+                b.len()
+            );
+        }
+    });
+    (url, iss)
+}
+
+/// Trusted publishing: a CI job's OIDC token, as a rule allows, for a
+/// short-lived token of the rule's user, limited to its repositories.
+#[test]
+fn trusted_publishing() {
+    let s = Server::start();
+    s.cli(&["repo", "create", "out", "-f", "files"]).unwrap();
+    s.cli(&["repo", "create", "other", "-f", "files"]).unwrap();
+    s.cli_in(
+        &["user", "add", "ci", "--password-stdin"],
+        "ci-password-1234",
+    )
+    .unwrap();
+    s.cli(&["grant", "set", "out", "user:ci", "write"]).unwrap();
+    s.cli(&["grant", "set", "other", "user:ci", "write"])
+        .unwrap();
+    let (issuer, iss) = fake_issuer(json!({
+        "repository": "org/app", "ref": "refs/tags/v1.0",
+        "workflow_ref": "org/app/.github/workflows/release.yml@refs/tags/v1.0",
+    }));
+
+    // Rules say who they trust; a GitHub one names its repository.
+    let e = s
+        .cli(&[
+            "trust", "add", "loose", "--issuer", &issuer, "--claim", "ref=*", "--user", "ci",
+            "--repos", "out",
+        ])
+        .unwrap_err();
+    assert!(e.contains("names who it trusts"), "{e}");
+    let e = s
+        .cli(&[
+            "trust", "add", "gh", "--github", "org/*", "--user", "ci", "--repos", "out",
+        ])
+        .unwrap_err();
+    assert!(e.contains("names its repository"), "{e}");
+    let e = s
+        .cli(&[
+            "trust",
+            "add",
+            "r",
+            "--issuer",
+            "http://example.org",
+            "--claim",
+            "repository=org/app",
+            "--user",
+            "ci",
+            "--repos",
+            "out",
+        ])
+        .unwrap_err();
+    assert!(e.contains("https address"), "{e}");
+    let out = s
+        .cli(&[
+            "trust",
+            "add",
+            "release",
+            "--issuer",
+            &issuer,
+            "--claim",
+            "repository=org/app",
+            "--ref",
+            "refs/tags/v*",
+            "--user",
+            "ci",
+            "--repos",
+            "out",
+            "--minutes",
+            "5",
+        ])
+        .unwrap();
+    assert!(
+        out.contains("trust rule release") && out.contains("5-minute token of ci for out"),
+        "{out}"
+    );
+    assert!(
+        s.cli(&["trust", "list"])
+            .unwrap()
+            .contains("ref=refs/tags/v* repository=org/app")
+    );
+
+    let exchange = |token: &str| {
+        let r = reqwest::blocking::Client::new()
+            .post(format!("{}/api/v1/oidc/token", s.api))
+            .json(&json!({"token": token}))
+            .send()
+            .unwrap();
+        (r.status().as_u16(), r.json::<Value>().unwrap_or_default())
+    };
+    let claims = |extra: Value| {
+        let mut c = json!({"aud": "pkgpod", "repository": "org/app", "ref": "refs/tags/v1.0"});
+        for (k, v) in extra.as_object().unwrap() {
+            c[k] = v.clone();
+        }
+        c
+    };
+    // Matching: a token of ci, for out only, that writes and expires.
+    let (st, v) = exchange(&iss.token(claims(json!({"jti": "one"}))));
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(
+        (v["user"].as_str(), v["rule"].as_str()),
+        (Some("ci"), Some("release"))
+    );
+    let tok = v["token"].as_str().unwrap().to_string();
+    let left = v["expires"].as_i64().unwrap() - pkgpod_base_now();
+    assert!((240..=300).contains(&left), "{left}");
+    let c = reqwest::blocking::Client::new();
+    let put = |repo: &str| {
+        c.put(s.url(&format!("/{repo}/app-1.0.tar.gz")))
+            .basic_auth("token", Some(&tok))
+            .body("app")
+            .send()
+            .unwrap()
+            .status()
+            .as_u16()
+    };
+    assert_eq!(put("out"), 201);
+    // Limited to the rule's repositories (another, private, is not even
+    // there for it).
+    assert!(matches!(put("other"), 403 | 404));
+    // Used once only.
+    let (st, v) = exchange(&iss.token(claims(json!({"jti": "one"}))));
+    assert_eq!(st, 403, "{v}");
+    assert!(v.to_string().contains("exchanged already"), "{v}");
+    // What does not match is refused, and says what it was.
+    for (extra, why) in [
+        (
+            json!({"ref": "refs/heads/master", "jti": "2"}),
+            "no trust rule matches",
+        ),
+        (
+            json!({"repository": "org/other", "jti": "3"}),
+            "no trust rule matches",
+        ),
+        (
+            json!({"aud": "something-else", "jti": "4"}),
+            "no trust rule matches",
+        ),
+        (
+            json!({"exp": pkgpod_base_now() - 600, "jti": "5"}),
+            "expired",
+        ),
+        (
+            json!({"iss": "https://elsewhere.example.org", "jti": "6"}),
+            "issuer",
+        ),
+    ] {
+        let (st, v) = exchange(&iss.token(claims(extra.clone())));
+        assert_eq!(st, 403, "{extra} {v}");
+        assert!(v.to_string().contains(why), "{extra} {v}");
+    }
+    // A token another key signed (or tampered with) does not verify.
+    let t = iss.token(claims(json!({"jti": "7"})));
+    let (h, rest) = t.split_once('.').unwrap();
+    let (p, sig) = rest.split_once('.').unwrap();
+    use base64::Engine as _;
+    let b = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    // The same claims but another ref, under the old signature.
+    let mut c: Value = serde_json::from_slice(&b.decode(p).unwrap()).unwrap();
+    c["ref"] = json!("refs/tags/v9.9");
+    c["jti"] = json!("8");
+    let forged = b.encode(c.to_string());
+    let (st, v) = exchange(&format!("{h}.{forged}.{sig}"));
+    assert_eq!(st, 403);
+    assert!(v.to_string().contains("signature"), "{v}");
+    let (st, _) = exchange("not.a.jwt");
+    assert_eq!(st, 403);
+
+    // The CLI in GitHub Actions: asks the runner for its token, logs in.
+    let cfg = s.dir.path().join("ci-cfg");
+    let out = s
+        .cmd()
+        .env("XDG_CONFIG_HOME", &cfg)
+        .env(
+            "ACTIONS_ID_TOKEN_REQUEST_URL",
+            format!("{issuer}/gha?api-version=2.0"),
+        )
+        .env("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ci-secret")
+        .args(["login", "--oidc"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        said.contains("logged in as ci by trust rule release (for out;"),
+        "{said}"
+    );
+    let f = cfg.join("ci.tar.gz");
+    std::fs::write(&f, "ci").unwrap();
+    let out = s
+        .cmd()
+        .env("XDG_CONFIG_HOME", &cfg)
+        .args([
+            "upload",
+            "out",
+            f.to_str().unwrap(),
+            "-s",
+            "path=ci/ci.tar.gz",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Without the job's permission there is nothing to exchange.
+    let out = s
+        .cmd()
+        .env("XDG_CONFIG_HOME", &cfg)
+        .env_remove("ACTIONS_ID_TOKEN_REQUEST_URL")
+        .env_remove("PKGPOD_OIDC_TOKEN")
+        .args(["login", "--oidc"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("id-token: write"));
+
+    // A removed rule trusts no one.
+    s.cli(&["trust", "remove", "release"]).unwrap();
+    let (st, _) = exchange(&iss.token(claims(json!({"jti": "9"}))));
+    assert_eq!(st, 403);
+    // Only server admins manage rules.
+    let r = reqwest::blocking::Client::new()
+        .get(format!("{}/api/v1/trust", s.api))
+        .basic_auth("ci", Some("ci-password-1234"))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 403);
+}
+
+fn pkgpod_base_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
 }
 
 /// A files proxy of a file server: its directories listed as the

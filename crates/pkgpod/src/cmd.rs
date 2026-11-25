@@ -159,6 +159,55 @@ pub enum TokenCmd {
     },
 }
 
+// Parsed once per run: the size of its largest variant does not matter.
+#[allow(clippy::large_enum_variant)]
+#[derive(Subcommand)]
+pub enum TrustCmd {
+    List,
+    /// Add a trust rule, or replace the one of the same name.
+    ///
+    /// pkgpod trust add release --github org/repo --ref 'refs/tags/v*'
+    ///   --workflow release.yml --user ci --repos ppa
+    Add {
+        name: String,
+        /// A GitHub Actions repository (owner/name): the issuer is GitHub's.
+        #[arg(long)]
+        github: Option<String>,
+        /// The git ref the job runs for (refs/heads/master, refs/tags/v*).
+        #[arg(long = "ref")]
+        git_ref: Option<String>,
+        /// The workflow file the job runs in (release.yml), GitHub only.
+        #[arg(long, requires = "github")]
+        workflow: Option<String>,
+        /// The deployment environment the job runs in.
+        #[arg(long)]
+        environment: Option<String>,
+        /// Any claim the token must carry (claim=pattern; * matches any run).
+        #[arg(long = "claim", value_name = "CLAIM=PATTERN")]
+        claims: Vec<String>,
+        /// Another issuer than GitHub's (its https URL).
+        #[arg(long)]
+        issuer: Option<String>,
+        #[arg(long, default_value = "pkgpod")]
+        audience: String,
+        /// The pkgpod user whose token is given.
+        #[arg(long)]
+        user: String,
+        /// The repositories the token is for.
+        #[arg(long, value_delimiter = ',', required = true)]
+        repos: Vec<String>,
+        /// A token that only reads.
+        #[arg(long)]
+        read_only: bool,
+        /// How long the token lasts (1 to 60).
+        #[arg(long, default_value_t = 15)]
+        minutes: i64,
+    },
+    Remove {
+        name: String,
+    },
+}
+
 #[derive(Subcommand)]
 pub enum ListenerCmd {
     List,
@@ -384,9 +433,15 @@ pub fn run(
     if let Cmd::Login {
         user,
         password_stdin,
+        oidc,
+        audience,
+        rule,
     } = &cmd
     {
-        return login(&url, user, *password_stdin);
+        if *oidc {
+            return login_oidc(&url, audience, rule.as_deref());
+        }
+        return login(&url, user.as_deref().unwrap_or_default(), *password_stdin);
     }
     let token = token
         .or_else(|| saved.map(|s| s.token))
@@ -809,6 +864,140 @@ pub fn run(
                 c.send(
                     Method::DELETE,
                     &format!("/api/v1/tokens/{id}"),
+                    &Value::Null,
+                )?;
+            }
+        },
+        Cmd::Trust(t) => match t {
+            TrustCmd::List => {
+                let v = c.get("/api/v1/trust")?;
+                x.print(&v, |v| {
+                    let mut rows = vec![vec![
+                        "NAME".into(),
+                        "TRUSTS".into(),
+                        "USER".into(),
+                        "REPOS".into(),
+                        "TOKEN".into(),
+                        "USED".into(),
+                    ]];
+                    for r in v.as_array().into_iter().flatten() {
+                        let claims: Vec<String> = r["claims"]
+                            .as_object()
+                            .into_iter()
+                            .flatten()
+                            .map(|(k, v)| format!("{k}={}", s(v)))
+                            .collect();
+                        let issuer = s(&r["issuer"]);
+                        rows.push(vec![
+                            s(&r["name"]),
+                            format!(
+                                "{}{}",
+                                if issuer == GITHUB_ISSUER {
+                                    String::new()
+                                } else {
+                                    format!("{issuer} ")
+                                },
+                                claims.join(" ")
+                            ),
+                            s(&r["user"]),
+                            r["repos"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .map(s)
+                                .collect::<Vec<_>>()
+                                .join(","),
+                            format!(
+                                "{} min{}",
+                                s(&r["minutes"]),
+                                if r["write"] == json!(true) {
+                                    ""
+                                } else {
+                                    ", read"
+                                }
+                            ),
+                            when(r["used"].as_i64()),
+                        ]);
+                    }
+                    table(rows);
+                });
+            }
+            TrustCmd::Add {
+                name,
+                github,
+                git_ref,
+                workflow,
+                environment,
+                claims,
+                issuer,
+                audience,
+                user,
+                repos,
+                read_only,
+                minutes,
+            } => {
+                let mut m = serde_json::Map::new();
+                if let Some(g) = &github {
+                    m.insert("repository".into(), json!(g));
+                    if let Some(w) = &workflow {
+                        // The file in .github/workflows, at any ref.
+                        let w = w.trim_start_matches(".github/workflows/");
+                        m.insert(
+                            "workflow_ref".into(),
+                            json!(format!("{g}/.github/workflows/{w}@*")),
+                        );
+                    }
+                }
+                if let Some(r) = git_ref {
+                    m.insert("ref".into(), json!(r));
+                }
+                if let Some(e) = environment {
+                    m.insert("environment".into(), json!(e));
+                }
+                for kv in &claims {
+                    let (k, v) = kv.split_once('=').ok_or_else(|| {
+                        CliError::usage(format!("{kv:?}: a claim is CLAIM=PATTERN"))
+                    })?;
+                    m.insert(k.trim().into(), json!(v.trim()));
+                }
+                let issuer = match (issuer, &github) {
+                    (Some(i), _) => i,
+                    (None, _) => GITHUB_ISSUER.to_string(),
+                };
+                let v = c.post(
+                    "/api/v1/trust",
+                    &json!({
+                        "name": name, "issuer": issuer, "audience": audience, "claims": m,
+                        "user": user, "repos": repos, "write": !read_only, "minutes": minutes,
+                    }),
+                )?;
+                x.print(&v, |v| {
+                    println!(
+                        "trust rule {}: {} gets a {}-minute token of {} for {}",
+                        s(&v["name"]),
+                        v["claims"]
+                            .as_object()
+                            .into_iter()
+                            .flatten()
+                            .map(|(k, v)| format!("{k}={}", s(v)))
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                        s(&v["minutes"]),
+                        s(&v["user"]),
+                        v["repos"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(s)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                });
+            }
+            TrustCmd::Remove { name } => {
+                c.send(
+                    Method::DELETE,
+                    &format!("/api/v1/trust/{}", enc(&name)),
                     &Value::Null,
                 )?;
             }
@@ -1522,6 +1711,77 @@ fn user(x: &Ctx, cmd: UserCmd) -> Result<(), CliError> {
             println!("password changed");
         }
     }
+    Ok(())
+}
+
+const GITHUB_ISSUER: &str = "https://token.actions.githubusercontent.com";
+
+/// The CI's OIDC token: `$PKGPOD_OIDC_TOKEN`, or one GitHub Actions
+/// makes for `audience`.
+fn ci_token(audience: &str) -> Result<String, CliError> {
+    if let Ok(t) = std::env::var("PKGPOD_OIDC_TOKEN")
+        && !t.trim().is_empty()
+    {
+        return Ok(t.trim().to_string());
+    }
+    let (Ok(url), Ok(bearer)) = (
+        std::env::var("ACTIONS_ID_TOKEN_REQUEST_URL"),
+        std::env::var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"),
+    ) else {
+        return Err(CliError::usage(
+            "no OIDC token: in GitHub Actions the job needs `permissions: id-token: write`; \
+             elsewhere put the CI's token in PKGPOD_OIDC_TOKEN",
+        ));
+    };
+    let sep = if url.contains('?') { '&' } else { '?' };
+    let enc: String = audience
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect();
+    let v: Value = reqwest::blocking::Client::new()
+        .get(format!("{url}{sep}audience={enc}"))
+        .bearer_auth(bearer)
+        .send()
+        .and_then(|r| r.error_for_status())
+        .and_then(|r| r.json())
+        .map_err(|e| CliError::other(format!("asking GitHub Actions for an OIDC token: {e}")))?;
+    v["value"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| CliError::other("GitHub Actions gave no OIDC token"))
+}
+
+/// Logs in with the CI's OIDC token, as a trust rule allows.
+fn login_oidc(url: &str, audience: &str, rule: Option<&str>) -> Result<(), CliError> {
+    let jwt = ci_token(audience)?;
+    let c = Client::new(url, None)?;
+    let v = c.post("/api/v1/oidc/token", &json!({"token": jwt, "rule": rule}))?;
+    let token = v["token"]
+        .as_str()
+        .ok_or_else(|| CliError::other("no token in the reply"))?;
+    let p = save(&Saved {
+        url: url.to_string(),
+        token: token.to_string(),
+    })?;
+    println!(
+        "logged in as {} by trust rule {} (for {}; until {}); token saved in {}",
+        s(&v["user"]),
+        s(&v["rule"]),
+        v["repos"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(s)
+            .collect::<Vec<_>>()
+            .join(", "),
+        when(v["expires"].as_i64()),
+        p.display()
+    );
     Ok(())
 }
 

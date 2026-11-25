@@ -194,6 +194,54 @@ console's How to use tab makes a token for one repository and puts it
 in the commands it shows. A token cannot make a token that may do more
 than itself.
 
+## Trusted publishing (CI)
+
+A CI job can log in with the OIDC token its CI gives it instead of a
+token kept as a secret. A server admin writes a **trust rule**: which
+jobs (by their token's claims) get a token of which user, for which
+repositories, for how long. The token lasts minutes and can do at most
+what its user may, on those repositories only; it is not kept anywhere
+in the CI.
+
+```sh
+pkgpod user add ci                            # a user for CI, with grants
+pkgpod grant set ppa user:ci write
+pkgpod trust add release --github org/app --ref 'refs/tags/v*' \
+  --workflow release.yml --user ci --repos ppa          # --minutes 15 (1 to 60)
+pkgpod trust list
+pkgpod trust remove release
+```
+
+`--github owner/name` trusts that repository's GitHub Actions jobs
+(a GitHub rule must name its repository); `--ref`, `--workflow` and
+`--environment` narrow it (`*` matches any run of characters). Any
+other OIDC issuer (GitLab, a Gitea or Forgejo runner) works with
+`--issuer <https URL>` and `--claim name=pattern` for its claims.
+`--read-only` gives a token that only reads. In the console: Server,
+Trusted publishing.
+
+In the workflow, the job asks GitHub for its token and exchanges it:
+
+```yaml
+permissions:
+  id-token: write    # the job may ask for its OIDC token
+  contents: read
+steps:
+  - uses: actions/checkout@v4
+  - run: |
+      pkgpod --url https://pkg.example.org login --oidc
+      pkgpod upload ppa dist/*.deb -s dists=noble
+```
+
+`pkgpod login --oidc` asks the runner for a token made for the
+audience `pkgpod` (`--audience` otherwise; the rule names the same),
+sends it to `POST /api/v1/oidc/token` and saves the token it gets.
+Elsewhere, put the CI's token in `PKGPOD_OIDC_TOKEN`. The server checks
+the token's signature with its issuer's published keys, its issuer,
+audience and expiry, and takes each token once. Each exchange is in
+the audit log under the rule's user, with the job's repository and
+ref.
+
 ## Badges and status
 
 `/.well-known/pkgpod/badges/<repo>/<kind>.svg`, on every serving

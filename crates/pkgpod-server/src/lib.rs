@@ -27,6 +27,7 @@ pub mod notes;
 pub mod npm;
 pub mod nuget;
 pub mod oci;
+pub mod oidc;
 pub mod openapi;
 pub mod promote;
 pub mod proxy;
@@ -146,6 +147,8 @@ pub struct App {
     pub conan_staged: conan::Staged,
     pub resigner: resign::Resigner,
     pub stats: stats::Stats,
+    /// Trusted publishing: issuers' keys, tokens exchanged.
+    pub oidc: oidc::Verifier,
     /// When this process opened the data (seconds).
     pub started: i64,
     cache: Mutex<Cache>,
@@ -234,6 +237,7 @@ impl App {
             conan_staged: conan::Staged::default(),
             resigner: resign::Resigner::default(),
             stats: stats::Stats::default(),
+            oidc: oidc::Verifier::default(),
             started: pkgpod_base::now(),
             cache: Mutex::new(Cache::default()),
         }))

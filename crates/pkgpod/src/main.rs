@@ -51,12 +51,26 @@ pub(crate) enum Cmd {
         cmd: AdminCmd,
     },
     /// Log in and save a token for later commands.
+    ///
+    /// In a CI job, `--oidc` logs in with the CI's OIDC token instead of
+    /// a password (GitHub Actions: `permissions: id-token: write`), as a
+    /// trust rule on the server allows; the token saved lasts minutes.
     Login {
-        #[arg(long, short)]
-        user: String,
+        #[arg(long, short, required_unless_present = "oidc")]
+        user: Option<String>,
         /// Read the password from stdin.
         #[arg(long)]
         password_stdin: bool,
+        /// Exchange the CI's OIDC token (GitHub Actions', or the one in
+        /// $PKGPOD_OIDC_TOKEN) for a short-lived token.
+        #[arg(long, conflicts_with_all = ["user", "password_stdin"])]
+        oidc: bool,
+        /// The audience to ask the CI's token for (as the trust rule says).
+        #[arg(long, default_value = "pkgpod", requires = "oidc")]
+        audience: String,
+        /// The trust rule to use when several match.
+        #[arg(long, requires = "oidc")]
+        rule: Option<String>,
     },
     /// Server version and who you are; with a repository, its state.
     Status {
@@ -189,6 +203,10 @@ pub(crate) enum Cmd {
     /// API tokens.
     #[command(subcommand)]
     Token(cmd::TokenCmd),
+    /// Trusted publishing: which CI jobs (by their OIDC token's claims)
+    /// get a short-lived token of which user (server admins).
+    #[command(subcommand)]
+    Trust(cmd::TrustCmd),
     /// Serving listeners.
     #[command(subcommand)]
     Listener(cmd::ListenerCmd),
