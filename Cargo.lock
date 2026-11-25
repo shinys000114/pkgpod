@@ -2293,7 +2293,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 name = "pkgpod"
 version = "0.0.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "clap",
  "jiff",
  "libc",
@@ -2318,7 +2318,7 @@ dependencies = [
 name = "pkgpod-apk"
 version = "0.0.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "flate2",
  "pkgpod-base",
  "pkgpod-engine",
@@ -2331,7 +2331,7 @@ dependencies = [
 name = "pkgpod-arch"
 version = "0.0.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "flate2",
  "liblzma",
  "pkgpod-base",
@@ -2568,7 +2568,7 @@ dependencies = [
 name = "pkgpod-npm"
 version = "0.0.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "pkgpod-base",
  "pkgpod-engine",
  "serde_json",
@@ -2638,7 +2638,7 @@ dependencies = [
  "argon2 0.6.0",
  "askama",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "ed25519-dalek",
  "futures-util",
  "glob",
@@ -2711,7 +2711,7 @@ dependencies = [
 name = "pkgpod-terraform"
 version = "0.0.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "flate2",
  "pkgpod-base",
  "pkgpod-engine",
