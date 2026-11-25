@@ -6143,6 +6143,17 @@ fn files_proxy_shared_and_grouped() {
         200,
         "the upstream answers every file here"
     );
+    // The repository list says what a proxy keeps and a group reads.
+    let (c, sid, _) = console_session(&s, "ops", "ops-password");
+    let home = c
+        .get(format!("{}/", s.api))
+        .header("cookie", format!("pkgpod_session={sid}"))
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(home.contains(" files kept · "), "{home}");
+    assert!(home.contains("2 members"), "{home}");
 }
 
 /// Syncs on one storage wait for a slot (syncs_per_storage).

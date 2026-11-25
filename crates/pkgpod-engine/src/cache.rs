@@ -204,6 +204,25 @@ impl Engine {
         })?)
     }
 
+    /// Every proxy's cached files: how many, and their bytes, by name.
+    pub fn cache_counts(&self) -> Result<std::collections::HashMap<String, (u64, u64)>> {
+        Ok(self.db().read(|c| {
+            let mut st = c.prepare(
+                "SELECT r.name, COUNT(*), COALESCE(SUM(c.size), 0) FROM cache c
+                 JOIN repos r ON r.id = c.repo WHERE c.kind = 'file' GROUP BY r.id",
+            )?;
+            let v = st
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        (r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as u64),
+                    ))
+                })?
+                .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
+            Ok::<_, rusqlite::Error>(v)
+        })?)
+    }
+
     /// Bytes of files and of everything cached.
     pub fn cache_size(&self, repo: &str) -> Result<(u64, u64)> {
         let id = self.repo_id(repo)?;
