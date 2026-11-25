@@ -207,6 +207,10 @@ pub(crate) enum Cmd {
     /// get a short-lived token of which user (server admins).
     #[command(subcommand)]
     Trust(cmd::TrustCmd),
+    /// Host pages: what a host's root shows (its repositories, with a
+    /// title and Markdown above and below them; server admins).
+    #[command(subcommand)]
+    Host(cmd::HostCmd),
     /// Outgoing webhooks: new versions, labels and jobs sent to other
     /// services (server admins).
     #[command(subcommand)]

@@ -19,6 +19,7 @@ pub mod gems;
 pub mod go;
 pub mod group;
 pub mod helm;
+pub mod hosts;
 pub mod import;
 pub mod jobs;
 pub mod keys;

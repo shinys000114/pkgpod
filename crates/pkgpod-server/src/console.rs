@@ -122,6 +122,8 @@ pub fn router() -> Router<Arc<App>> {
         .route("/c/teams/{team}/delete", post(team_delete))
         .route("/c/teams/{team}/members", post(member))
         .route("/admin/server", get(server_page))
+        .route("/c/hosts/{host}", post(host_set))
+        .route("/c/hosts/{host}/clear", post(host_clear))
         .route("/c/webhooks", post(hook_set))
         .route("/c/webhooks/{name}/delete", post(hook_delete))
         .route("/c/webhooks/{name}/ping", post(hook_ping))
@@ -2790,15 +2792,16 @@ struct UseQ {
 
 /// The How to use part for `place` (empty: the default), with `token` in
 /// place of `<token>` when one was just made.
-fn use_render(
-    app: &Arc<App>,
-    caller: &Caller,
+/// How to use a repository, as its How to use tab says it, from these
+/// addresses (the first is shown) and for this place (a deb dist; empty:
+/// the default).
+pub(crate) fn use_lines(
+    app: &App,
     r: &pkgpod_engine::RepoInfo,
-    want: &str,
+    urls: &[String],
     host: &str,
-    token: Option<(&str, String)>,
-) -> Response {
-    let urls: Vec<String> = r.setting_list("urls");
+    want: &str,
+) -> Vec<UseLine> {
     let places = usage_places(app, r);
     // The one asked for; a deb repository's default is one with packages.
     let place = if places.iter().any(|p| p == want) {
@@ -2808,7 +2811,7 @@ fn use_render(
     } else {
         places.first().cloned().unwrap_or_default()
     };
-    let mut usage = with_names(app, r, usage(app, r, &urls, host, &place));
+    let mut usage = with_names(app, r, usage(app, r, urls, host, &place));
     if matches!(r.kind, Kind::Proxy | Kind::Group) {
         // Read through: nothing is published here and it has no labels.
         usage.retain(|l| {
@@ -2834,6 +2837,27 @@ fn use_render(
             },
         });
     }
+    usage
+}
+
+fn use_render(
+    app: &Arc<App>,
+    caller: &Caller,
+    r: &pkgpod_engine::RepoInfo,
+    want: &str,
+    host: &str,
+    token: Option<(&str, String)>,
+) -> Response {
+    let urls: Vec<String> = r.setting_list("urls");
+    let places = usage_places(app, r);
+    let place = if places.iter().any(|p| p == want) {
+        want.to_string()
+    } else if r.format == "deb" {
+        deb_default_dist(app, r, &places)
+    } else {
+        places.first().cloned().unwrap_or_default()
+    };
+    let mut usage = use_lines(app, r, &urls, host, &place);
     let mut token_note = String::new();
     if let Some((t, note)) = token {
         for u in &mut usage {
@@ -4988,6 +5012,18 @@ pub struct ListenerRow {
     pub ok: bool,
 }
 
+/// A host as the Server page lists it, with its page.
+pub struct HostRow {
+    pub host: String,
+    pub url: String,
+    pub repos: usize,
+    pub root_repo: String,
+    pub title: String,
+    pub header: String,
+    pub footer: String,
+    pub updated: String,
+}
+
 /// A webhook as the Server page lists it, with its last deliveries.
 pub struct HookRow {
     pub name: String,
@@ -5058,6 +5094,7 @@ struct ServerPage {
     users: Vec<String>,
     repo_names: Vec<String>,
     hooks: Vec<HookRow>,
+    hosts: Vec<HostRow>,
 }
 
 async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
@@ -5137,6 +5174,22 @@ async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
         })
         .collect();
     let users = app.auth.users()?.into_iter().map(|u| u.name).collect();
+    let hosts = crate::hosts::list(&app)?
+        .iter()
+        .map(|h| HostRow {
+            host: s(&h["host"]),
+            url: s(&h["url"]),
+            repos: h["repos"].as_array().map_or(0, Vec::len),
+            root_repo: h["root_repo"].as_str().unwrap_or("").to_string(),
+            title: h["page"]["title"].as_str().unwrap_or("").to_string(),
+            header: h["page"]["header"].as_str().unwrap_or("").to_string(),
+            footer: h["page"]["footer"].as_str().unwrap_or("").to_string(),
+            updated: h["page"]["updated"]
+                .as_i64()
+                .map(|t| when(Some(t)))
+                .unwrap_or_default(),
+        })
+        .collect();
     let hooks = crate::webhooks::hooks(&app)?
         .into_iter()
         .map(|h| HookRow {
@@ -5188,7 +5241,33 @@ async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
         users,
         repo_names,
         hooks,
+        hosts,
     }))
+}
+
+/// A host's page from the Server page's form.
+async fn host_set(
+    State(app): St,
+    v: Viewer,
+    Path(host): Path<String>,
+    Form(form): Form<Vec<(String, String)>>,
+) -> Response {
+    let req = api::HostReq {
+        title: Some(form_get(&form, "title").to_string()),
+        header: Some(form_get(&form, "header").replace("\r\n", "\n")),
+        footer: Some(form_get(&form, "footer").replace("\r\n", "\n")),
+    };
+    match api::host_put(State(app), v.who(), Path(host), Json(req)).await {
+        Ok(_) => refresh(),
+        Err(e) => err_part(e),
+    }
+}
+
+async fn host_clear(State(app): St, v: Viewer, Path(host): Path<String>) -> Response {
+    match api::host_delete(State(app), v.who(), Path(host)).await {
+        Ok(_) => refresh(),
+        Err(e) => err_part(e),
+    }
 }
 
 /// A webhook from the Server page's form.

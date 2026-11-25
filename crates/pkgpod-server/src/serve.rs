@@ -220,7 +220,7 @@ password=<token>
 /// Formats whose repositories are trees to browse. npm, OCI, cargo, Go
 /// and NuGet repositories answer their clients' API only, as public registries do:
 /// they are left out of listings, and their address says how to use them.
-fn browsable(format: &str) -> bool {
+pub(crate) fn browsable(format: &str) -> bool {
     !matches!(
         format,
         "npm"
@@ -418,32 +418,17 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
             if method != Method::GET && method != Method::HEAD {
                 return status(StatusCode::METHOD_NOT_ALLOWED);
             }
-            // Only what the caller may read.
-            let mut entries = Vec::new();
-            for (seg, repo) in list {
-                if let Ok(s) = app.served(&repo)
-                    && browsable(&s.repo.format)
-                    && app
-                        .auth
-                        .role(&caller, &repo, s.repo.setting_bool("public"))
-                        .is_some()
-                {
-                    entries.push(ListEntry {
-                        name: seg,
-                        dir: true,
-                        size: Some(0),
-                        modified: None,
-                    });
-                }
-            }
-            entries.dedup_by(|a, b| a.name == b.name);
-            listing(
+            // The repositories here, whatever their format, with what they
+            // are and how to use them; a host's root has its page's notes.
+            crate::hosts::index(
+                &app,
+                &caller,
+                &host,
                 &raw_path,
-                entries,
-                req.uri().query().unwrap_or(""),
+                list,
                 method == Method::HEAD,
-                &Default::default(),
             )
+            .await
         }
         Hit::Repo {
             repo,
@@ -1803,7 +1788,7 @@ pub(crate) fn listing(
         .into_response()
 }
 
-const LISTING_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; \
+pub(crate) const LISTING_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; \
     img-src 'self' https: data:; base-uri 'none'; form-action 'none'";
 
 /// A files repository's notes in a directory of its tree, read from the

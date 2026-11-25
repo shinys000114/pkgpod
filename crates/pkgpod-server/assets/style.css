@@ -592,3 +592,8 @@ td.claims div { overflow-wrap: anywhere; min-width: 14rem; }
 fieldset.field { border: 0; padding: 0; margin: 0; min-width: 0; }
 fieldset.field > span { display: block; margin-bottom: .25rem; }
 fieldset.field .check-line { display: flex; gap: .4rem; align-items: baseline; margin: .15rem 0; }
+/* Host pages: one collapsed editor per host. */
+.host-pages details.host { border-bottom: 1px solid var(--line); padding: .5rem 0; }
+.host-pages details.host:last-child { border-bottom: 0; }
+.host-pages summary { cursor: pointer; }
+.host-pages form { margin-top: .6rem; }
