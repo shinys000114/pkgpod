@@ -84,8 +84,8 @@ fn schemas() -> Value {
         ),
         (
             "Kind",
-            json!({"type": "string", "enum": ["hosted", "import", "mirror", "group", "proxy"],
-                   "description": "hosted: uploads and operations; import: copied once, then hosted; mirror: follows an upstream, no versions; group: reads its members in order (settings.members); proxy: fetches from settings.upstream when asked, and keeps it."}),
+            json!({"type": "string", "enum": ["hosted", "mirror", "group", "proxy"],
+                   "description": "hosted: uploads, operations and imports; mirror: follows an upstream, no versions; group: reads its members in order (settings.members); proxy: fetches from settings.upstream when asked, and keeps it."}),
         ),
         (
             "Role",
@@ -988,13 +988,22 @@ fn schemas() -> Value {
                     ),
                     ("key", text("PEM key file.")),
                     ("enabled", boolean()),
-                    ("running", boolean()),
+                    (
+                        "running",
+                        json!({"type": "boolean", "description": "It listens on its address."}),
+                    ),
+                    (
+                        "starting",
+                        json!({"type": "boolean", "description": "Started, but its address is not free yet (it tries for a few seconds)."}),
+                    ),
                     (
                         "error",
                         nullable("string", "Why it is not running, if it failed."),
                     ),
                 ],
-                &["name", "addr", "cert", "key", "enabled", "running", "error"],
+                &[
+                    "name", "addr", "cert", "key", "enabled", "running", "starting", "error",
+                ],
             ),
         ),
         (
@@ -1268,12 +1277,18 @@ fn schemas() -> Value {
                     ("name", string()),
                     (
                         "repos",
-                        json!({"type": "array", "items": {"type": "string"}, "description": "Empty: all the user's."}),
+                        json!({"type": "array", "items": {"type": "string"}, "description": "Empty: all the user's; else repositories the user may read."}),
                     ),
                     ("write", boolean()),
                     (
                         "expires_days",
-                        nullable("integer", "Null or 0: never expires."),
+                        nullable(
+                            "integer",
+                            &format!(
+                                "1 to {}; null: never expires.",
+                                pkgpod_engine::settings::DAYS
+                            ),
+                        ),
                     ),
                 ],
                 &["name"],

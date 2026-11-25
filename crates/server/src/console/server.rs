@@ -686,6 +686,8 @@ pub(crate) async fn server_tab_page(
             let running = app.listeners.is_running(&l.name);
             let state = if running {
                 "running".to_string()
+            } else if app.listeners.is_starting(&l.name) {
+                "starting".into()
             } else if let Some(e) = app.listeners.error(&l.name) {
                 format!("failed: {e}")
             } else if !l.enabled {

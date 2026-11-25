@@ -877,15 +877,16 @@ pub(crate) async fn repo_patch(
         if r0.kind == Kind::Proxy {
             crate::serving::proxy::check_settings(&r0.format, &req.settings)?;
         }
-        let r = app.engine.update_settings(&repo, &req.settings)?;
+        let mut r = app.engine.update_settings(&repo, &req.settings)?;
         // Settings may change what is published (Release fields, key);
         // a republish that fails takes the change back.
-        if r.kind.versioned()
-            && r.settings != r0.settings
-            && let Err(e) = app.engine.republish(&repo, c.name())
-        {
-            app.engine.update_settings(&repo, &r0.settings)?;
-            return Err(e.into());
+        if r.kind.versioned() && r.settings != r0.settings {
+            if let Err(e) = app.engine.republish(&repo, c.name()) {
+                app.engine.update_settings(&repo, &r0.settings)?;
+                return Err(e.into());
+            }
+            // The reply names the version the republish made.
+            r = app.engine.repo(&repo)?;
         }
         // What a proxy keeps is what its upstream gave: another upstream
         // is asked afresh.
@@ -1885,10 +1886,22 @@ pub(crate) async fn token_create(
             ));
         }
     }
-    let mut expires = req
-        .expires_days
-        .filter(|d| *d > 0)
-        .map(|d| pkgpod_base::now() + d * 86400);
+    // Left out, the token never expires. A number counts days: 0 or
+    // less is a mistake, not "never" (it was read as that).
+    if let Some(d) = req.expires_days
+        && !(1..=pkgpod_engine::settings::DAYS).contains(&d)
+    {
+        return Err(Error::Invalid(format!(
+            "expires_days {d}: 1 to {} (left out: never)",
+            pkgpod_engine::settings::DAYS
+        )));
+    }
+    // A repository there is not would make a token for nothing; one the
+    // user may not read is answered alike.
+    for r in &req.repos {
+        app.repo_for(&c, r, Role::Read)?;
+    }
+    let mut expires = req.expires_days.map(|d| pkgpod_base::now() + d * 86400);
     if let Some(until) = c.scope.as_ref().and_then(|s| s.expires) {
         expires = Some(expires.map_or(until, |e| e.min(until)));
     }
@@ -2244,6 +2257,7 @@ pub(crate) async fn listeners(State(app): St, Who(c): Who) -> Result<Json<Value>
             json!({
                 "name": l.name, "addr": l.addr, "cert": l.cert, "key": l.key, "enabled": l.enabled,
                 "running": app.listeners.is_running(&l.name),
+                "starting": app.listeners.is_starting(&l.name),
                 "error": app.listeners.error(&l.name),
             })
         })
@@ -2276,10 +2290,8 @@ fn address_taken(app: &App, name: &str, addr: &str) -> Result<Option<String>> {
         return Ok(None);
     };
     let overlaps = |a: &str| {
-        a.parse::<std::net::SocketAddr>().is_ok_and(|a| {
-            a.port() == want.port()
-                && (a.ip() == want.ip() || a.ip().is_unspecified() || want.ip().is_unspecified())
-        })
+        a.parse::<std::net::SocketAddr>()
+            .is_ok_and(|a| crate::ops::listeners::clash(want, a))
     };
     if overlaps(&app.cfg.listen) {
         return Ok(Some(format!("{addr} is the management listener's address")));
@@ -2638,11 +2650,14 @@ pub(crate) async fn logs(
             "level {level:?}: error, warn, info, debug or trace"
         )));
     }
+    if q.limit == Some(0) {
+        return Err(Error::Invalid("limit 0: at least 1".into()));
+    }
     let r = crate::ops::logs::read(
         q.after.unwrap_or(0),
         level,
         q.q.as_deref().unwrap_or(""),
-        q.limit.unwrap_or(500).clamp(1, 5000),
+        q.limit.unwrap_or(500).min(5000),
     );
     Ok(Json(json!(r)))
 }

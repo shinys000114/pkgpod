@@ -1436,6 +1436,104 @@ fn trust_tokens_go_with_their_rule() {
     assert!(matches!(put(&tok, "four.txt"), 401 | 403));
 }
 
+/// What would mean nothing is refused rather than read as something
+/// else: a token that expires in no days (it never expired), one for a
+/// repository there is not, a log of no lines (it gave one), a negative
+/// number in a settings form.
+#[test]
+fn inputs_that_mean_nothing_are_refused() {
+    use reqwest::Method;
+    let s = Server::start();
+    let pw = std::fs::read_to_string(s.dir.path().join("data/admin-password")).unwrap();
+    let admin = As::User("admin", pw.trim());
+    s.cli(&["repo", "create", "pub", "-f", "files", "-s", "public=true"])
+        .unwrap();
+    s.cli(&["repo", "create", "priv", "-f", "files"]).unwrap();
+    s.cli_in(
+        &["user", "add", "eve", "--password-stdin"],
+        "eve-password-1",
+    )
+    .unwrap();
+    let eve = As::User("eve", "eve-password-1");
+    let mk = |who, body: Value| call(&s, Method::POST, "/api/v1/tokens", who, body);
+    for days in [0, -1, 36501, i64::MAX] {
+        let (st, v, _) = mk(admin, json!({"name": "t", "expires_days": days}));
+        assert_eq!(st, 400, "{days}: {v}");
+    }
+    let (st, v, _) = mk(admin, json!({"name": "t", "expires_days": 1}));
+    assert_eq!(st, 201, "{v}");
+    assert!(v["info"]["expires"].as_i64().is_some(), "{v}");
+    let e = s
+        .cli(&["token", "create", "x", "--expires-days", "0"])
+        .unwrap_err();
+    assert!(e.contains("expires_days"), "{e}");
+    // A repository there is not, and one the user may not read, alike.
+    let (st, nope, _) = mk(eve, json!({"name": "t", "repos": ["pub", "nope"]}));
+    assert_eq!(st, 404, "{nope}");
+    let (st, hidden, _) = mk(eve, json!({"name": "t", "repos": ["priv"]}));
+    assert_eq!(st, 404, "{hidden}");
+    assert_eq!(
+        nope["error"].as_str().unwrap().replace("nope", "priv"),
+        hidden["error"].as_str().unwrap()
+    );
+    let (st, v, _) = mk(eve, json!({"name": "t", "repos": ["pub"]}));
+    assert_eq!(st, 201, "{v}");
+    assert!(s.cli(&["token", "create", "x", "--repos", "nope"]).is_err());
+    let names: Vec<Value> = s
+        .json(&["token", "list", "--all"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].clone())
+        .collect();
+    assert!(!names.contains(&json!("x")), "{names:?}");
+    // No lines of the log.
+    let (st, v, _) = call(&s, Method::GET, "/api/v1/logs?limit=0", admin, Value::Null);
+    assert_eq!(st, 400, "{v}");
+    assert!(s.cli(&["logs", "-n", "0"]).is_err());
+    assert!(s.cli(&["logs", "-n", "1", "--level", "trace"]).is_ok());
+    // The console's number fields take no negative number.
+    let (c, sid, _) = console_session(&s, "ad", "ad-password-1");
+    let page = c
+        .get(format!("{}/r/pub/settings", s.api))
+        .header("cookie", format!("pkgpod_session={sid}"))
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    let field = page
+        .split("<input type=\"number\" name=\"keep_versions\"")
+        .nth(1)
+        .and_then(|t| t.split('>').next())
+        .unwrap_or_else(|| panic!("{page}"));
+    assert!(field.contains("min=\"0\""), "{field}");
+}
+
+/// A settings change that republishes answers with the version it made.
+#[test]
+fn a_settings_change_answers_with_its_version() {
+    use reqwest::Method;
+    let s = Server::start();
+    let pw = std::fs::read_to_string(s.dir.path().join("data/admin-password")).unwrap();
+    let admin = As::User("admin", pw.trim());
+    // A Release field: published, so the change is a version.
+    s.cli(&["repo", "create", "d", "-s", "sign=false"]).unwrap();
+    s.cli(&["op", "d", "dist-set", "name=x", "-y"]).unwrap();
+    let get = || call(&s, Method::GET, "/api/v1/repos/d", admin, Value::Null).1;
+    let before = get()["version"].as_i64().unwrap();
+    let (st, v, _) = call(
+        &s,
+        Method::PATCH,
+        "/api/v1/repos/d",
+        admin,
+        json!({"settings": {"origin": "Us"}}),
+    );
+    assert_eq!(st, 200, "{v}");
+    let after = get()["version"].as_i64().unwrap();
+    assert!(after > before, "{before} {after}");
+    assert_eq!(v["version"], json!(after), "{v}");
+}
+
 /// A console session for `user` (made an admin with `password`): the
 /// client, its session cookie and CSRF token.
 fn console_session(
@@ -12711,6 +12809,15 @@ fn a_listener_moved_while_retrying_keeps_serving() {
     ])
     .unwrap();
     std::thread::sleep(Duration::from_millis(300));
+    // Not running until it listens.
+    let ls = s.cli(&["listener", "list"]).unwrap();
+    assert!(ls.contains("starting") && !ls.contains("running"), "{ls}");
+    let v = s.json(&["listener", "list"]);
+    assert_eq!(
+        (&v[0]["running"], &v[0]["starting"]),
+        (&json!(false), &json!(true)),
+        "{v}"
+    );
     // Moved meanwhile: the new address serves, and keeps serving after
     // the old attempt gives up.
     let port = free_port();

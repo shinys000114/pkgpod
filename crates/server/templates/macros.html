@@ -18,7 +18,7 @@
   {% else if f.kind == "json" %}
   <label class="field wide"><span>{{ f.label }}</span><textarea name="{{ f.name }}" rows="6" spellcheck="false">{{ f.value }}</textarea><small>{{ f.help }}</small></label>
   {% else if f.kind == "int" %}
-  <label class="field"><span>{{ f.label }}</span><input type="number" name="{{ f.name }}" value="{{ f.value }}"><small>{{ f.help }}</small></label>
+  <label class="field"><span>{{ f.label }}</span><input type="number" name="{{ f.name }}" value="{{ f.value }}" min="0"><small>{{ f.help }}</small></label>
   {% else if f.kind == "list" %}
   <label class="field wide"><span>{{ f.label }}</span><input name="{{ f.name }}" value="{{ f.value }}" placeholder="comma separated"{% call attrs(f) %}{% endcall %}>{% call datalist(f) %}{% endcall %}<small>{{ f.help }}</small></label>
   {% else %}

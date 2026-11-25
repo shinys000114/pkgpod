@@ -315,7 +315,7 @@ pub(crate) enum Cmd {
     },
     /// The server's recent log, since it started (server admins).
     Logs {
-        /// error, warn, info, debug: that or more severe.
+        /// error, warn, info, debug, trace: that or more severe.
         #[arg(long, default_value = "info")]
         level: String,
         /// Only events with this text.

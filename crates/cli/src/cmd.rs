@@ -1491,6 +1491,8 @@ pub fn run(
                     for l in v.as_array().into_iter().flatten() {
                         let state = if l["running"] == json!(true) {
                             "running".to_string()
+                        } else if l["starting"] == json!(true) {
+                            "starting".into()
                         } else if let Some(e) = l["error"].as_str() {
                             format!("failed: {e}")
                         } else if l["enabled"] == json!(false) {
