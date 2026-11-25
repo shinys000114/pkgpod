@@ -380,6 +380,45 @@
     form.querySelector(".upload-progress").hidden = true;
     form.querySelector(".upload-pct").textContent = "";
   });
+  // An answer htmx does not show (an error page from a proxy in front: a
+  // restart, a body too large) or no answer at all: said where the
+  // request's result goes, else in its card, else at the bottom of the
+  // page. Never in place of a tab.
+  function failed(ev, text) {
+    var to = ev.detail.target;
+    var box = to && to.matches && to.matches(".result, .results, [id$='-result']") ? to : null;
+    var card = !box && ev.detail.elt && ev.detail.elt.closest && ev.detail.elt.closest(".card");
+    if (card) box = card.querySelector(".result, .results");
+    // Not over what was clicked: a plan's Apply is in a result area, and
+    // the plan must stay to be applied again.
+    if (box && ev.detail.elt && box.contains(ev.detail.elt)) box = null;
+    if (!box) {
+      box = document.getElementById("answer-note");
+      if (!box) {
+        box = document.createElement("div");
+        box.id = "answer-note";
+        box.className = "toast";
+        box.title = "Click to close";
+        box.addEventListener("click", function () { box.remove(); });
+        document.body.appendChild(box);
+      }
+    }
+    var plan = document.createElement("div");
+    plan.className = "plan";
+    var p = document.createElement("p");
+    p.className = "error";
+    p.textContent = text;
+    plan.appendChild(p);
+    box.replaceChildren(plan);
+  }
+  document.addEventListener("htmx:responseError", function (ev) {
+    var x = ev.detail.xhr;
+    failed(ev, "The server answered " + x.status + (x.statusText ? " " + x.statusText : "") +
+      ". Try again, or reload the page.");
+  });
+  document.addEventListener("htmx:sendError", function (ev) {
+    failed(ev, "No answer from the server. Try again when it can be reached.");
+  });
   document.addEventListener("click", function (ev) {
     var b = ev.target.closest("button.copy");
     if (b) {

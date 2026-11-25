@@ -6,7 +6,7 @@
     <select name="dist">{% for (d, on) in dists %}<option{% if on %} selected{% endif %}>{{ d }}</option>{% endfor %}</select>
     <select name="component">{% for (c, on) in comps %}<option{% if on %} selected{% endif %}>{{ c }}</option>{% endfor %}</select>
     <select name="arch">{% for (a, on) in archs %}<option{% if on %} selected{% endif %}>{{ a }}</option>{% endfor %}</select>
-    <input type="search" name="q" value="{{ q }}" placeholder="filter by name">
+    <input type="search" id="mpk-q" name="q" value="{{ q }}" placeholder="filter by name">
   </form>
   </div>{% endif %}
   {% if !note.is_empty() %}<p class="empty">{{ note }}</p>

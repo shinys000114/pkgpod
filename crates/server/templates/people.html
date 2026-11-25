@@ -2,7 +2,7 @@
 {% extends "base.html" %}
 {% block title %}Users & teams · pkgpod{% endblock %}
 {% block main %}
-<div class="page-head"><div class="title"><h1>Users &amp; teams</h1><p class="sub">Rights come from grants per repository (on its Settings tab) to users or teams; grants on * cover every repository.</p></div></div>
+<div class="page-head"><div class="title"><h1>Users &amp; teams</h1><p class="sub">Rights come from grants per repository (on its Access tab) to users or teams; grants on * cover every repository.</p></div></div>
 <div id="people-result"></div>
 <div class="card">
   <div class="card-head"><h2>Users</h2></div>
@@ -15,7 +15,7 @@
     <td>{% if u.admin %}<span class="muted">all</span>{% else if u.repos.is_empty() %}<span class="muted">none (public ones to read)</span>{% else %}<details class="inline-list"><summary>{{ u.repos.len() }}</summary>{% for (r, role) in u.repos %}<div><a href="/r/{{ r }}">{{ r }}</a> <span class="tag">{{ role }}</span></div>{% endfor %}</details>{% endif %}</td>
     <td class="nowrap">{{ u.created }}</td>
     <td class="acts nowrap">
-      {% if !me %}<form class="inline" hx-post="/c/users/{{ u.name|urlencode }}" hx-target="#people-result"><input type="password" name="password" placeholder="new password" minlength="8" size="14" autocomplete="new-password"><button class="link" type="submit">set</button></form>
+      {% if !me %}<form class="inline" hx-post="/c/users/{{ u.name|urlencode }}" hx-target="#people-result"><input type="password" name="password" placeholder="new password" required minlength="8" size="14" autocomplete="new-password"><button class="link" type="submit">set</button></form>
       <button class="link danger" hx-post="/c/users/{{ u.name|urlencode }}/delete" hx-target="#people-result" hx-confirm="Delete user {{ u.name }} and their tokens?">delete</button>{% else %}<a class="small" href="/account">your password</a>{% endif %}
     </td>
   </tr>{% endfor %}

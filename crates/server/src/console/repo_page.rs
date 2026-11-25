@@ -16,7 +16,8 @@ pub(crate) struct RepoPage {
     pub(crate) name: String,
     pub(crate) format: String,
     pub(crate) format_title: String,
-    pub(crate) mirror: bool,
+    /// hosted, mirror, proxy, ...: every kind but hosted is tagged.
+    pub(crate) kind: &'static str,
     pub(crate) public: bool,
     pub(crate) description: String,
     pub(crate) stats: Vec<Stat>,
@@ -183,6 +184,17 @@ pub(crate) fn repo_tabs(
 }
 
 pub(crate) async fn repo_page(
+    st: St,
+    v: Viewer,
+    repo: Path<String>,
+    q: Query<TabQ>,
+    headers: HeaderMap,
+) -> Response {
+    let s = v.shell("repos");
+    page(s, repo_page_of(st, v, repo, q, headers).await)
+}
+
+async fn repo_page_of(
     State(app): St,
     v: Viewer,
     Path(repo): Path<String>,
@@ -243,11 +255,11 @@ pub(crate) async fn repo_page(
             }),
             "",
         ));
-        stats.push(stat("From", r.setting_str("source").to_string(), ""));
+        stats.push(stat("Upstream", r.setting_str("source").to_string(), ""));
     } else if r.kind == Kind::Group {
         stats.push(stat("Members", r.setting_list("members").join(", "), ""));
     } else if r.kind == Kind::Proxy {
-        stats.push(stat("Of", r.setting_str("upstream").to_string(), ""));
+        stats.push(stat("Upstream", r.setting_str("upstream").to_string(), ""));
         let (files, _) = app.engine.cache_size(&r.name).unwrap_or_default();
         stats.push(stat("Cached", crate::serving::human(files), ""));
     } else {
@@ -288,7 +300,7 @@ pub(crate) async fn repo_page(
         name: r.name.clone(),
         format: r.format.clone(),
         format_title: f.title().to_string(),
-        mirror,
+        kind: r.kind.as_str(),
         public: r.setting_bool("public"),
         description: r.setting_str("description").to_string(),
         stats,

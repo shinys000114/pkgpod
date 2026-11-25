@@ -362,6 +362,48 @@ fn msg(ok: bool, text: impl Into<String>) -> Response {
     })
 }
 
+#[derive(Template)]
+#[template(path = "error.html")]
+struct ErrorPage {
+    s: Shell,
+    title: &'static str,
+    text: String,
+}
+
+/// A page that cannot be shown, said as a page in the console's frame
+/// with the error's status (JSON is for the API's callers).
+fn page_err(s: Shell, e: Error) -> Response {
+    let st = e.status();
+    if st == StatusCode::INTERNAL_SERVER_ERROR {
+        tracing::error!("{e}");
+    }
+    let title = match st {
+        StatusCode::NOT_FOUND => "Nothing here",
+        StatusCode::FORBIDDEN => "Not allowed",
+        _ => "Something went wrong",
+    };
+    let mut r = render(&ErrorPage {
+        s,
+        title,
+        text: e.to_string(),
+    });
+    *r.status_mut() = st;
+    r
+}
+
+/// A full page, or what kept it from being shown.
+fn page(s: Shell, r: Result<Response>) -> Response {
+    r.unwrap_or_else(|e| page_err(s, e))
+}
+
+/// A form's answer that takes the whole tab's place: the form points at
+/// its own result area, where an error stays beside it.
+fn to_tab(mut r: Response) -> Response {
+    r.headers_mut()
+        .insert("HX-Retarget", HeaderValue::from_static("#tab"));
+    r
+}
+
 fn err_part(e: Error) -> Response {
     let mut r = msg(false, e.to_string());
     // htmx swaps error responses only if told; keep 200 for parts.
@@ -402,5 +444,12 @@ mod tests {
         );
         assert_eq!(op_title("Remove manifests no tag reaches (through indexes, or as their subject's referrers).").0,
             "Remove manifests no tag reaches");
+    }
+
+    #[test]
+    fn counts_in_words() {
+        assert_eq!(plural(1, "error"), "1 error");
+        assert_eq!(plural(0, "warning"), "0 warnings");
+        assert_eq!(plural(2, "warning"), "2 warnings");
     }
 }

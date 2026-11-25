@@ -5,13 +5,13 @@
   <pre class="log live-tail">{{ l.tail }}</pre>
 </div>
 {% endif %}
-{% if rows.is_empty() %}<p class="empty">No syncs yet.</p>{% else %}
+{% if rows.is_empty() %}<p class="empty">No jobs yet.</p>{% else %}
 <div class="table-wrap"><table>
   <thead><tr><th class="num">Job</th><th>State</th><th>By</th><th>Started</th><th>Finished</th><th>Summary</th></tr></thead>
   <tbody>
   {% for j in rows %}<tr>
     <td class="num"><a href="/jobs/{{ j.id }}">{{ j.id }}</a></td>
-    <td><span class="badge {% if j.state == "ok" %}ok{% else if j.state == "running" %}run{% else %}bad{% endif %}">{{ j.state }}</span></td>
+    <td><span class="badge {% if j.state == "ok" %}ok{% else if j.state == "running" || j.state == "queued" %}run{% else %}bad{% endif %}">{{ j.state }}</span></td>
     <td>{{ j.actor }}</td><td class="nowrap">{{ j.started }}</td><td class="nowrap">{{ j.finished }}</td><td class="wrap">{{ j.summary }}</td>
   </tr>{% endfor %}
   </tbody>

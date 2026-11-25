@@ -25,12 +25,13 @@ pub(crate) async fn search_rows(State(app): St, v: Viewer, Query(q): Query<QQ>) 
         return msg(true, "Type part of a package name.");
     }
     let limit = 300;
+    let q = q.q;
     match json_of(
         api::search_list(
             State(app),
             v.who(),
             Query(api::SearchQ {
-                q: q.q,
+                q: q.clone(),
                 repo: None,
                 limit: Some(limit),
             }),
@@ -48,12 +49,14 @@ pub(crate) async fn search_rows(State(app): St, v: Viewer, Query(q): Query<QQ>) 
                 show_repo: true,
                 can_write: false,
                 repo: String::new(),
-                q: String::new(),
+                // What was asked: nothing found is not nothing there.
+                q,
                 at: String::new(),
                 wheres: Vec::new(),
                 others: Vec::new(),
                 title: "Packages",
                 cols: ["Name", "Version", "Where"],
+                show_version: true,
                 show_size: true,
                 show_downloads: false,
             })

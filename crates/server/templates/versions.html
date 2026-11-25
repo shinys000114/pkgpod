@@ -5,7 +5,7 @@
     <span class="muted small">Tick two versions to compare them, or one to see it against the current.</span>
     <button type="button" class="ver-compare" data-repo="{{ repo }}" disabled>Compare</button>
     {% if can_write %}
-    <form class="inline" hx-post="/c/r/{{ repo }}/labels" hx-target="#tab">
+    <form class="inline" hx-post="/c/r/{{ repo }}/labels" hx-target="#ver-result">
       Label <input id="label-version" name="version" size="6" placeholder="current" autocomplete="off"> as <input name="name" size="14" placeholder="release-1" required autocomplete="off" autocapitalize="off" spellcheck="false"> <input name="note" size="18" placeholder="note">
       <label class="check"><input type="checkbox" name="force"> move if it exists</label> <button type="submit">Label</button>
     </form>
@@ -19,7 +19,7 @@
       <td class="pick"><input type="checkbox" class="ver-pick" value="{{ v.seq }}" aria-label="choose version {{ v.seq }}"></td>
       <td class="num"><b>{{ v.seq }}</b>{% if v.current %} <span class="tag accent">current</span>{% endif %}</td>
       <td class="nowrap">{{ v.when }}</td><td>{{ v.actor }}</td><td class="wrap">{{ v.summary }}</td>
-      <td>{% for l in v.labels %}<span class="tag">{{ l }}</span>{% if can_write %}<button class="link danger" hx-post="/c/r/{{ repo }}/labels/{{ l|urlencode }}/delete" hx-target="#tab" hx-confirm="Remove label {{ l }}?">×</button>{% endif %} {% endfor %}</td>
+      <td>{% for l in v.labels %}<span class="tag">{{ l }}</span>{% if can_write %}<button class="link danger" hx-post="/c/r/{{ repo }}/labels/{{ l|urlencode }}/delete" hx-target="#ver-result" hx-confirm="Remove label {{ l }}?">×</button>{% endif %} {% endfor %}</td>
       <td class="acts nowrap">
         <button class="link" hx-get="/r/{{ repo }}/changes?from={{ v.seq }}" hx-target="#ver-result">changes</button>
         {% if can_write %}<button class="link fill" type="button" data-for="label-version" data-value="{{ v.seq }}">label…</button>{% endif %}

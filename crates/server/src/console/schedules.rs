@@ -77,7 +77,12 @@ pub(crate) fn clock(t: i64, today: &str) -> (String, String) {
 }
 
 /// Every mirror's schedule on one page, and the syncs of the next day.
-pub(crate) async fn schedules_page(State(app): St, v: Viewer) -> Result<Response> {
+pub(crate) async fn schedules_page(st: St, v: Viewer) -> Response {
+    let s = v.shell("schedules");
+    page(s, schedules_page_of(st, v).await)
+}
+
+async fn schedules_page_of(State(app): St, v: Viewer) -> Result<Response> {
     let caller = v.caller.clone();
     let o = api::blocking(&app, move |app| {
         crate::jobs::schedules::overview(app, &caller)

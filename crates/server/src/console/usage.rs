@@ -169,6 +169,27 @@ pub(crate) fn usage(
     let mut out = Vec::new();
     if r.format == "npm" {
         let nerf = base.split_once("://").map_or(base.as_str(), |x| x.1);
+        if !r.kind.versioned() {
+            // A proxy or a group is read through: nothing is published
+            // here (its note is added with the others').
+            out.push(UseLine {
+                label: ".npmrc".into(),
+                text: if r.setting_bool("public") {
+                    format!("registry={base}")
+                } else {
+                    format!("registry={base}\n//{nerf}:_authToken=<token>")
+                },
+            });
+            out.push(UseLine {
+                label: "Or for one scope".into(),
+                text: format!("@team:registry={base}"),
+            });
+            out.push(UseLine {
+                label: "Install".into(),
+                text: "npm install <package>".into(),
+            });
+            return out;
+        }
         out.push(UseLine {
             label: ".npmrc".into(),
             text: if r.setting_bool("public") {
@@ -1236,7 +1257,7 @@ pub(crate) fn use_lines(
             let w = l.label.to_lowercase();
             !(w.starts_with("upload")
                 || w.starts_with("a labelled")
-                || w == "publish"
+                || w.starts_with("publish")
                 || w.contains("deploy")
                 || w.starts_with("push"))
         });
@@ -1244,7 +1265,7 @@ pub(crate) fn use_lines(
             label: "Note".into(),
             text: if r.kind == Kind::Proxy {
                 format!(
-                    "A proxy of {}: what is not here yet is fetched from it when first asked for, then kept.\nPublish to a hosted repository; its Cache tab lists, pins and evicts what is kept.",
+                    "A proxy of {}: what is not here yet is fetched from it when first asked for, then kept.\nPublish to a hosted repository; this proxy's Cache tab lists, pins and evicts what is kept.",
                     r.setting_str("upstream")
                 )
             } else {
@@ -1363,14 +1384,14 @@ pub(crate) async fn use_token(
                     "never expires".into()
                 }
             );
-            use_render(
+            to_tab(use_render(
                 &app,
                 &v.caller,
                 &r,
                 form_get(&form, "place"),
                 &host_of(&headers),
                 Some((&token, note)),
-            )
+            ))
         }
         Err(e) => err_part(e),
     }

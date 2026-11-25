@@ -46,7 +46,12 @@ pub(crate) fn token_rows(v: &Value) -> Vec<TokenRow> {
         .collect()
 }
 
-pub(crate) async fn account_page(State(app): St, v: Viewer) -> Result<Response> {
+pub(crate) async fn account_page(st: St, v: Viewer) -> Response {
+    let s = v.shell("account");
+    page(s, account_page_of(st, v).await)
+}
+
+async fn account_page_of(State(app): St, v: Viewer) -> Result<Response> {
     let t = json_of(api::tokens(State(app.clone()), v.who(), Query(api::AllQ::default())).await)?;
     let list = json_of(api::repos(State(app), v.who()).await)?;
     Ok(render(&AccountPage {
@@ -117,7 +122,15 @@ pub(crate) async fn token_create(
 
 pub(crate) async fn token_delete(State(app): St, v: Viewer, Path(id): Path<i64>) -> Response {
     match api::token_delete(State(app), v.who(), Path(id)).await {
-        Ok(_) => msg(true, "deleted"),
-        Err(e) => err_part(e),
+        // Nothing in place of its row: the row goes.
+        Ok(_) => StatusCode::OK.into_response(),
+        // Said under the tokens; the row stays.
+        Err(e) => {
+            let mut r = err_part(e);
+            let h = r.headers_mut();
+            h.insert("HX-Retarget", HeaderValue::from_static("#tokens-result"));
+            h.insert("HX-Reswap", HeaderValue::from_static("innerHTML"));
+            r
+        }
     }
 }

@@ -9,7 +9,7 @@
   </table></div>
   <p class="muted small card-body">version: <code>?package=&lt;name&gt;</code> (the latest by the format's order); downloads: in 30 days, all or <code>?package=</code>; any: <code>&amp;label=</code> for other words on the left.</p>
   {% else %}
-  <p class="empty">{% if can_admin %}A private repository's badges need a badge token: make one to get their addresses.{% else %}Not shown: the repository is private and has no badge token (its admins can make one).{% endif %}</p>
+  <p class="empty">{% if can_admin %}A private repository's badges need a badge token: make one to get their addresses.{% else %}Not shown: a private repository's badges need its badge token, which only its admins see and make.{% endif %}</p>
   {% endif %}
   {% if can_admin && !public %}
   <div class="card-body">

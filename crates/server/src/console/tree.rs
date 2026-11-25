@@ -7,6 +7,8 @@ use super::*;
 pub struct TreeRow {
     pub name: String,
     pub path: String,
+    /// The path as an address's end: each segment encoded (a#b, 50%).
+    pub url: String,
     pub dir: bool,
     pub size: String,
     pub detail: String,
@@ -33,6 +35,8 @@ pub(crate) struct TreePart {
     pub(crate) version: String,
     pub(crate) served: bool,
     pub(crate) can_write: bool,
+    /// Why nothing is listed (a version or path that is not there).
+    pub(crate) note: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -70,9 +74,14 @@ pub(crate) async fn tree_part(
         }),
     )
     .await;
-    let t = match json_of(res) {
-        Ok(t) => t,
-        Err(e) => return err_part(e),
+    // A version or path that is not there is said in the card, whose
+    // form stays to change it; no right to read it, in place of it.
+    let (t, note) = match json_of(res) {
+        Ok(t) => (t, String::new()),
+        Err(e) => match app.repo_for(&v.caller, &repo, Role::Read) {
+            Ok(_) => (Value::Null, e.to_string()),
+            Err(_) => return err_part(e),
+        },
     };
     let path = q.path.trim_matches('/').to_string();
     let mut crumbs = vec![("/".to_string(), String::new())];
@@ -121,6 +130,11 @@ pub(crate) async fn tree_part(
                     "ref" => format!("→ {}", s(&e["target"])),
                     _ => String::new(),
                 },
+                url: p
+                    .split('/')
+                    .map(crate::serving::percent_encode)
+                    .collect::<Vec<_>>()
+                    .join("/"),
                 name,
                 path: p,
             }
@@ -150,7 +164,8 @@ pub(crate) async fn tree_part(
         _ => String::new(),
     };
     render(&TreePart {
-        both: format != "files",
+        // A mirror's served tree is the one it received.
+        both: format != "files" && !mirror,
         mirror,
         base,
         repo,
@@ -160,6 +175,7 @@ pub(crate) async fn tree_part(
         version: q.version,
         served,
         can_write: can_write && !served,
+        note,
     })
 }
 

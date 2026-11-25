@@ -2401,6 +2401,543 @@ fn console_login_pages_and_csrf() {
     assert_eq!(r.status().as_u16(), 200, "a token does not log in");
 }
 
+/// Lists that fit what they show: a files repository's files a row each
+/// (no empty Version column, unrelated files of one name not folded,
+/// one body to sort), filter boxes the refresh gives back their focus
+/// (by their ids), and addresses to copy that reach names with #, % and
+/// spaces.
+#[test]
+fn console_lists_fit_and_addresses_reach() {
+    let s = Server::start();
+    let (c, sid, _) = console_session(&s, "ui", "ui-password");
+    let text = |p: &str| {
+        c.get(format!("{}{p}", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .send()
+            .unwrap()
+            .text()
+            .unwrap()
+    };
+    s.cli(&["repo", "create", "fl", "-f", "files"]).unwrap();
+    let tok = s
+        .cli(&["token", "create", "w", "--repos", "fl", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let http = reqwest::blocking::Client::new();
+    for (path, body) in [
+        ("docs/README.md", "docs"),
+        ("notes/README.md", "notes"),
+        ("a%23b.txt", "hash"),
+        ("50%25.txt", "percent"),
+        ("with%20space.txt", "space"),
+    ] {
+        let r = http
+            .put(s.url(&format!("/fl/{path}")))
+            .basic_auth("token", Some(&tok))
+            .body(body)
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 201, "{path}");
+    }
+    let all = text("/r/fl/packages");
+    assert!(
+        !all.contains("<th>Version</th>")
+            && !all.contains("pkg-sum")
+            && all.matches("<tbody").count() == 1
+            && all.contains("<table class=\"sortable\">"),
+        "{all}"
+    );
+    assert!(all.contains("id=\"pkg-q\""), "{all}");
+    // Search results sort too.
+    let found = text("/search/rows?q=README");
+    assert!(
+        found.matches("<tbody").count() == 1 && found.matches("README.md").count() >= 2,
+        "{found}"
+    );
+    // Copy address: each name encoded, and the address reaches the file.
+    let tree = text("/r/fl/tree?path=");
+    for (name, body) in [
+        ("a%23b.txt", "hash"),
+        ("50%25.txt", "percent"),
+        ("with%20space.txt", "space"),
+    ] {
+        let url = s.url(&format!("/fl/{name}"));
+        assert!(
+            tree.contains(&format!("<span class=\"copy-src\" hidden>{url}</span>")),
+            "{name}: {tree}"
+        );
+        let r = http
+            .get(&url)
+            .basic_auth("token", Some(&tok))
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 200, "{url}");
+        assert_eq!(r.text().unwrap(), body);
+    }
+    // The other filter boxes: a proxy's cache, a mirror's packages.
+    s.cli(&[
+        "repo",
+        "create",
+        "fp",
+        "-f",
+        "files",
+        "-k",
+        "proxy",
+        "-s",
+        &format!("upstream={}", s.url("/fl/")),
+    ])
+    .unwrap();
+    assert!(text("/r/fp/cache").contains("id=\"cache-q\""));
+    s.cli(&[
+        "repo",
+        "create",
+        "dm",
+        "-k",
+        "mirror",
+        "-s",
+        "source=http://127.0.0.1:9/",
+        "-s",
+        "dists=stable",
+    ])
+    .unwrap();
+    let tree = s
+        .dir
+        .path()
+        .join("data/storages/main/trees/dm/dists/stable");
+    std::fs::create_dir_all(tree.join("main/binary-amd64")).unwrap();
+    std::fs::write(
+        tree.join("Release"),
+        "Suite: stable\nComponents: main\nArchitectures: amd64\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tree.join("main/binary-amd64/Packages"),
+        "Package: hello\nVersion: 1.0\nArchitecture: amd64\nFilename: pool/main/h/hello_1.0_amd64.deb\nSize: 4\n\n",
+    )
+    .unwrap();
+    let mp = text("/r/dm/packages");
+    assert!(mp.contains("id=\"mpk-q\"") && mp.contains("hello"), "{mp}");
+}
+
+/// The console offers what works for a repository's kind and format:
+/// Republish where there are versions, the received files' box on
+/// mirrors, install-only npm steps on proxies and groups, a kind tag on
+/// every kind but hosted; storage use with proxies' caches; job pages
+/// that name the job's kind, draw a queued job as waiting, and offer to
+/// allow missing files only where the format has that setting.
+#[test]
+fn console_offers_what_the_kind_has() {
+    let s = Server::start();
+    let (c, sid, _) = console_session(&s, "ki", "ki-password");
+    let text = |p: &str| {
+        c.get(format!("{}{p}", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .send()
+            .unwrap()
+            .text()
+            .unwrap()
+    };
+    s.cli(&["repo", "create", "h", "-f", "files", "-s", "public=true"])
+        .unwrap();
+    let tok = s
+        .cli(&["token", "create", "w", "--repos", "h", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let r = reqwest::blocking::Client::new()
+        .put(s.url("/h/x.bin"))
+        .basic_auth("token", Some(&tok))
+        .body(vec![7u8; 3000])
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 201);
+    let up = format!("upstream={}", s.url("/h/"));
+    for args in [
+        &[
+            "p",
+            "-f",
+            "files",
+            "-k",
+            "proxy",
+            "-s",
+            &up,
+            "-s",
+            "public=true",
+        ][..],
+        &["g", "-f", "files", "-k", "group", "-s", "members=h"],
+        &[
+            "m",
+            "-k",
+            "mirror",
+            "-s",
+            "source=http://127.0.0.1:9/",
+            "-s",
+            "dists=stable",
+        ],
+        &[
+            "rm",
+            "-f",
+            "rpm",
+            "-k",
+            "mirror",
+            "-s",
+            "source=http://127.0.0.1:9/",
+        ],
+        &["nh", "-f", "npm"],
+        &[
+            "np",
+            "-f",
+            "npm",
+            "-k",
+            "proxy",
+            "-s",
+            "upstream=http://127.0.0.1:9/",
+        ],
+        &["ng", "-f", "npm", "-k", "group", "-s", "members=nh,np"],
+    ] {
+        let mut a = vec!["repo", "create"];
+        a.extend_from_slice(args);
+        s.cli(&a).unwrap();
+    }
+    // Republish only where there are versions; the received files' box
+    // only on mirrors.
+    for (repo, republish, tree) in [
+        ("h", true, false),
+        ("p", false, false),
+        ("g", false, false),
+        ("m", false, true),
+    ] {
+        let st = text(&format!("/r/{repo}/settings"));
+        assert_eq!(st.contains("Republish"), republish, "{repo}: {st}");
+        assert_eq!(st.contains("name=\"remove_tree\""), tree, "{repo}: {st}");
+    }
+    // A kind tag on every kind but hosted; the upstream named alike.
+    for (repo, tag) in [("p", "proxy"), ("g", "group"), ("m", "mirror")] {
+        let page = text(&format!("/r/{repo}"));
+        assert!(
+            page.contains(&format!("<span class=\"tag\">{tag}</span>")),
+            "{repo}: {page}"
+        );
+    }
+    let page = text("/r/h");
+    assert!(
+        !page.contains("<span class=\"tag\">hosted</span>"),
+        "{page}"
+    );
+    for repo in ["p", "m"] {
+        let page = text(&format!("/r/{repo}"));
+        assert!(page.contains("<span class=\"k\">Upstream</span>"), "{page}");
+    }
+    // A mirror has one tree: no served and stored views.
+    let mt = s.dir.path().join("data/storages/main/trees/m/pool");
+    std::fs::create_dir_all(&mt).unwrap();
+    std::fs::write(mt.join("hello_1.0_amd64.deb"), "deb").unwrap();
+    let t = text("/r/m/tree?path=pool");
+    assert!(
+        t.contains("hello_1.0_amd64.deb") && !t.contains("name=\"served\""),
+        "{t}"
+    );
+    // npm: publishing only where it is published.
+    let u = text("/r/nh/use");
+    assert!(u.contains("npm publish"), "{u}");
+    for repo in ["np", "ng"] {
+        let u = text(&format!("/r/{repo}/use"));
+        assert!(
+            !u.contains("npm publish")
+                && u.contains("npm install")
+                && !u.contains("only what is published here"),
+            "{repo}: {u}"
+        );
+    }
+    let u = text("/r/p/use");
+    assert!(u.contains("this proxy&#39;s Cache tab"), "{u}");
+    // A files proxy's prefetch example is a file's path.
+    let cache = text("/r/p/cache");
+    assert!(
+        !cache.contains("@v/") && cache.contains("/cache/prefetch"),
+        "{cache}"
+    );
+    // An image proxy cannot prefetch: no box for it.
+    s.cli(&[
+        "repo",
+        "create",
+        "op",
+        "-f",
+        "oci",
+        "-k",
+        "proxy",
+        "-s",
+        "upstream=http://127.0.0.1:9/",
+    ])
+    .unwrap();
+    let cache = text("/r/op/cache");
+    assert!(
+        cache.contains("id=\"cache-q\"") && !cache.contains("/cache/prefetch"),
+        "{cache}"
+    );
+    // Storage use: a proxy's cache counted, a group holds nothing.
+    let r = reqwest::blocking::Client::new()
+        .get(s.url("/p/x.bin"))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(r.bytes().unwrap().len(), 3000);
+    let usage = text("/admin/usage");
+    let row = |name: &str| {
+        usage
+            .split("<tr>")
+            .find(|r| r.contains(&format!("<a href=\"/r/{name}\">")))
+            .unwrap_or_else(|| panic!("{name}: {usage}"))
+            .to_string()
+    };
+    let p = row("p");
+    assert!(
+        p.contains("2.9 KiB") && p.contains("proxy cache") && p.contains(">Files</span>"),
+        "{p}"
+    );
+    let g = row("g");
+    assert!(g.contains("group") && !g.contains("0 B"), "{g}");
+    assert!(usage.contains("proxies' caches"), "{usage}");
+    // Job pages, of jobs as syncs and imports leave them (a sync that
+    // found files gone upstream, one waiting for a slot): written here,
+    // as a test cannot wait for them.
+    sql(
+        &s,
+        r#"INSERT INTO jobs (repo, kind, state, actor, created, started, finished, summary, report) VALUES
+           ('m', 'sync', 'failed', 'ki', 1, 1, 2, '1 file(s) gone upstream', '{"missing_upstream":["pool/main/h/hello_1.0_amd64.deb"]}'),
+           ('rm', 'sync', 'failed', 'ki', 1, 1, 2, '1 file(s) gone upstream', '{"missing_upstream":["Packages/h/hello-1.0-1.noarch.rpm"]}'),
+           ('h', 'import', 'ok', 'ki', 1, 1, 2, 'imported', NULL),
+           ('m', 'sync', 'queued', 'ki', 3, NULL, NULL, '', NULL);"#,
+    );
+    let deb = text("/jobs/1");
+    assert!(
+        deb.contains("gone upstream") && deb.contains("Allow these and sync again"),
+        "{deb}"
+    );
+    let rpm = text("/jobs/2");
+    assert!(
+        rpm.contains("gone upstream") && !rpm.contains("Allow these"),
+        "{rpm}"
+    );
+    let import = text("/jobs/3");
+    assert!(
+        import.contains("import of <a href=\"/r/h\">") && !import.contains("sync of"),
+        "{import}"
+    );
+    let queued = text("/jobs/4");
+    assert!(
+        queued.contains("job-state run\">queued") && queued.contains("job-stop"),
+        "{queued}"
+    );
+    let jobs = text("/r/m/jobs");
+    assert!(jobs.contains("<span class=\"badge run\">queued"), "{jobs}");
+    assert!(text("/r/nh/jobs").contains("No jobs yet."));
+}
+
+/// Errors where people look: a page that cannot be shown is a page in
+/// the console's frame with its status (JSON is the API's), and a form
+/// that fails says so beside it, leaving the tab as it was; readers see
+/// what is theirs to see, and messages say what happened.
+#[test]
+fn console_errors_stay_in_place() {
+    let s = Server::start();
+    let (c, sid, csrf) = console_session(&s, "er", "er-password");
+    let page = |sid: &str, p: &str| {
+        let r = c
+            .get(format!("{}{p}", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .send()
+            .unwrap();
+        let ty = r.headers()["content-type"].to_str().unwrap().to_string();
+        (r.status().as_u16(), ty, r.text().unwrap())
+    };
+    let text = |p: &str| page(&sid, p).2;
+    let post = |p: &str, form: &[(&str, &str)]| {
+        let r = c
+            .post(format!("{}{p}", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .header("x-csrf-token", &csrf)
+            .form(form)
+            .send()
+            .unwrap();
+        let to = r
+            .headers()
+            .get("hx-retarget")
+            .map(|h| h.to_str().unwrap().to_string());
+        (to, r.text().unwrap())
+    };
+    for (p, says) in [
+        ("/r/nope", "no repository nope"),
+        ("/jobs/999", "999"),
+        ("/admin/server/bogus", "no server page bogus"),
+    ] {
+        let (st, ty, body) = page(&sid, p);
+        assert!(
+            st == 404
+                && ty.starts_with("text/html")
+                && body.contains(says)
+                && body.contains("<aside class=\"side\">"),
+            "{p}: {st} {ty} {body}"
+        );
+    }
+    s.cli_in(&["user", "add", "rd", "--password-stdin"], "rd-password")
+        .unwrap();
+    let (_, rsid, _) = console_login(&s, "rd", "rd-password");
+    for p in [
+        "/admin/server",
+        "/admin/server/jobs",
+        "/admin/people",
+        "/new",
+    ] {
+        let (st, ty, body) = page(&rsid, p);
+        assert!(
+            st == 403 && ty.starts_with("text/html") && body.contains("<aside class=\"side\">"),
+            "{p}: {st} {ty} {body}"
+        );
+    }
+    // A label named twice: the second says so beside the form; the
+    // first's Versions tab goes in place of the tab.
+    s.cli(&["repo", "create", "f", "-f", "files"]).unwrap();
+    let dir = s.dir.path().join("up");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a.txt"), "a").unwrap();
+    s.cli(&["upload", "f", dir.join("a.txt").to_str().unwrap()])
+        .unwrap();
+    let v = text("/r/f/versions");
+    assert!(
+        v.contains("hx-post=\"/c/r/f/labels\" hx-target=\"#ver-result\""),
+        "{v}"
+    );
+    let (to, body) = post("/c/r/f/labels", &[("name", "rel")]);
+    assert!(
+        to.as_deref() == Some("#tab") && body.contains("Versions"),
+        "{to:?} {body}"
+    );
+    let (to, body) = post("/c/r/f/labels", &[("name", "rel")]);
+    assert!(
+        to.is_none() && body.contains("already has a label rel") && !body.contains("<table"),
+        "{to:?} {body}"
+    );
+    let (to, _) = post("/c/r/f/labels/rel/delete", &[]);
+    assert_eq!(to.as_deref(), Some("#tab"));
+    // Browse: a version that is not there, said in the card, whose form
+    // stays to change it.
+    let t = text("/r/f/tree?path=&version=99");
+    assert!(
+        t.contains("no version 99") && t.contains("name=\"version\" value=\"99\""),
+        "{t}"
+    );
+    // Grants.
+    let a = text("/r/f/access");
+    assert!(a.contains("hx-target=\"#access-result\""), "{a}");
+    let (to, body) = post(
+        "/c/r/f/grants",
+        &[("subject", "user:ghost"), ("role", "read")],
+    );
+    assert!(to.is_none() && body.contains("ghost"), "{to:?} {body}");
+    let (to, _) = post("/c/r/f/grants", &[("subject", "user:rd"), ("role", "read")]);
+    assert_eq!(to.as_deref(), Some("#tab"));
+    let (to, _) = post("/c/r/f/grants/user%3Ard/delete", &[]);
+    assert_eq!(to.as_deref(), Some("#tab"));
+    // How to use: a token made goes in place of the tab.
+    let u = text("/r/f/use");
+    assert!(u.contains("hx-target=\"#use-result\""), "{u}");
+    let (to, body) = post("/c/r/f/use-token", &[("days", "30")]);
+    assert!(
+        to.as_deref() == Some("#tab") && body.contains("pkgpod_"),
+        "{to:?} {body}"
+    );
+    // A private repository's badge token is its admins'.
+    s.cli(&["repo", "create", "priv", "-f", "files"]).unwrap();
+    s.cli(&["upload", "priv", dir.join("a.txt").to_str().unwrap()])
+        .unwrap();
+    let (_, b) = post("/c/r/priv/badge-token", &[]);
+    let bt = b
+        .split("token=")
+        .nth(1)
+        .unwrap()
+        .split(['"', '<', ')', '&'])
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(bt.len() > 8, "{b}");
+    s.cli(&["grant", "set", "priv", "user:rd", "read"]).unwrap();
+    let rb = page(&rsid, "/r/priv/badges").2;
+    assert!(!rb.contains(&bt) && !rb.contains("token="), "{rb}");
+    // A cache change that fails is said in the cache card, which stays.
+    s.cli(&[
+        "repo",
+        "create",
+        "fp",
+        "-f",
+        "files",
+        "-k",
+        "proxy",
+        "-s",
+        &format!("upstream={}", s.url("/f/")),
+    ])
+    .unwrap();
+    let (_, body) = post("/c/r/fp/cache/bogus", &[("path", "a.txt")]);
+    assert!(
+        body.contains("<div class=\"card\" id=\"cache\">")
+            && body.contains("no cache action bogus"),
+        "{body}"
+    );
+    // Read only: the settings are shown, not offered.
+    let rs = page(&rsid, "/r/priv/settings").2;
+    assert!(
+        rs.contains("<fieldset class=\"settings-group\" disabled>"),
+        "{rs}"
+    );
+    let rs = text("/r/priv/settings");
+    assert!(!rs.contains("settings-group\" disabled"), "{rs}");
+    // Saved: a new version named only when one was made.
+    let (_, saved) = post("/c/r/f/settings", &[("description", "Tools")]);
+    assert!(
+        saved.contains("Saved.") && !saved.contains("version"),
+        "{saved}"
+    );
+    s.cli(&["repo", "create", "d", "-s", "sign=false"]).unwrap();
+    s.cli(&["op", "d", "dist-set", "name=noble", "-y"]).unwrap();
+    let (_, saved) = post("/c/r/d/settings", &[("valid_days", "7")]);
+    assert!(
+        saved.contains("Saved.") && saved.contains("version 3"),
+        "{saved}"
+    );
+    // Search: nothing found is not nothing there.
+    let none = text("/search/rows?q=zzzz");
+    assert!(none.contains("Nothing matches."), "{none}");
+    // The new repository's storage is the API's default.
+    let other = s.dir.path().join("aaa");
+    std::fs::create_dir_all(&other).unwrap();
+    s.cli(&["storage", "set", "aaa", other.to_str().unwrap()])
+        .unwrap();
+    let new = text("/new");
+    assert!(new.contains("<option selected>main</option>"), "{new}");
+    // Rights are on a repository's Access tab; a password is needed to
+    // set one.
+    let people = text("/admin/people");
+    assert!(
+        people.contains("on its Access tab")
+            && people.contains("name=\"password\" placeholder=\"new password\" required"),
+        "{people}"
+    );
+    // A token deleted: its row goes, nothing in its place.
+    post("/c/tokens", &[("name", "gone")]);
+    let acct = text("/account");
+    let id = acct
+        .split("/c/tokens/")
+        .nth(1)
+        .unwrap()
+        .split('/')
+        .next()
+        .unwrap()
+        .to_string();
+    let (_, body) = post(&format!("/c/tokens/{id}/delete"), &[]);
+    assert_eq!(body, "", "token delete");
+}
+
 #[test]
 fn deb_mirror_of_a_hosted_repository() {
     if !have("dpkg-deb") || !have("gpg") {

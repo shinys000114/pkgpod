@@ -82,6 +82,8 @@ pub(crate) struct PackagesPart {
     /// The card's title and the columns' names, by format.
     pub(crate) title: &'static str,
     pub(crate) cols: [&'static str; 3],
+    /// Some row has a version (a files repository's often have none).
+    pub(crate) show_version: bool,
     pub(crate) show_size: bool,
     /// The rows' downloads in the last 30 days are shown.
     pub(crate) show_downloads: bool,
@@ -499,7 +501,10 @@ pub(crate) async fn packages_part(
     };
     rows.sort_by(|a, b| a.name.cmp(&b.name));
     let total = rows.len();
-    let groups = pkg_groups(rows, true);
+    let show_version = r.format != "files" || rows.iter().any(|x| !x.version.is_empty());
+    // Files of one name in two directories are two files, not two
+    // versions of one package.
+    let groups = pkg_groups(rows, r.format != "files");
     render(&PackagesPart {
         limit_hit: total >= limit,
         grouped: groups.iter().any(|g| g.rows.len() > 1),
@@ -514,6 +519,7 @@ pub(crate) async fn packages_part(
         others,
         title,
         cols,
+        show_version,
         show_size,
         show_downloads: true,
     })

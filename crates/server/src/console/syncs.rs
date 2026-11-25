@@ -15,6 +15,8 @@ pub(crate) async fn sync(State(app): St, v: Viewer, Path(repo): Path<String>) ->
 
 pub struct JobRow {
     pub id: i64,
+    /// sync, import
+    pub kind: String,
     pub state: String,
     pub actor: String,
     pub started: String,
@@ -25,6 +27,7 @@ pub struct JobRow {
 pub(crate) fn job_row(j: &crate::jobs::Job) -> JobRow {
     JobRow {
         id: j.id,
+        kind: j.kind.clone(),
         state: j.state.clone(),
         actor: j.actor.clone(),
         started: when(j.started),
@@ -121,6 +124,9 @@ pub(crate) struct JobPage {
     /// Files upstream no longer has that the repository does not allow
     /// to be missing yet.
     pub(crate) missing: Vec<String>,
+    /// The format can allow files to be missing (a Debian mirror's
+    /// Missing files allowed).
+    pub(crate) allows: bool,
     /// The viewer may allow them (an admin of the repository).
     pub(crate) can_allow: bool,
 }
@@ -160,22 +166,36 @@ async fn job_with_log(
     .await
 }
 
-pub(crate) async fn job_page(State(app): St, v: Viewer, Path(id): Path<i64>) -> Result<Response> {
+pub(crate) async fn job_page(st: St, v: Viewer, id: Path<i64>) -> Response {
+    let s = v.shell("repos");
+    page(s, job_page_of(st, v, id).await)
+}
+
+async fn job_page_of(State(app): St, v: Viewer, Path(id): Path<i64>) -> Result<Response> {
     let (job, log) = job_with_log(&app, &v, id).await?;
     let missing = still_missing(&app, &job);
-    let can_allow = !missing.is_empty()
-        && app.engine.repo(&job.repo).is_ok_and(|r| {
+    let repo = app.engine.repo(&job.repo).ok();
+    let allows = repo.as_ref().is_some_and(|r| {
+        app.engine
+            .fields(&r.format, r.kind)
+            .is_ok_and(|f| f.iter().any(|x| x.name == "ignore_missing"))
+    });
+    let can_allow = allows
+        && !missing.is_empty()
+        && repo.is_some_and(|r| {
             app.auth
                 .role(&v.caller, &job.repo, r.setting_bool("public"))
                 == Some(Role::Admin)
         });
     Ok(render(&JobPage {
         missing,
+        allows,
         can_allow,
         s: v.shell("repos"),
         id: job.id,
         state: job.state.clone(),
-        running: job.state == "running",
+        // A queued job is on its way: followed, and can be stopped.
+        running: matches!(job.state.as_str(), "running" | "queued"),
         repo: job.repo.clone(),
         job: job_row(&job),
         from: log.next,
@@ -253,7 +273,8 @@ pub(crate) async fn job_log(State(app): St, v: Viewer, Path(id): Path<i64>) -> R
             from: log.next,
             cut: log.from > 0,
             log: log.text,
-            running: j.state == "running",
+            // A queued job is on its way: followed too.
+            running: matches!(j.state.as_str(), "running" | "queued"),
             state: j.state,
         }),
         Err(e) => err_part(e),
