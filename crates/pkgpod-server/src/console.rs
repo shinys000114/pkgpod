@@ -890,8 +890,9 @@ fn strs(v: &Value) -> Vec<String> {
 async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response> {
     let list = json_of(api::repos(State(app.clone()), v.who()).await)?;
     let app2 = app.clone();
-    let (counts, syncs) = api::blocking(&app, move |_| {
+    let (counts, cached, syncs) = api::blocking(&app, move |_| {
         let counts = app2.engine.catalog_counts()?;
+        let cached = app2.engine.cache_counts()?;
         // The last sync of each mirror.
         let mut syncs = HashMap::new();
         for j in crate::jobs::list(&app2.db, None, 500)? {
@@ -899,7 +900,7 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
                 syncs.entry(j.repo.clone()).or_insert(j);
             }
         }
-        Ok((counts, syncs))
+        Ok((counts, cached, syncs))
     })
     .await?;
     let host = host_of(&headers);
@@ -920,6 +921,22 @@ async fn index(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response
 
             let (content, content_when, state, job) = if kind == "mirror" {
                 sync_state(syncs.get(&name))
+            } else if kind == "proxy" {
+                // What it has fetched and kept: it has no catalog.
+                let text = match cached.get(&name) {
+                    None | Some((0, _)) => "nothing kept yet".to_string(),
+                    Some((1, b)) => format!("1 file kept · {}", crate::serve::human(*b)),
+                    Some((n, b)) => format!("{n} files kept · {}", crate::serve::human(*b)),
+                };
+                (text, String::new(), String::new(), None)
+            } else if kind == "group" {
+                let n = strs(&r["settings"]["members"]).len();
+                let text = match n {
+                    0 => "no members".to_string(),
+                    1 => "1 member".to_string(),
+                    n => format!("{n} members"),
+                };
+                (text, String::new(), String::new(), None)
             } else {
                 (count_words(&format, n), String::new(), String::new(), None)
             };
