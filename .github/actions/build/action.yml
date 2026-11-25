@@ -51,8 +51,14 @@ runs:
           cp "build/src/target/$t-unknown-linux-musl/release/pkgpod" "dist/pkgpod_${v}_linux_$t"
         done
         # One file for both binaries, which link the same crates (cmp fails
-        # the build when they stop doing so).
+        # the build when they stop doing so, and the diff says how).
         n=release/THIRD-PARTY-NOTICES
-        cmp "build/src/target/x86_64-unknown-linux-musl/$n" "build/src/target/aarch64-unknown-linux-musl/$n"
-        cp "build/src/target/x86_64-unknown-linux-musl/$n" dist/
+        a="build/src/target/x86_64-unknown-linux-musl/$n"
+        b="build/src/target/aarch64-unknown-linux-musl/$n"
+        if ! cmp "$a" "$b"; then
+          # Each hunk headed by the crate ("name version") it is in.
+          diff -u -F '^[A-Za-z0-9_-]\+ [0-9][^ ]*$' "$a" "$b" | head -n 200 || true
+          exit 1
+        fi
+        cp "$a" dist/
         cd dist && sha256sum * > checksums.txt && cat checksums.txt

@@ -12,6 +12,8 @@
 # those of the build (debian/rules: offline, from vendor/). A text seen
 # before is named, not repeated.
 set -eu
+# The same order, so the same bytes, whatever the builder's locale.
+export LC_ALL=C
 target=$1
 shift
 registry=${CARGO_HOME:-$HOME/.cargo}/registry/src
@@ -19,8 +21,12 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 # Not in a pipe: a failing cargo must fail the build, not empty the file.
-cargo tree "$@" --locked -p pkgpod --target "$target" -e normal,no-proc-macro \
-    --prefix none --format '{p}|{l}' >"$tmp/tree"
+# Never in colour (CI sets CARGO_TERM_COLOR=always): the "(*)" of a
+# crate seen before would come with escapes, so neither sed nor sort -u
+# below would drop the repeats, and which crates repeat differs by
+# target.
+cargo tree "$@" --color never --locked -p pkgpod --target "$target" \
+    -e normal,no-proc-macro --prefix none --format '{p}|{l}' >"$tmp/tree"
 # Path dependencies are pkgpod's own crates.
 sed 's/ (\*)$//' "$tmp/tree" | grep -v ' (/' | sort -u >"$tmp/crates"
 
@@ -36,6 +42,22 @@ public domain.
 EOF
 
 rule=========================================================================
+# Those of the paths on stdin that <dir>/.cargo-checksum.json lists: the
+# files cargo vendored. Not those a build script may add to its crate's
+# directory, which a later build of the same tree (arm64 after amd64)
+# would read and the earlier did not; they are named, so the build log
+# says which crate adds what.
+vendored() {
+    while IFS= read -r f; do
+        key=$(printf '%s' "$f" | sed 's/[\\"]/\\&/g')
+        if grep -qF "\"$key\":\"" "$1/.cargo-checksum.json"; then
+            printf '%s\n' "$f"
+        else
+            echo "$0: left out $1/$f, which cargo did not vendor" >&2
+        fi
+    done
+}
+
 while IFS='|' read -r pkg licence; do
     name=${pkg% v*}
     version=${pkg##* v}
@@ -53,6 +75,10 @@ while IFS='|' read -r pkg licence; do
         -o -iname 'copying*' -o -iname 'notice*' -o -iname 'copyright*' \) \
         ! -name '*.sh' ! -name '*.rs' ! -name '*.py' ! -name '*.[ch]' -print) |
         sed 's|^\./||' | sort >"$tmp/files"
+    if [ -f "$dir/.cargo-checksum.json" ]; then
+        vendored "$dir" <"$tmp/files" >"$tmp/listed"
+        mv "$tmp/listed" "$tmp/files"
+    fi
     if [ ! -s "$tmp/files" ]; then
         printf '\nThe crate ships no licence file; the licence above is the one\n'
         printf 'its Cargo.toml names, whose text is given for other crates here.\n'
