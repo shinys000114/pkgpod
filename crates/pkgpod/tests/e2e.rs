@@ -9472,7 +9472,14 @@ fn arch_packages_with_pacman() {
         .replacen("http://", &format!("http://token:{tok}@"), 1);
     // pacman with only this repository, packages and databases signed.
     let setup = |at: &str, trust: bool| {
-        let mut s = String::from("set -e\npacman-key --init >/dev/null 2>&1\n");
+        // No keyserver: an unknown key is not looked up on the network
+        // (which can take minutes), it fails at once.
+        let mut s = String::from(
+            "set -e\npacman-key --init >/dev/null 2>&1\n\
+             sed -i 's|^keyserver .*||' /etc/pacman.d/gnupg/gpg.conf\n\
+             echo 'keyserver hkp://127.0.0.1:1' >> /etc/pacman.d/gnupg/gpg.conf\n\
+             echo 'keyserver hkp://127.0.0.1:1' >> /etc/pacman.d/gnupg/dirmngr.conf\n",
+        );
         if trust {
             s.push_str(&format!("curl -fsS {base}key.asc -o /tmp/k.asc\n"));
             s.push_str("pacman-key --add /tmp/k.asc >/dev/null 2>&1\n");
