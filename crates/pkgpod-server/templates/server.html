@@ -75,6 +75,37 @@ steps:
   </details>
   </div>
 </div>
+<div class="card" id="webhooks">
+  <div class="card-head"><h2>Webhooks</h2><span class="hint">new versions, labels and ended jobs sent to other services: a deploy after a publish (GitHub repository_dispatch), a chat line when a sync fails</span></div>
+  {% if hooks.is_empty() %}<p class="empty">No webhooks.</p>{% else %}
+  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Sends</th><th>To</th><th>Last deliveries</th><th></th></tr></thead><tbody>
+  {% for h in hooks %}<tr><td><b>{{ h.name }}</b>{% if !h.active %} <span class="tag">off</span>{% endif %}<div class="muted small">{{ h.kind }}{% if h.has_secret %}, with a secret{% endif %}</div></td>
+    <td>{{ h.events }}<div class="muted small">of {{ h.repos }}</div></td>
+    <td class="mono small claims"><div>{{ h.url }}</div></td>
+    <td class="small">{% if h.deliveries.is_empty() %}<span class="muted">none yet</span>{% endif %}{% for (id, ev, st, info, at) in h.deliveries %}<div><span class="{% if st == "ok" %}st-ok{% else if st == "failed" %}st-bad{% else %}st-run{% endif %}">{{ st }}</span> {{ ev }} <span class="muted">{{ at }}{% if !info.is_empty() %} · {{ info }}{% endif %}</span>{% if st != "ok" %} <button class="link" hx-post="/c/webhooks/{{ h.name|urlencode }}/retry/{{ id }}" hx-target="#server-result">again</button>{% endif %}</div>{% endfor %}</td>
+    <td class="acts nowrap"><button class="link" hx-post="/c/webhooks/{{ h.name|urlencode }}/ping" hx-target="#server-result">ping</button> <button class="link danger" hx-post="/c/webhooks/{{ h.name|urlencode }}/delete" hx-target="#server-result" hx-confirm="Remove webhook {{ h.name }} and its deliveries?">remove</button></td></tr>{% endfor %}
+  </tbody></table></div>
+  {% endif %}
+  <div class="card-body">
+  <form hx-post="/c/webhooks" hx-target="#server-result">
+    <div class="fields">
+      <label class="field"><span>Name</span><input name="name" required placeholder="deploy" autocomplete="off" autocapitalize="off" spellcheck="false"><small>The same name changes a webhook.</small></label>
+      <label class="field wide"><span>URL</span><input name="url" required placeholder="https://api.github.com/repos/owner/name/dispatches" autocomplete="off" spellcheck="false"></label>
+      <label class="field"><span>Kind</span><select name="kind"><option value="json">JSON, signed</option><option value="github">GitHub repository_dispatch</option><option value="slack">Slack (a line of text)</option></select><small>github: the URL above; the secret a token that may dispatch.</small></label>
+      <label class="field"><span>Secret</span><input name="secret" type="password" autocomplete="new-password" placeholder="kept if left empty"><small>JSON: signs each delivery (X-Pkgpod-Signature-256). GitHub: the token.</small></label>
+      <fieldset class="field"><span>Events</span>
+        <label class="check-line"><input type="checkbox" name="events" value="version" checked> <span>version: a new version (upload, change, promotion, rollback)</span></label>
+        <label class="check-line"><input type="checkbox" name="events" value="label"> <span>label</span></label>
+        <label class="check-line"><input type="checkbox" name="events" value="job"> <span>job: a sync or import that ended</span></label>
+        <label class="check-line"><input type="checkbox" name="events" value="job-failed"> <span>job-failed: only those that did not end well</span></label>
+      </fieldset>
+      <label class="field"><span>Repositories</span><input name="repos" placeholder="all" list="dl-trust-repos" autocomplete="off" spellcheck="false"><small>Empty: every repository.</small></label>
+      <label class="check field"><span class="check-line"><input type="checkbox" name="disabled"> <span>Disabled</span></span><small>Kept, but nothing sent.</small></label>
+    </div>
+    <div class="form-foot"><button type="submit">Save webhook</button></div>
+  </form>
+  </div>
+</div>
 <div class="card">
   <div class="card-head"><h2>Signing keys</h2><span class="hint">repositories are signed with the default key unless their key setting names another</span></div>
   {% if keys.is_empty() %}<p class="empty">No keys: signed repositories cannot publish until one is added.</p>{% else %}

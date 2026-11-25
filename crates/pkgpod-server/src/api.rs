@@ -309,6 +309,17 @@ pub fn router() -> Router<Arc<App>> {
         .route("/api/v1/trust/{name}", delete(trust_delete))
         .route("/api/v1/oidc/token", post(oidc_token))
         .route("/api/v1/cli", get(crate::cli_dl::cli_info))
+        .route("/api/v1/webhooks", get(webhooks).post(webhook_put))
+        .route("/api/v1/webhooks/{name}", delete(webhook_delete))
+        .route(
+            "/api/v1/webhooks/{name}/deliveries",
+            get(webhook_deliveries),
+        )
+        .route("/api/v1/webhooks/{name}/ping", post(webhook_ping))
+        .route(
+            "/api/v1/webhooks/{name}/deliveries/{id}/retry",
+            post(webhook_retry),
+        )
         .route("/api/v1/listeners", get(listeners))
         .route(
             "/api/v1/listeners/{name}",
@@ -1612,6 +1623,81 @@ pub(crate) async fn token_create(
         StatusCode::CREATED,
         Json(json!({"token": token, "info": info})),
     ))
+}
+
+// ---- webhooks ----
+
+pub(crate) async fn webhooks(State(app): St, Who(c): Who) -> Result<Json<Value>> {
+    app.require_admin(&c)?;
+    let app2 = app.clone();
+    Ok(Json(json!(
+        blocking(&app, move |_| crate::webhooks::hooks(&app2)).await?
+    )))
+}
+
+/// Adds a webhook, or changes the one of the same name.
+pub(crate) async fn webhook_put(
+    State(app): St,
+    Who(c): Who,
+    Json(h): Json<crate::webhooks::Hook>,
+) -> Result<(StatusCode, Json<Value>)> {
+    app.require_admin(&c)?;
+    let app2 = app.clone();
+    let h = blocking(&app, move |_| crate::webhooks::put_hook(&app2, h)).await?;
+    app.auth.audit(
+        c.name(),
+        "webhook",
+        &h.name,
+        &format!("{} {} on {}", h.kind, h.url, h.events.join(",")),
+    );
+    Ok((StatusCode::CREATED, Json(json!(h))))
+}
+
+pub(crate) async fn webhook_delete(
+    State(app): St,
+    Who(c): Who,
+    Path(name): Path<String>,
+) -> Result<StatusCode> {
+    app.require_admin(&c)?;
+    let (app2, n2) = (app.clone(), name.clone());
+    blocking(&app, move |_| crate::webhooks::remove_hook(&app2, &n2)).await?;
+    app.auth.audit(c.name(), "webhook remove", &name, "");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub(crate) async fn webhook_deliveries(
+    State(app): St,
+    Who(c): Who,
+    Path(name): Path<String>,
+) -> Result<Json<Value>> {
+    app.require_admin(&c)?;
+    let app2 = app.clone();
+    Ok(Json(json!(
+        blocking(&app, move |_| crate::webhooks::deliveries(&app2, &name, 50)).await?
+    )))
+}
+
+/// A ping delivery, sent with the next round (within a second).
+pub(crate) async fn webhook_ping(
+    State(app): St,
+    Who(c): Who,
+    Path(name): Path<String>,
+) -> Result<(StatusCode, Json<Value>)> {
+    app.require_admin(&c)?;
+    let app2 = app.clone();
+    let id = blocking(&app, move |_| crate::webhooks::ping(&app2, &name)).await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({"delivery": id}))))
+}
+
+pub(crate) async fn webhook_retry(
+    State(app): St,
+    Who(c): Who,
+    Path((name, id)): Path<(String, i64)>,
+) -> Result<StatusCode> {
+    app.require_admin(&c)?;
+    let app2 = app.clone();
+    blocking(&app, move |_| crate::webhooks::retry(&app2, &name, id)).await?;
+    Ok(StatusCode::ACCEPTED)
 }
 
 // ---- trusted publishing ----
