@@ -456,7 +456,7 @@ fn serve(a: &ServerArgs) -> Result<(), client::CliError> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&cfg.log)),
         )
         .with(tracing_subscriber::fmt::layer().with_target(false))
-        .with(pkgpod_server::logs::layer())
+        .with(pkgpod_server::ops::logs::layer())
         .init();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -478,7 +478,7 @@ fn serve(a: &ServerArgs) -> Result<(), client::CliError> {
 fn admin(a: &ServerArgs, cmd: AdminCmd) -> Result<(), client::CliError> {
     let cfg = load(a)?;
     let err = |e: pkgpod_server::Error| client::CliError::other(e.to_string());
-    let show = |rep: &pkgpod_server::backup::Report| {
+    let show = |rep: &pkgpod_server::jobs::backup::Report| {
         println!(
             "{} file(s) ({} linked, {} bytes copied)",
             rep.files, rep.linked, rep.bytes
@@ -489,8 +489,9 @@ fn admin(a: &ServerArgs, cmd: AdminCmd) -> Result<(), client::CliError> {
     };
     if let AdminCmd::Restore { from } = &cmd {
         // Before the server's data is opened, which would make it.
-        let rep = pkgpod_server::backup::restore(from, &cfg.data_dir, &mut |m| println!("{m}"))
-            .map_err(err)?;
+        let rep =
+            pkgpod_server::jobs::backup::restore(from, &cfg.data_dir, &mut |m| println!("{m}"))
+                .map_err(err)?;
         show(&rep);
         println!("restored into {}", cfg.data_dir.display());
         return Ok(());
@@ -516,8 +517,9 @@ fn admin(a: &ServerArgs, cmd: AdminCmd) -> Result<(), client::CliError> {
             }
         }
         AdminCmd::Backup { to, mirrors } => {
-            let rep = pkgpod_server::backup::backup(&app, &to, mirrors, &mut |m| println!("{m}"))
-                .map_err(err)?;
+            let rep =
+                pkgpod_server::jobs::backup::backup(&app, &to, mirrors, &mut |m| println!("{m}"))
+                    .map_err(err)?;
             show(&rep);
             println!("backed up into {}", to.display());
         }
