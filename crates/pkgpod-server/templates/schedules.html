@@ -1,0 +1,54 @@
+{# SPDX-License-Identifier: AGPL-3.0-only #}
+{% extends "base.html" %}
+{% block title %}Schedules · pkgpod{% endblock %}
+{% block main %}
+<div class="page-head">
+  <div class="title"><h1>Schedules</h1><p class="sub">When each mirror syncs, as cron in the server's time zone ({{ time_zone }}, now {{ now }}). A schedule is the mirror's own setting: changed here or on its Settings tab, it is the same.</p></div>
+  {% if s.admin && !paused %}<div class="actions"><button type="button" hx-post="/c/schedules/pause" hx-vals='{"paused": "true"}' hx-target="#schedules-result" hx-confirm="No scheduled sync starts until they are resumed (syncs asked for still run). Pause all schedules?">Pause all</button></div>{% endif %}
+</div>
+<div id="schedules-result"></div>
+{% if paused %}<div class="callout warn sched-paused"><span><b>Schedules are paused.</b> No scheduled sync starts; the mirrors keep their schedules, and syncs asked for still run.</span>{% if s.admin %} <button type="button" hx-post="/c/schedules/pause" hx-vals='{"paused": "false"}' hx-target="#schedules-result">Resume</button>{% endif %}</div>{% endif %}
+<div class="card">
+  <div class="card-head"><h2>Mirrors</h2><span class="hint">5 fields (minute hour day month weekday) or @hourly, @daily, @weekly; empty: only when asked</span></div>
+  {% if rows.is_empty() %}<p class="empty">No mirror{% if !s.admin %} you can see{% endif %}.</p>{% else %}
+  <div class="table-wrap"><table class="schedules">
+    <thead><tr><th>Mirror</th><th>Schedule</th><th>Next</th><th>Last sync</th><th>Took</th><th></th></tr></thead>
+    <tbody>
+    {% for r in rows %}<tr>
+      <td class="nowrap"><a href="/r/{{ r.repo }}"><b>{{ r.repo }}</b></a><div class="muted small">{{ r.format }} · on {{ r.storage }}</div></td>
+      <td class="sched">{% if r.can_edit %}<form class="inline one-line" hx-post="/c/schedules/{{ r.repo }}" hx-target="#schedules-result">
+        <input name="schedule" value="{{ r.schedule }}" placeholder="when asked" class="mono" autocomplete="off" spellcheck="false" aria-label="Schedule of {{ r.repo }}" hx-get="/c/schedules/preview" hx-trigger="input changed delay:300ms" hx-target="#pv-{{ r.repo }}" hx-swap="innerHTML"><button type="submit" class="link">save</button></form>
+        {% else %}{% if r.schedule.is_empty() %}<span class="muted">when asked</span>{% else %}<code>{{ r.schedule }}</code>{% endif %}{% endif %}
+        <div class="small" id="pv-{{ r.repo }}">{% if !r.error.is_empty() %}<span class="error">not valid: {{ r.error }}</span>{% endif %}</div></td>
+      <td class="nowrap">{% if r.next == "paused" %}<span class="muted">paused</span>{% else if r.next.is_empty() %}<span class="muted">—</span>{% else %}{% if !r.next_day.is_empty() %}<div class="muted small">{{ r.next_day }}</div>{% endif %}{{ r.next }}{% endif %}</td>
+      <td class="wrap{% if !r.state.is_empty() %} st-{{ r.state }}{% endif %}" data-sync="{{ r.repo }}">{% match r.job %}{% when Some with (id) %}<a href="/jobs/{{ id }}">{{ r.content }} <span class="nowrap">{{ r.content_when }}</span></a>{% when None %}{{ r.content }}{% endmatch %}</td>
+      <td class="nowrap">{% if r.took.is_empty() %}<span class="muted">—</span>{% else %}{{ r.took }}{% endif %}</td>
+      <td class="acts nowrap">{% if r.can_sync && !r.running %}<button type="button" class="link" hx-post="/c/r/{{ r.repo }}/sync" hx-target="#schedules-result">sync now</button>{% endif %}</td>
+    </tr>{% endfor %}
+    </tbody>
+  </table></div>
+  {% endif %}
+</div>
+<div class="card">
+  <div class="card-head"><h2>Next 24 hours</h2><span class="hint">the syncs the schedules start; each runs about as long as its last good sync{% if slots > 0 %}, at most {{ slots }} at once on a storage{% endif %}{% if s.admin %} (<a href="/admin/server#storages">Server, Storages</a>){% endif %}</span></div>
+  {% if paused %}<p class="empty">None: schedules are paused.</p>
+  {% else if planned.is_empty() %}<p class="empty">{% if any %}No scheduled sync in the next 24 hours.{% else %}No mirror has a schedule: they sync only when asked.{% endif %}</p>
+  {% else %}
+  <details class="panel planned-list"{% if waits + skipped > 0 || planned.len() <= 12 %} open{% endif %}>
+    <summary>{{ planned.len() }} sync{% if planned.len() != 1 %}s{% endif %}{% if waits > 0 %} · <span class="st-run">{{ waits }} wait{% if waits == 1 %}s{% endif %} for a slot</span>{% endif %}{% if skipped > 0 %} · <span class="st-bad">{{ skipped }} skipped, the sync before still running</span>{% endif %}{% if waits + skipped == 0 %} <span class="hint">none waits or is skipped</span>{% endif %}</summary>
+    <div class="table-wrap"><table class="planned">
+    <thead><tr><th>Starts</th><th>Mirror</th><th>Storage</th><th>Until about</th><th></th></tr></thead>
+    <tbody>
+    {% for p in planned %}<tr{% if !p.meets.is_empty() %} class="meets-{{ p.meets }}"{% endif %}>
+      <td class="nowrap">{% if !p.day.is_empty() %}<span class="muted small">{{ p.day }}</span> {% endif %}{{ p.at }}</td>
+      <td class="nowrap"><a href="/r/{{ p.repo }}">{{ p.repo }}</a></td>
+      <td class="nowrap">{{ p.storage }}</td>
+      <td class="nowrap">{% if p.meets == "busy" %}<span class="muted">—</span>{% else if p.until.is_empty() %}<span class="muted">not known yet</span>{% else %}{{ p.until }}{% endif %}</td>
+      <td class="small">{% if p.meets == "slot" %}<span class="st-run">waits for a slot ({{ slots }} already run on {{ p.storage }}){% if !p.starts.is_empty() %}, starts about {{ p.starts }}{% endif %}</span>{% else if p.meets == "busy" %}<span class="st-bad">skipped: its sync before still runs</span>{% endif %}</td>
+    </tr>{% endfor %}
+    </tbody>
+    </table></div>
+  </details>
+  {% endif %}
+</div>
+{% endblock %}

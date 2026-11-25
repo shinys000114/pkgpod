@@ -597,3 +597,11 @@ fieldset.field .check-line { display: flex; gap: .4rem; align-items: baseline; m
 .host-pages details.host:last-child { border-bottom: 0; }
 .host-pages summary { cursor: pointer; }
 .host-pages form { margin-top: .6rem; }
+
+/* Schedules */
+.sched-paused { display: flex; gap: .8rem; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+table.schedules td.sched { min-width: 12rem; }
+table.schedules td.sched input { font-family: var(--mono); width: 9rem; }
+table.schedules td.sched form.one-line { flex-wrap: nowrap; }
+details.planned-list > .table-wrap { border-top: 1px solid var(--line); }
+table.planned tr.meets-busy td { color: var(--muted); }

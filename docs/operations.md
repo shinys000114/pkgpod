@@ -411,6 +411,31 @@ already syncing is not started again, and a time that passes while the
 server is down is not made up for. A mirror's status says when it syncs
 next.
 
+All mirrors' schedules are on one page, the console's **Schedules**:
+each mirror's schedule (edited in place, the next runs shown as it is
+typed), its next run, its last sync and how long the last good one
+took, and Sync now. Below, the syncs the schedules start in the next 24
+hours, each with when it ends if it takes as long as last time, and
+what it meets: a storage whose `syncs_per_storage` syncs are all
+running (it waits), or its own mirror's sync before still running (it
+is skipped). Staggering schedules there keeps mirrors on the same disks
+from queueing behind one another. Readers see the mirrors they may
+read; a mirror's admins change its schedule.
+
+```sh
+pkgpod schedule list             # every mirror: schedule, next, last sync
+pkgpod schedule list --plan      # the next 24 hours, and what waits
+pkgpod schedule set debian '0 3 * * *'
+pkgpod schedule set debian ''    # only when asked
+pkgpod schedule pause            # no scheduled sync starts (server admins)
+pkgpod schedule resume
+```
+
+Pausing keeps every mirror's schedule: nothing scheduled starts until
+the schedules are resumed, and syncs asked for still run. The console
+shows it at the top of the Schedules page, where server admins pause
+and resume (`schedules_paused` in the server settings).
+
 At most `syncs_per_storage` syncs (default 2) run at once on one
 storage; others wait, queued, and their log says so. Mirrors on the
 same disks slow one another: five syncs at once on one HDD array move

@@ -367,7 +367,8 @@ pkgpod job 42 --cancel        # stop it
 ```
 
 A **mirror** syncs when asked, or on its `schedule` (cron: `0 */6 * *
-*`, or `@hourly`, `@daily`, ...). A sync that fails leaves the served
+*`, or `@hourly`, `@daily`, ...; all of them on the console's
+Schedules page, or `pkgpod schedule list`). A sync that fails leaves the served
 tree as it was. Mirrors take no uploads and have no versions;
 promotion (deb) takes chosen packages of a mirror into a hosted
 repository, where they stay whatever the mirror does later.
@@ -390,7 +391,10 @@ pkgpod import images https://registry.example.org --image team/app:1.0 --platfor
 The console is at the management listener's `/`. Its home page lists
 the repositories you may read; server admins make new ones there (New
 repository: a format and kind, a name, then the settings). Search finds
-packages across repositories. Account holds your tokens and password;
+packages across repositories. Schedules shows every mirror's schedule
+on one page, with the syncs of the next day (see
+[operations](../operations.md#scheduled-mirror-syncs)). Account holds
+your tokens and password;
 server admins also have Users & teams (users, teams, grants on `*`) and
 Server (serving listeners, signing keys, storages, storage use, garbage
 collection, download statistics, recent changes).

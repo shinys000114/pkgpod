@@ -185,6 +185,23 @@ pub enum HostCmd {
 }
 
 #[derive(Subcommand)]
+pub enum ScheduleCmd {
+    /// Every mirror's schedule, next run and last sync; with --plan the
+    /// syncs of the next day, and which wait for a slot or are skipped.
+    List {
+        #[arg(long)]
+        plan: bool,
+    },
+    /// Set a mirror's schedule (cron, in the server's time zone: "0 */6 * * *",
+    /// @daily); "" syncs it only when asked.
+    Set { repo: String, schedule: String },
+    /// No scheduled sync starts (server admins); the schedules stay.
+    Pause,
+    /// Scheduled syncs start again.
+    Resume,
+}
+
+#[derive(Subcommand)]
 pub enum WebhookCmd {
     List,
     /// Add a webhook, or change the one of the same name.
@@ -938,6 +955,105 @@ pub fn run(
                     &format!("/api/v1/tokens/{id}"),
                     &Value::Null,
                 )?;
+            }
+        },
+        Cmd::Schedule(sc) => match sc {
+            ScheduleCmd::List { plan } => {
+                let v = c.get("/api/v1/schedules")?;
+                x.print(&v, |v| {
+                    if v["paused"] == true {
+                        println!("schedules are paused: no scheduled sync starts");
+                    }
+                    println!("time zone: {}", s(&v["time_zone"]));
+                    if plan {
+                        let mut rows = vec![vec![
+                            "STARTS".into(),
+                            "MIRROR".into(),
+                            "STORAGE".into(),
+                            "UNTIL".into(),
+                            "".into(),
+                        ]];
+                        for p in v["planned"].as_array().into_iter().flatten() {
+                            rows.push(vec![
+                                when(p["at"].as_i64()),
+                                s(&p["repo"]),
+                                s(&p["storage"]),
+                                match p["until"].as_i64() {
+                                    Some(_) => when(p["until"].as_i64()),
+                                    None => "-".into(),
+                                },
+                                match p["meets"].as_str() {
+                                    Some("slot") => "waits for a slot".into(),
+                                    Some("busy") => "skipped: still syncing".into(),
+                                    _ => String::new(),
+                                },
+                            ]);
+                        }
+                        table(rows);
+                        return;
+                    }
+                    let mut rows = vec![vec![
+                        "MIRROR".into(),
+                        "STORAGE".into(),
+                        "SCHEDULE".into(),
+                        "NEXT".into(),
+                        "LAST SYNC".into(),
+                    ]];
+                    for m in v["mirrors"].as_array().into_iter().flatten() {
+                        let sched = s(&m["schedule"]);
+                        rows.push(vec![
+                            s(&m["repo"]),
+                            s(&m["storage"]),
+                            match (sched.is_empty(), m["error"].as_str()) {
+                                (true, _) => "-".into(),
+                                (false, Some(e)) => format!("{sched} (not valid: {e})"),
+                                (false, None) => sched,
+                            },
+                            match m["next"].as_i64() {
+                                Some(t) => when(Some(t)),
+                                None => "-".into(),
+                            },
+                            match m["last"].as_object() {
+                                Some(l) => format!(
+                                    "{} {}",
+                                    s(&l["state"]),
+                                    when(l["finished"].as_i64().or(l["started"].as_i64()))
+                                ),
+                                None => "never".into(),
+                            },
+                        ]);
+                    }
+                    table(rows);
+                });
+            }
+            ScheduleCmd::Set { repo, schedule } => {
+                let v = c.send(
+                    Method::PATCH,
+                    &format!("/api/v1/repos/{}", enc(&repo)),
+                    &json!({"settings": {"schedule": schedule.trim()}}),
+                )?;
+                x.print(&v, |v| match v["settings"]["schedule"].as_str() {
+                    Some(e) if !e.is_empty() => println!("{}: {e}", s(&v["name"])),
+                    _ => println!("{}: syncs only when asked", s(&v["name"])),
+                });
+            }
+            ScheduleCmd::Pause | ScheduleCmd::Resume => {
+                let paused = matches!(sc, ScheduleCmd::Pause);
+                let v = c.send(
+                    Method::PATCH,
+                    "/api/v1/settings",
+                    &json!({ "schedules_paused": paused }),
+                )?;
+                x.print(&v, |_| {
+                    println!(
+                        "{}",
+                        if paused {
+                            "schedules paused"
+                        } else {
+                            "schedules resumed"
+                        }
+                    )
+                });
             }
         },
         Cmd::Host(h) => match h {
@@ -1740,6 +1856,7 @@ pub fn run(
                 println!("downloads_days = {}", s(&v["downloads_days"]));
                 println!("syncs_per_storage = {}", s(&v["syncs_per_storage"]));
                 println!("jobs_days = {}", s(&v["jobs_days"]));
+                println!("schedules_paused = {}", v["schedules_paused"] == true);
             });
         }
         Cmd::Gc {

@@ -283,7 +283,7 @@ tests with its real client. See [format-plugins.md](format-plugins.md).
 | The console | `crates/pkgpod-server/src/console.rs`, `templates/`, `assets/` |
 | Users, teams, rights, tokens, sessions | `crates/pkgpod-server/src/auth.rs` |
 | Signing keys, server settings | `crates/pkgpod-server/src/keys.rs`, `rsa_key.rs`, `usign_key.rs` |
-| Jobs, mirror syncs, schedules | `crates/pkgpod-server/src/jobs.rs`, `cron.rs` |
+| Jobs, mirror syncs, schedules | `crates/pkgpod-server/src/jobs.rs`, `cron.rs`, `schedules.rs` |
 | Imports | `crates/pkgpod-server/src/import.rs` |
 | Deb mirrors: their packages, re-signing, promotion | `mirror_pkgs.rs`, `resign.rs`, `promote.rs` in `crates/pkgpod-server/src/` |
 | Proxies and groups | `crates/pkgpod-server/src/proxy.rs`, `group.rs` |

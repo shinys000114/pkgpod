@@ -121,6 +121,10 @@ pub fn router() -> Router<Arc<App>> {
         .route("/c/teams", post(team_create))
         .route("/c/teams/{team}/delete", post(team_delete))
         .route("/c/teams/{team}/members", post(member))
+        .route("/schedules", get(schedules_page))
+        .route("/c/schedules/preview", get(schedule_preview))
+        .route("/c/schedules/pause", post(schedules_pause))
+        .route("/c/schedules/{repo}", post(schedule_set))
         .route("/admin/server", get(server_page))
         .route("/c/hosts/{host}", post(host_set))
         .route("/c/hosts/{host}/clear", post(host_clear))
@@ -740,17 +744,30 @@ fn url_pieces(u: &str) -> Vec<String> {
 /// A mirror's last sync as the list shows it: (words, time, colour,
 /// job). The time is kept apart so it never breaks across lines.
 fn sync_state(j: Option<&crate::jobs::Job>) -> (String, String, String, Option<i64>) {
-    let Some(j) = j else {
-        return ("never synced".into(), String::new(), String::new(), None);
+    match j {
+        None => ("never synced".into(), String::new(), String::new(), None),
+        Some(j) => {
+            let (words, at, colour) = sync_words(&j.state, j.created, j.started, j.finished);
+            (words, at, colour, Some(j.id))
+        }
+    }
+}
+
+/// A sync's state in words, when, and its colour.
+fn sync_words(
+    state: &str,
+    created: i64,
+    started: Option<i64>,
+    finished: Option<i64>,
+) -> (String, String, String) {
+    let (words, at, colour) = match state {
+        "running" => ("syncing since", started, "run"),
+        "queued" => ("sync queued ·", Some(created), "run"),
+        "ok" => ("synced ·", finished, "ok"),
+        "cancelled" => ("sync cancelled ·", finished, "bad"),
+        _ => ("sync failed ·", finished, "bad"),
     };
-    let (words, at, colour) = match j.state.as_str() {
-        "running" => ("syncing since", j.started, "run"),
-        "queued" => ("sync queued ·", Some(j.created), "run"),
-        "ok" => ("synced ·", j.finished, "ok"),
-        "cancelled" => ("sync cancelled ·", j.finished, "bad"),
-        _ => ("sync failed ·", j.finished, "bad"),
-    };
-    (words.into(), when(at), colour.into(), Some(j.id))
+    (words.into(), when(at), colour.into())
 }
 
 /// The mirrors' sync states the viewer may read, by name, for the
@@ -2724,7 +2741,15 @@ async fn repo_page(
         }
         stats.push(stat(
             "Next",
-            crate::jobs::next_run(&r).unwrap_or_else(|| "when asked".into()),
+            crate::jobs::next_run(&app, &r).unwrap_or_else(|| {
+                if !r.setting_str("schedule").trim().is_empty()
+                    && crate::jobs::schedules_paused(&app)
+                {
+                    "schedules paused".into()
+                } else {
+                    "when asked".into()
+                }
+            }),
             "",
         ));
         stats.push(stat("From", r.setting_str("source").to_string(), ""));
@@ -3005,7 +3030,7 @@ async fn actions_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> Re
         mirror,
         can_write,
         can_sync: mirror && role >= Some(Role::Write),
-        next_run: crate::jobs::next_run(&r).unwrap_or_default(),
+        next_run: crate::jobs::next_run(&app, &r).unwrap_or_default(),
         source: r.setting_str("source").to_string(),
         upload: if can_write {
             form_fields(
@@ -5245,6 +5270,221 @@ async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
     }))
 }
 
+// ---- schedules ----
+
+pub struct SchedRow {
+    pub repo: String,
+    pub format: String,
+    pub storage: String,
+    pub schedule: String,
+    pub error: String,
+    /// The next run's day (none when today) and time, or "paused".
+    pub next_day: String,
+    pub next: String,
+    pub content: String,
+    pub content_when: String,
+    pub state: String,
+    pub job: Option<i64>,
+    pub running: bool,
+    pub took: String,
+    pub can_edit: bool,
+    pub can_sync: bool,
+}
+
+pub struct PlanRow {
+    pub day: String,
+    pub at: String,
+    pub starts: String,
+    pub repo: String,
+    pub storage: String,
+    pub until: String,
+    pub meets: String,
+}
+
+#[derive(Template)]
+#[template(path = "schedules.html")]
+struct SchedulesPage {
+    s: Shell,
+    paused: bool,
+    time_zone: String,
+    now: String,
+    slots: i64,
+    rows: Vec<SchedRow>,
+    planned: Vec<PlanRow>,
+    waits: usize,
+    skipped: usize,
+    /// Some schedule is set (the plan is empty for want of one, or not).
+    any: bool,
+}
+
+/// A span of seconds in words: 35 s, 12 min, 2 h 5 min.
+fn took(secs: i64) -> String {
+    match secs {
+        s if s < 60 => format!("{s} s"),
+        s if s < 3600 => format!("{} min", (s + 30) / 60),
+        s => {
+            let m = (s + 30) / 60;
+            match m % 60 {
+                0 => format!("{} h", m / 60),
+                r => format!("{} h {r} min", m / 60),
+            }
+        }
+    }
+}
+
+/// The time of day, with the day when it is not today.
+fn clock(t: i64, today: &str) -> (String, String) {
+    let w = when(Some(t));
+    match w.split_once(' ') {
+        Some((d, h)) if d == today => (String::new(), h.to_string()),
+        Some((d, h)) => (d.to_string(), h.to_string()),
+        None => (String::new(), w),
+    }
+}
+
+/// Every mirror's schedule on one page, and the syncs of the next day.
+async fn schedules_page(State(app): St, v: Viewer) -> Result<Response> {
+    let caller = v.caller.clone();
+    let o = api::blocking(&app, move |app| crate::schedules::overview(app, &caller)).await?;
+    let now = when(Some(o.now));
+    let today = now
+        .split_once(' ')
+        .map(|(d, _)| d.to_string())
+        .unwrap_or_default();
+    let rows = o
+        .mirrors
+        .iter()
+        .map(|r| {
+            let (content, content_when, state, job) = match &r.last {
+                Some(l) => {
+                    let (w, at, c) = sync_words(&l.state, l.created, l.started, l.finished);
+                    (w, at, c, Some(l.job))
+                }
+                None => ("never synced".into(), String::new(), String::new(), None),
+            };
+            let (next_day, next) = match r.next {
+                Some(t) => clock(t, &today),
+                None if o.paused && r.error.is_none() && !r.schedule.is_empty() => {
+                    (String::new(), "paused".into())
+                }
+                None => (String::new(), String::new()),
+            };
+            SchedRow {
+                next_day,
+                next,
+                repo: r.repo.clone(),
+                format: r.format.clone(),
+                storage: r.storage.clone(),
+                schedule: r.schedule.clone(),
+                error: r.error.clone().unwrap_or_default(),
+                content,
+                content_when,
+                state,
+                job,
+                running: r.running.is_some(),
+                took: r.took.map(took).unwrap_or_default(),
+                can_edit: r.can_edit,
+                can_sync: r.can_sync,
+            }
+        })
+        .collect::<Vec<_>>();
+    let planned = o
+        .planned
+        .iter()
+        .map(|p| {
+            let (day, at) = clock(p.at, &today);
+            PlanRow {
+                day,
+                at,
+                starts: p.starts.map(|t| clock(t, &today).1).unwrap_or_default(),
+                repo: p.repo.clone(),
+                storage: p.storage.clone(),
+                until: p.until.map(|u| clock(u, &today).1).unwrap_or_default(),
+                meets: p.meets.unwrap_or_default().to_string(),
+            }
+        })
+        .collect::<Vec<PlanRow>>();
+    Ok(render(&SchedulesPage {
+        s: v.shell("schedules"),
+        waits: planned.iter().filter(|p| p.meets == "slot").count(),
+        skipped: planned.iter().filter(|p| p.meets == "busy").count(),
+        any: o.mirrors.iter().any(|r| !r.schedule.is_empty()),
+        paused: o.paused,
+        time_zone: o.time_zone,
+        now,
+        slots: o.syncs_per_storage,
+        rows,
+        planned,
+    }))
+}
+
+/// The next runs of a schedule as it is typed.
+async fn schedule_preview(Query(q): Query<HashMap<String, String>>) -> Response {
+    let expr = q.get("schedule").map(|s| s.trim()).unwrap_or_default();
+    let text = if expr.is_empty() {
+        "empty: syncs only when asked".to_string()
+    } else {
+        match crate::schedules::preview(expr, 3) {
+            Ok(t) => format!(
+                "next: {}",
+                t.iter()
+                    .map(|t| when(Some(*t)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Err(e) => format!("not valid: {e}"),
+        }
+    };
+    let bad = text.starts_with("not valid");
+    Html(format!(
+        "<span class=\"{}\">{}</span>",
+        if bad { "err" } else { "muted" },
+        crate::serve::html(&text)
+    ))
+    .into_response()
+}
+
+/// One mirror's schedule from the Schedules page.
+async fn schedule_set(
+    State(app): St,
+    v: Viewer,
+    Path(repo): Path<String>,
+    Form(form): Form<Vec<(String, String)>>,
+) -> Response {
+    let expr = form_get(&form, "schedule").trim().to_string();
+    match api::repo_patch(
+        State(app),
+        v.who(),
+        Path(repo),
+        Json(api::PatchReq {
+            settings: json!({ "schedule": expr }),
+        }),
+    )
+    .await
+    {
+        Ok(_) => refresh(),
+        Err(e) => err_part(e),
+    }
+}
+
+/// Pauses or resumes all schedules (server admins).
+async fn schedules_pause(
+    State(app): St,
+    v: Viewer,
+    Form(form): Form<Vec<(String, String)>>,
+) -> Response {
+    let req = api::SettingsReq {
+        downloads_days: None,
+        syncs_per_storage: None,
+        jobs_days: None,
+        schedules_paused: Some(form_get(&form, "paused") == "true"),
+    };
+    match api::settings_patch(State(app), v.who(), Json(req)).await {
+        Ok(_) => refresh(),
+        Err(e) => err_part(e),
+    }
+}
+
 /// A host's page from the Server page's form.
 async fn host_set(
     State(app): St,
@@ -5552,6 +5792,7 @@ async fn settings_save_server(
         downloads_days: days,
         syncs_per_storage: syncs,
         jobs_days: jobs,
+        schedules_paused: None,
     };
     match api::settings_patch(State(app), v.who(), Json(req)).await {
         Ok(Json(r)) => msg(
