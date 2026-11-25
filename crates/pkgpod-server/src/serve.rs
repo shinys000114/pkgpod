@@ -391,9 +391,16 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
     {
         let (app2, rest) = (app.clone(), path[3..].to_vec());
         let q = req.uri().query().unwrap_or("").to_string();
-        return tokio::task::spawn_blocking(move || crate::badge::serve(&app2, &caller, &rest, &q))
-            .await
-            .unwrap_or_else(|_| status(StatusCode::INTERNAL_SERVER_ERROR));
+        let inm = req
+            .headers()
+            .get(header::IF_NONE_MATCH)
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        return tokio::task::spawn_blocking(move || {
+            crate::badge::serve(&app2, &caller, &rest, &q, inm.as_deref())
+        })
+        .await
+        .unwrap_or_else(|_| status(StatusCode::INTERNAL_SERVER_ERROR));
     }
     if registry && crate::oci::claims(&table, &host, &path[1..]) {
         let rest = path[1..].to_vec();

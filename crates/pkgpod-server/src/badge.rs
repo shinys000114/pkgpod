@@ -72,7 +72,13 @@ fn query(q: &str, key: &str) -> Option<String> {
 
 /// Answers `/.well-known/pkgpod/badges/<repo>/<kind>.svg` (`rest`: what
 /// follows the prefix).
-pub fn serve(app: &App, caller: &Caller, rest: &[String], query_s: &str) -> Response {
+pub fn serve(
+    app: &App,
+    caller: &Caller,
+    rest: &[String],
+    query_s: &str,
+    if_none_match: Option<&str>,
+) -> Response {
     let missing = || plain(StatusCode::NOT_FOUND, "no such badge");
     let [repo, file] = rest else {
         return missing();
@@ -143,28 +149,43 @@ pub fn serve(app: &App, caller: &Caller, rest: &[String], query_s: &str) -> Resp
             .unwrap_or(0);
             ("downloads".into(), format!("{}/month", short(n)), BLUE)
         }
-        _ => {
-            let n = st["packages"].as_i64().unwrap_or(0);
-            ("packages".into(), short(n), BLUE)
-        }
+        _ => match st["packages"].as_i64() {
+            Some(n) => ("packages".into(), short(n), BLUE),
+            // A mirror that counts none (rsync, files).
+            None => ("packages".into(), "—".into(), GREY),
+        },
     };
     let svg = render(label.as_deref().unwrap_or(&l), &v, colour);
+    let svg_bytes = svg.clone();
     let mut resp = Response::new(Body::from(svg));
     let h = resp.headers_mut();
     h.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("image/svg+xml; charset=utf-8"),
     );
-    // Short: image proxies (GitHub's) ask again soon.
+    // Asked again every time, answered 304 while it says the same: a CDN
+    // in front would otherwise keep (and stretch) a lifetime, and a badge
+    // show a state hours old.
     h.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static(if public {
-            "max-age=300"
+            "no-cache"
         } else {
-            "private, max-age=300"
+            "private, no-cache"
         }),
     );
+    let etag = format!(
+        "\"{}\"",
+        &pkgpod_base::Digest::of(svg_bytes.as_bytes()).hex()[..32]
+    );
+    if let Ok(v) = HeaderValue::from_str(&etag) {
+        h.insert(header::ETAG, v);
+    }
     crate::serve::sandbox(h);
+    if if_none_match == Some(etag.as_str()) {
+        *resp.status_mut() = StatusCode::NOT_MODIFIED;
+        *resp.body_mut() = Body::empty();
+    }
     resp
 }
 

@@ -399,6 +399,11 @@ fn deb_repository_with_apt() {
     assert!(body.contains("href=\"ppa/\""), "{body}");
 }
 
+/// A repository's package count in its status.
+fn st_packages(s: &Server, repo: &str) -> i64 {
+    s.json(&["status", repo])["packages"].as_i64().unwrap_or(-1)
+}
+
 /// Moves a package version's catalog rows `days` back, as if it came
 /// in then.
 fn age_rows(s: &Server, repo: &str, name: &str, version: &str, days: i64) {
@@ -1335,6 +1340,11 @@ fn deb_mirror_of_a_hosted_repository() {
     let (st, svg) = get(&s.url("/.well-known/pkgpod/badges/mir/status.svg"), None);
     assert_eq!(st, 200);
     assert!(svg.contains(">synced<"), "{svg}");
+    // Its packages: the pool files its indexes list, as the sync counted.
+    let n = st_packages(&s, "mir");
+    assert!(n > 0, "{n}");
+    let (_, svg) = get(&s.url("/.well-known/pkgpod/badges/mir/packages.svg"), None);
+    assert!(svg.contains(&format!(">{n}<")), "{svg}");
 
     // A file gone upstream: the job says so, its page lists it, and one
     // button allows it to be missing and syncs again.
@@ -3624,6 +3634,26 @@ fn status_badges_and_metrics() {
     assert!(badge("pub/status.svg").2.contains(">version 4<"));
     assert!(badge("pub/downloads.svg").2.contains(">1/month<"));
     assert!(badge("pub/packages.svg").2.contains(">3<"));
+    // Asked again each time (a CDN in front keeps nothing), answered 304
+    // while it is the same.
+    let r = c
+        .get(s.url("/.well-known/pkgpod/badges/pub/status.svg"))
+        .send()
+        .unwrap();
+    assert_eq!(r.headers()["cache-control"], "no-cache");
+    let etag = r.headers()["etag"].to_str().unwrap().to_string();
+    let r = c
+        .get(s.url("/.well-known/pkgpod/badges/pub/status.svg"))
+        .header("if-none-match", &etag)
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 304);
+    let r = c
+        .get(s.url("/.well-known/pkgpod/badges/pub/downloads.svg"))
+        .header("if-none-match", &etag)
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200, "another badge, another tag");
     // What is put in is escaped.
     let (_, _, svg) = badge("pub/packages.svg?label=%3Cscript%3Ex");
     assert!(
