@@ -385,7 +385,7 @@ a state (`queued`, `running`, `ok`, or failed) and a summary.
 pkgpod sync debian            # start a sync; prints the job's number
 pkgpod sync debian --wait     # wait for it, printing its log
 pkgpod jobs debian            # recent jobs of one repository (none: all)
-pkgpod job 42                 # a job and its log
+pkgpod job 42                 # a job and its log's end
 pkgpod job 42 --cancel        # stop it
 ```
 

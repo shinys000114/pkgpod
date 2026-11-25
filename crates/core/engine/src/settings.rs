@@ -185,9 +185,7 @@ pub fn mirror_common() -> Vec<Field> {
 /// (the whole tree).
 pub fn check_mirror_source(settings: &Value) -> Result<String> {
     let s = settings["source"].as_str().unwrap_or("").trim().to_string();
-    let http = s.starts_with("http://") || s.starts_with("https://");
-    let rsync = s.starts_with("rsync://") || s.contains("::");
-    if !s.is_empty() && !http && !rsync {
+    if !s.is_empty() && pkgpod_base::source_kind(&s) == pkgpod_base::Source::Invalid {
         return Err(crate::Error::Invalid(format!(
             "source {s:?}: http(s)://… or rsync://…"
         )));

@@ -317,9 +317,12 @@ A job is a row in `jobs` (state `running`, then `ok`, `failed` or
 Server-Sent Events from `/jobs/<id>/stream`: `log` events carry the
 lines written after a byte offset (the event id, so a browser that
 reconnects continues where it was), and an `end` event the final
-state. `pkgpod job <id>` and `GET /api/v1/jobs/<id>` give the log
-whole. Jobs still running when the server stopped are marked failed on
-the next start.
+state. `pkgpod job <id>` and `GET /api/v1/jobs/<id>` give the log's
+end, at most 256 KiB in whole lines (`?from=` reads on from a byte, as
+`sync --wait` follows it), and `GET /api/v1/jobs/<id>/log` all of it,
+streamed: an rsync log can be gigabytes. A stopping server cancels its
+jobs and waits up to 10 seconds for them; jobs still running when it
+stopped otherwise are marked failed on the next start.
 
 ## Rights
 

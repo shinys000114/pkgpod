@@ -1077,7 +1077,16 @@ fn schemas() -> Value {
             "JobDetail",
             json!({"allOf": [
                 sref("Job"),
-                object("", vec![("log", text("The job's log so far."))], &["log"]),
+                object(
+                    "",
+                    vec![
+                        ("log", text("Whole lines of the job's log, at most 256 KiB: from log_from on, or its end.")),
+                        ("log_from", text_int("Where in the log (bytes) the text starts.")),
+                        ("log_next", text_int("Where it ends: the next part's from.")),
+                        ("log_size", text_int("The log's size in bytes.")),
+                    ],
+                    &["log", "log_from", "log_next", "log_size"],
+                ),
             ]}),
         ),
         (
@@ -1744,8 +1753,12 @@ fn ops() -> Vec<Op> {
             .query("q", string(), "Only events with this text (any case).")
             .query("limit", integer(), "The newest this many (1 to 5000, default 500).")
             .reply(200, "The events, newest last.", sref("Logs")),
-        op("get", "/api/v1/jobs/{id}", "job", "A job with its log.")
+        op("get", "/api/v1/jobs/{id}", "job", "A job with a part of its log.")
+            .query("from", integer(), "The log from this byte on (to follow it, the last log_next); without, its end.")
+            .query("max", integer(), "At most this many bytes of the log (1 to 262144, the default).")
             .reply(200, "The job.", sref("JobDetail")),
+        op("get", "/api/v1/jobs/{id}/log", "job_log", "A job's whole log, as text.")
+            .reply_as(200, "The log so far.", "text/plain", string()),
         op("post", "/api/v1/jobs/{id}/cancel", "job_cancel", "Stop a running job (write).")
             .empty(202, "Asked to stop (no body)."),
         op("post", "/api/v1/gc", "gc", "Collect garbage {dry_run?, grace_hours?} (server admin).")

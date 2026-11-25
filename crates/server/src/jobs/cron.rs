@@ -45,6 +45,9 @@ fn field(s: &str, lo: u32, hi: u32, names: &[&str], base: u32) -> Result<(u64, b
                 if st == 0 {
                     return Err(format!("step 0 in {part:?}"));
                 }
+                if st > hi - lo + 1 {
+                    return Err(format!("step {st} in {part:?} is longer than {lo}-{hi}"));
+                }
                 (r, st)
             }
             None => (part, 1),
@@ -66,7 +69,7 @@ fn field(s: &str, lo: u32, hi: u32, names: &[&str], base: u32) -> Result<(u64, b
         let mut v = a;
         while v <= b {
             bits |= 1 << v;
-            v += step;
+            v = v.saturating_add(step);
         }
     }
     Ok((bits, s == "*"))
@@ -190,9 +193,16 @@ mod tests {
             "*/0 * * * *",
             "5-1 * * * *",
             "x * * * *",
+            "30/4294967295 * * * *",
+            "0 0 */32 * *",
         ] {
             assert!(Cron::parse(bad).is_err(), "{bad:?}");
         }
+        // A step past the range's end: only the start.
+        let c = Cron::parse("30/45 * * * *").unwrap();
+        assert!(c.matches(date(2026, 11, 20).at(20, 30, 0, 0)));
+        assert!(!c.matches(date(2026, 11, 20).at(20, 15, 0, 0)));
+        assert!(!c.matches(date(2026, 11, 20).at(20, 0, 0, 0)));
     }
 
     #[test]

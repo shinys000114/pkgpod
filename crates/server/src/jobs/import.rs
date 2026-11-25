@@ -138,11 +138,7 @@ pub fn start(app: &Arc<App>, repo: &str, mut req: ImportReq, actor: &str) -> Res
             );
         }
         let s = req.source.trim();
-        if !(["rsync://", "http://", "https://"]
-            .iter()
-            .any(|p| s.starts_with(p))
-            || s.contains("::"))
-        {
+        if pkgpod_base::source_kind(s) == pkgpod_base::Source::Invalid {
             return Err(Error::Invalid(format!(
                 "{s:?}: a source is rsync://, host::module, http(s):// or a directory on the server"
             )));
@@ -190,6 +186,34 @@ pub fn start(app: &Arc<App>, repo: &str, mut req: ImportReq, actor: &str) -> Res
     )
 }
 
+/// Where an import of `r` stages what it fetches, and what the fetch
+/// keeps between files.
+fn staging(r: &RepoInfo) -> (std::path::PathBuf, std::path::PathBuf) {
+    let state = r.storage_path.join("state");
+    (
+        state.join(format!("{}.import", r.name)),
+        state.join(format!("{}.import-cache", r.name)),
+    )
+}
+
+/// Removes what an import of `r` left: the server stopped during it. A
+/// directory with a repository's name stays: it is a mirror's state.
+pub fn remove_staging(app: &App, r: &RepoInfo) {
+    let (a, b) = staging(r);
+    for d in [a, b] {
+        let theirs = d
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| app.engine.repo(n).is_ok());
+        if !theirs && d.is_dir() {
+            match std::fs::remove_dir_all(&d) {
+                Ok(()) => tracing::info!("removed {}, left by an import", d.display()),
+                Err(e) => tracing::warn!("{}: {e}", d.display()),
+            }
+        }
+    }
+}
+
 fn run(
     app: &App,
     r: &RepoInfo,
@@ -198,14 +222,7 @@ fn run(
     cancel: &AtomicBool,
     log: &(dyn Fn(&str) + Sync),
 ) -> Result<(bool, String, Value), String> {
-    let staging = r
-        .storage_path
-        .join("state")
-        .join(format!("{}.import", r.name));
-    let cache = r
-        .storage_path
-        .join("state")
-        .join(format!("{}.import-cache", r.name));
+    let (staging, cache) = staging(r);
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging).map_err(|e| format!("{}: {e}", staging.display()))?;
     std::fs::create_dir_all(&cache).map_err(|e| format!("{}: {e}", cache.display()))?;
@@ -501,14 +518,7 @@ fn run_files(
     cancel: &AtomicBool,
     log: &(dyn Fn(&str) + Sync),
 ) -> Result<(bool, String, Value), String> {
-    let staging = r
-        .storage_path
-        .join("state")
-        .join(format!("{}.import", r.name));
-    let state = r
-        .storage_path
-        .join("state")
-        .join(format!("{}.import-cache", r.name));
+    let (staging, state) = staging(r);
     let _ = std::fs::remove_dir_all(&staging);
     let res = (|| {
         let (ok, summary, _) = crate::jobs::fetch_tree(

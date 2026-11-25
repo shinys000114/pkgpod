@@ -32,6 +32,9 @@ use crate::{App, Error, Result};
 pub struct Jobs {
     running: Mutex<HashMap<String, (i64, Arc<AtomicBool>)>>,
     slots: Slots,
+    /// The server is stopping: no job starts, and those running are
+    /// cancelled and recorded as stopped by the server.
+    stopping: AtomicBool,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -209,9 +212,78 @@ pub fn prune(app: &App) -> Result<(usize, u64)> {
     Ok((gone.len(), bytes))
 }
 
-/// The job's log so far.
-pub fn log(app: &App, id: i64) -> String {
-    std::fs::read_to_string(log_path(app, id)).unwrap_or_default()
+/// Most of a job's log one request reads: a log can be gigabytes (rsync
+/// names every file), so it is read in parts.
+pub const LOG_PART: u64 = 256 << 10;
+
+/// Bytes `from..next` of a job's log, whole lines, and the log's size.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct LogPart {
+    pub text: String,
+    pub from: u64,
+    pub next: u64,
+    pub size: u64,
+}
+
+/// At most `max` bytes of the job's log from byte `from`, up to the last
+/// whole line (the rest comes with the next read; a line longer than
+/// `max` comes in pieces).
+pub fn log_from(app: &App, id: i64, from: u64, max: u64) -> LogPart {
+    read_log(&log_path(app, id), Some(from), max)
+}
+
+/// The end of the job's log: at most `max` bytes, from a line's start.
+pub fn log_tail(app: &App, id: i64, max: u64) -> LogPart {
+    read_log(&log_path(app, id), None, max)
+}
+
+fn read_log(path: &std::path::Path, from: Option<u64>, max: u64) -> LogPart {
+    use std::io::{Read, Seek, SeekFrom};
+    let max = max.max(1);
+    let Ok(mut f) = std::fs::File::open(path) else {
+        let at = from.unwrap_or(0);
+        return LogPart {
+            from: at,
+            next: at,
+            ..Default::default()
+        };
+    };
+    let size = f.metadata().map(|m| m.len()).unwrap_or(0);
+    // A tail is read from the byte before it, to see whether it starts
+    // a line.
+    let behind = from.is_none() && size > max;
+    let mut start = match from {
+        Some(n) => n.min(size),
+        None => size.saturating_sub(max + 1),
+    };
+    let mut buf = Vec::new();
+    if f.seek(SeekFrom::Start(start)).is_ok() {
+        let _ = f.take(max + behind as u64).read_to_end(&mut buf);
+    }
+    if behind {
+        // From the first line that starts in it (a line longer than the
+        // whole tail: its end).
+        let cut = buf
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(1, |i| i + 1)
+            .min(buf.len());
+        buf.drain(..cut);
+        start += cut as u64;
+    }
+    match buf.iter().rposition(|b| *b == b'\n') {
+        Some(i) => buf.truncate(i + 1),
+        // A line still being written.
+        None if from.is_some() && (buf.len() as u64) < max => buf.clear(),
+        None => {}
+    }
+    let next = start + buf.len() as u64;
+    LogPart {
+        text: String::from_utf8_lossy(&buf).into_owned(),
+        from: start,
+        next,
+        size: size.max(next),
+    }
 }
 
 /// Jobs that were running when the server stopped did not finish.
@@ -224,6 +296,35 @@ pub fn recover(db: &Db) -> Result<()> {
         )
     })?;
     Ok(())
+}
+
+/// Removes what a server that stopped during a job, or crashed, left:
+/// imports' staging trees, and the uploads being written then in every
+/// storage's store/tmp. Run at start, before anything can make more.
+pub fn remove_leftovers(app: &App) {
+    for r in app.engine.repos().unwrap_or_default() {
+        import::remove_staging(app, &r);
+    }
+    for (name, path) in app.engine.storages().unwrap_or_default() {
+        let tmp = path.join("store").join("tmp");
+        let Ok(rd) = std::fs::read_dir(&tmp) else {
+            continue;
+        };
+        let (mut n, mut bytes) = (0, 0);
+        for e in rd.flatten() {
+            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+            if e.file_type().is_ok_and(|t| t.is_file()) && std::fs::remove_file(e.path()).is_ok() {
+                n += 1;
+                bytes += size;
+            }
+        }
+        if n > 0 {
+            tracing::info!(
+                "storage {name}: removed {n} unfinished upload(s) ({})",
+                crate::serving::human(bytes)
+            );
+        }
+    }
 }
 
 impl Jobs {
@@ -247,7 +348,10 @@ impl Jobs {
         }
     }
 
+    /// The server stops: no job starts from now on, and the running ones
+    /// are asked to stop.
     pub fn cancel_all(&self) {
+        self.stopping.store(true, Ordering::Relaxed);
         for (_, flag) in self
             .running
             .lock()
@@ -257,7 +361,41 @@ impl Jobs {
             flag.store(true, Ordering::Relaxed);
         }
     }
+
+    /// Whether no job runs.
+    pub fn idle(&self) -> bool {
+        self.running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+    }
 }
+
+/// What a stopping server writes for the jobs that did not end in time
+/// (their threads end with the process).
+pub fn stopped(app: &App) {
+    let ids: Vec<i64> = app
+        .jobs
+        .running
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .values()
+        .map(|(id, _)| *id)
+        .collect();
+    for id in ids {
+        tracing::warn!("job {id} did not stop in time: cut");
+        let _ = app.db.write(|tx| {
+            tx.execute(
+                "UPDATE jobs SET state = 'cancelled', finished = ?1, summary = ?2
+                 WHERE id = ?3 AND state IN ('queued', 'running')",
+                params![now(), STOPPED, id],
+            )
+        });
+    }
+}
+
+/// The summary of a job the server cancelled as it stopped.
+const STOPPED: &str = "the server stopped";
 
 /// What a job runs: (all fine, summary, report) or why it failed.
 type Work = Box<
@@ -314,14 +452,16 @@ impl Slots {
         let mut waiting = Some(waiting);
         let mut t = self.taken.lock().unwrap_or_else(|e| e.into_inner());
         loop {
+            // Cancelled while it waited: a slot freed meanwhile is not
+            // taken.
+            if cancel.load(Ordering::Relaxed) {
+                return false;
+            }
             let limit = syncs_per_storage(app);
             let n = t.get(storage).copied().unwrap_or(0);
             if limit == 0 || n < limit {
                 *t.entry(storage.to_string()).or_insert(0) += 1;
                 return true;
-            }
-            if cancel.load(Ordering::Relaxed) {
-                return false;
             }
             if let Some(w) = waiting.take() {
                 drop(t);
@@ -372,6 +512,9 @@ pub fn start(app: &Arc<App>, r: RepoInfo, kind: &str, actor: &str, work: Work) -
     let cancel = Arc::new(AtomicBool::new(false));
     let id = {
         let mut running = app.jobs.running.lock().unwrap_or_else(|e| e.into_inner());
+        if app.jobs.stopping.load(Ordering::Relaxed) {
+            return Err(Error::Conflict("the server is stopping".into()));
+        }
         if let Some((id, _)) = running.get(&repo) {
             return Err(Error::Conflict(format!(
                 "{repo} has a job running (job {id})"
@@ -406,59 +549,81 @@ pub fn start(app: &Arc<App>, r: RepoInfo, kind: &str, actor: &str, work: Work) -
             };
             log(&format!("{kind2} of {} started by {actor2}", r.name));
             tracing::info!("job {id}: {kind2} of {} started by {actor2}", r.name);
-            // Syncs wait for a slot on their storage.
-            let mut held = None;
-            if kind2 == "sync" {
-                let storage = r.storage.clone();
-                let took = app2.jobs.slots.take(&app2, &storage, &cancel, || {
-                    log(&format!(
-                        "waiting: {} syncs run on storage {storage} at once (syncs_per_storage)",
-                        syncs_per_storage(&app2)
-                    ));
-                    let _ = app2.db.write(|tx| {
-                        tx.execute("UPDATE jobs SET state = 'queued' WHERE id = ?1", [id])
+            // A job that panics ends failed, not running until the server
+            // restarts.
+            let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // Syncs wait for a slot on their storage.
+                let mut held = None;
+                if kind2 == "sync" {
+                    let storage = r.storage.clone();
+                    let took = app2.jobs.slots.take(&app2, &storage, &cancel, || {
+                        log(&format!(
+                            "waiting: {} syncs run on storage {storage} at once (syncs_per_storage)",
+                            syncs_per_storage(&app2)
+                        ));
+                        let _ = app2.db.write(|tx| {
+                            tx.execute("UPDATE jobs SET state = 'queued' WHERE id = ?1", [id])
+                        });
                     });
-                });
-                let _ = app2.db.write(|tx| {
-                    tx.execute(
-                        "UPDATE jobs SET state = 'running', started = ?1 WHERE id = ?2 AND state = 'queued'",
-                        params![now(), id],
-                    )
-                });
-                if !took {
-                    log("cancelled: interrupted while waiting");
                     let _ = app2.db.write(|tx| {
                         tx.execute(
-                            "UPDATE jobs SET state = 'cancelled', finished = ?1, summary = 'interrupted while waiting' WHERE id = ?2",
+                            "UPDATE jobs SET state = 'running', started = ?1 WHERE id = ?2 AND state = 'queued'",
                             params![now(), id],
                         )
                     });
-                    app2.jobs.running.lock().unwrap_or_else(|e| e.into_inner()).remove(&r.name);
-                    app2.auth.audit(&actor2, &kind2, &r.name, "cancelled");
-                    return;
+                    if !took {
+                        return (
+                            "cancelled",
+                            "interrupted while waiting".to_string(),
+                            Value::Null,
+                        );
+                    }
+                    held = Some(app2.jobs.slots.held(&storage));
                 }
-                held = Some(app2.jobs.slots.held(&storage));
+                let res = work(&app2, &r, &cancel, &log);
+                drop(held);
+                match res {
+                    Ok((true, s, rep)) => ("ok", s, rep),
+                    Ok((false, s, rep)) => ("failed", s, rep),
+                    Err(e) if cancel.load(Ordering::Relaxed) => ("cancelled", e, Value::Null),
+                    Err(e) => ("failed", e, Value::Null),
+                }
+            }));
+            let (state, mut summary, report) = ended.unwrap_or_else(|p| {
+                let why = p
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| p.downcast_ref::<&str>().copied())
+                    .unwrap_or("");
+                tracing::error!("job {id}: {kind2} of {} panicked: {why}", r.name);
+                ("failed", "internal error".to_string(), Value::Null)
+            });
+            if state == "cancelled" && app2.jobs.stopping.load(Ordering::Relaxed) {
+                summary = STOPPED.to_string();
             }
-            let res = work(&app2, &r, &cancel, &log);
-            drop(held);
-            let (state, summary, report) = match res {
-                Ok((true, s, rep)) => ("ok", s, rep),
-                Ok((false, s, rep)) => ("failed", s, rep),
-                Err(e) if cancel.load(Ordering::Relaxed) => ("cancelled", e, Value::Null),
-                Err(e) => ("failed", e, Value::Null),
-            };
             log(&format!("{state}: {summary}"));
             if state == "failed" {
                 tracing::warn!("job {id}: {kind2} of {} failed: {summary}", r.name);
             } else {
                 tracing::info!("job {id}: {kind2} of {}: {state}: {summary}", r.name);
             }
-            let _ = app2.db.write(|tx| {
+            // Until its end is written (a full disk, say), the job stays
+            // running here as it does in the database: nothing else
+            // starts on the repository, and a cancel is harmless.
+            let mut pause = Duration::from_secs(1);
+            while let Err(e) = app2.db.write(|tx| {
                 tx.execute(
                     "UPDATE jobs SET state = ?1, finished = ?2, summary = ?3, report = ?4 WHERE id = ?5",
                     params![state, now(), summary, report.to_string(), id],
                 )
-            });
+            }) {
+                tracing::error!(
+                    "job {id}: writing its end ({state}): {e}; trying again in {}s",
+                    pause.as_secs()
+                );
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(Duration::from_secs(60));
+            }
             app2.jobs.running.lock().unwrap_or_else(|e| e.into_inner()).remove(&r.name);
             app2.auth.audit(&actor2, &kind2, &r.name, state);
         })
@@ -511,9 +676,15 @@ pub(crate) fn fetch_tree(
         pkgpod_mirror::Error::Interrupted => "interrupted".to_string(),
         e => e.to_string(),
     };
+    let kind = pkgpod_base::source_kind(source);
+    if kind == pkgpod_base::Source::Invalid {
+        return Err(format!(
+            "{source:?}: a source is rsync://, host::module or http(s)://"
+        ));
+    }
     std::fs::create_dir_all(dest).map_err(|e| format!("{}: {e}", dest.display()))?;
     std::fs::create_dir_all(state).map_err(|e| format!("{}: {e}", state.display()))?;
-    if source.starts_with("rsync://") || source.contains("::") {
+    if kind == pkgpod_base::Source::Rsync {
         let mut m =
             pkgpod_mirror::rsync::RsyncMirror::new(source, pkgpod_mirror::rsync::Mode::Tree);
         m.delete = o.delete;
@@ -608,7 +779,7 @@ fn sync(
         )?;
         return Ok(rep);
     }
-    if source.starts_with("rsync://") || source.contains("::") {
+    if pkgpod_base::source_kind(&source) == pkgpod_base::Source::Rsync {
         // Packages first, then the indexes that name them.
         let mode = match r.format.as_str() {
             "rpm" => pkgpod_mirror::rsync::Mode::Rpm,
@@ -884,6 +1055,157 @@ mod tests {
             current: None,
             created: 0,
         }
+    }
+
+    fn app() -> (tempfile::TempDir, Arc<App>) {
+        let d = tempfile::tempdir().unwrap();
+        let app = App::open(crate::config::Config {
+            data_dir: d.path().join("data"),
+            ..Default::default()
+        })
+        .unwrap();
+        (d, app)
+    }
+
+    fn ended(app: &App, id: i64) -> Job {
+        let t = std::time::Instant::now();
+        while app.jobs.running("debian").is_some() {
+            assert!(t.elapsed() < Duration::from_secs(20), "job {id} runs on");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        get(&app.db, id).unwrap()
+    }
+
+    #[test]
+    fn a_cancelled_waiter_takes_no_slot() {
+        let (_d, app) = app();
+        let slots = Slots::default();
+        assert!(!slots.take(&app, "main", &AtomicBool::new(true), || {}));
+        assert_eq!(slots.taken.lock().unwrap().get("main"), None);
+        assert!(slots.take(&app, "main", &AtomicBool::new(false), || {}));
+    }
+
+    #[test]
+    fn a_job_that_panics_ends_failed() {
+        let (_d, app) = app();
+        let id = start(
+            &app,
+            repo(json!([])),
+            "test",
+            "ann",
+            Box::new(|_, _, _, _| panic!("a bug")),
+        )
+        .unwrap();
+        let j = ended(&app, id);
+        assert_eq!(
+            (j.state.as_str(), j.summary.as_str()),
+            ("failed", "internal error")
+        );
+        assert!(
+            log_tail(&app, id, LOG_PART)
+                .text
+                .contains("failed: internal error")
+        );
+    }
+
+    #[test]
+    fn a_stopping_server_cancels_its_jobs_and_starts_none() {
+        let (_d, app) = app();
+        let id = start(
+            &app,
+            repo(json!([])),
+            "test",
+            "ann",
+            Box::new(|_, _, cancel, _| {
+                while !cancel.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err("interrupted".into())
+            }),
+        )
+        .unwrap();
+        assert!(!app.jobs.idle());
+        app.jobs.cancel_all();
+        let j = ended(&app, id);
+        assert!(app.jobs.idle());
+        assert_eq!(
+            (j.state.as_str(), j.summary.as_str()),
+            ("cancelled", STOPPED)
+        );
+        let e = start(
+            &app,
+            repo(json!([])),
+            "test",
+            "ann",
+            Box::new(|_, _, _, _| unreachable!()),
+        );
+        assert!(matches!(e, Err(Error::Conflict(_))), "{e:?}");
+    }
+
+    #[test]
+    fn a_log_is_read_in_whole_lines() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("1.log");
+        let part = |from, max| read_log(&p, from, max);
+        assert_eq!(part(None, 10), LogPart::default());
+        std::fs::write(&p, "one\ntwo\nthree\nfou").unwrap();
+        let all = part(Some(0), 100);
+        assert_eq!(
+            (all.text.as_str(), all.next, all.size),
+            ("one\ntwo\nthree\n", 14, 17)
+        );
+        // Paged: up to the last whole line of each part.
+        let a = part(Some(0), 9);
+        assert_eq!((a.text.as_str(), a.from, a.next), ("one\ntwo\n", 0, 8));
+        let b = part(Some(a.next), 9);
+        assert_eq!((b.text.as_str(), b.next), ("three\n", 14));
+        // The line being written comes once it ends; one longer than a
+        // part comes in pieces.
+        assert_eq!(part(Some(b.next), 9).text, "");
+        assert_eq!(part(Some(1), 2).text, "ne");
+        assert_eq!(part(Some(99), 9).from, 17);
+        // A tail starts at a line's start.
+        let t = part(None, 11);
+        assert_eq!(
+            (t.text.as_str(), t.from, t.next, t.size),
+            ("three\n", 8, 14, 17)
+        );
+        let t = part(None, 14);
+        assert_eq!((t.text.as_str(), t.from), ("two\nthree\n", 4));
+        assert_eq!(part(None, 100).text, "one\ntwo\nthree\n");
+    }
+
+    #[test]
+    fn a_source_is_fetched_as_what_it_names() {
+        let d = tempfile::tempdir().unwrap();
+        let o = TreeOpts {
+            excludes: vec![],
+            delete: false,
+            max_delete: 0,
+            bwlimit: None,
+            parallel: 1,
+        };
+        let fetch = |source: &str| {
+            let lines = Mutex::new(Vec::new());
+            let r = fetch_tree(
+                source,
+                &o,
+                &d.path().join("tree"),
+                &d.path().join("state"),
+                &AtomicBool::new(false),
+                &|l: &str| lines.lock().unwrap().push(l.to_string()),
+            );
+            format!("{r:?} {:?}", lines.into_inner().unwrap())
+        };
+        // An IPv6 literal's "::" is not rsync's.
+        let out = fetch("http://[::1]:9/");
+        assert!(!out.contains("rsync"), "{out}");
+        // A remote shell's path ending in "::" runs nothing.
+        let out = fetch("localhost:/var/lib/::");
+        assert!(
+            out.starts_with("Err(") && out.contains("a source is"),
+            "{out}"
+        );
     }
 
     #[test]

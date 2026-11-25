@@ -374,6 +374,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/api/v1/jobs", get(all_jobs))
         .route("/api/v1/logs", get(logs))
         .route("/api/v1/jobs/{id}", get(job))
+        .route("/api/v1/jobs/{id}/log", get(job_log))
         .route("/api/v1/jobs/{id}/cancel", post(job_cancel))
         .route("/api/v1/gc", post(gc))
         .route("/api/v1/cleanup", post(cleanup_all))
@@ -937,6 +938,7 @@ pub(crate) async fn repo_delete(
     blocking(&app, move |app| {
         let r = app.engine.repo(&repo)?;
         app.engine.delete_repo(&repo)?;
+        crate::jobs::import::remove_staging(app, &r);
         crate::protocols::oci::forget(app, &repo);
         app.auth.forget_repo(&repo)?;
         crate::auth::oidc::forget_repo(app, &repo)?;
@@ -2688,16 +2690,72 @@ pub(crate) async fn all_jobs(
     .await
 }
 
-pub(crate) async fn job(State(app): St, Who(c): Who, Path(id): Path<i64>) -> Result<Json<Value>> {
+/// A job, for who may read its repository.
+pub(crate) fn job_for(app: &App, c: &Caller, id: i64) -> Result<crate::jobs::Job> {
+    let j = crate::jobs::get(&app.db, id)?;
+    app.repo_for(c, &j.repo, Role::Read)?;
+    Ok(j)
+}
+
+#[derive(Deserialize, Default)]
+pub(crate) struct JobQ {
+    /// The log from this byte on (following it); without, its end.
+    #[serde(default)]
+    pub(crate) from: Option<u64>,
+    /// At most this many bytes of the log.
+    #[serde(default)]
+    pub(crate) max: Option<u64>,
+}
+
+/// A job with a part of its log (a whole log can be gigabytes: it is
+/// read in parts, or downloaded from `/log`).
+pub(crate) async fn job(
+    State(app): St,
+    Who(c): Who,
+    Path(id): Path<i64>,
+    Query(q): Query<JobQ>,
+) -> Result<Json<Value>> {
     blocking(&app, move |app| {
-        let j = crate::jobs::get(&app.db, id)?;
-        app.repo_for(&c, &j.repo, Role::Read)?;
-        let log = crate::jobs::log(app, id);
+        let j = job_for(app, &c, id)?;
+        let max = q
+            .max
+            .unwrap_or(crate::jobs::LOG_PART)
+            .clamp(1, crate::jobs::LOG_PART);
+        let part = match q.from {
+            Some(from) => crate::jobs::log_from(app, id, from, max),
+            None => crate::jobs::log_tail(app, id, max),
+        };
         let mut v = json!(j);
-        v["log"] = json!(log);
+        v["log"] = json!(part.text);
+        v["log_from"] = json!(part.from);
+        v["log_next"] = json!(part.next);
+        v["log_size"] = json!(part.size);
         Ok(Json(v))
     })
     .await
+}
+
+/// A job's whole log, streamed as text.
+pub(crate) async fn job_log(State(app): St, Who(c): Who, Path(id): Path<i64>) -> Result<Response> {
+    blocking(&app, move |app| job_for(app, &c, id)).await?;
+    let body = match tokio::fs::File::open(crate::jobs::log_path(&app, id)).await {
+        Ok(f) => axum::body::Body::from_stream(crate::ops::cli_dl::file_stream(f)),
+        Err(_) => axum::body::Body::empty(),
+    };
+    Ok((
+        [
+            (
+                header::CONTENT_TYPE,
+                "text/plain; charset=utf-8".to_string(),
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"job-{id}.log\""),
+            ),
+        ],
+        body,
+    )
+        .into_response())
 }
 
 pub(crate) async fn job_cancel(

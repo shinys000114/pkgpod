@@ -3,5 +3,6 @@
   <div class="card-head"><h2><span class="badge job-state {% if state == "ok" %}ok{% else if running %}run{% else %}bad{% endif %}">{{ state }}</span></h2>
     {% if running %}<button class="danger job-stop" hx-post="/c/jobs/{{ id }}/cancel" hx-target="next .result">Stop</button>{% endif %}</div>
   <div class="result card-body"></div>
+  {% if cut %}<p class="card-body muted small">Only the end of the log is shown: <a href="/api/v1/jobs/{{ id }}/log">download the whole log</a>.</p>{% endif %}
   <pre class="log">{{ log }}</pre>
 </div>

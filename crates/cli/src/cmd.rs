@@ -1833,6 +1833,12 @@ pub fn run(
                     s(&j["state"]),
                     s(&j["summary"])
                 );
+                if j["log_from"].as_u64().is_some_and(|n| n > 0) {
+                    println!(
+                        "(the log's end; all of it: GET /api/v1/jobs/{}/log)",
+                        s(&j["id"])
+                    );
+                }
                 print!("{}", j["log"].as_str().unwrap_or(""));
             });
         }
@@ -2033,15 +2039,16 @@ fn follow(x: &Ctx, v: &Value, wait: bool) -> Result<(), CliError> {
         });
         return Ok(());
     }
-    let mut shown = 0;
+    // The log in parts, each from where the last ended.
+    let mut from = 0;
     loop {
-        let j = x.c.get(&format!("/api/v1/jobs/{id}"))?;
-        let log = j["log"].as_str().unwrap_or("");
-        if log.len() > shown {
-            print!("{}", &log[shown..]);
-            shown = log.len();
-        }
+        let j = x.c.get(&format!("/api/v1/jobs/{id}?from={from}"))?;
+        print!("{}", j["log"].as_str().unwrap_or(""));
+        let next = j["log_next"].as_u64().unwrap_or(from);
+        let more = next > from && next < j["log_size"].as_u64().unwrap_or(0);
+        from = next;
         match j["state"].as_str() {
+            _ if more => {}
             Some("running" | "queued") => std::thread::sleep(std::time::Duration::from_secs(1)),
             Some("ok") => return Ok(()),
             _ => return Err(CliError::other(format!("job {id}: {}", s(&j["summary"])))),

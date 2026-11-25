@@ -229,11 +229,7 @@ impl Format for Files {
             return Ok(());
         }
         let s = str_of(settings, "source").trim();
-        let ok = s.is_empty()
-            || ["rsync://", "http://", "https://"]
-                .iter()
-                .any(|p| s.starts_with(p))
-            || s.contains("::");
+        let ok = s.is_empty() || pkgpod_base::source_kind(s) != pkgpod_base::Source::Invalid;
         if !ok {
             return Err(Error::Invalid(format!(
                 "{s:?}: a source is rsync://, host::module or http(s)://"

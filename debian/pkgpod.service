@@ -11,8 +11,14 @@ Group=pkgpod
 ExecStart=/usr/bin/pkgpod serve --config /etc/pkgpod/pkgpod.toml
 Restart=on-failure
 RestartSec=10s
-# On stop the server answers the requests in flight for up to 30s.
-TimeoutStopSec=45s
+# On stop the server answers the requests in flight for up to 30s, and
+# meanwhile gives the jobs it cancels 10s to end (a sync's rsync with
+# them). SIGTERM goes to the server alone; whatever is left of the unit
+# once it is gone is killed.
+KillMode=mixed
+TimeoutStopSec=60s
+# Every connection is a file descriptor; the default 1024 is soon taken.
+LimitNOFILE=65536
 # Serving listeners on ports below 1024 (80, 443) without root.
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
