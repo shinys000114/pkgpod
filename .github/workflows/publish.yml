@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Publishes master's build to a pkgpod server with trusted publishing: the
+# job logs in with its GitHub OIDC token, so no secret is kept here. It runs
+# only where the repository variables PKGPOD_URL (the server's console and
+# API address) and PKGPOD_REPO (a files repository there) are set, and the
+# server has a trust rule for this repository's publish.yml on master:
+#
+#   pkgpod trust add publish --github <owner>/<name> --ref refs/heads/master \
+#     --workflow publish.yml --user <ci user> --repos <PKGPOD_REPO>
+name: publish
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: vars.PKGPOD_URL != '' && vars.PKGPOD_REPO != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PKGPOD_URL: ${{ vars.PKGPOD_URL }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/build
+        with:
+          version: 0.0.0-ci
+      - name: Publish to pkgpod
+        run: |
+          set -euo pipefail
+          p=dist/pkgpod_0.0.0-ci_linux_x86_64
+          chmod +x "$p"
+          "$p" login --oidc
+          at="master/${GITHUB_SHA::7}"
+          for f in dist/*.deb dist/pkgpod_0.0.0-ci_linux_* dist/checksums.txt; do
+            "$p" upload "${{ vars.PKGPOD_REPO }}" "$f" -s "path=$at/$(basename "$f")"
+          done
+          echo "published to ${{ vars.PKGPOD_REPO }} at $at" >> "$GITHUB_STEP_SUMMARY"
