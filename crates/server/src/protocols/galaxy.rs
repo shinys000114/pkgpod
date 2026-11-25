@@ -279,7 +279,16 @@ async fn upload(app: &Arc<App>, a: &Ask, req: Request) -> Response {
                     .get("content-transfer-encoding")
                     .and_then(|v| v.to_str().ok())
                     .is_some_and(|v| v.eq_ignore_ascii_case("base64"));
-                let bytes = match f.bytes().await {
+                // Only the file and its sha256 are read, each as far as it
+                // can go (base64 makes four bytes of three, and line breaks
+                // a few more); other fields are passed over unread.
+                let max = match name.as_str() {
+                    "file" if b64 => pkgpod_galaxy::MAX_ARTIFACT as usize / 2 * 3,
+                    "file" => pkgpod_galaxy::MAX_ARTIFACT as usize,
+                    "sha256" => 128,
+                    _ => continue,
+                };
+                let bytes = match crate::serving::field_capped(f, max).await {
                     Ok(b) => b,
                     Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
                 };
@@ -294,7 +303,7 @@ async fn upload(app: &Arc<App>, a: &Ask, req: Request) -> Response {
                         Err(e) => return error(StatusCode::BAD_REQUEST, format!("{name}: {e}")),
                     }
                 } else {
-                    bytes.to_vec()
+                    bytes
                 };
                 match name.as_str() {
                     "file" => data = Some(bytes),

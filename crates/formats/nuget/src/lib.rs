@@ -438,8 +438,22 @@ impl Format for Nuget {
                     )));
                 }
             }
+            // Pushed once, like the package.
+            let at = symbols_path(&n.id, &n.version);
+            if let Some(Entry::Blob { sha256, .. }) = e.get(&at)? {
+                if sha256 == up.sha256 {
+                    return Ok(format!(
+                        "symbols of {} {} are already there",
+                        n.id, n.version
+                    ));
+                }
+                return Err(Error::Conflict(format!(
+                    "symbols of {} {} are already there: they are pushed once",
+                    n.id, n.version
+                )));
+            }
             e.put(
-                &symbols_path(&n.id, &n.version),
+                &at,
                 Entry::blob(
                     up.sha256,
                     up.size,

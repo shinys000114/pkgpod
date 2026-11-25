@@ -110,8 +110,17 @@ pub async fn upload(app: Arc<App>, repo: RepoInfo, caller: Caller, req: Request)
             Err(e) => return text(StatusCode::BAD_REQUEST, e.to_string()),
         };
         match field.name().unwrap_or("") {
-            ":action" => action = field.text().await.unwrap_or_default(),
-            "sha256_digest" => sha_sent = field.text().await.ok().map(|s| s.trim().to_lowercase()),
+            ":action" => match crate::serving::field_capped(field, crate::serving::MAX_FIELD).await
+            {
+                Ok(b) => action = String::from_utf8_lossy(&b).into_owned(),
+                Err(e) => return text(StatusCode::BAD_REQUEST, e.to_string()),
+            },
+            "sha256_digest" => {
+                match crate::serving::field_capped(field, crate::serving::MAX_FIELD).await {
+                    Ok(b) => sha_sent = Some(String::from_utf8_lossy(&b).trim().to_lowercase()),
+                    Err(e) => return text(StatusCode::BAD_REQUEST, e.to_string()),
+                }
+            }
             "content" => {
                 let filename = field.file_name().map(String::from);
                 match crate::serving::stream_to_store(

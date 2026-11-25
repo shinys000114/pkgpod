@@ -28,7 +28,8 @@ One binary, `pkgpod`, built from a Rust workspace (`crates/`: `core/` the base a
   It defines the `Format` trait and never looks inside a blob.
 - **`pkgpod-base`**: the SQLite database with per-component migrations
   (`db.rs`), the content store (`store.rs`), sha256 digests
-  (`digest.rs`) and a small zip reader (`zip.rs`).
+  (`digest.rs`), a small zip reader (`zip.rs`) and a YAML loader that
+  bounds what aliases expand to (`yaml.rs`).
 - **`pkgpod-mirror`**: the engines that fetch from elsewhere: apt
   archives over HTTP following their Release files (`http.rs`,
   `release.rs`, `fetch.rs`), rsync (`rsync.rs`, which runs the rsync

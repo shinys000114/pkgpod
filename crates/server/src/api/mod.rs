@@ -1438,6 +1438,9 @@ pub(crate) async fn upload(
         let mut m = Multipart::from_request(req, &())
             .await
             .map_err(|e| Error::Invalid(e.to_string()))?;
+        // The text fields together are bounded like one: repeated or
+        // under many names, they are all kept.
+        let mut text_len = 0;
         while let Some(field) = m
             .next_field()
             .await
@@ -1457,10 +1460,15 @@ pub(crate) async fn upload(
                     filename: Some(fname),
                 });
             } else {
-                let text = field
-                    .text()
-                    .await
-                    .map_err(|e| Error::Invalid(e.to_string()))?;
+                let text = crate::serving::field_capped(field, crate::serving::MAX_FIELD).await?;
+                text_len += text.len();
+                if text_len > crate::serving::MAX_FIELD {
+                    return Err(Error::Invalid(format!(
+                        "the form's text fields are larger than {} bytes together",
+                        crate::serving::MAX_FIELD
+                    )));
+                }
+                let text = String::from_utf8_lossy(&text).into_owned();
                 if !text.is_empty() {
                     // Repeated fields (checked boxes) make a list.
                     let joined = match params.get(&name).and_then(Value::as_str) {

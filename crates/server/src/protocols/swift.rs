@@ -107,7 +107,20 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
         );
         return r;
     }
-    let r: Vec<String> = a.rel.iter().map(|s| s.to_ascii_lowercase()).collect();
+    // Scope and name match in any case; a release version (the third
+    // segment) is compared as it is spelt, as semver orders it.
+    let r: Vec<String> = a
+        .rel
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            if i == 2 {
+                s.clone()
+            } else {
+                s.to_ascii_lowercase()
+            }
+        })
+        .collect();
     let r: Vec<&str> = r.iter().map(String::as_str).collect();
     let base = a.base.clone();
     let get = matches!(method, Method::GET | Method::HEAD);
@@ -329,19 +342,21 @@ async fn publish(
                         Err(e) => return problem(StatusCode::BAD_REQUEST, e.to_string()),
                     }
                 }
-                "metadata" => match f.bytes().await {
-                    Ok(b) if !b.is_empty() => match serde_json::from_slice(&b) {
-                        Ok(v) => metadata = v,
-                        Err(e) => {
-                            return problem(
-                                StatusCode::UNPROCESSABLE_ENTITY,
-                                format!("metadata: {e}"),
-                            );
-                        }
-                    },
-                    Ok(_) => {}
-                    Err(e) => return problem(StatusCode::BAD_REQUEST, e.to_string()),
-                },
+                "metadata" => {
+                    match crate::serving::field_capped(f, crate::serving::MAX_FIELD).await {
+                        Ok(b) if !b.is_empty() => match serde_json::from_slice(&b) {
+                            Ok(v) => metadata = v,
+                            Err(e) => {
+                                return problem(
+                                    StatusCode::UNPROCESSABLE_ENTITY,
+                                    format!("metadata: {e}"),
+                                );
+                            }
+                        },
+                        Ok(_) => {}
+                        Err(e) => return problem(StatusCode::BAD_REQUEST, e.to_string()),
+                    }
+                }
                 "source-archive-signature" | "metadata-signature" => {
                     return problem(
                         StatusCode::UNPROCESSABLE_ENTITY,

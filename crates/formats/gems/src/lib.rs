@@ -237,7 +237,9 @@ pub fn read_gem(data: &[u8]) -> Result<Spec> {
         }
     }
     let text = meta.ok_or_else(|| invalid("the gem has no metadata.gz"))?;
-    let docs = yaml_rust2::YamlLoader::load_from_str(&text)
+    // Aliases (Psych writes them for objects named twice) may stand for
+    // at most as much as the metadata may hold.
+    let docs = pkgpod_base::yaml::load(&text, MAX_META)
         .map_err(|e| invalid(format!("the gem's metadata: {e}")))?;
     let y = docs
         .first()
@@ -757,5 +759,31 @@ mod tests {
         assert!(latest.starts_with(b"\x04\x08[\x06[\x08"), "{latest:?}");
         assert!(latest.windows(6).any(|w| w == b"1.10.0"));
         assert!(unz(&idx[2].1).windows(9).any(|w| w == b"2.0.0.pre"));
+    }
+
+    #[test]
+    fn aliases_bounded() {
+        // As Psych writes a requirement named twice: read.
+        let named = META
+            .replacen(
+                "requirement: !ruby/object:Gem::Requirement",
+                "requirement: &1 !ruby/object:Gem::Requirement",
+                1,
+            )
+            .replacen(
+                "prerelease: false\n",
+                "prerelease: false\n  version_requirements: *1\n",
+                1,
+            );
+        assert_eq!(read_gem(&gem(&named)).unwrap().deps.len(), 2);
+        // A kilobyte named 4300 times: more than the metadata itself may
+        // hold.
+        let bomb = format!(
+            "{META}x: &x {}\ny: [{}]\n",
+            "y".repeat(1000),
+            vec!["*x"; 4300].join(",")
+        );
+        let e = read_gem(&gem(&bomb)).unwrap_err();
+        assert!(e.to_string().contains("aliases"), "{e}");
     }
 }
