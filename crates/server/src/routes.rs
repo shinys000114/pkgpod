@@ -34,8 +34,20 @@ impl Route {
     }
 }
 
-/// Parses `scheme://host[:port]/path`.
+/// Parses `scheme://host[:port]/path`, one of a repository's own
+/// addresses.
 pub fn parse_url(u: &str) -> Result<(String, String, Vec<String>), String> {
+    parse(u, true)
+}
+
+/// Parses a proxy's upstream as [`parse_url`] does, but a segment of
+/// its path may start with '@' (npm scopes, a directory named @latest):
+/// only at a repository's own addresses does '@label' pick a version.
+pub fn parse_upstream(u: &str) -> Result<(String, String, Vec<String>), String> {
+    parse(u, false)
+}
+
+fn parse(u: &str, own: bool) -> Result<(String, String, Vec<String>), String> {
     // Before any error that echoes the address, a user or a password
     // however it is written (http:///u:p@h/ has no host here).
     if pkgpod_engine::settings::has_credentials(u, false) {
@@ -70,11 +82,13 @@ pub fn parse_url(u: &str) -> Result<(String, String, Vec<String>), String> {
         .collect();
     if prefix
         .iter()
-        .any(|s| s == "." || s == ".." || s.starts_with('@'))
+        .any(|s| s == "." || s == ".." || (own && s.starts_with('@')))
     {
-        return Err(format!(
-            "{u:?}: the path may not contain '.', '..' or '@...'"
-        ));
+        return Err(if own {
+            format!("{u:?}: the path may not contain '.', '..' or '@...'")
+        } else {
+            format!("{u:?}: the path may not contain '.' or '..'")
+        });
     }
     Ok((scheme.to_string(), host.to_ascii_lowercase(), prefix))
 }
@@ -428,6 +442,23 @@ mod tests {
                 e.contains("no user or password") && !e.contains("secret"),
                 "{e}"
             );
+            let e = parse_upstream(u).unwrap_err();
+            assert!(
+                e.contains("no user or password") && !e.contains("secret"),
+                "{e}"
+            );
+        }
+        // An upstream is not one of our addresses, where '@label' picks
+        // a version: npm scopes, a directory named @latest.
+        for u in [
+            "https://h.example.org/pub/@latest/",
+            "https://h.example.org/@scope/",
+        ] {
+            assert!(parse_url(u).is_err(), "{u}");
+            assert_eq!(parse_upstream(u).unwrap().1, "h.example.org");
+        }
+        for u in ["ftp://x/", "https:///x", "https://h/a/../b", "https://h/?q"] {
+            assert!(parse_upstream(u).is_err(), "{u}");
         }
     }
 }

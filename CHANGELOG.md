@@ -220,9 +220,13 @@ The API and the CLI:
   of the API's listener list) until it listens on its address, and
   `running` only then. `grant list '*'` lists the grants on every
   repository (server admins).
-- A mirror's or an import's http(s) source (an OCI import's registry
-  too) or a proxy's upstream that holds a user or password is refused,
-  without echoing it (an import's before any job is made). An rsync
+- A mirror's or an import's source of any scheme (an OCI import's
+  registry too) or a proxy's upstream that holds a password is
+  refused, without echoing it (an import's before any job is made);
+  an rsync source may name a plain user, and an http(s) one none. A
+  proxy's upstream may have path segments starting with `@` (an npm
+  scope); a repository's own addresses may not, as `@label` picks a
+  version there. An rsync
   source is `rsync://[user@]host[:port]/...` or `[user@]host::module`,
   the host a name of letters, digits, `.` and `-`, or a bracketed IPv6
   address.

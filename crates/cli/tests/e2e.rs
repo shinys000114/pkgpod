@@ -13120,6 +13120,34 @@ fn misspelt_parameters_and_secrets_in_addresses_are_refused() {
         r.headers()["last-modified"],
         "Fri, 31 Dec 9999 23:59:59 GMT"
     );
+    // Nor one that is not whole seconds, which is not taken as now:
+    // the file's own time would be lost without a word.
+    for m in ["abc", "1e3", "1700000000.5", "99999999999999999999"] {
+        let e = s
+            .cli(&[
+                "upload",
+                "t",
+                f,
+                "-s",
+                "path=z/",
+                "-s",
+                &format!("mtime={m}"),
+            ])
+            .unwrap_err();
+        assert!(e.contains("z/f.txt: mtime"), "{m}: {e}");
+    }
+    let r = c
+        .put(s.url("/t/z/f.txt?mtime=1.5"))
+        .basic_auth("admin", Some(pw.trim()))
+        .body("y")
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 400);
+    let body = r.text().unwrap();
+    assert!(body.contains("z/f.txt: mtime"), "{body}");
+    // Empty is now.
+    s.cli(&["upload", "t", f, "-s", "path=z/", "-s", "mtime="])
+        .unwrap();
     // And operations.
     let e = s
         .cli(&["op", "t", "move", "from=a", "too=c", "-y"])
@@ -13171,6 +13199,89 @@ fn misspelt_parameters_and_secrets_in_addresses_are_refused() {
         e.contains("no user or password") && !e.contains("secret"),
         "{e}"
     );
+    // Whatever the source's scheme, also in a deb mirror, which checks
+    // no more of its source (a file:/// one is a server admin's).
+    for (format, address) in [
+        ("deb", "rsync://u:secret@files.example.org/m/"),
+        ("deb", "rsync://u:a/secret@files.example.org/m/"),
+        ("deb", "ftp://u:secret@files.example.org/x/"),
+        ("deb", "sftp://u:secret@files.example.org/"),
+        ("deb", "u:secret@files.example.org::m"),
+        ("deb", "//u:secret@files.example.org/x/"),
+        ("rpm", "u:secret@files.example.org::m"),
+        ("files", "rsync://u%3Asecret@files.example.org/m/"),
+    ] {
+        let e = s
+            .cli(&[
+                "repo",
+                "create",
+                "mirror",
+                "-f",
+                format,
+                "-k",
+                "mirror",
+                "-s",
+                &format!("source={address}"),
+            ])
+            .unwrap_err();
+        assert!(
+            e.contains("no user or password") && !e.contains("secret"),
+            "{address}: {e}"
+        );
+    }
+    // A user name alone is no secret to rsync, which takes the password
+    // from elsewhere.
+    for (name, format, address) in [
+        ("dm", "deb", "rsync://u@files.example.org/m/"),
+        ("fm", "files", "u@files.example.org::m/a@b/"),
+    ] {
+        s.cli(&[
+            "repo",
+            "create",
+            name,
+            "-f",
+            format,
+            "-k",
+            "mirror",
+            "-s",
+            &format!("source={address}"),
+        ])
+        .unwrap();
+    }
+    // An upstream is not one of our addresses, where '@label' picks a
+    // version: its path may have an @ segment (npm scopes, a directory
+    // named @latest), and what is under it is fetched.
+    s.cli(&["repo", "create", "up", "-f", "files", "-s", "public=true"])
+        .unwrap();
+    s.cli(&["upload", "up", f, "-s", "path=d/@x/"]).unwrap();
+    for (name, format, upstream) in [
+        ("fp", "files", s.url("/up/d/@x/")),
+        ("np", "npm", "https://files.example.org/@scope/".to_string()),
+    ] {
+        s.cli(&[
+            "repo",
+            "create",
+            name,
+            "-f",
+            format,
+            "-k",
+            "proxy",
+            "-s",
+            &format!("upstream={upstream}"),
+        ])
+        .unwrap();
+    }
+    let r = c
+        .get(s.url("/fp/f.txt"))
+        .basic_auth("admin", Some(pw.trim()))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(r.text().unwrap(), "x");
+    let e = s
+        .cli(&["repo", "set", "fp", "urls=https://files.example.org/@x/"])
+        .unwrap_err();
+    assert!(e.contains("'@...'"), "{e}");
     let e = s
         .cli(&["gc", "--grace-hours", "3000000000000000"])
         .unwrap_err();

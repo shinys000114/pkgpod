@@ -756,7 +756,7 @@ pub fn check_settings(format: &str, settings: &Value) -> Result<()> {
         }
         // A registry may be named by its host (docker.io, ghcr.io/team).
         if !u.is_empty() && !(format == "oci" && !u.contains("://")) {
-            crate::routes::parse_url(u).map_err(Error::Invalid)?;
+            crate::routes::parse_upstream(u).map_err(Error::Invalid)?;
         }
     }
     Ok(())

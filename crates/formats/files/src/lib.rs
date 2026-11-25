@@ -340,16 +340,7 @@ impl Format for Files {
 
     fn ingest(&self, cx: &Cx, up: &Upload, p: &Value, e: &mut Edit) -> Result<String> {
         let t = Self::target(up, p)?;
-        let mtime = p
-            .get("mtime")
-            .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
-            .unwrap_or_else(pkgpod_base::now);
-        // A later one could not be served (see MAX_MTIME).
-        if mtime > MAX_MTIME {
-            return Err(Error::Invalid(format!(
-                "{t}: mtime {mtime}, at most {MAX_MTIME} (the end of the year 9999)"
-            )));
-        }
+        let mtime = mtime_of(&t, p)?;
         match e.get(&t)? {
             Some(Entry::Blob { sha256, .. }) if sha256 == up.sha256 => {
                 return Ok(format!("{t} unchanged"));
@@ -441,6 +432,30 @@ impl Format for Files {
     }
 }
 
+/// The modification time an upload of `t` gives, unix seconds as a
+/// number or as text; none or empty: now. One that is there but does
+/// not read as whole seconds (1.5, 1e3, a typo, past i64) is refused:
+/// taken as now, the file's own time would be lost without a word.
+fn mtime_of(t: &str, p: &Value) -> Result<i64> {
+    let mtime = match p.get("mtime") {
+        None | Some(Value::Null) => pkgpod_base::now(),
+        Some(Value::String(s)) if s.trim().is_empty() => pkgpod_base::now(),
+        Some(v) => v
+            .as_i64()
+            .or_else(|| v.as_str()?.trim().parse().ok())
+            .ok_or_else(|| {
+                Error::Invalid(format!("{t}: mtime {v}: whole unix seconds, or empty"))
+            })?,
+    };
+    // A later one could not be served (see MAX_MTIME).
+    if mtime > MAX_MTIME {
+        return Err(Error::Invalid(format!(
+            "{t}: mtime {mtime}, at most {MAX_MTIME} (the end of the year 9999)"
+        )));
+    }
+    Ok(mtime)
+}
+
 /// Points the link at `path` to `to` (a path of the same tree), or
 /// removes it when `to` is empty. Only a link (or nothing) is at `path`.
 fn link(e: &mut Edit, path: &str, to: &str) -> Result<String> {
@@ -505,6 +520,38 @@ mod tests {
         let mirror = Files.settings(Kind::Mirror);
         assert!(check(&mirror, &json!({"bwlimit": -1})).is_err());
         assert!(check(&mirror, &json!({"parallel": 1_000_000})).is_err());
+    }
+
+    #[test]
+    fn mtimes_are_whole_seconds_or_empty() {
+        // Empty is now; one that is there but not whole unix seconds is
+        // refused, not taken as now (which would lose it without a word).
+        let at = |v: Value| mtime_of("d/f.txt", &v);
+        for v in [
+            json!({}),
+            json!({"mtime": null}),
+            json!({"mtime": ""}),
+            json!({"mtime": " "}),
+        ] {
+            assert!((at(v).unwrap() - pkgpod_base::now()).abs() < 60);
+        }
+        assert_eq!(at(json!({"mtime": 1700000000})).unwrap(), 1700000000);
+        assert_eq!(at(json!({"mtime": "1700000000"})).unwrap(), 1700000000);
+        assert_eq!(at(json!({"mtime": "-5"})).unwrap(), -5);
+        for v in [
+            json!("abc"),
+            json!("1e3"),
+            json!("1700000000.5"),
+            json!(1.7e9),
+            json!(1700000000.5),
+            json!("99999999999999999999"),
+            json!(u64::MAX),
+            json!(true),
+            json!(253402300800i64),
+        ] {
+            let e = at(json!({ "mtime": v })).unwrap_err().to_string();
+            assert!(e.contains("d/f.txt: mtime"), "{e}");
+        }
     }
 
     #[test]

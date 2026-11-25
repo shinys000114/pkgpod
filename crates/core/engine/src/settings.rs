@@ -186,8 +186,14 @@ pub fn mirror_common() -> Vec<Field> {
 pub fn check_mirror_source(settings: &Value) -> Result<String> {
     let s = settings["source"].as_str().unwrap_or("").trim().to_string();
     if !s.is_empty() && pkgpod_base::source_kind(&s) == pkgpod_base::Source::Invalid {
+        // Not echoed when what is before an @ may be a password.
+        let quoted = if s.contains('@') {
+            String::new()
+        } else {
+            format!(" {s:?}")
+        };
         return Err(crate::Error::Invalid(format!(
-            "source {s:?}: http(s)://… or rsync://…"
+            "source{quoted}: http(s)://… or rsync://…"
         )));
     }
     Ok(s)
@@ -211,8 +217,9 @@ pub fn check_no_credentials(kind: crate::Kind, settings: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Whether an http(s) address, or with `bare` a registry named by its
-/// host alone (docker.io, ghcr.io/team), holds a user or a password.
+/// Whether an address, or with `bare` a registry named by its host
+/// alone (docker.io, ghcr.io/team), holds a user or a password: for an
+/// rsync daemon, more than a user name.
 pub fn has_credentials(address: &str, bare: bool) -> bool {
     let s = address.trim();
     // As the HTTP client reads it (reqwest parses with url), which skips
@@ -236,6 +243,22 @@ pub fn has_credentials(address: &str, bare: bool) -> bool {
         (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
             .then(|| rest.to_string())
     };
+    // Any other address is read as a mirror's source is: an rsync
+    // daemon's (rsync://u@h/m/, u@h::m) takes a user name alone, its
+    // password comes from elsewhere, and a local path none. In anything
+    // else (ftp://, u:p@h::m, rsync://u:a/b@h/m/) an @ may follow a
+    // password that cannot be told from one (//u:p@h/ too, which is
+    // read as a host, not a path). A registry named by its host alone
+    // is read as https:// above, and its path may have an @.
+    let local = (s.starts_with('/') && !s.starts_with("//")) || s.starts_with("file:///");
+    if http(s).is_none()
+        && !(bare && !s.contains("://"))
+        && s.contains('@')
+        && pkgpod_base::source_kind(s) != pkgpod_base::Source::Rsync
+        && !local
+    {
+        return true;
+    }
     readings.iter().any(|a| {
         let rest = http(a);
         let parsed = match url::Url::parse(a) {
@@ -594,6 +617,25 @@ mod tests {
             assert!(has_credentials(a, false), "{a:?}");
             assert!(has_credentials(a, true), "{a:?}");
         }
+        // Other sources: an rsync daemon's takes a user name alone, and
+        // anything else with an @ may hold a password.
+        for a in [
+            "rsync://u:secret@h.example.org/m/",
+            "rsync://u:a/secret@h.example.org/m/",
+            "rsync://u%3Asecret@h.example.org/m/",
+            "RSYNC://u:secret@h.example.org/m/",
+            "rsync:/u:secret@h.example.org/m/",
+            "rs\tync://u:secret@h.example.org/m/",
+            "u:secret@h.example.org::m",
+            "u:a/secret@h.example.org::m",
+            "u:secret@[::1]::m",
+            "ftp://u:secret@h.example.org/x/",
+            "sftp://u:secret@h.example.org/",
+            "file://u:secret@h.example.org/x/",
+            "//u:secret@h.example.org/x/",
+        ] {
+            assert!(has_credentials(a, false), "{a:?}");
+        }
         // A registry named by its host alone, which is fetched from with
         // https:// before it unless it starts with http(s)://.
         for a in [
@@ -613,9 +655,14 @@ mod tests {
             "https://deb.example.org/a@b/",
             "https://exa mple.org/",
             "rsync://user@h.example.org/m/",
+            "rsync://u@h.example.org:873/m/a@b/",
+            "rsync://[::1]:8873/m/a@b/",
             "user@h.example.org::mod",
+            "h.example.org::mod/a@b/",
             "/srv/dir",
+            "/srv/a@b/",
             "file:///srv/dir",
+            "file:///srv/a@b/",
         ] {
             assert!(!has_credentials(a, false), "{a:?}");
         }
@@ -626,6 +673,7 @@ mod tests {
             "localhost:5000/team",
             "127.0.0.1:5000",
             "https://ghcr.io",
+            "ghcr.io/team/a@b",
         ] {
             assert!(!has_credentials(a, true), "{a:?}");
         }
@@ -642,6 +690,12 @@ mod tests {
                 "https://u:a/secret@h.example.org/",
             ),
             (crate::Kind::Proxy, "upstream", "u:a/secret@ghcr.io"),
+            (
+                crate::Kind::Mirror,
+                "source",
+                "rsync://u:secret@h.example.org/m/",
+            ),
+            (crate::Kind::Mirror, "source", "u:secret@h.example.org::m"),
         ] {
             let e = check_no_credentials(kind, &json!({ name: a }))
                 .unwrap_err()
@@ -651,5 +705,14 @@ mod tests {
                 "{e}"
             );
         }
+        // Nor by the check of a mirror's source, should one get there.
+        let e = check_mirror_source(&json!({"source": "ftp://u:secret@h.example.org/"}))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("rsync://") && !e.contains("secret"), "{e}");
+        let e = check_mirror_source(&json!({"source": "ftp://h.example.org/"}))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("ftp://h.example.org/"), "{e}");
     }
 }
