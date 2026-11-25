@@ -665,6 +665,8 @@ fn settings_json(app: &App) -> Value {
         "syncs_per_storage": crate::jobs::syncs_per_storage(app),
         "jobs_days": crate::jobs::jobs_days(app),
         "schedules_paused": crate::jobs::schedules_paused(app),
+        "console_url": crate::cli_dl::console_url(app),
+        "ci_action": crate::cli_dl::ci_action(app),
     })
 }
 
@@ -695,6 +697,12 @@ pub(crate) struct SettingsReq {
     pub(crate) jobs_days: Option<i64>,
     #[serde(default)]
     pub(crate) schedules_paused: Option<bool>,
+    /// "" clears it.
+    #[serde(default)]
+    pub(crate) console_url: Option<String>,
+    /// "" clears it.
+    #[serde(default)]
+    pub(crate) ci_action: Option<String>,
 }
 
 pub(crate) async fn settings_patch(
@@ -729,6 +737,32 @@ pub(crate) async fn settings_patch(
             crate::keys::set_setting(&app.db, crate::jobs::DAYS_SETTING, Some(&d.to_string()))?;
             app.auth
                 .audit(c.name(), "settings", "", &format!("jobs_days={d}"));
+        }
+        for (name, v, check) in [
+            (
+                crate::cli_dl::CONSOLE_URL,
+                &req.console_url,
+                crate::cli_dl::check_console_url as fn(&str) -> Result<String>,
+            ),
+            (
+                crate::cli_dl::CI_ACTION,
+                &req.ci_action,
+                crate::cli_dl::check_ci_action,
+            ),
+        ] {
+            let Some(v) = v else { continue };
+            let v = if v.trim().is_empty() {
+                None
+            } else {
+                Some(check(v)?)
+            };
+            crate::keys::set_setting(&app.db, name, v.as_deref())?;
+            app.auth.audit(
+                c.name(),
+                "settings",
+                "",
+                &format!("{name}={}", v.as_deref().unwrap_or("")),
+            );
         }
         if let Some(p) = req.schedules_paused {
             crate::keys::set_setting(&app.db, crate::jobs::PAUSE_SETTING, p.then_some("1"))?;

@@ -481,6 +481,14 @@ fn schemas() -> Value {
                         "schedules_paused",
                         json!({"type": "boolean", "description": "No scheduled sync starts (the mirrors keep their schedules; syncs asked for still run)."}),
                     ),
+                    (
+                        "console_url",
+                        json!({"type": ["string", "null"], "description": "The console's and API's public address (https://pkg.example.org): named in the CLI's install script and download and in CI examples instead of the address a request names. Empty (\"\" to clear): as each request names it."}),
+                    ),
+                    (
+                        "ci_action",
+                        json!({"type": ["string", "null"], "description": "Where the pkgpod GitHub action is (owner/repository@ref), for the CI examples. \"\" clears it."}),
+                    ),
                 ],
                 &[],
             ),

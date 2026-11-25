@@ -6926,6 +6926,50 @@ fn cli_from_the_server() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("SHA-256"));
     assert_eq!(std::fs::read_dir(&bin2).unwrap().count(), 0, "nothing left");
+
+    // The console's public address, as set, whatever a request names;
+    // nothing a cache keeps for others.
+    s.cli(&[
+        "settings",
+        "--console-url",
+        "https://pkg.example.org/",
+        "--ci-action",
+        "team/pkgpod@v1",
+    ])
+    .unwrap();
+    let r = reqwest::blocking::Client::new()
+        .get(format!("{}/cli/install.sh", s.api))
+        .header("host", "evil.example.net")
+        .send()
+        .unwrap();
+    assert_eq!(r.headers()["cache-control"], "no-store");
+    let sh = r.text().unwrap();
+    assert!(
+        sh.contains("curl -fsSL \"https://pkg.example.org/cli/pkgpod\"") && !sh.contains("evil"),
+        "{sh}"
+    );
+    let st = s.cli(&["settings"]).unwrap();
+    assert!(
+        st.contains("console_url = https://pkg.example.org")
+            && st.contains("ci_action = team/pkgpod@v1"),
+        "{st}"
+    );
+    for bad in [
+        ["--console-url", "ftp://x"],
+        ["--console-url", "https://x/path"],
+        ["--ci-action", "no-ref"],
+        ["--ci-action", "a b/c@d"],
+    ] {
+        let mut a = vec!["settings"];
+        a.extend_from_slice(&bad);
+        assert!(s.cli(&a).is_err(), "{bad:?}");
+    }
+    s.cli(&["settings", "--console-url", ""]).unwrap();
+    let sh = reqwest::blocking::get(format!("{}/cli/install.sh", s.api))
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(sh.contains(&format!("{}/cli/pkgpod", s.api)), "{sh}");
 }
 
 /// Links in a files repository (a stable address for the newest build)
@@ -7374,6 +7418,7 @@ fn trusted_publishing_without_a_user() {
             && st.contains(&format!("curl -fsSL {}/cli/install.sh", s.api))
             && st.contains("repository: mine")
             && st.contains("pkgpod upload mine dist/* -s path=")
+            && st.contains("uses: &#60;owner&#62;/pkgpod@master")
             && !st.contains("this server"),
         "{st}"
     );
