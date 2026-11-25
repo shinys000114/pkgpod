@@ -1012,7 +1012,7 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
             return if role.is_some() && caller.user.is_some() {
                 status(StatusCode::FORBIDDEN)
             } else {
-                deny(&Caller::anonymous())
+                deny(&caller)
             };
         }
         return crate::protocols::pypi::upload(app, served.repo, caller, req).await;

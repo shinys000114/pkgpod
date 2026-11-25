@@ -865,6 +865,1304 @@ fn rights_and_errors() {
     assert_eq!(r.status().as_u16(), 404);
 }
 
+/// Who may make a change in the console, in the table of them.
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+enum Need {
+    /// Anyone logged in, for themselves.
+    Anyone,
+    /// Write on the repository.
+    Write,
+    /// The repository's admin.
+    RepoAdmin,
+    /// A server admin.
+    ServerAdmin,
+}
+
+/// A change the console takes, as its form sends it.
+struct Change {
+    /// The route, as the console's router names it.
+    route: &'static str,
+    /// The address; `{me}` is the caller's own name.
+    path: String,
+    form: Vec<(&'static str, String)>,
+    /// A file sent with the form, which then goes as multipart.
+    file: Option<(&'static str, &'static str)>,
+    need: Need,
+    /// What a server admin's answer says ("": anything but a refusal).
+    ok: &'static str,
+}
+
+impl Change {
+    fn new(route: &'static str, path: impl Into<String>, need: Need, ok: &'static str) -> Change {
+        Change {
+            route,
+            path: path.into(),
+            form: Vec::new(),
+            file: None,
+            need,
+            ok,
+        }
+    }
+
+    fn with(mut self, k: &'static str, v: impl Into<String>) -> Change {
+        self.form.push((k, v.into()));
+        self
+    }
+}
+
+/// A console change sent in a session, with its CSRF token or without
+/// one: the status and the answer.
+fn console_send(
+    s: &Server,
+    c: &reqwest::blocking::Client,
+    sid: &str,
+    csrf: Option<&str>,
+    ch: &Change,
+    me: &str,
+) -> (u16, String) {
+    let mut r = c
+        .post(format!("{}{}", s.api, ch.path.replace("{me}", me)))
+        .header("cookie", format!("pkgpod_session={sid}"));
+    if let Some(t) = csrf {
+        r = r.header("x-csrf-token", t);
+    }
+    r = match ch.file {
+        Some((name, body)) => {
+            use reqwest::blocking::multipart::{Form, Part};
+            let form = ch
+                .form
+                .iter()
+                .fold(Form::new(), |f, (k, v)| f.text(*k, v.clone()));
+            r.multipart(form.part("file", Part::text(body).file_name(name)))
+        }
+        None => r.form(&ch.form),
+    };
+    let r = r.send().unwrap();
+    (r.status().as_u16(), r.text().unwrap())
+}
+
+/// What the server keeps, a line each, to see that a refused request
+/// changed nothing: every table of its database but the audit log and
+/// the sessions (logging in is no change), without when tokens and rules
+/// were last used; and the files in its storages.
+fn state_of(s: &Server) -> Vec<String> {
+    let c = rusqlite::Connection::open(s.dir.path().join("data/pkgpod.db")).unwrap();
+    c.busy_timeout(Duration::from_secs(10)).unwrap();
+    let tables: Vec<String> = c
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let mut out = Vec::new();
+    for t in tables.iter().filter(|t| *t != "audit" && *t != "sessions") {
+        let mut st = c.prepare(&format!("SELECT * FROM \"{t}\"")).unwrap();
+        let cols: Vec<String> = st.column_names().map(String::from).collect();
+        let rows = st
+            .query_map([], |r| {
+                let mut line = format!("{t}:");
+                for (i, n) in cols.iter().enumerate().filter(|(_, n)| *n != "used") {
+                    let v: rusqlite::types::Value = r.get(i)?;
+                    line.push_str(&format!(" {n}={v:?}"));
+                }
+                Ok(line)
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        out.extend(rows);
+    }
+    for (p, n, _) in tree_files(&s.dir.path().join("data/storages")) {
+        out.push(format!("file: {} {n}", p.display()));
+    }
+    out.sort();
+    out
+}
+
+/// The lines one state has and the other has not.
+fn state_diff(a: &[String], b: &[String]) -> String {
+    let gone = a
+        .iter()
+        .filter(|l| !b.contains(l))
+        .map(|l| format!("- {l}"));
+    let new = b
+        .iter()
+        .filter(|l| !a.contains(l))
+        .map(|l| format!("+ {l}"));
+    gone.chain(new).collect::<Vec<_>>().join("\n")
+}
+
+/// Waits until no job runs (a sync or an import a change started).
+fn jobs_done(s: &Server, admin: As) {
+    let t = Instant::now();
+    loop {
+        let (_, v, _) = call(s, reqwest::Method::GET, "/api/v1/jobs", admin, Value::Null);
+        let busy = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|j| j["state"] == "running" || j["state"] == "queued");
+        if !busy {
+            return;
+        }
+        assert!(t.elapsed() < Duration::from_secs(30), "jobs still run: {v}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Every change the console takes, sent by those who may not make it (a
+/// reader, a writer, a repository's admin, from their own sessions), is
+/// refused and changes nothing; without the session's CSRF token it is
+/// refused for anyone; a server admin's minimal form does what it says.
+#[test]
+fn console_changes_need_their_rights() {
+    use reqwest::Method;
+    let s = Server::start();
+    let pw = admin_password(&s);
+    let admin = As::User("admin", &pw);
+    let dead = format!("http://127.0.0.1:{}/", dead_port());
+    // An upstream that is not there, said at once (a closed port is
+    // tried again for seconds).
+    let nothing = s.url("/nothing/");
+    // What the forms change: Debian repositories with a dist (one with a
+    // label and a plan), files and some to promote them to, one to
+    // delete, a mirror whose sync found files gone upstream, a proxy;
+    // people, a team, the server's key, storage, listener, host page,
+    // trust rule, token and webhook.
+    for r in ["web", "dst"] {
+        s.cli(&["repo", "create", r, "-s", "sign=false"]).unwrap();
+        s.cli(&["op", r, "dist-set", "name=noble", "-y"]).unwrap();
+    }
+    s.cli(&["label", "web", "keep"]).unwrap();
+    // A plan is applied by whoever made it: the server admin's session.
+    let (cb, mut sid, mut csrf) = console_session(&s, "boss", "boss-password-1");
+    let focal = Change::new("", "/c/r/web/ops/dist-set", Need::Write, "").with("name", "focal");
+    let (_, preview) = console_send(&s, &cb, &sid, Some(&csrf), &focal, "boss");
+    let plan = preview
+        .split("/c/plans/")
+        .nth(1)
+        .unwrap()
+        .split('/')
+        .next()
+        .unwrap()
+        .to_string();
+    for r in ["fl", "fl2"] {
+        s.cli(&["repo", "create", r, "-f", "files"]).unwrap();
+    }
+    let a = s.dir.path().join("a.txt");
+    std::fs::write(&a, "a").unwrap();
+    s.cli(&["upload", "fl", a.to_str().unwrap(), "-s", "path=a/"])
+        .unwrap();
+    s.cli(&["repo", "create", "gone", "-f", "files"]).unwrap();
+    s.cli(&[
+        "repo",
+        "create",
+        "mir",
+        "-k",
+        "mirror",
+        "-s",
+        &format!("source={nothing}"),
+        "-s",
+        "dists=noble",
+    ])
+    .unwrap();
+    assert!(s.cli(&["sync", "mir", "--wait"]).is_err());
+    let (_, v, _) = call(
+        &s,
+        Method::GET,
+        "/api/v1/repos/mir/jobs",
+        admin,
+        Value::Null,
+    );
+    let job = v[0]["id"].as_i64().unwrap();
+    sql(
+        &s,
+        &format!(
+            "UPDATE jobs SET report = json_set(coalesce(report, '{{}}'), '$.missing_upstream', \
+             json('[\"pool/x.deb\"]')) WHERE id = {job}"
+        ),
+    );
+    s.cli(&[
+        "repo",
+        "create",
+        "px",
+        "-f",
+        "files",
+        "-k",
+        "proxy",
+        "-s",
+        &format!("upstream={dead}"),
+    ])
+    .unwrap();
+    for (u, role) in [("reader", "read"), ("writer", "write"), ("lead", "admin")] {
+        s.cli_in(
+            &["user", "add", u, "--password-stdin"],
+            &format!("{u}-password"),
+        )
+        .unwrap();
+        s.cli(&["grant", "set", "*", &format!("user:{u}"), role])
+            .unwrap();
+    }
+    s.cli_in(
+        &["user", "add", "other", "--password-stdin"],
+        "other-password",
+    )
+    .unwrap();
+    s.cli(&["grant", "set", "web", "user:other", "read"])
+        .unwrap();
+    s.cli(&["team", "add", "devs"]).unwrap();
+    s.cli(&["key", "generate", "k1", "K1 <k1@example.invalid>"])
+        .unwrap();
+    let keys = s.dir.path().join("data/keys");
+    let k1 = std::fs::read_to_string(keys.join("k1.asc")).unwrap();
+    let k1_pass = std::fs::read_to_string(keys.join("k1.pass")).unwrap_or_default();
+    let extra = s.dir.path().join("extra");
+    s.cli(&["storage", "set", "extra", extra.to_str().unwrap()])
+        .unwrap();
+    s.cli(&[
+        "listener",
+        "set",
+        "extra",
+        &format!("127.0.0.1:{}", free_port()),
+    ])
+    .unwrap();
+    s.cli(&["host", "set", "pkg.example.org", "--title", "Packages"])
+        .unwrap();
+    s.cli(&[
+        "trust", "add", "t-srv", "--github", "org/app", "--user", "other", "--repos", "web",
+    ])
+    .unwrap();
+    s.cli(&["token", "create", "spare"]).unwrap();
+    let (_, v, _) = call(&s, Method::GET, "/api/v1/tokens", admin, Value::Null);
+    let spare = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "spare")
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    let (hook, _) = receiver(std::sync::Arc::new(std::sync::atomic::AtomicU16::new(200)));
+    s.cli(&["webhook", "add", "w", &hook, "--events", "version"])
+        .unwrap();
+    let (_, v, _) = call(
+        &s,
+        Method::POST,
+        "/api/v1/webhooks/w/ping",
+        admin,
+        Value::Null,
+    );
+    let delivery = v["delivery"].as_i64().unwrap();
+    // Delivered before anything is compared: nothing then changes by
+    // itself.
+    let t = Instant::now();
+    loop {
+        let (_, v, _) = call(
+            &s,
+            Method::GET,
+            "/api/v1/webhooks/w/deliveries",
+            admin,
+            Value::Null,
+        );
+        if v.as_array()
+            .is_some_and(|d| !d.is_empty() && d.iter().all(|d| d["state"] != "pending"))
+        {
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(20), "{v}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    jobs_done(&s, admin);
+
+    // In the order a server admin sends them: what a change needs made
+    // first, then the change.
+    use Need::*;
+    let new_listener = format!("127.0.0.1:{}", free_port());
+    let extra2 = s.dir.path().join("extra2");
+    let rows = vec![
+        Change::new(
+            "/c/r/{repo}/ops/{op}",
+            "/c/r/web/ops/dist-set",
+            Write,
+            "Preview",
+        )
+        .with("name", "jammy"),
+        Change::new(
+            "/c/plans/{id}/apply",
+            format!("/c/plans/{plan}/apply"),
+            Write,
+            "Applied",
+        ),
+        Change::new("/c/r/{repo}/cleanup", "/c/r/web/cleanup", Write, ""),
+        Change::new(
+            "/c/r/{repo}/rollback",
+            "/c/r/web/rollback",
+            Write,
+            "Preview",
+        )
+        .with("version", "1"),
+        Change::new("/c/r/{repo}/promote", "/c/r/fl/promote", Write, "Preview")
+            .with("to", "fl2")
+            .with("path", "a/a.txt"),
+        Change::new(
+            "/c/r/{repo}/republish",
+            "/c/r/web/republish",
+            Write,
+            "republished",
+        ),
+        Change::new("/c/r/{repo}/labels", "/c/r/web/labels", Write, "l1").with("name", "l1"),
+        Change::new(
+            "/c/r/{repo}/labels/{label}/delete",
+            "/c/r/web/labels/keep/delete",
+            Write,
+            "",
+        ),
+        Change {
+            file: Some(("b.txt", "b")),
+            ..Change::new("/c/r/{repo}/upload", "/c/r/fl/upload", Write, "version")
+                .with("path", "up/")
+        },
+        Change::new("/c/r/{repo}/remove", "/c/r/fl/remove", Write, "Preview")
+            .with("path", "a/a.txt"),
+        Change::new(
+            "/c/r/{repo}/use-token",
+            "/c/r/fl/use-token",
+            Write,
+            "may upload",
+        )
+        .with("write", "on"),
+        Change::new(
+            "/c/r/{repo}/cache/{action}",
+            "/c/r/px/cache/evict",
+            Write,
+            "",
+        )
+        .with("path", "x"),
+        Change::new(
+            "/c/r/{repo}/settings",
+            "/c/r/web/settings",
+            RepoAdmin,
+            "Saved.",
+        )
+        .with("description", "Ours"),
+        Change::new(
+            "/c/r/{repo}/badge-token",
+            "/c/r/web/badge-token",
+            RepoAdmin,
+            "",
+        ),
+        Change::new(
+            "/c/r/{repo}/badge-token/delete",
+            "/c/r/web/badge-token/delete",
+            RepoAdmin,
+            "",
+        ),
+        Change::new(
+            "/c/r/{repo}/grants",
+            "/c/r/web/grants",
+            RepoAdmin,
+            "user:other",
+        )
+        .with("subject", "user:other")
+        .with("role", "write"),
+        Change::new(
+            "/c/r/{repo}/grants/{subject}/delete",
+            "/c/r/web/grants/user:other/delete",
+            RepoAdmin,
+            "",
+        ),
+        Change::new("/c/schedules/{repo}", "/c/schedules/mir", RepoAdmin, "")
+            .with("schedule", "0 3 * * *"),
+        Change::new(
+            "/c/jobs/{id}/allow-missing",
+            format!("/c/jobs/{job}/allow-missing"),
+            RepoAdmin,
+            "",
+        ),
+        Change::new("/c/r/{repo}/sync", "/c/r/mir/sync", Write, "Sync started"),
+        // The job is over: a minimal form, not one that stops a job.
+        Change::new(
+            "/c/jobs/{id}/cancel",
+            format!("/c/jobs/{job}/cancel"),
+            Write,
+            "is not running",
+        ),
+        Change::new(
+            "/c/r/{repo}/import",
+            "/c/r/dst/import",
+            Write,
+            "Import started",
+        )
+        .with("source", nothing.clone())
+        .with("dists", "noble"),
+        Change::new("/c/trust", "/c/trust", RepoAdmin, "")
+            .with("new", "1")
+            .with("name", "t2")
+            .with("github", "org/app")
+            .with("repos", "web"),
+        Change::new(
+            "/c/trust/{name}/delete",
+            "/c/trust/t-srv/delete",
+            ServerAdmin,
+            "",
+        ),
+        Change::new(
+            "/c/r/{repo}/copy",
+            "/c/r/web/copy",
+            ServerAdmin,
+            "created webcopy like web",
+        )
+        .with("name", "webcopy"),
+        Change::new("/c/repos", "/c/repos", ServerAdmin, "created made")
+            .with("format", "files")
+            .with("kind", "hosted")
+            .with("name", "made"),
+        Change::new(
+            "/c/r/{repo}/delete",
+            "/c/r/gone/delete",
+            ServerAdmin,
+            "deleted",
+        )
+        .with("confirm", "gone"),
+        Change::new("/c/users", "/c/users", ServerAdmin, "")
+            .with("name", "newbie")
+            .with("password", "newbie-password"),
+        Change::new("/c/users/{user}", "/c/users/{me}", ServerAdmin, "").with("admin", "true"),
+        Change::new("/c/users/{user}", "/c/users/other", ServerAdmin, "").with("disabled", "true"),
+        Change::new(
+            "/c/users/{user}/delete",
+            "/c/users/other/delete",
+            ServerAdmin,
+            "",
+        ),
+        Change::new("/c/teams", "/c/teams", ServerAdmin, "").with("name", "ops"),
+        Change::new(
+            "/c/teams/{team}/members",
+            "/c/teams/devs/members",
+            ServerAdmin,
+            "",
+        )
+        .with("user", "reader"),
+        Change::new(
+            "/c/teams/{team}/delete",
+            "/c/teams/devs/delete",
+            ServerAdmin,
+            "",
+        ),
+        Change::new("/c/schedules/pause", "/c/schedules/pause", ServerAdmin, "")
+            .with("paused", "true"),
+        Change::new(
+            "/c/hosts/{host}",
+            "/c/hosts/pkg.example.org",
+            ServerAdmin,
+            "",
+        )
+        .with("title", "Ours"),
+        Change::new(
+            "/c/hosts/{host}/clear",
+            "/c/hosts/pkg.example.org/clear",
+            ServerAdmin,
+            "",
+        ),
+        Change::new("/c/webhooks", "/c/webhooks", ServerAdmin, "")
+            .with("name", "w2")
+            .with("url", hook.clone())
+            .with("events", "version")
+            .with("repos", "*"),
+        Change::new(
+            "/c/webhooks/{name}/ping",
+            "/c/webhooks/w/ping",
+            ServerAdmin,
+            "",
+        ),
+        Change::new(
+            "/c/webhooks/{name}/retry/{id}",
+            format!("/c/webhooks/w/retry/{delivery}"),
+            ServerAdmin,
+            "",
+        ),
+        Change::new(
+            "/c/webhooks/{name}/delete",
+            "/c/webhooks/w2/delete",
+            ServerAdmin,
+            "",
+        ),
+        Change::new("/c/listeners", "/c/listeners", ServerAdmin, "")
+            .with("name", "extra2")
+            .with("addr", new_listener),
+        Change::new(
+            "/c/listeners/{name}/delete",
+            "/c/listeners/extra/delete",
+            ServerAdmin,
+            "",
+        ),
+        Change::new("/c/keys/generate", "/c/keys/generate", ServerAdmin, "")
+            .with("name", "k2")
+            .with("uid", "K2 <k2@example.invalid>"),
+        Change::new("/c/keys", "/c/keys", ServerAdmin, "")
+            .with("name", "k3")
+            .with("secret_key", k1)
+            .with("passphrase", k1_pass),
+        Change::new(
+            "/c/keys/{name}/default",
+            "/c/keys/k2/default",
+            ServerAdmin,
+            "",
+        ),
+        Change::new(
+            "/c/keys/{name}/delete",
+            "/c/keys/k3/delete",
+            ServerAdmin,
+            "",
+        ),
+        Change::new("/c/storages", "/c/storages", ServerAdmin, "")
+            .with("name", "extra2")
+            .with("path", extra2.to_str().unwrap()),
+        Change::new(
+            "/c/storages/{name}/delete",
+            "/c/storages/extra/delete",
+            ServerAdmin,
+            "",
+        ),
+        Change::new("/c/gc", "/c/gc", ServerAdmin, "Would remove").with("dry_run", "1"),
+        Change::new("/c/settings", "/c/settings", ServerAdmin, "kept 30 days")
+            .with("downloads_days", "30"),
+        Change::new("/c/settings/ci", "/c/settings/ci", ServerAdmin, "")
+            .with("console_url", "http://pkg.example.org/"),
+        Change::new(
+            "/c/tokens/{id}/delete",
+            format!("/c/tokens/{spare}/delete"),
+            ServerAdmin,
+            "",
+        ),
+        Change::new("/c/tokens", "/c/tokens", Anyone, "Token made").with("name", "mine"),
+        Change::new("/c/password", "/c/password", Anyone, "Password changed")
+            .with("old", "boss-password-1")
+            .with("new", "boss-password-2")
+            .with("again", "boss-password-2"),
+        Change::new("/logout", "/logout", Anyone, ""),
+    ];
+    // The table has every change the router takes (the login form has a
+    // CSRF cookie of its own and no session: console_login_pages_and_csrf
+    // sends it), each at an address of its route.
+    let src = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../server/src/console/mod.rs"),
+    )
+    .unwrap();
+    let router = src
+        .split("pub fn router()")
+        .nth(1)
+        .unwrap()
+        .split("\n}\n")
+        .next()
+        .unwrap();
+    let mut posts: Vec<&str> = router
+        .split(".route(")
+        .skip(1)
+        .filter(|r| r.contains("post("))
+        .filter_map(|r| r.trim_start().strip_prefix('"')?.split('"').next())
+        .filter(|p| *p != "/login")
+        .collect();
+    posts.sort();
+    posts.dedup();
+    let mut table: Vec<&str> = rows.iter().map(|ch| ch.route).collect();
+    table.sort();
+    table.dedup();
+    assert_eq!(posts, table, "the console's changes and the table's");
+    for ch in &rows {
+        let (p, r): (Vec<&str>, Vec<&str>) =
+            (ch.path.split('/').collect(), ch.route.split('/').collect());
+        assert!(
+            p.len() == r.len() && p.iter().zip(&r).all(|(a, b)| a == b || b.starts_with('{')),
+            "{} is not at {}",
+            ch.path,
+            ch.route
+        );
+    }
+
+    // Refused: an error in place of the form's result (htmx swaps it in,
+    // so it comes with 200), or the cache card saying why; not by the
+    // CSRF check, which would refuse whoever sent it.
+    let refused = |st: u16, body: &str| {
+        !body.contains("X-CSRF-Token")
+            && (matches!(st, 401 | 403 | 404)
+                || body.contains("class=\"error\"")
+                || body.contains("may not do that"))
+    };
+    for (user, may) in [("reader", Anyone), ("writer", Write), ("lead", RepoAdmin)] {
+        let (c, sid, csrf) = console_login(&s, user, &format!("{user}-password"));
+        for ch in rows.iter().filter(|ch| ch.need > may) {
+            let before = state_of(&s);
+            let (st, body) = console_send(&s, &c, &sid, Some(&csrf), ch, user);
+            assert!(refused(st, &body), "{user} {}: {st} {body}", ch.path);
+            let after = state_of(&s);
+            assert!(
+                before == after,
+                "{user} {} changed:\n{}",
+                ch.path,
+                state_diff(&before, &after)
+            );
+        }
+    }
+    for ch in &rows {
+        let before = state_of(&s);
+        let (_, body) = console_send(&s, &cb, &sid, None, ch, "boss");
+        assert!(
+            body.contains("missing or wrong X-CSRF-Token"),
+            "{}: {body}",
+            ch.path
+        );
+        let after = state_of(&s);
+        assert!(
+            before == after,
+            "{} without the CSRF token changed:\n{}",
+            ch.path,
+            state_diff(&before, &after)
+        );
+    }
+    for ch in &rows {
+        let (st, body) = console_send(&s, &cb, &sid, Some(&csrf), ch, "boss");
+        let done = st < 400
+            && !body.contains("X-CSRF-Token")
+            && body.contains(ch.ok)
+            && (!ch.ok.is_empty() || !refused(st, &body));
+        assert!(done, "boss {}: {st} {body}", ch.path);
+        jobs_done(&s, admin);
+        if ch.route == "/c/password" {
+            // A new password ends the session.
+            (_, sid, csrf) = console_login(&s, "boss", "boss-password-2");
+        }
+    }
+    let r = cb
+        .get(format!("{}/", s.api))
+        .header("cookie", format!("pkgpod_session={sid}"))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 303, "logged out");
+}
+
+/// The console addresses a page names (links, the parts it loads, its
+/// scripts and styles), unescaped, without fragments; whether each is a
+/// part (htmx asks for it).
+fn page_links(html: &str) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    for (attr, part) in [
+        (" href=\"", false),
+        (" hx-get=\"", true),
+        (" src=\"", false),
+    ] {
+        for piece in html.split(attr).skip(1) {
+            let v = piece.split('"').next().unwrap_or("");
+            let v = v
+                .replace("&#38;", "&")
+                .replace("&amp;", "&")
+                .replace("&#34;", "\"")
+                .replace("&#39;", "'");
+            let v = v.split('#').next().unwrap_or("");
+            if v.starts_with('/') && !v.starts_with("//") {
+                out.push((v.to_string(), part));
+            }
+        }
+    }
+    out
+}
+
+/// What the console links to is there, from the home page on, for a
+/// server admin and for a reader of every repository: no page or part
+/// fails, is missing or refused, and no part a page loads is only an
+/// error. A value a format keeps in its tree is no file to download.
+#[test]
+fn console_links_lead_to_pages_there() {
+    let s = Server::start();
+    let dead = format!("http://127.0.0.1:{}/", dead_port());
+    // Things for the pages to list: versions, files, a link and a label,
+    // a package, a failed sync, a proxy.
+    s.cli(&["repo", "create", "web", "-s", "sign=false"])
+        .unwrap();
+    s.cli(&["op", "web", "dist-set", "name=noble", "-y"])
+        .unwrap();
+    if have("dpkg-deb") {
+        let deb = build_deb(s.dir.path(), "hello", "1.0", "all", "gzip", "");
+        s.cli(&["upload", "web", deb.to_str().unwrap(), "-s", "dists=noble"])
+            .unwrap();
+    }
+    s.cli(&["repo", "create", "fl", "-f", "files"]).unwrap();
+    let f = s.dir.path().join("tool.tar.gz");
+    std::fs::write(&f, "tool").unwrap();
+    s.cli(&[
+        "upload",
+        "fl",
+        f.to_str().unwrap(),
+        "-s",
+        "path=tool/1.0/",
+        "-s",
+        "link=tool/latest",
+    ])
+    .unwrap();
+    s.cli(&["label", "fl", "stable"]).unwrap();
+    s.cli(&[
+        "repo",
+        "create",
+        "mir",
+        "-k",
+        "mirror",
+        "-s",
+        &format!("source={}", s.url("/nothing/")),
+        "-s",
+        "dists=noble",
+    ])
+    .unwrap();
+    assert!(s.cli(&["sync", "mir", "--wait"]).is_err());
+    s.cli(&[
+        "repo",
+        "create",
+        "px",
+        "-f",
+        "files",
+        "-k",
+        "proxy",
+        "-s",
+        &format!("upstream={dead}"),
+    ])
+    .unwrap();
+    s.cli(&["repo", "create", "py", "-f", "pypi"]).unwrap();
+    s.cli_in(
+        &["user", "add", "reader", "--password-stdin"],
+        "reader-password",
+    )
+    .unwrap();
+    s.cli(&["grant", "set", "*", "user:reader", "read"])
+        .unwrap();
+    let boss = console_session(&s, "boss", "boss-password");
+    let reader = console_login(&s, "reader", "reader-password");
+    for (who, (c, sid, _)) in [("boss", boss), ("reader", reader)] {
+        let mut seen = std::collections::HashSet::new();
+        let mut todo = vec![("/".to_string(), false, "the start".to_string())];
+        let mut bad = Vec::new();
+        while let Some((path, part, from)) = todo.pop() {
+            // A job's live log never ends; logging out ends the crawl.
+            if path.contains("/stream") || path == "/logout" || !seen.insert(path.clone()) {
+                continue;
+            }
+            assert!(seen.len() < 2000, "{who}: no end of pages");
+            let mut r = c
+                .get(format!("{}{path}", s.api))
+                .header("cookie", format!("pkgpod_session={sid}"));
+            if part {
+                r = r.header("hx-request", "true");
+            }
+            let r = r.send().unwrap();
+            let st = r.status().as_u16();
+            let to = r
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .map(String::from);
+            let html = r
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|t| t.starts_with("text/html"));
+            let body = r.text().unwrap_or_default();
+            if let Some(to) = to {
+                if to == "/login" {
+                    bad.push(format!("{path}: to the login page, linked from {from}"));
+                }
+                todo.push((to, false, path.clone()));
+                continue;
+            }
+            // Not even a refusal: what a page offers, its viewer may open.
+            if st != 200 {
+                bad.push(format!("{path}: {st}, linked from {from}"));
+                continue;
+            }
+            let t = body.trim_start();
+            if part && t.starts_with("<div class=\"plan\">") && t.contains("class=\"error\"") {
+                bad.push(format!("{path}: only an error, loaded by {from}: {t}"));
+            }
+            if html {
+                for (l, p) in page_links(&body) {
+                    todo.push((l, p, path.clone()));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{who}:\n{}", bad.join("\n"));
+        assert!(seen.len() > 40, "{who}: only {seen:?}");
+    }
+}
+
+/// A format's client protocol, as a private repository's table of them
+/// asks it.
+struct Proto {
+    format: &'static str,
+    /// Its index (`{r}` is the repository).
+    index: &'static str,
+    /// What a reader gets there in a new repository: some indexes are
+    /// there only once a package is.
+    reads: u16,
+    /// How a client uploads, and where.
+    method: &'static str,
+    upload: &'static str,
+}
+
+/// A private repository of every format, at its clients' own addresses:
+/// anonymous reads ask for credentials; a user without a grant finds
+/// nothing there, to read or to upload to; a reader may not upload; none
+/// of that makes a version, and a writer's upload gets past the rights.
+#[test]
+fn private_repositories_of_every_format() {
+    let s = Server::start();
+    for u in ["outsider", "reader", "writer"] {
+        s.cli_in(
+            &["user", "add", u, "--password-stdin"],
+            &format!("{u}-password"),
+        )
+        .unwrap();
+    }
+    let p = |format, index, reads, method, upload| Proto {
+        format,
+        index,
+        reads,
+        method,
+        upload,
+    };
+    let protos = [
+        p(
+            "deb",
+            "/{r}/dists/noble/Release",
+            200,
+            "PUT",
+            "/{r}/upload/?dists=noble",
+        ),
+        p("files", "/{r}/", 200, "PUT", "/{r}/a/b.txt"),
+        p(
+            "oci",
+            "/v2/{r}/img/tags/list",
+            404,
+            "POST",
+            "/v2/{r}/img/blobs/uploads/",
+        ),
+        p("pypi", "/{r}/simple/", 200, "POST", "/{r}/"),
+        p("npm", "/{r}/-/v1/search?text=x", 200, "PUT", "/{r}/hello"),
+        p(
+            "cargo",
+            "/{r}/index/config.json",
+            200,
+            "PUT",
+            "/{r}/api/v1/crates/new",
+        ),
+        p(
+            "go",
+            "/{r}/example.org/m/@v/list",
+            404,
+            "PUT",
+            "/{r}/upload",
+        ),
+        p(
+            "apk",
+            "/{r}/v3.22/main/x86_64/APKINDEX.tar.gz",
+            404,
+            "PUT",
+            "/{r}/upload?branch=v3.22&repository=main",
+        ),
+        p(
+            "rpm",
+            "/{r}/el9/repodata/repomd.xml",
+            404,
+            "PUT",
+            "/{r}/upload?group=el9",
+        ),
+        p("helm", "/{r}/index.yaml", 200, "POST", "/{r}/api/charts"),
+        p(
+            "maven",
+            "/{r}/org/example/greet/maven-metadata.xml",
+            404,
+            "PUT",
+            "/{r}/org/example/greet/1.0.0/greet-1.0.0.pom",
+        ),
+        p("gems", "/{r}/versions", 200, "POST", "/{r}/api/v1/gems"),
+        p("arch", "/{r}/{r}/x86_64/{r}.db", 404, "PUT", "/{r}/upload"),
+        p(
+            "nuget",
+            "/{r}/index.json",
+            200,
+            "PUT",
+            "/{r}/api/v2/package",
+        ),
+        p(
+            "composer",
+            "/{r}/packages.json",
+            200,
+            "PUT",
+            "/{r}/upload?version=1.0.0",
+        ),
+        p(
+            "conda",
+            "/{r}/noarch/repodata.json",
+            200,
+            "PUT",
+            "/{r}/upload",
+        ),
+        p(
+            "cran",
+            "/{r}/src/contrib/PACKAGES",
+            200,
+            "PUT",
+            "/{r}/upload",
+        ),
+        // dart pub publish starts by asking where to upload.
+        p(
+            "pub",
+            "/{r}/api/packages/hello",
+            404,
+            "GET",
+            "/{r}/api/packages/versions/new",
+        ),
+        p(
+            "ipk",
+            "/{r}/main/Packages",
+            404,
+            "PUT",
+            "/{r}/upload?feed=main",
+        ),
+        p(
+            "terraform",
+            "/{r}/v1/providers/team/hello/versions",
+            404,
+            "PUT",
+            "/{r}/upload?namespace=team",
+        ),
+        p(
+            "galaxy",
+            "/{r}/api/",
+            200,
+            "POST",
+            "/{r}/api/v3/artifacts/collections/",
+        ),
+        p(
+            "conan",
+            "/{r}/v2/conans/search",
+            200,
+            "PUT",
+            "/{r}/v2/conans/hello/1.0/_/_/revisions/0123abcd/files/conanfile.py",
+        ),
+        p(
+            "swift",
+            "/{r}/identifiers?url=x",
+            404,
+            "PUT",
+            "/{r}/team/Greeting/1.0.0",
+        ),
+    ];
+    let formats = get(&format!("{}/api/v1/formats", s.api), None).1;
+    let formats: Value = serde_json::from_str(&formats).unwrap();
+    assert_eq!(
+        formats.as_array().map(Vec::len),
+        Some(protos.len()),
+        "a row for every format: {formats}"
+    );
+    let c = reqwest::blocking::Client::new();
+    let ask = |m: &str, path: &str, who: Option<&str>| {
+        let m = reqwest::Method::from_bytes(m.as_bytes()).unwrap();
+        let mut r = c.request(m.clone(), s.url(path));
+        if m != reqwest::Method::GET {
+            r = r.body("x");
+        }
+        if let Some(u) = who {
+            r = r.basic_auth(u, Some(format!("{u}-password")));
+        }
+        r.send().unwrap().status().as_u16()
+    };
+    for p in &protos {
+        let r = format!("p-{}", p.format);
+        let mut made = vec!["repo", "create", &r, "-f", p.format];
+        if p.format == "deb" {
+            made.extend(["-s", "sign=false"]);
+        }
+        s.cli(&made).unwrap();
+        if p.format == "deb" {
+            s.cli(&["op", &r, "dist-set", "name=noble", "-y"]).unwrap();
+        }
+        s.cli(&["grant", "set", &r, "user:reader", "read"]).unwrap();
+        s.cli(&["grant", "set", &r, "user:writer", "write"])
+            .unwrap();
+        let (index, upload) = (p.index.replace("{r}", &r), p.upload.replace("{r}", &r));
+        let versions = || s.json(&["versions", &r]).as_array().map_or(0, Vec::len);
+        let before = versions();
+        for path in [format!("/{r}/"), index.clone()] {
+            assert_eq!(ask("GET", &path, None), 401, "{path}: anonymous");
+            assert_eq!(ask("GET", &path, Some("outsider")), 404, "{path}: no grant");
+        }
+        assert_eq!(ask("GET", &format!("/{r}/"), Some("reader")), 200, "{r}");
+        assert_eq!(ask("GET", &index, Some("reader")), p.reads, "{index}");
+        assert_eq!(ask(p.method, &upload, None), 401, "{upload}: anonymous");
+        assert_eq!(
+            ask(p.method, &upload, Some("outsider")),
+            404,
+            "{upload}: no grant"
+        );
+        assert_eq!(
+            ask(p.method, &upload, Some("reader")),
+            403,
+            "{upload}: reader"
+        );
+        assert_eq!(versions(), before, "{r}: refused uploads made a version");
+        let st = ask(p.method, &upload, Some("writer"));
+        assert!(
+            !matches!(st, 401 | 403 | 404 | 405),
+            "{upload}: writer {st}"
+        );
+    }
+}
+
+/// A disabled user gets in no longer: not with the password, a token, a
+/// trust rule's token or the console session they had; nor logs in
+/// again, nor gets a trust rule's token that works.
+#[test]
+fn a_disabled_user_gets_in_no_way() {
+    let s = Server::start();
+    s.cli(&["repo", "create", "priv", "-f", "files"]).unwrap();
+    let f = s.dir.path().join("f.txt");
+    std::fs::write(&f, "f").unwrap();
+    s.cli(&["upload", "priv", f.to_str().unwrap(), "-s", "path=d/"])
+        .unwrap();
+    s.cli_in(&["user", "add", "dev", "--password-stdin"], "dev-password")
+        .unwrap();
+    s.cli(&["grant", "set", "priv", "user:dev", "write"])
+        .unwrap();
+    let tok = token_of(&s, "dev", "dev-password");
+    let (issuer, iss) = fake_issuer(json!({}));
+    s.cli(&[
+        "trust",
+        "add",
+        "ci",
+        "--issuer",
+        &issuer,
+        "--claim",
+        "repository=org/app",
+        "--user",
+        "dev",
+        "--repos",
+        "priv",
+    ])
+    .unwrap();
+    let c = reqwest::blocking::Client::new();
+    let exchange = |jti: &str| {
+        let t = iss.token(json!({"aud": "pkgpod", "repository": "org/app", "jti": jti}));
+        let r = c
+            .post(format!("{}/api/v1/oidc/token", s.api))
+            .json(&json!({ "token": t }))
+            .send()
+            .unwrap();
+        (
+            r.status().as_u16(),
+            r.json::<Value>().unwrap_or(Value::Null),
+        )
+    };
+    let (st, v) = exchange("one");
+    assert_eq!(st, 200, "{v}");
+    let ci = v["token"].as_str().unwrap().to_string();
+    let (cs, sid, csrf) = console_login(&s, "dev", "dev-password");
+    let api = format!("{}/api/v1/repos/priv", s.api);
+    let file = s.url("/priv/d/f.txt");
+    let code = |r: reqwest::blocking::RequestBuilder| r.send().unwrap().status().as_u16();
+    let ways = || {
+        let session = format!("pkgpod_session={sid}");
+        [
+            (
+                "API, password",
+                code(c.get(&api).basic_auth("dev", Some("dev-password"))),
+            ),
+            ("API, token", code(c.get(&api).bearer_auth(&tok))),
+            ("API, trust token", code(c.get(&api).bearer_auth(&ci))),
+            (
+                "serving, password",
+                code(c.get(&file).basic_auth("dev", Some("dev-password"))),
+            ),
+            (
+                "serving, token",
+                code(c.get(&file).basic_auth("token", Some(&tok))),
+            ),
+            (
+                "serving, trust token",
+                code(c.get(&file).basic_auth("token", Some(&ci))),
+            ),
+            (
+                "console page",
+                code(
+                    cs.get(format!("{}/r/priv", s.api))
+                        .header("cookie", &session),
+                ),
+            ),
+            (
+                "console change",
+                code(
+                    cs.post(format!("{}/c/r/priv/use-token", s.api))
+                        .header("cookie", &session)
+                        .header("x-csrf-token", &csrf)
+                        .form(&[("days", "1")]),
+                ),
+            ),
+        ]
+    };
+    for (way, st) in ways() {
+        assert_eq!(st, 200, "{way}, enabled");
+    }
+    s.cli(&["user", "set", "dev", "--disabled", "true"])
+        .unwrap();
+    for (way, st) in ways() {
+        // The console sends a session it does not know to the login page.
+        let refused = if way.starts_with("console") { 303 } else { 401 };
+        assert_eq!(st, refused, "{way}, disabled");
+    }
+    let c2 = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let r = c2.get(format!("{}/login", s.api)).send().unwrap();
+    let lc = r
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find_map(|v| v.strip_prefix("pkgpod_login="))
+        .map(|v| v.split(';').next().unwrap().to_string())
+        .unwrap();
+    let r = c2
+        .post(format!("{}/login", s.api))
+        .header("cookie", format!("pkgpod_login={lc}"))
+        .form(&[
+            ("user", "dev"),
+            ("password", "dev-password"),
+            ("csrf", lc.as_str()),
+        ])
+        .send()
+        .unwrap();
+    let session = r
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .any(|v| v.as_bytes().starts_with(b"pkgpod_session="));
+    assert!(
+        r.status().as_u16() == 200 && !session,
+        "no session for a disabled user"
+    );
+    // A trust rule's token for them, asked for now, gets in nowhere.
+    let (st, v) = exchange("two");
+    match v["token"].as_str() {
+        Some(t) => {
+            assert_eq!(code(c.get(&api).bearer_auth(t)), 401, "{v}");
+            assert_eq!(code(c.get(&file).basic_auth("token", Some(t))), 401, "{v}");
+        }
+        None => assert_ne!(st, 200, "{v}"),
+    }
+}
+
+/// The CLI uploads with what trust rules give, as action.yml runs it: a
+/// rule's own token (no user) and a user's token for one repository, each
+/// asked about its repository before an upload; one file, then several,
+/// each into its run's directory with the link moved to it. Another
+/// repository is refused at that question, and gets nothing.
+#[test]
+fn cli_uploads_with_trust_tokens() {
+    let s = Server::start();
+    for r in ["out", "other"] {
+        s.cli(&["repo", "create", r, "-f", "files"]).unwrap();
+    }
+    s.cli_in(&["user", "add", "ci", "--password-stdin"], "ci-password-1")
+        .unwrap();
+    s.cli(&["grant", "set", "*", "user:ci", "write"]).unwrap();
+    let (issuer, _iss) = fake_issuer(json!({"repository": "org/app"}));
+    for (rule, user) in [("pub", None), ("user", Some("ci"))] {
+        let mut args = vec![
+            "trust",
+            "add",
+            rule,
+            "--issuer",
+            &issuer,
+            "--claim",
+            "repository=org/app",
+            "--repos",
+            "out",
+        ];
+        if let Some(u) = user {
+            args.extend(["--user", u]);
+        }
+        s.cli(&args).unwrap();
+    }
+    let dist = s.dir.path().join("dist");
+    std::fs::create_dir_all(&dist).unwrap();
+    let file = |n: &str| {
+        let p = dist.join(n);
+        std::fs::write(&p, n).unwrap();
+        p.to_str().unwrap().to_string()
+    };
+    let (a, b) = (file("app.tar.gz"), file("SHA256SUMS"));
+    let pw = admin_password(&s);
+    let count = |r: &str| s.json(&["versions", r]).as_array().map_or(0, Vec::len);
+    for (rule, who) in [("pub", "trust:pub"), ("user", "ci")] {
+        let cfg = s.dir.path().join(format!("cfg-{rule}"));
+        let run = |args: &[&str]| {
+            let o = s
+                .cmd()
+                .env("XDG_CONFIG_HOME", &cfg)
+                .env(
+                    "ACTIONS_ID_TOKEN_REQUEST_URL",
+                    format!("{issuer}/gha?api-version=2.0"),
+                )
+                .env("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ci-secret")
+                .args(args)
+                .output()
+                .unwrap();
+            (
+                o.status.code(),
+                format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                ),
+            )
+        };
+        let (code, out) = run(&["login", "--oidc", "--rule", rule]);
+        assert_eq!(code, Some(0), "{out}");
+        assert!(
+            out.contains(&format!(
+                "logged in as {who} by trust rule {rule} (for out;"
+            )),
+            "{out}"
+        );
+        let before = count("out");
+        for (n, files) in [(1, vec![a.as_str()]), (2, vec![a.as_str(), b.as_str()])] {
+            let (path, link) = (
+                format!("path={rule}/run-{n}/"),
+                format!("link={rule}/latest"),
+            );
+            let mut args = vec!["upload", "out"];
+            args.extend(&files);
+            args.extend(["-s", &path, "-s", &link]);
+            let (code, out) = run(&args);
+            assert_eq!(code, Some(0), "{rule}, run {n}: {out}");
+        }
+        assert_eq!(count("out"), before + 2, "{rule}: a version an upload");
+        let ls = s.cli(&["ls", "out", &format!("{rule}/run-2")]).unwrap();
+        assert!(
+            ls.contains("app.tar.gz") && ls.contains("SHA256SUMS"),
+            "{ls}"
+        );
+        // Only the second run has SHA256SUMS: the link moved to it.
+        let latest = s.url(&format!("/out/{rule}/latest/SHA256SUMS"));
+        assert_eq!(
+            get(&latest, Some(("admin", &pw))),
+            (200, "SHA256SUMS".into())
+        );
+        let others = count("other");
+        let (code, out) = run(&["upload", "other", &a, "-s", "path=x/"]);
+        assert_ne!(code, Some(0), "{rule}: {out}");
+        assert_eq!(count("other"), others, "{rule}: {out}");
+    }
+}
+
 /// Who calls the API in a test: a user and password, or a token.
 #[derive(Clone, Copy)]
 enum As<'a> {
