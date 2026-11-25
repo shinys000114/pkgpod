@@ -1,6 +1,6 @@
 [package]
 name = "pkgpod-mirror"
-description = "pkgpod mirror engines: apt archives over HTTP, rsync"
+description = "pkgpod mirror engines: apt, dnf and Arch repositories over HTTP, rsync"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,6 +15,10 @@ reqwest.workspace = true
 thiserror.workspace = true
 flate2.workspace = true
 liblzma.workspace = true
+zstd.workspace = true
+bzip2.workspace = true
+quick-xml.workspace = true
+tar.workspace = true
 glob.workspace = true
 httpdate.workspace = true
 rustix.workspace = true
