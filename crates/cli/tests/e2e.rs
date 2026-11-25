@@ -10259,16 +10259,30 @@ fn shared_caches_keep_only_what_anyone_may_read() {
         .unwrap(),
     );
     assert_eq!(r.status, 200);
-    assert!(r.cache.starts_with("private"), "{}", r.cache);
+    assert_eq!(r.cache, "private, no-cache");
+    // What is named by its content is kept there too.
+    let r = seen(
+        cc.get(format!(
+            "{}/r/pubd/file?path={}&served=1",
+            s.api,
+            by_hash.replace('/', "%2F")
+        ))
+        .header("cookie", format!("pkgpod_session={sid}"))
+        .send()
+        .unwrap(),
+    );
+    assert_eq!(r.status, 200);
+    assert_eq!(r.cache, "private, max-age=31536000, immutable");
     // A pool file is asked again each time: a replace puts other content
-    // at its name, and the ETag tells.
+    // at its name, and the ETag tells. The 304 says so too, so a cache
+    // that kept it under an older rule learns the new one.
     let r = fetch(&format!("/pubd/{pool}"), false, None);
     assert_eq!(r.cache, "no-cache");
     let old = r.etag;
-    assert_eq!(
-        fetch(&format!("/pubd/{pool}"), false, Some(&old)).status,
-        304
-    );
+    for (auth, cache) in [(false, "no-cache"), (true, "private, no-cache")] {
+        let r = fetch(&format!("/pubd/{pool}"), auth, Some(&old));
+        assert_eq!((r.status, r.cache.as_str()), (304, cache), "{auth}");
+    }
     let other = s.dir.path().join("other");
     std::fs::create_dir_all(&other).unwrap();
     let two = build_deb(&other, "hello", "1.0", "all", "xz", "Depends: libc6\n");
@@ -10360,6 +10374,157 @@ fn groups_with_a_private_member_are_kept_by_clients_only() {
         (r.status, r.body.as_str(), r.cache.as_str(), r.vary.as_str()),
         (200, "PUBLIC-SQUAT", "no-cache", "")
     );
+}
+
+/// What a group answers for a name is revalidated, a proxy member's
+/// file too (which the proxy itself has kept for an hour): a member
+/// before it may come to have the name, and the group's address then
+/// names that member's file, while a cache in front would still hand
+/// out the one it kept, whose checksum no longer matches.
+#[test]
+fn group_answers_are_revalidated() {
+    let s = Server::start();
+    let dir = "org/lib/lib/1.0";
+    let port = stub_upstream_on(
+        0,
+        vec![
+            (
+                "/org/lib/lib/maven-metadata.xml".into(),
+                b"<metadata><groupId>org.lib</groupId><artifactId>lib</artifactId></metadata>"
+                    .to_vec(),
+            ),
+            (format!("/{dir}/lib-1.0.jar"), b"UPSTREAM-JAR".to_vec()),
+        ],
+    );
+    s.cli(&["repo", "create", "mh", "-f", "maven", "-s", "public=true"])
+        .unwrap();
+    s.cli(&[
+        "repo",
+        "create",
+        "mp",
+        "-f",
+        "maven",
+        "-k",
+        "proxy",
+        "-s",
+        &format!("upstream=http://127.0.0.1:{port}/"),
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    s.cli(&[
+        "repo",
+        "create",
+        "mg",
+        "-f",
+        "maven",
+        "-k",
+        "group",
+        "-s",
+        "members=mh,mp",
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let c = reqwest::blocking::Client::new();
+    let fetch = |path: &str, inm: Option<&str>| {
+        let mut r = c.get(s.url(path));
+        if let Some(e) = inm {
+            r = r.header("if-none-match", e);
+        }
+        seen(r.send().unwrap())
+    };
+    let jar = format!("/mg/{dir}/lib-1.0.jar");
+    let first = fetch(&jar, None);
+    assert_eq!(
+        (first.status, first.body.as_str(), first.cache.as_str()),
+        (200, "UPSTREAM-JAR", "no-cache")
+    );
+    let r = fetch(&jar, Some(&first.etag));
+    assert_eq!((r.status, r.cache.as_str()), (304, "no-cache"));
+    // The proxy alone keeps it: what its upstream released stays.
+    let r = fetch(&format!("/mp/{dir}/lib-1.0.jar"), None);
+    assert_eq!((r.status, r.cache.as_str()), (200, "public, max-age=3600"));
+    let pw = std::fs::read_to_string(s.dir.path().join("data/admin-password")).unwrap();
+    let pom = "<project><modelVersion>4.0.0</modelVersion><groupId>org.lib</groupId>\
+               <artifactId>lib</artifactId><version>1.0</version></project>";
+    for (file, body) in [("lib-1.0.pom", pom), ("lib-1.0.jar", "INTERNAL-JAR")] {
+        let r = c
+            .put(s.url(&format!("/mh/{dir}/{file}")))
+            .basic_auth("admin", Some(pw.trim()))
+            .body(body)
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 201, "{file}");
+    }
+    let r = fetch(&jar, Some(&first.etag));
+    assert_eq!(
+        (r.status, r.body.as_str(), r.cache.as_str()),
+        (200, "INTERNAL-JAR", "no-cache")
+    );
+    assert_ne!(r.etag, first.etag);
+}
+
+/// The console's download is revalidated as the serving listeners' is
+/// (a replace, a removal and a new upload, or a rollback put other
+/// content at its address), whatever version it names: a label moves,
+/// and may be all digits. Only the browser keeps it.
+#[test]
+fn console_downloads_are_revalidated() {
+    let s = Server::start();
+    s.cli(&["repo", "create", "fr", "-f", "files", "-s", "public=true"])
+        .unwrap();
+    let up = s.dir.path().join("up");
+    std::fs::create_dir_all(&up).unwrap();
+    std::fs::write(up.join("a.txt"), "one").unwrap();
+    // A files repository's by-hash is a path like another.
+    for path in ["d/", "by-hash/SHA256/"] {
+        s.cli(&[
+            "upload",
+            "fr",
+            up.join("a.txt").to_str().unwrap(),
+            "-s",
+            &format!("path={path}"),
+        ])
+        .unwrap();
+    }
+    let seq = s
+        .json(&["versions", "fr"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v["seq"].as_i64())
+        .max()
+        .unwrap();
+    let (cc, sid, _) = console_session(&s, "pk", "pk-password");
+    let get = |q: &str, inm: Option<&str>| {
+        let mut r = cc
+            .get(format!("{}/r/fr/file?{q}", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"));
+        if let Some(e) = inm {
+            r = r.header("if-none-match", e);
+        }
+        seen(r.send().unwrap())
+    };
+    for q in [
+        "path=d%2Fa.txt".to_string(),
+        "path=d%2Fa.txt&served=0&version=".to_string(),
+        format!("path=d%2Fa.txt&version={seq}"),
+        "path=by-hash%2FSHA256%2Fa.txt".to_string(),
+    ] {
+        let r = get(&q, None);
+        assert_eq!(
+            (r.status, r.body.as_str(), r.cache.as_str()),
+            (200, "one", "private, no-cache"),
+            "{q}"
+        );
+        let n = get(&q, Some(&r.etag));
+        assert_eq!(
+            (n.status, n.cache.as_str()),
+            (304, "private, no-cache"),
+            "{q}"
+        );
+    }
 }
 
 /// [`groups_with_a_private_member_are_kept_by_clients_only`] for a group
@@ -10610,6 +10775,19 @@ fn weak_validators_redirects_and_lost_files() {
     for inm in [format!("W/{etag}"), format!("\"other\", W/{etag}")] {
         assert_eq!(fetch("/f/tools/t.txt", Some(&inm)).status, 304, "{inm}");
     }
+    // A 304 says how long to keep the file as the 200 does (a cache in
+    // front takes that in place of what it kept), with no body, nor
+    // that body's type and length.
+    let r = c
+        .get(s.url("/f/tools/t.txt"))
+        .header("if-none-match", &etag)
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 304);
+    assert_eq!(r.headers()["cache-control"], "no-cache");
+    for h in ["content-type", "content-length"] {
+        assert!(r.headers().get(h).is_none(), "{h}: {:?}", r.headers());
+    }
     assert_eq!(fetch("/f/tools/t.txt", Some("W/\"other\"")).status, 200);
     let badge = "/.well-known/pkgpod/badges/f/status.svg";
     let etag = fetch(badge, None).etag;
@@ -10773,8 +10951,11 @@ fn mirror_pool_files_are_revalidated() {
     let r = fetch(deb, None);
     assert_eq!((r.status, r.cache.as_str()), (200, "no-cache"));
     assert!(!r.etag.is_empty());
+    // The 304 says so too, so a cache that kept the file under an older
+    // rule learns the new one.
     for inm in [r.etag.clone(), format!("W/{}", r.etag)] {
-        assert_eq!(fetch(deb, Some(&inm)).status, 304, "{inm}");
+        let r = fetch(deb, Some(&inm));
+        assert_eq!((r.status, r.cache.as_str()), (304, "no-cache"), "{inm}");
     }
     let r = fetch(
         &format!("/mir/dists/x/main/binary-amd64/by-hash/SHA256/{hash}"),

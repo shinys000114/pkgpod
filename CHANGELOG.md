@@ -252,7 +252,11 @@ by its content (`by-hash`, rpm's `repodata/<sha256>-*`), a mirror's
 pool files (a sync of a file upstream rebuilt puts other content at a
 pool name), an ipk feed's Packages, Packages.gz, Packages.sig and
 key.pub, OCI manifests by tag, the tag and referrer lists and the
-catalog; `by-hash` files are kept for a year. `If-None-Match` matches
+catalog; `by-hash` files are kept for a year. A group's answer for a
+name is revalidated too (a member before the one answering may come to
+have it), as is the console's download whatever version it names, and
+a 304 carries the `Cache-Control` its 200 would, so a cache that kept a
+file under an older rule learns the new one. `If-None-Match` matches
 weak validators too, as a CDN sends them. A file a version names that
 the store has lost is a 500 with `no-store`, and logged. A mirror's
 files are served with the types a hosted repository gives the same

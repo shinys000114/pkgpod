@@ -235,7 +235,12 @@ pub(crate) async fn file_download(
         return status_page(StatusCode::NOT_FOUND);
     };
     let name = q.path.rsplit('/').next().unwrap_or("file").to_string();
-    let mut resp = crate::serving::serve_blob(&file, &sha, &name, None, false, req).await;
+    // Revalidated as the serving listeners revalidate a stored file (by
+    // its whole path, so what is named by its content is still kept):
+    // the address names the current version's file, or a label's, and
+    // either may change; a version number may be a label's name too.
+    let files = r.format == "files";
+    let mut resp = crate::serving::serve_stored(&file, &sha, &q.path, files, req).await;
     // Only for the browser that asked: the session is a cookie, which a
     // shared cache in front does not tell apart.
     crate::serving::private(&mut resp);

@@ -1414,6 +1414,18 @@ pub(crate) async fn serve_blob(
     serve_tagged(file, &etag, rel, mtime, files, false, req).await
 }
 
+/// [`serve_counted`] without counting it (the console's download).
+pub(crate) async fn serve_stored(
+    file: &std::path::Path,
+    sha: &Digest,
+    rel: &str,
+    files: bool,
+    req: Request,
+) -> Response {
+    let etag = format!("\"{}\"", sha.hex());
+    serve_tagged(file, &etag, rel, None, files, true, req).await
+}
+
 /// [`serve_blob`] with its ETag given (quoted); `stored`: a file of a
 /// stored version, kept as [`stored_cache_control`] says.
 async fn serve_tagged(
@@ -1446,8 +1458,23 @@ async fn serve_tagged(
                 .is_some_and(|since| m <= since)
         }),
     };
+    // A files repository's path may get other content any time: always
+    // revalidated (cheap, by ETag).
+    let cache = if files {
+        "no-cache"
+    } else if stored {
+        stored_cache_control(rel)
+    } else {
+        cache_control(rel)
+    };
     if fresh {
-        let mut r = status(StatusCode::NOT_MODIFIED);
+        // With the Cache-Control the 200 would have: a cache takes the
+        // 304's in place of what it kept, so one that kept the file for
+        // an hour under an older rule learns it is now revalidated. No
+        // body, so none of a body's headers either.
+        let mut r = StatusCode::NOT_MODIFIED.into_response();
+        r.headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
         if let Ok(v) = HeaderValue::from_str(etag) {
             r.headers_mut().insert(header::ETAG, v);
         }
@@ -1501,18 +1528,7 @@ async fn serve_tagged(
         header::CONTENT_TYPE,
         HeaderValue::from_static(content_type(rel)),
     );
-    // A files repository's path may get other content any time: always
-    // revalidated (cheap, by ETag).
-    h.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static(if files {
-            "no-cache"
-        } else if stored {
-            stored_cache_control(rel)
-        } else {
-            cache_control(rel)
-        }),
-    );
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
     if let Ok(v) = HeaderValue::from_str(etag) {
         h.insert(header::ETAG, v);
     }
@@ -1712,7 +1728,9 @@ async fn serve_mirror(
         Ok(r) => r.map(Body::new),
         Err(_) => return status(StatusCode::INTERNAL_SERVER_ERROR),
     };
-    if r.status().is_success() {
+    // A 304 too, as serve_tagged's: a cache takes its Cache-Control in
+    // place of what it kept.
+    if r.status().is_success() || r.status() == StatusCode::NOT_MODIFIED {
         r.headers_mut().insert(
             header::CACHE_CONTROL,
             HeaderValue::from_static(if files {
@@ -1721,6 +1739,8 @@ async fn serve_mirror(
                 cache_control(&rel_s)
             }),
         );
+    }
+    if r.status().is_success() {
         // The types a hosted repository gives these names: ServeDir
         // guesses by extension alone (InRelease and .deb as octet-stream,
         // .rpm as audio). A files mirror keeps its guess where the table
@@ -2421,6 +2441,41 @@ mod tests {
                     "Fri, 31 Dec 9999 23:59:59 GMT"
                 );
             }
+        }
+    }
+
+    /// A 304 says how long to keep the file as the 200 would: a cache
+    /// in front takes it in place of what it kept, and so learns that a
+    /// file it kept for an hour is now revalidated. It has no body, nor
+    /// that body's type.
+    #[tokio::test]
+    async fn not_modified_says_what_the_file_would() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("f");
+        std::fs::write(&file, "x").unwrap();
+        for (files, stored, cc) in [
+            (false, true, "no-cache"),
+            (false, false, "public, max-age=3600"),
+            (true, false, "no-cache"),
+        ] {
+            let ask = |inm: Option<&'static str>| {
+                let mut req = Request::new(Body::empty());
+                if let Some(v) = inm {
+                    req.headers_mut()
+                        .insert(header::IF_NONE_MATCH, HeaderValue::from_static(v));
+                }
+                serve_tagged(&file, "\"e\"", "x-1.0.jar", None, files, stored, req)
+            };
+            let ok = ask(None).await;
+            assert_eq!(ok.status(), StatusCode::OK);
+            assert_eq!(ok.headers()[header::CACHE_CONTROL], cc);
+            let r = ask(Some("\"e\"")).await;
+            assert_eq!(r.status(), StatusCode::NOT_MODIFIED);
+            assert_eq!(r.headers()[header::CACHE_CONTROL], cc, "{files} {stored}");
+            assert_eq!(r.headers()[header::ETAG], "\"e\"");
+            assert!(r.headers().get(header::CONTENT_TYPE).is_none());
+            let body = axum::body::to_bytes(r.into_body(), 64).await.unwrap();
+            assert!(body.is_empty(), "{body:?}");
         }
     }
 }

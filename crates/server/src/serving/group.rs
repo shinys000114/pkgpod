@@ -204,6 +204,25 @@ async fn from(app: &Arc<App>, at: &At, m: Served, again: &Again) -> Response {
     crate::serving::serve_repo(app.clone(), sub, again.request()).await
 }
 
+/// A member's answer for a name, revalidated at the group's address
+/// (a 304 too, which a cache takes in place of what it kept): a member
+/// before it may come to have the name (a publish to it, a member added
+/// or moved up), and the address then names that member's file, while
+/// a cache in front would still hand out the one it kept, whose
+/// checksum no longer matches. What is named by its content (immutable)
+/// is the same from any member.
+fn revalidated(mut r: Response) -> Response {
+    let h = r.headers_mut();
+    let kept = h
+        .get(header::CACHE_CONTROL)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("max-age") && !v.contains("immutable"));
+    if kept {
+        h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    }
+    r
+}
+
 fn text(st: StatusCode, m: String) -> Response {
     let mut r = Response::new(Body::from(format!("{m}\n")));
     *r.status_mut() = st;
@@ -283,7 +302,7 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
                         .unwrap_or(false)
                 };
                 if found {
-                    return from(&app, &at, m, &again).await;
+                    return revalidated(from(&app, &at, m, &again).await);
                 }
             }
             crate::serving::status(StatusCode::NOT_FOUND)
@@ -303,7 +322,7 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
                     }
                     return crate::serving::status(StatusCode::BAD_GATEWAY);
                 }
-                return r;
+                return revalidated(r);
             }
             crate::serving::status(StatusCode::NOT_FOUND)
         }
@@ -571,5 +590,30 @@ mod tests {
         );
         assert_eq!(ask("files", &v(&["a", "b"]), true, ""), Ask::Listing);
         assert_eq!(ask("files", &v(&["@first", "b"]), false, ""), Ask::Nothing);
+    }
+
+    /// A member's lifetime is dropped at the group's address, but for
+    /// what is named by its content, which no member can change.
+    #[test]
+    fn what_a_group_keeps() {
+        for (cc, want) in [
+            (Some("public, max-age=3600"), Some("no-cache")),
+            (
+                Some("public, max-age=31536000, immutable"),
+                Some("public, max-age=31536000, immutable"),
+            ),
+            (Some("no-cache"), Some("no-cache")),
+            (Some("no-store"), Some("no-store")),
+            (None, None),
+        ] {
+            let mut r = StatusCode::OK.into_response();
+            if let Some(v) = cc {
+                r.headers_mut()
+                    .insert(header::CACHE_CONTROL, HeaderValue::from_static(v));
+            }
+            let r = revalidated(r);
+            let got = r.headers().get(header::CACHE_CONTROL);
+            assert_eq!(got.and_then(|v| v.to_str().ok()), want, "{cc:?}");
+        }
     }
 }
