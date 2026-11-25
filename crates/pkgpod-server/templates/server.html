@@ -14,13 +14,14 @@
 </div>
 {% else if tab == "serving" %}
 <div class="card" id="console-address">
-  <div class="card-head"><h2>Console</h2><span class="hint">where people and CI reach the console and API</span></div>
+  <div class="card-head"><h2>Console</h2></div>
   <div class="card-body">
-  <p class="muted small">It listens on <span class="mono">{{ management }}</span> (the configuration file: <code>listen</code>). Its public address is the one the CLI's install script and download, and the CI examples, name; {% if console_url.is_empty() %}not set, they name whatever address each request comes to (its Host).{% else %}set, they name it whatever a request says.{% endif %}</p>
-  <form class="inline" hx-post="/c/settings/ci" hx-target="next .result">
-    <label class="field"><span>Public address</span><input name="console_url" value="{{ console_url }}" placeholder="https://pkg.example.org" size="34" autocomplete="off" spellcheck="false"></label>
+  <p class="muted small">Listens on <span class="mono">{{ management }}</span> (<code>listen</code> in the configuration file).</p>
+  <form class="inline mt" hx-post="/c/settings/ci" hx-target="next .result">
+    Public address <input name="console_url" value="{{ console_url }}" placeholder="https://pkg.example.org" size="34" autocomplete="off" spellcheck="false" aria-label="Public address">
     <button type="submit">Save</button>
   </form>
+  <p class="muted small">Where people and CI jobs reach the console: the CLI's install script and the CI examples name it. {% if console_url.is_empty() %}Not set: they name the address each request came to.{% endif %}</p>
   <div class="result"></div>
   </div>
 </div>
@@ -144,12 +145,11 @@
   {% include "trust_form.html" %}
   </details>
   <details class="more"><summary>In a GitHub Actions workflow</summary>
-<p class="muted small">For a repository here; the job needs a rule that trusts its GitHub repository and workflow. The address is {% if console_url.is_empty() %}the one your browser reached this page at: set the console's public address in <a href="/admin/server/serving#console-address">Listeners &amp; hosts</a>{% else %}the console's public address (<a href="/admin/server/serving#console-address">Listeners &amp; hosts</a>){% endif %}.</p>
+<p class="muted small">For a repository here; the job needs a rule that trusts its GitHub repository and workflow. The address in it is {% if console_url.is_empty() %}the one your browser reached this page at; the console's public address is set in <a href="/admin/server/serving#console-address">Listeners &amp; hosts</a>{% else %}the console's public address, set in <a href="/admin/server/serving#console-address">Listeners &amp; hosts</a>{% endif %}.</p>
 <pre class="code">{{ ci_example }}</pre>
-<form class="inline" hx-post="/c/settings/ci" hx-target="next .result">
-  <label class="field"><span>pkgpod action</span><input name="ci_action" value="{{ ci_action }}" placeholder="owner/pkgpod@master" size="30" autocomplete="off" spellcheck="false"></label>
+<form class="inline mt" hx-post="/c/settings/ci" hx-target="next .result">
+  The pkgpod action is at <input name="ci_action" value="{{ ci_action }}" placeholder="owner/pkgpod@master" size="30" autocomplete="off" spellcheck="false" aria-label="The pkgpod action's place"> <span class="muted small">(on GitHub: owner/repository@ref)</span>
   <button type="submit">Save</button>
-  <span class="muted small">Where the action is on GitHub: owner/repository@ref.</span>
 </form>
 <div class="result"></div>
   </details>
