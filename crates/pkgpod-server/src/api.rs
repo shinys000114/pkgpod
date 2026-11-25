@@ -656,7 +656,10 @@ pub(crate) async fn cache_change(
 }
 
 fn settings_json(app: &App) -> Value {
-    json!({"downloads_days": crate::stats::days_kept(app)})
+    json!({
+        "downloads_days": crate::stats::days_kept(app),
+        "syncs_per_storage": crate::jobs::syncs_per_storage(app),
+    })
 }
 
 /// The server's settings (admins).
@@ -670,6 +673,8 @@ pub(crate) async fn settings_get(State(app): St, Who(c): Who) -> Result<Json<Val
 pub(crate) struct SettingsReq {
     #[serde(default)]
     pub(crate) downloads_days: Option<i64>,
+    #[serde(default)]
+    pub(crate) syncs_per_storage: Option<i64>,
 }
 
 pub(crate) async fn settings_patch(
@@ -686,6 +691,16 @@ pub(crate) async fn settings_patch(
             crate::stats::days_changed(app, old, d)?;
             app.auth
                 .audit(c.name(), "settings", "", &format!("downloads_days={d}"));
+        }
+        if let Some(n) = req.syncs_per_storage {
+            if !(0..=64).contains(&n) {
+                return Err(Error::Invalid(
+                    "syncs_per_storage: 0 (no limit) to 64".into(),
+                ));
+            }
+            crate::keys::set_setting(&app.db, crate::jobs::SYNCS_SETTING, Some(&n.to_string()))?;
+            app.auth
+                .audit(c.name(), "settings", "", &format!("syncs_per_storage={n}"));
         }
         Ok(Json(settings_json(app)))
     })

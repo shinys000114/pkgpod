@@ -22,6 +22,7 @@ use crate::{App, Error, Result};
 #[derive(Default)]
 pub struct Jobs {
     running: Mutex<HashMap<String, (i64, Arc<AtomicBool>)>>,
+    slots: Slots,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -159,6 +160,87 @@ pub fn start_sync(app: &Arc<App>, repo: &str, actor: &str) -> Result<i64> {
     )
 }
 
+/// The server setting: how many syncs run at once on one storage.
+pub const SYNCS_SETTING: &str = "syncs_per_storage";
+const SYNCS_DEFAULT: i64 = 2;
+
+/// Syncs that may run at once on one storage (0: no limit). Mirrors on
+/// the same disks slow one another: more at once is not more done.
+pub fn syncs_per_storage(app: &App) -> i64 {
+    crate::keys::get_setting(&app.db, SYNCS_SETTING)
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(SYNCS_DEFAULT)
+        .max(0)
+}
+
+/// Syncs running per storage, and a wake-up for those that wait.
+#[derive(Default)]
+pub struct Slots {
+    taken: Mutex<HashMap<String, i64>>,
+    freed: std::sync::Condvar,
+}
+
+impl Slots {
+    /// Waits for a slot on `storage` (the limit read each time: a change
+    /// applies to those waiting); false if cancelled while waiting.
+    fn take(&self, app: &App, storage: &str, cancel: &AtomicBool, waiting: impl FnOnce()) -> bool {
+        let mut waiting = Some(waiting);
+        let mut t = self.taken.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            let limit = syncs_per_storage(app);
+            let n = t.get(storage).copied().unwrap_or(0);
+            if limit == 0 || n < limit {
+                *t.entry(storage.to_string()).or_insert(0) += 1;
+                return true;
+            }
+            if cancel.load(Ordering::Relaxed) {
+                return false;
+            }
+            if let Some(w) = waiting.take() {
+                drop(t);
+                w();
+                t = self.taken.lock().unwrap_or_else(|e| e.into_inner());
+                continue;
+            }
+            t = self
+                .freed
+                .wait_timeout(t, std::time::Duration::from_secs(1))
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+
+    /// A taken slot, given back when dropped (a job that panics too).
+    fn held<'a>(&'a self, storage: &str) -> Held<'a> {
+        Held {
+            slots: self,
+            storage: storage.to_string(),
+        }
+    }
+
+    fn give(&self, storage: &str) {
+        let mut t = self.taken.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = t.get_mut(storage) {
+            *n = (*n - 1).max(0);
+        }
+        drop(t);
+        self.freed.notify_all();
+    }
+}
+
+struct Held<'a> {
+    slots: &'a Slots,
+    storage: String,
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        self.slots.give(&self.storage);
+    }
+}
+
 /// Starts a job of `kind` on a repository, one at a time per repository.
 pub fn start(app: &Arc<App>, r: RepoInfo, kind: &str, actor: &str, work: Work) -> Result<i64> {
     let repo = r.name.clone();
@@ -198,7 +280,41 @@ pub fn start(app: &Arc<App>, r: RepoInfo, kind: &str, actor: &str, work: Work) -
                 }
             };
             log(&format!("{kind2} of {} started by {actor2}", r.name));
+            // Syncs wait for a slot on their storage.
+            let mut held = None;
+            if kind2 == "sync" {
+                let storage = r.storage.clone();
+                let took = app2.jobs.slots.take(&app2, &storage, &cancel, || {
+                    log(&format!(
+                        "waiting: {} syncs run on storage {storage} at once (syncs_per_storage)",
+                        syncs_per_storage(&app2)
+                    ));
+                    let _ = app2.db.write(|tx| {
+                        tx.execute("UPDATE jobs SET state = 'queued' WHERE id = ?1", [id])
+                    });
+                });
+                let _ = app2.db.write(|tx| {
+                    tx.execute(
+                        "UPDATE jobs SET state = 'running', started = ?1 WHERE id = ?2 AND state = 'queued'",
+                        params![now(), id],
+                    )
+                });
+                if !took {
+                    log("cancelled: interrupted while waiting");
+                    let _ = app2.db.write(|tx| {
+                        tx.execute(
+                            "UPDATE jobs SET state = 'cancelled', finished = ?1, summary = 'interrupted while waiting' WHERE id = ?2",
+                            params![now(), id],
+                        )
+                    });
+                    app2.jobs.running.lock().unwrap_or_else(|e| e.into_inner()).remove(&r.name);
+                    app2.auth.audit(&actor2, &kind2, &r.name, "cancelled");
+                    return;
+                }
+                held = Some(app2.jobs.slots.held(&storage));
+            }
             let res = work(&app2, &r, &cancel, &log);
+            drop(held);
             let (state, summary, report) = match res {
                 Ok((true, s, rep)) => ("ok", s, rep),
                 Ok((false, s, rep)) => ("failed", s, rep),

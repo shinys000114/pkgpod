@@ -5048,6 +5048,7 @@ struct ServerPage {
     data_dir: String,
     management: String,
     downloads_days: i64,
+    syncs_per_storage: i64,
     trust: Vec<TrustRow>,
     users: Vec<String>,
     repo_names: Vec<String>,
@@ -5176,6 +5177,7 @@ async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
         data_dir: app.cfg.data_dir.display().to_string(),
         management: app.cfg.listen.clone(),
         downloads_days: crate::stats::days_kept(&app),
+        syncs_per_storage: crate::jobs::syncs_per_storage(&app),
         trust,
         users,
         repo_names,
@@ -5446,20 +5448,36 @@ async fn settings_save_server(
     v: Viewer,
     Form(form): Form<Vec<(String, String)>>,
 ) -> Response {
-    let days = match form_get(&form, "downloads_days").trim().parse::<i64>() {
-        Ok(d) => d,
-        Err(_) => return msg(false, "Days: a whole number."),
+    let num = |k: &str| -> std::result::Result<Option<i64>, ()> {
+        let v = form_get(&form, k).trim();
+        if v.is_empty() {
+            return Ok(None);
+        }
+        v.parse::<i64>().map(Some).map_err(|_| ())
+    };
+    let (days, syncs) = match (num("downloads_days"), num("syncs_per_storage")) {
+        (Ok(d), Ok(n)) => (d, n),
+        _ => return msg(false, "A whole number, please."),
     };
     let req = api::SettingsReq {
-        downloads_days: Some(days),
+        downloads_days: days,
+        syncs_per_storage: syncs,
     };
     match api::settings_patch(State(app), v.who(), Json(req)).await {
         Ok(Json(r)) => msg(
             true,
-            match r["downloads_days"].as_i64() {
-                Some(0) => "Downloads are not counted.".to_string(),
-                Some(d) => format!("Download counts are kept {d} days."),
-                None => "Saved.".to_string(),
+            if syncs.is_some() {
+                match r["syncs_per_storage"].as_i64() {
+                    Some(0) => "Syncs are not limited per storage.".to_string(),
+                    Some(n) => format!("At most {n} syncs run at once on a storage."),
+                    None => "Saved.".to_string(),
+                }
+            } else {
+                match r["downloads_days"].as_i64() {
+                    Some(0) => "Downloads are not counted.".to_string(),
+                    Some(d) => format!("Download counts are kept {d} days."),
+                    None => "Saved.".to_string(),
+                }
             },
         ),
         Err(e) => err_part(e),
