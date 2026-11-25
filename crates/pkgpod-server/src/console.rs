@@ -4741,6 +4741,7 @@ struct AccessPart {
     repo_names: Vec<String>,
     fixed_repo: String,
     as_user: bool,
+    ci_example: String,
     trust_prefill: String,
     hook_prefill: String,
 }
@@ -4804,7 +4805,12 @@ fn access_rows(app: &App, repo: &str, public: bool) -> Vec<AccessRow> {
 
 /// Who may do what with a repository: rights, who has access, trusted
 /// publishing and webhooks (its admins; webhooks server admins).
-async fn access_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> Response {
+async fn access_part(
+    State(app): St,
+    v: Viewer,
+    headers: HeaderMap,
+    Path(repo): Path<String>,
+) -> Response {
     let r = match app.repo_for(&v.caller, &repo, Role::Admin) {
         Ok(r) => r,
         Err(e) => return err_part(e),
@@ -4885,6 +4891,7 @@ async fn access_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> Res
         repo_names: Vec::new(),
         fixed_repo: repo.clone(),
         as_user: server_admin,
+        ci_example: ci_example(&app, &crate::cli_dl::base(&headers), Some(&r)),
         trust_prefill: String::new(),
         hook_prefill: String::new(),
         access: if can_admin {
@@ -4939,6 +4946,7 @@ async fn settings_save(
 async fn grant(
     State(app): St,
     v: Viewer,
+    headers: HeaderMap,
     Path(repo): Path<String>,
     Form(form): Form<Vec<(String, String)>>,
 ) -> Response {
@@ -4947,7 +4955,7 @@ async fn grant(
         role: form_get(&form, "role").to_string(),
     };
     match api::grant(State(app.clone()), v.who(), Path(repo.clone()), Json(req)).await {
-        Ok(_) => access_part(State(app), v, Path(repo)).await,
+        Ok(_) => access_part(State(app), v, headers, Path(repo)).await,
         Err(e) => err_part(e),
     }
 }
@@ -4955,10 +4963,11 @@ async fn grant(
 async fn revoke(
     State(app): St,
     v: Viewer,
+    headers: HeaderMap,
     Path((repo, subject)): Path<(String, String)>,
 ) -> Response {
     match api::revoke(State(app.clone()), v.who(), Path((repo.clone(), subject))).await {
-        Ok(_) => access_part(State(app), v, Path(repo)).await,
+        Ok(_) => access_part(State(app), v, headers, Path(repo)).await,
         Err(e) => err_part(e),
     }
 }
@@ -5410,6 +5419,62 @@ fn audit_row(a: &Value) -> AuditRow {
     }
 }
 
+/// A GitHub Actions workflow that publishes to `r` with trusted
+/// publishing, as this server is reached (`base`) and as the format
+/// uploads: the action, or the commands by hand.
+fn ci_example(app: &App, base: &str, r: Option<&pkgpod_engine::RepoInfo>) -> String {
+    let name = r.map_or("<repository>".to_string(), |r| r.name.clone());
+    let format = r.map_or("", |r| r.format.as_str());
+    let first = |r: &pkgpod_engine::RepoInfo| usage_places(app, r).into_iter().next();
+    let (files, with, by_hand): (&str, Vec<String>, Vec<String>) = match (format, r) {
+        ("deb", Some(r)) => {
+            let dists = usage_places(app, r);
+            let d = Some(deb_default_dist(app, r, &dists))
+                .filter(|d| !d.is_empty())
+                .unwrap_or_else(|| "<dist>".into());
+            (
+                "dist/*.deb",
+                vec![format!("params: dists={d}")],
+                vec![format!("-s dists={d}")],
+            )
+        }
+        ("rpm", Some(r)) => {
+            let g = first(r).unwrap_or_else(|| "<group>".into());
+            (
+                "dist/*.rpm",
+                vec![format!("params: group={g}")],
+                vec![format!("-s group={g}")],
+            )
+        }
+        ("files", _) => (
+            "dist/*",
+            vec![
+                "path: builds/${{ github.sha }}/".into(),
+                "link: builds/latest".into(),
+            ],
+            vec![
+                "-s path=builds/${{ github.sha }}/".into(),
+                "-s link=builds/latest".into(),
+            ],
+        ),
+        _ => ("dist/*", Vec::new(), Vec::new()),
+    };
+    let mut s = format!(
+        "permissions:\n  id-token: write   # the job may ask GitHub for its OIDC token\n  contents: read\n\
+         steps:\n  - uses: actions/checkout@v4\n  - uses: <owner>/pkgpod@master   # the pkgpod action, from pkgpod's own repository\n    with:\n      \
+         url: {base}\n      repository: {name}\n      files: {files}\n"
+    );
+    for w in &with {
+        s.push_str(&format!("      {w}\n"));
+    }
+    s.push_str(&format!(
+        "# or by hand:\n  - run: |\n      curl -fsSL {base}/cli/install.sh | sh\n      \
+         pkgpod --url {base} login --oidc\n      pkgpod upload {name} {files}{}\n",
+        by_hand.iter().map(|x| format!(" {x}")).collect::<String>()
+    ));
+    s
+}
+
 /// Trust rules as the console lists them: all, or those for `repo`.
 fn trust_rows(app: &App, repo: Option<&str>) -> Result<Vec<TrustRow>> {
     Ok(crate::oidc::rules(app)?
@@ -5583,6 +5648,8 @@ struct ServerPage {
     fixed_repo: String,
     /// The trust rule form offers a user and other issuers (server admins).
     as_user: bool,
+    /// A workflow that publishes here, with this server's address.
+    ci_example: String,
     trust_prefill: String,
     hook_prefill: String,
     hooks: Vec<HookRow>,
@@ -5593,18 +5660,28 @@ struct ServerPage {
 /// have their own pages).
 const SERVER_TABS: [&str; 4] = ["serving", "storage", "keys", "publishing"];
 
-async fn server_page(State(app): St, v: Viewer) -> Result<Response> {
-    server_tab_page(app, v, "overview").await
+async fn server_page(State(app): St, v: Viewer, headers: HeaderMap) -> Result<Response> {
+    server_tab_page(app, v, headers, "overview").await
 }
 
-async fn server_tab(State(app): St, v: Viewer, Path(tab): Path<String>) -> Result<Response> {
+async fn server_tab(
+    State(app): St,
+    v: Viewer,
+    headers: HeaderMap,
+    Path(tab): Path<String>,
+) -> Result<Response> {
     let Some(tab) = SERVER_TABS.iter().find(|t| **t == tab) else {
         return Err(Error::NotFound(format!("no server page {tab}")));
     };
-    server_tab_page(app, v, tab).await
+    server_tab_page(app, v, headers, tab).await
 }
 
-async fn server_tab_page(app: Arc<App>, v: Viewer, tab: &'static str) -> Result<Response> {
+async fn server_tab_page(
+    app: Arc<App>,
+    v: Viewer,
+    headers: HeaderMap,
+    tab: &'static str,
+) -> Result<Response> {
     app.require_admin(&v.caller)?;
     let all = crate::listeners::list(&app.db)?;
     // Picking a listener's name in the form fills in its settings.
@@ -5716,6 +5793,19 @@ async fn server_tab_page(app: Arc<App>, v: Viewer, tab: &'static str) -> Result<
         repo_names,
         fixed_repo: String::new(),
         as_user: true,
+        ci_example: if publishing {
+            // For the first rule's repository, or a hosted one.
+            let rules = crate::oidc::rules(&app).unwrap_or_default();
+            let all = app.engine.repos().unwrap_or_default();
+            let pick = rules
+                .iter()
+                .flat_map(|r| r.repos.iter())
+                .find_map(|n| all.iter().find(|r| &r.name == n))
+                .or_else(|| all.iter().find(|r| r.kind.versioned()));
+            ci_example(&app, &crate::cli_dl::base(&headers), pick)
+        } else {
+            String::new()
+        },
         trust_prefill: if publishing {
             trust_prefill(&app)?
         } else {

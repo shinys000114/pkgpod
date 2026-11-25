@@ -7367,6 +7367,16 @@ fn trusted_publishing_without_a_user() {
         st.contains(r#"id="repo-trust""#) && !st.contains(r#"name="user""#),
         "{st}"
     );
+    // The workflow to use, with this server's address and this
+    // repository, as the files format uploads.
+    assert!(
+        st.contains(&format!("url: {}\n", s.api))
+            && st.contains(&format!("curl -fsSL {}/cli/install.sh", s.api))
+            && st.contains("repository: mine")
+            && st.contains("pkgpod upload mine dist/* -s path=")
+            && !st.contains("this server"),
+        "{st}"
+    );
     assert!(
         !st.contains(r#"id="repo-webhooks""#),
         "webhooks stay with server admins"
