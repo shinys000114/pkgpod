@@ -259,6 +259,14 @@ pub fn put_rule(app: &App, mut r: Rule) -> Result<Rule> {
             ],
         )
     })?;
+    // Tokens it gave under what it said before go: a rule saved again
+    // gives new ones under what it says now.
+    app.db.write(|tx| {
+        tx.execute(
+            "DELETE FROM publish_tokens WHERE rule = (SELECT id FROM trust_rules WHERE name = ?1)",
+            [&r.name],
+        )
+    })?;
     rules(app)?
         .into_iter()
         .find(|x| x.name == r.name)

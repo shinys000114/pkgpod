@@ -7194,9 +7194,23 @@ fn trusted_publishing_without_a_user() {
     );
     let log = s.json(&["versions", "out"]);
     assert_eq!(log[0]["actor"], "trust:pub", "{log}");
-    // The rule removed takes its tokens' rights with it.
-    s.cli(&["trust", "remove", "pub"]).unwrap();
+    // A rule saved again drops the tokens it gave before; one removed
+    // takes its tokens' rights with it.
+    s.cli(&[
+        "trust",
+        "add",
+        "pub",
+        "--issuer",
+        &issuer,
+        "--claim",
+        "repository=org/app",
+        "--repos",
+        "out,theirs",
+    ])
+    .unwrap();
+    assert!(matches!(put("theirs"), 401 | 403));
     assert!(matches!(put("out"), 401 | 403));
+    s.cli(&["trust", "remove", "pub"]).unwrap();
 
     // A repository's admin: rules without a user, GitHub's, for what they
     // admin; nothing else, nor others' rules.
