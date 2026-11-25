@@ -81,7 +81,14 @@ pub(crate) fn live_job(app: &App, j: &crate::jobs::Job) -> LiveJob {
 }
 
 pub(crate) async fn jobs_part(State(app): St, v: Viewer, Path(repo): Path<String>) -> Response {
-    match api::repo_jobs(State(app.clone()), v.who(), Path(repo)).await {
+    match api::repo_jobs(
+        State(app.clone()),
+        v.who(),
+        Path(repo),
+        Query(Default::default()),
+    )
+    .await
+    {
         Ok(Json(list)) => {
             let jobs: Vec<crate::jobs::Job> = serde_json::from_value(list).unwrap_or_default();
             let live = jobs

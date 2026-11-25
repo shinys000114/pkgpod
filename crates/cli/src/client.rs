@@ -160,6 +160,18 @@ impl Client {
         self.finish(self.req(Method::GET, path).send())
     }
 
+    /// A list, and whether the server had more than it sent (it cut the
+    /// list at its limit).
+    pub fn get_list(&self, path: &str) -> Result<(Value, bool), CliError> {
+        let r = self.req(Method::GET, path).send();
+        let more = r.as_ref().is_ok_and(|r| {
+            r.headers()
+                .get(pkgpod_server::api::MORE)
+                .is_some_and(|v| v.as_bytes() == b"true")
+        });
+        Ok((self.finish(r)?, more))
+    }
+
     pub fn get_text(&self, path: &str) -> Result<String, CliError> {
         match self.get(path)? {
             Value::String(s) => Ok(s),

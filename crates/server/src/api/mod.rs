@@ -49,16 +49,44 @@ pub fn cookie(h: &axum::http::HeaderMap, name: &str) -> Option<String> {
         .map(|(_, v)| v.to_string())
 }
 
+/// Whether a request that changes something comes from another site: a
+/// browser sends cached Basic credentials (and cookies) with a form
+/// posted from any site, and says where it came from. Clients outside
+/// browsers send neither header.
+pub fn cross_site_write(method: &Method, h: &axum::http::HeaderMap, host: &str) -> bool {
+    if matches!(*method, Method::GET | Method::HEAD) {
+        return false;
+    }
+    h.get("sec-fetch-site")
+        .is_some_and(|v| v.as_bytes() == b"cross-site")
+        || h.get(header::ORIGIN)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|o| o.split_once("://").map(|x| x.1) != Some(host))
+}
+
 impl FromRequestParts<Arc<App>> for Who {
     type Rejection = Error;
 
     async fn from_request_parts(p: &mut Parts, app: &Arc<App>) -> Result<Self> {
+        let host = p
+            .headers
+            .get(header::HOST)
+            .and_then(|h| h.to_str().ok())
+            .map(String::from)
+            .or_else(|| p.uri.authority().map(|a| a.to_string()))
+            .unwrap_or_default();
+        if cross_site_write(&p.method, &p.headers, &host) {
+            return Err(Error::Forbidden(
+                "a change sent from another site is refused".into(),
+            ));
+        }
         if p.headers.contains_key(header::AUTHORIZATION) {
             let app = app.clone();
             let h = p.headers.clone();
-            let c = tokio::task::spawn_blocking(move || crate::serving::basic_caller(&app, &h))
-                .await
-                .map_err(|e| Error::Invalid(e.to_string()))??;
+            let c =
+                tokio::task::spawn_blocking(move || crate::serving::basic_caller(&app, &h, "api"))
+                    .await
+                    .map_err(|e| Error::Invalid(e.to_string()))??;
             return Ok(Who(c));
         }
         if let Some(sid) = cookie(&p.headers, SESSION_COOKIE)
@@ -592,12 +620,14 @@ pub(crate) async fn cache_list(
     blocking(&app, move |app| {
         proxy_for(app, &c, &repo, Role::Read)?;
         let (files, all) = app.engine.cache_size(&repo)?;
-        let rows = app
-            .engine
-            .cache_list(&repo, &q.prefix, q.limit.unwrap_or(500).min(5000))?;
+        let limit = q.limit.unwrap_or(500).min(5000);
+        let mut rows = app.engine.cache_list(&repo, &q.prefix, limit + 1)?;
+        let more = rows.len() > limit;
+        rows.truncate(limit);
         Ok(Json(json!({
             "files_bytes": files, "bytes": all,
             "rows": rows.iter().map(crate::serving::proxy::row_json).collect::<Vec<_>>(),
+            "more": more,
         })))
     })
     .await
@@ -718,17 +748,16 @@ pub(crate) async fn settings_patch(
 ) -> Result<Json<Value>> {
     app.require_admin(&c)?;
     blocking(&app, move |app| {
+        // Every field is checked before any is written: a call that fails
+        // changes nothing.
+        let mut set: Vec<(&str, String, Option<String>)> = Vec::new();
         if let Some(d) = req.downloads_days {
             crate::serving::stats::check_days(d)?;
-            let old = crate::serving::stats::days_kept(app);
-            crate::auth::keys::set_setting(
-                &app.db,
+            set.push((
                 crate::serving::stats::SETTING,
-                Some(&d.to_string()),
-            )?;
-            crate::serving::stats::days_changed(app, old, d)?;
-            app.auth
-                .audit(c.name(), "settings", "", &format!("downloads_days={d}"));
+                format!("downloads_days={d}"),
+                Some(d.to_string()),
+            ));
         }
         if let Some(n) = req.syncs_per_storage {
             if !(0..=64).contains(&n) {
@@ -736,25 +765,21 @@ pub(crate) async fn settings_patch(
                     "syncs_per_storage: 0 (no limit) to 64".into(),
                 ));
             }
-            crate::auth::keys::set_setting(
-                &app.db,
+            set.push((
                 crate::jobs::SYNCS_SETTING,
-                Some(&n.to_string()),
-            )?;
-            app.auth
-                .audit(c.name(), "settings", "", &format!("syncs_per_storage={n}"));
+                format!("syncs_per_storage={n}"),
+                Some(n.to_string()),
+            ));
         }
         if let Some(d) = req.jobs_days {
             if !(0..=3650).contains(&d) {
                 return Err(Error::Invalid("jobs_days: 0 (keep all) to 3650".into()));
             }
-            crate::auth::keys::set_setting(
-                &app.db,
+            set.push((
                 crate::jobs::DAYS_SETTING,
-                Some(&d.to_string()),
-            )?;
-            app.auth
-                .audit(c.name(), "settings", "", &format!("jobs_days={d}"));
+                format!("jobs_days={d}"),
+                Some(d.to_string()),
+            ));
         }
         for (name, v, check) in [
             (
@@ -774,18 +799,27 @@ pub(crate) async fn settings_patch(
             } else {
                 Some(check(v)?)
             };
-            crate::auth::keys::set_setting(&app.db, name, v.as_deref())?;
-            app.auth.audit(
-                c.name(),
-                "settings",
-                "",
-                &format!("{name}={}", v.as_deref().unwrap_or("")),
-            );
+            set.push((name, format!("{name}={}", v.as_deref().unwrap_or("")), v));
         }
         if let Some(p) = req.schedules_paused {
-            crate::auth::keys::set_setting(&app.db, crate::jobs::PAUSE_SETTING, p.then_some("1"))?;
-            app.auth
-                .audit(c.name(), "settings", "", &format!("schedules_paused={p}"));
+            set.push((
+                crate::jobs::PAUSE_SETTING,
+                format!("schedules_paused={p}"),
+                p.then(|| "1".to_string()),
+            ));
+        }
+        let old_days = crate::serving::stats::days_kept(app);
+        app.db.write(|tx| {
+            for (name, _, v) in &set {
+                crate::auth::keys::set_setting_in(tx, name, v.as_deref())?;
+            }
+            Ok::<_, rusqlite::Error>(())
+        })?;
+        for (_, detail, _) in &set {
+            app.auth.audit(c.name(), "settings", "", detail);
+        }
+        if let Some(d) = req.downloads_days {
+            crate::serving::stats::days_changed(app, old_days, d)?;
         }
         Ok(Json(settings_json(app)))
     })
@@ -805,6 +839,28 @@ pub(crate) async fn repo_patch(
 ) -> Result<Json<Value>> {
     blocking(&app, move |app| {
         let r0 = app.repo_for(&c, &repo, Role::Admin)?;
+        // Addresses decide which repository a request reaches, so one
+        // could take over another's paths: server admins set them. The
+        // ones it has may come back as they are (the console sends every
+        // field). Checked before the addresses are, which would name the
+        // repository holding one.
+        if req.settings.get("urls").is_some() && !c.is_admin() {
+            let next = pkgpod_engine::settings::check(
+                &app.engine.fields(&r0.format, r0.kind)?,
+                &pkgpod_engine::settings::merge(&r0.settings, &req.settings),
+            )?;
+            let urls: Vec<String> = next["urls"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+            if urls != r0.setting_list("urls") {
+                return Err(Error::Forbidden(
+                    "addresses are set by server admins".into(),
+                ));
+            }
+        }
         app.check_urls(&repo, &req.settings)?;
         if let Some(src) = req.settings.get("source").and_then(Value::as_str)
             && crate::jobs::import::local_source(src).is_some()
@@ -821,8 +877,6 @@ pub(crate) async fn repo_patch(
             crate::serving::proxy::check_settings(&r0.format, &req.settings)?;
         }
         let r = app.engine.update_settings(&repo, &req.settings)?;
-        app.auth
-            .audit(c.name(), "repo settings", &repo, &req.settings.to_string());
         // Settings may change what is published (Release fields, key);
         // a republish that fails takes the change back.
         if r.kind.versioned()
@@ -832,7 +886,30 @@ pub(crate) async fn repo_patch(
             app.engine.update_settings(&repo, &r0.settings)?;
             return Err(e.into());
         }
-        Ok(Json(repo_json(app, &r, &c)))
+        // What a proxy keeps is what its upstream gave: another upstream
+        // is asked afresh.
+        let mut evicted = 0;
+        if r.kind == Kind::Proxy && r.setting_str("upstream") != r0.setting_str("upstream") {
+            let paths: Vec<String> = app
+                .engine
+                .cache_list(&repo, "", i64::MAX as usize)?
+                .into_iter()
+                .map(|row| row.path)
+                .collect();
+            evicted = app.engine.cache_evict(&repo, &paths)?;
+        }
+        if r.settings != r0.settings {
+            let mut detail = req.settings.to_string();
+            if evicted > 0 {
+                detail.push_str(&format!("; {evicted} cached paths forgotten"));
+            }
+            app.auth.audit(c.name(), "repo settings", &repo, &detail);
+        }
+        let mut v = repo_json(app, &r, &c);
+        if evicted > 0 {
+            v["evicted"] = json!(evicted);
+        }
+        Ok(Json(v))
     })
     .await
 }
@@ -1086,47 +1163,82 @@ pub(crate) struct SearchQ {
     pub(crate) limit: Option<usize>,
 }
 
+/// The header that says a list was cut at its limit: there are more.
+pub const MORE: &str = "x-pkgpod-more";
+
+/// A list as JSON, said to be cut when there were more.
+fn cut(list: Value, more: bool) -> Response {
+    let mut r = Json(list).into_response();
+    if more {
+        r.headers_mut()
+            .insert(MORE, axum::http::HeaderValue::from_static("true"));
+    }
+    r
+}
+
 pub(crate) async fn packages(
     State(app): St,
     Who(c): Who,
     Path(repo): Path<String>,
     Query(q): Query<SearchQ>,
-) -> Result<Json<Value>> {
+) -> Result<Response> {
     blocking(&app, move |app| {
         app.repo_for(&c, &repo, Role::Read)?;
-        let hits = app
-            .engine
-            .search(&q.q, Some(&repo), q.limit.unwrap_or(500).min(5000))?;
-        Ok(Json(json!(hits)))
+        let limit = q.limit.unwrap_or(500).min(5000);
+        let mut hits = app.engine.search(&q.q, Some(&repo), limit + 1)?;
+        let more = hits.len() > limit;
+        hits.truncate(limit);
+        Ok(cut(json!(hits), more))
     })
     .await
 }
 
+/// Packages the caller may read, at most `limit` of them, and whether
+/// there were more.
+fn search_hits(app: &App, c: &Caller, q: &SearchQ) -> Result<(Value, bool)> {
+    let limit = q.limit.unwrap_or(200).min(2000);
+    let hits = app.engine.search(&q.q, q.repo.as_deref(), limit * 4 + 1)?;
+    // Cut before the rights were looked at: there may be more.
+    let unread = hits.len() > limit * 4;
+    let mut seen = std::collections::HashMap::new();
+    let mut v: Vec<_> = hits
+        .into_iter()
+        .filter(|h| {
+            *seen.entry(h.repo.clone()).or_insert_with(|| {
+                app.engine
+                    .repo(&h.repo)
+                    .ok()
+                    .and_then(|r| app.auth.role(c, &r.name, r.setting_bool("public")))
+                    .is_some()
+            })
+        })
+        .take(limit + 1)
+        .collect();
+    let more = v.len() > limit || unread;
+    v.truncate(limit);
+    Ok((json!(v), more))
+}
+
+/// Packages by name, said to be cut when they were.
 pub(crate) async fn search(
     State(app): St,
     Who(c): Who,
     Query(q): Query<SearchQ>,
-) -> Result<Json<Value>> {
+) -> Result<Response> {
     blocking(&app, move |app| {
-        let limit = q.limit.unwrap_or(200).min(2000);
-        let hits = app.engine.search(&q.q, q.repo.as_deref(), limit * 4)?;
-        let mut seen = std::collections::HashMap::new();
-        let v: Vec<_> = hits
-            .into_iter()
-            .filter(|h| {
-                *seen.entry(h.repo.clone()).or_insert_with(|| {
-                    app.engine
-                        .repo(&h.repo)
-                        .ok()
-                        .and_then(|r| app.auth.role(&c, &r.name, r.setting_bool("public")))
-                        .is_some()
-                })
-            })
-            .take(limit)
-            .collect();
-        Ok(Json(json!(v)))
+        let (v, more) = search_hits(app, &c, &q)?;
+        Ok(cut(v, more))
     })
     .await
+}
+
+/// [`search`]'s list alone (the console's).
+pub(crate) async fn search_list(
+    State(app): St,
+    Who(c): Who,
+    Query(q): Query<SearchQ>,
+) -> Result<Json<Value>> {
+    blocking(&app, move |app| Ok(Json(search_hits(app, &c, &q)?.0))).await
 }
 
 pub(crate) async fn op(
@@ -1442,7 +1554,11 @@ pub(crate) async fn grants(
     Path(repo): Path<String>,
 ) -> Result<Json<Value>> {
     blocking(&app, move |app| {
-        app.repo_for(&c, &repo, Role::Admin)?;
+        if repo == "*" {
+            app.require_admin(&c)?;
+        } else {
+            app.repo_for(&c, &repo, Role::Admin)?;
+        }
         Ok(Json(json!(app.auth.grants(Some(&repo))?)))
     })
     .await
@@ -1533,7 +1649,7 @@ pub(crate) async fn my_password(
     blocking(&app, move |app| {
         if app
             .auth
-            .login(&name, &req.old)
+            .login(&name, &req.old, "api")
             .filter(|x| x.scope.is_none())
             .is_none()
         {
@@ -1617,9 +1733,14 @@ pub(crate) async fn user_delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Teams: all for server admins; for others, their own.
 pub(crate) async fn teams(State(app): St, Who(c): Who) -> Result<Json<Value>> {
-    app.require_user(&c)?;
-    Ok(Json(json!(app.auth.teams()?)))
+    let u = app.require_user(&c)?;
+    let mut all = app.auth.teams()?;
+    if !c.is_admin() {
+        all.retain(|t| t.members.contains(&u.name));
+    }
+    Ok(Json(json!(all)))
 }
 
 #[derive(Deserialize)]
@@ -1679,12 +1800,26 @@ pub(crate) struct AllQ {
     pub(crate) all: Option<String>,
 }
 
+/// Whether the caller acts with all its user's rights: a password, a
+/// session, or a token limited to nothing. Only such a caller manages its
+/// user's tokens.
+fn unlimited(app: &App, c: &Caller) -> Result<()> {
+    app.require_user(c)?;
+    match &c.scope {
+        Some(s) if !s.repos.is_empty() || !s.write || s.exchanged => Err(Error::Forbidden(
+            "a limited token manages no tokens: use a password or an unlimited token".into(),
+        )),
+        _ => Ok(()),
+    }
+}
+
 pub(crate) async fn tokens(
     State(app): St,
     Who(c): Who,
     Query(q): Query<AllQ>,
 ) -> Result<Json<Value>> {
     let u = app.require_user(&c)?;
+    unlimited(&app, &c)?;
     if q.all.is_some() {
         app.require_admin(&c)?;
         return Ok(Json(json!(app.auth.tokens(None)?)));
@@ -1709,8 +1844,24 @@ pub(crate) async fn token_create(
     Json(req): Json<TokenReq>,
 ) -> Result<(StatusCode, Json<Value>)> {
     let u = app.require_user(&c)?.clone();
-    // A token cannot do more than the one that made it.
+    // In any case: such tokens are told apart by a LIKE, which ignores it.
+    if req
+        .name
+        .trim()
+        .get(..6)
+        .is_some_and(|p| p.eq_ignore_ascii_case("trust:"))
+    {
+        return Err(Error::Invalid(
+            "names beginning with trust: are those of the tokens trust rules give".into(),
+        ));
+    }
+    // A token cannot do more than the one that made it, nor last longer.
     if let Some(s) = &c.scope {
+        if s.exchanged {
+            return Err(Error::Forbidden(
+                "a token a trust rule gave makes no token: it would outlast the rule".into(),
+            ));
+        }
         if req.write && !s.write {
             return Err(Error::Forbidden(
                 "a read-only token cannot make a writing one".into(),
@@ -1724,10 +1875,13 @@ pub(crate) async fn token_create(
             ));
         }
     }
-    let expires = req
+    let mut expires = req
         .expires_days
         .filter(|d| *d > 0)
         .map(|d| pkgpod_base::now() + d * 86400);
+    if let Some(until) = c.scope.as_ref().and_then(|s| s.expires) {
+        expires = Some(expires.map_or(until, |e| e.min(until)));
+    }
     let (token, info) = app
         .auth
         .create_token(&u.name, &req.name, &req.repos, req.write, expires)?;
@@ -1960,8 +2114,20 @@ pub(crate) async fn trust_rules(State(app): St, Who(c): Who) -> Result<Json<Valu
 /// Adds a trust rule, or replaces the one of the same name.
 pub(crate) async fn trust_put(
     State(app): St,
-    Who(c): Who,
+    who: Who,
     Json(rule): Json<crate::auth::oidc::Rule>,
+) -> Result<(StatusCode, Json<Value>)> {
+    trust_save(app, who, rule, false).await
+}
+
+/// Adds a trust rule, or with `create_only` refuses one of a name there
+/// is, once the caller may make such a rule (no name is confirmed to
+/// one who may not).
+pub(crate) async fn trust_save(
+    app: Arc<App>,
+    Who(c): Who,
+    rule: crate::auth::oidc::Rule,
+    create_only: bool,
 ) -> Result<(StatusCode, Json<Value>)> {
     let app2 = app.clone();
     let c2 = c.clone();
@@ -1969,7 +2135,17 @@ pub(crate) async fn trust_put(
         let stored = crate::auth::oidc::rules(&app2)?
             .into_iter()
             .find(|x| x.name == rule.name.trim());
-        may_manage_rule(&app2, &c2, stored.as_ref(), Some(&rule))?;
+        if create_only {
+            may_manage_rule(&app2, &c2, None, Some(&rule))?;
+            if stored.is_some() {
+                return Err(Error::Conflict(format!(
+                    "there is a trust rule {:?}: change it on the Server page, or pick another name",
+                    rule.name.trim()
+                )));
+            }
+        } else {
+            may_manage_rule(&app2, &c2, stored.as_ref(), Some(&rule))?;
+        }
         crate::auth::oidc::put_rule(&app2, rule)
     })
     .await?;
@@ -2036,6 +2212,7 @@ pub(crate) async fn token_delete(
     Path(id): Path<i64>,
 ) -> Result<StatusCode> {
     let u = app.require_user(&c)?;
+    unlimited(&app, &c)?;
     let owner = if c.is_admin() {
         None
     } else {
@@ -2079,6 +2256,30 @@ fn yes() -> bool {
     true
 }
 
+/// Whose address `addr` is, if another's: the management listener's or
+/// another listener's. (One another program holds is found when the
+/// listener binds it: a listener just moved off it may still be closing
+/// its socket.)
+fn address_taken(app: &App, name: &str, addr: &str) -> Result<Option<String>> {
+    let Ok(want) = addr.parse::<std::net::SocketAddr>() else {
+        // A host name: bound (or refused) when the listener starts.
+        return Ok(None);
+    };
+    let overlaps = |a: &str| {
+        a.parse::<std::net::SocketAddr>().is_ok_and(|a| {
+            a.port() == want.port()
+                && (a.ip() == want.ip() || a.ip().is_unspecified() || want.ip().is_unspecified())
+        })
+    };
+    if overlaps(&app.cfg.listen) {
+        return Ok(Some(format!("{addr} is the management listener's address")));
+    }
+    Ok(crate::ops::listeners::list(&app.db)?
+        .into_iter()
+        .find(|l| l.name != name && l.enabled && overlaps(&l.addr))
+        .map(|l| format!("{addr} is the address of listener {}", l.name)))
+}
+
 pub(crate) async fn listener_set(
     State(app): St,
     Who(c): Who,
@@ -2086,6 +2287,11 @@ pub(crate) async fn listener_set(
     Json(req): Json<ListenerReq>,
 ) -> Result<StatusCode> {
     app.require_admin(&c)?;
+    if req.enabled
+        && let Some(why) = address_taken(&app, &name, req.addr.trim())?
+    {
+        return Err(Error::Conflict(format!("{why}: choose another")));
+    }
     crate::ops::listeners::set(
         &app.db,
         &crate::ops::listeners::Listener {
@@ -2126,10 +2332,29 @@ pub(crate) struct KeyReq {
     pub(crate) passphrase: String,
 }
 
+#[derive(Deserialize, Default)]
+pub(crate) struct ReplaceQ {
+    /// Replace a key of that name.
+    #[serde(default)]
+    pub(crate) replace: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+pub(crate) struct ForceQ {
+    /// Delete it although repositories sign with it.
+    #[serde(default)]
+    pub(crate) force: Option<String>,
+}
+
+fn yes_to(v: &Option<String>) -> bool {
+    matches!(v.as_deref(), Some("1" | "true" | "yes"))
+}
+
 pub(crate) async fn key_set(
     State(app): St,
     Who(c): Who,
     Path(name): Path<String>,
+    Query(q): Query<ReplaceQ>,
     Json(req): Json<KeyReq>,
 ) -> Result<Json<Value>> {
     app.require_admin(&c)?;
@@ -2138,6 +2363,7 @@ pub(crate) async fn key_set(
             &name,
             req.secret_key.as_bytes(),
             Some(req.passphrase.as_str()),
+            yes_to(&q.replace),
         )?;
         app.auth
             .audit(c.name(), "key import", &name, &k.fingerprint);
@@ -2146,15 +2372,47 @@ pub(crate) async fn key_set(
     .await
 }
 
+/// The repositories that sign with key `name`: those naming it, and,
+/// when it is the default, those that have a key setting, left empty,
+/// and sign (neither `sign` nor a mirror's `resign` is false).
+fn signing_with(app: &App, name: &str) -> Result<Vec<String>> {
+    let default = app.keys.get(name)?.default;
+    let off = |r: &RepoInfo, s: &str| r.settings.get(s) == Some(&Value::Bool(false));
+    Ok(app
+        .engine
+        .repos()?
+        .into_iter()
+        .filter(|r| match r.settings.get("key").and_then(Value::as_str) {
+            Some(k) if k.trim() == name => true,
+            Some(k) => default && k.trim().is_empty() && !off(r, "sign") && !off(r, "resign"),
+            None => false,
+        })
+        .map(|r| r.name)
+        .collect())
+}
+
 pub(crate) async fn key_delete(
     State(app): St,
     Who(c): Who,
     Path(name): Path<String>,
+    Query(q): Query<ForceQ>,
 ) -> Result<StatusCode> {
     app.require_admin(&c)?;
-    app.keys.remove(&name)?;
-    app.auth.audit(c.name(), "key delete", &name, "");
-    Ok(StatusCode::NO_CONTENT)
+    blocking(&app, move |app| {
+        // Without it they could not publish, nor have a setting changed.
+        let users = signing_with(app, &name)?;
+        if !users.is_empty() && !yes_to(&q.force) {
+            return Err(Error::Conflict(format!(
+                "{} sign with key {name}: give them another first, or pass --force",
+                users.join(", ")
+            )));
+        }
+        app.keys.remove(&name)?;
+        app.auth
+            .audit(c.name(), "key delete", &name, &users.join(" "));
+        Ok(StatusCode::NO_CONTENT)
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -2166,11 +2424,12 @@ pub(crate) async fn key_generate(
     State(app): St,
     Who(c): Who,
     Path(name): Path<String>,
+    Query(q): Query<ReplaceQ>,
     Json(req): Json<GenReq>,
 ) -> Result<Json<Value>> {
     app.require_admin(&c)?;
     blocking(&app, move |app| {
-        let k = app.keys.generate(&name, &req.uid)?;
+        let k = app.keys.generate(&name, &req.uid, yes_to(&q.replace))?;
         app.auth
             .audit(c.name(), "key generate", &name, &k.fingerprint);
         Ok(Json(json!(k)))
@@ -2310,14 +2569,30 @@ pub(crate) async fn sync(
     Ok((StatusCode::ACCEPTED, Json(json!({"job": id}))))
 }
 
+#[derive(Deserialize, Default)]
+pub(crate) struct PageQ {
+    /// Only jobs older than this one (the next page).
+    #[serde(default)]
+    pub(crate) before: Option<i64>,
+    #[serde(default)]
+    pub(crate) limit: Option<usize>,
+}
+
 pub(crate) async fn repo_jobs(
     State(app): St,
     Who(c): Who,
     Path(repo): Path<String>,
+    Query(q): Query<PageQ>,
 ) -> Result<Json<Value>> {
     blocking(&app, move |app| {
         app.repo_for(&c, &repo, Role::Read)?;
-        Ok(Json(json!(crate::jobs::list(&app.db, Some(&repo), 50)?)))
+        let f = crate::jobs::Filter {
+            repo: Some(repo),
+            before: q.before,
+            ..Default::default()
+        };
+        let limit = q.limit.unwrap_or(50).clamp(1, 500);
+        Ok(Json(json!(crate::jobs::find(&app.db, &f, limit)?)))
     })
     .await
 }
@@ -2360,10 +2635,18 @@ pub(crate) async fn logs(
     Ok(Json(json!(r)))
 }
 
+// Not a flattened Filter: a query's values are all text to serde's
+// flatten, and `before` would never read as a number.
 #[derive(Deserialize, Default)]
 pub(crate) struct JobsQ {
-    #[serde(flatten)]
-    pub(crate) filter: crate::jobs::Filter,
+    #[serde(default)]
+    pub(crate) repo: Option<String>,
+    #[serde(default)]
+    pub(crate) kind: Option<String>,
+    #[serde(default)]
+    pub(crate) state: Option<String>,
+    #[serde(default)]
+    pub(crate) before: Option<i64>,
     #[serde(default)]
     pub(crate) limit: Option<usize>,
 }
@@ -2374,9 +2657,31 @@ pub(crate) async fn all_jobs(
     Query(q): Query<JobsQ>,
 ) -> Result<Json<Value>> {
     app.require_admin(&c)?;
+    fn given(v: &Option<String>) -> Option<&str> {
+        v.as_deref().map(str::trim).filter(|v| !v.is_empty())
+    }
+    // A filter nothing can match is a mistake, not an empty list.
+    if let Some(k) = given(&q.kind)
+        && !["sync", "import"].contains(&k)
+    {
+        return Err(Error::Invalid(format!("kind {k:?}: sync or import")));
+    }
+    if let Some(st) = given(&q.state)
+        && !["queued", "running", "ok", "failed", "cancelled", "active"].contains(&st)
+    {
+        return Err(Error::Invalid(format!(
+            "state {st:?}: queued, running, ok, failed, cancelled or active"
+        )));
+    }
+    let f = crate::jobs::Filter {
+        repo: q.repo,
+        kind: q.kind,
+        state: q.state,
+        before: q.before,
+    };
     blocking(&app, move |app| {
         let limit = q.limit.unwrap_or(200).clamp(1, 500);
-        Ok(Json(json!(crate::jobs::find(&app.db, &q.filter, limit)?)))
+        Ok(Json(json!(crate::jobs::find(&app.db, &f, limit)?)))
     })
     .await
 }

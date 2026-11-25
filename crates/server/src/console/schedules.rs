@@ -289,6 +289,10 @@ pub(crate) async fn hook_set(
         created: 0,
         last: None,
     };
+    // Webhooks are server admins': no name is confirmed to others.
+    if let Err(e) = app.require_admin(&v.caller) {
+        return err_part(e);
+    }
     // From a repository's page: a new one only (changing one there
     // would make it that repository's alone).
     if form_get(&form, "new") == "1"
@@ -388,18 +392,8 @@ pub(crate) async fn trust_set(
         created: 0,
         used: None,
     };
-    if form_get(&form, "new") == "1"
-        && crate::auth::oidc::rules(&app)
-            .unwrap_or_default()
-            .iter()
-            .any(|x| x.name == rule.name)
-    {
-        return err_part(Error::Conflict(format!(
-            "there is a trust rule {:?}: change it on the Server page, or pick another name",
-            rule.name
-        )));
-    }
-    match api::trust_put(State(app), v.who(), Json(rule)).await {
+    let new = form_get(&form, "new") == "1";
+    match api::trust_save(app, v.who(), rule, new).await {
         Ok(_) => refresh(),
         Err(e) => err_part(e),
     }
@@ -459,6 +453,7 @@ pub(crate) async fn key_generate(
         State(app),
         v.who(),
         Path(form_get(&form, "name").trim().to_string()),
+        Query(Default::default()),
         Json(req),
     )
     .await
@@ -481,6 +476,7 @@ pub(crate) async fn key_add(
         State(app),
         v.who(),
         Path(form_get(&form, "name").trim().to_string()),
+        Query(Default::default()),
         Json(req),
     )
     .await
@@ -498,7 +494,7 @@ pub(crate) async fn key_default(State(app): St, v: Viewer, Path(name): Path<Stri
 }
 
 pub(crate) async fn key_delete(State(app): St, v: Viewer, Path(name): Path<String>) -> Response {
-    match api::key_delete(State(app), v.who(), Path(name)).await {
+    match api::key_delete(State(app), v.who(), Path(name), Query(Default::default())).await {
         Ok(_) => refresh(),
         Err(e) => err_part(e),
     }

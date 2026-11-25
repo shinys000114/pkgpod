@@ -56,14 +56,23 @@ pub fn get_setting(db: &Db, name: &str) -> Result<Option<String>> {
 }
 
 pub fn set_setting(db: &Db, name: &str, value: Option<&str>) -> Result<()> {
-    db.write(|tx| match value {
+    db.write(|tx| set_setting_in(tx, name, value))?;
+    Ok(())
+}
+
+/// [`set_setting`] in a transaction of the caller's.
+pub fn set_setting_in(
+    tx: &rusqlite::Transaction,
+    name: &str,
+    value: Option<&str>,
+) -> rusqlite::Result<usize> {
+    match value {
         Some(v) => tx.execute(
             "INSERT INTO settings (name, value) VALUES (?1, ?2) ON CONFLICT(name) DO UPDATE SET value = excluded.value",
             params![name, v],
         ),
         None => tx.execute("DELETE FROM settings WHERE name = ?1", [name]),
-    })?;
-    Ok(())
+    }
 }
 
 fn io(p: &Path, e: std::io::Error) -> Error {
@@ -194,10 +203,27 @@ impl Keys {
             .ok_or_else(|| Error::NotFound(format!("no key {name}")))
     }
 
-    /// Keeps `key` as `name` (replacing one of that name). The first key
-    /// becomes the default.
-    fn keep(&self, name: &str, key: &PgpKey, passphrase: Option<&str>) -> Result<Key> {
+    /// Keeps `key` as `name`. One of that name is replaced only when
+    /// asked to, or when its secret key file is gone (to be imported
+    /// again). The first key becomes the default.
+    fn keep(
+        &self,
+        name: &str,
+        key: &PgpKey,
+        passphrase: Option<&str>,
+        replace: bool,
+    ) -> Result<Key> {
         pkgpod_engine::check_name("key", name).map_err(|e| Error::Invalid(e.to_string()))?;
+        if !replace
+            && let Ok(k) = self.get(name)
+            && !k.missing
+        {
+            return Err(Error::Conflict(format!(
+                "key {name} exists ({}): pick another name, or pass --replace (what it signs \
+                 is signed by the new key from the next publish on)",
+                k.fingerprint
+            )));
+        }
         std::fs::create_dir_all(&self.dir).map_err(|e| io(&self.dir, e))?;
         {
             use std::os::unix::fs::PermissionsExt;
@@ -231,18 +257,25 @@ impl Keys {
     }
 
     /// Imports a secret key (armored or binary), unlocked by
-    /// `passphrase` when it has one.
-    pub fn import(&self, name: &str, data: &[u8], passphrase: Option<&str>) -> Result<Key> {
+    /// `passphrase` when it has one; `replace`: one of that name.
+    pub fn import(
+        &self,
+        name: &str,
+        data: &[u8],
+        passphrase: Option<&str>,
+        replace: bool,
+    ) -> Result<Key> {
         let passphrase = passphrase.filter(|p| !p.is_empty());
         let key =
             PgpKey::from_bytes(data, passphrase).map_err(|e| Error::Invalid(e.to_string()))?;
-        self.keep(name, &key, passphrase)
+        self.keep(name, &key, passphrase, replace)
     }
 
-    /// Makes a new Ed25519 signing key without a passphrase as `name`.
-    pub fn generate(&self, name: &str, uid: &str) -> Result<Key> {
+    /// Makes a new Ed25519 signing key without a passphrase as `name`
+    /// (`replace`: one of that name).
+    pub fn generate(&self, name: &str, uid: &str, replace: bool) -> Result<Key> {
         let key = PgpKey::generate(uid).map_err(|e| Error::Invalid(e.to_string()))?;
-        self.keep(name, &key, None)
+        self.keep(name, &key, None, replace)
     }
 
     pub fn remove(&self, name: &str) -> Result<()> {

@@ -854,6 +854,11 @@ pub fn schedules_paused(app: &App) -> bool {
 
 /// When a mirror's schedule runs next (none while schedules are paused).
 pub fn next_run(app: &App, r: &RepoInfo) -> Option<String> {
+    next_run_at(app, r).map(|t| t.strftime("%Y-%m-%d %H:%M").to_string())
+}
+
+/// [`next_run`], as a time with its zone.
+pub fn next_run_at(app: &App, r: &RepoInfo) -> Option<jiff::ZonedDateTime> {
     let expr = r.setting_str("schedule").trim();
     if expr.is_empty() || schedules_paused(app) {
         return None;
@@ -861,7 +866,6 @@ pub fn next_run(app: &App, r: &RepoInfo) -> Option<String> {
     let c = crate::jobs::cron::Cron::parse(expr).ok()?;
     let now = jiff::Timestamp::now().to_zoned_datetime(jiff::tz::TimeZone::system());
     c.next_after(&now)
-        .map(|t| t.strftime("%Y-%m-%d %H:%M").to_string())
 }
 
 #[cfg(test)]

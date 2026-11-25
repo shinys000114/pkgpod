@@ -183,6 +183,10 @@ fn schemas() -> Value {
                         r["description"] = json!("The caller's role on it.");
                         r
                     }),
+                    (
+                        "evicted",
+                        json!({"type": "integer", "description": "A proxy's upstream changed: the cached paths it forgot."}),
+                    ),
                 ],
                 &[
                     "name", "format", "kind", "storage", "settings", "created", "version",
@@ -431,7 +435,7 @@ fn schemas() -> Value {
                     ),
                     (
                         "packages",
-                        json!({"type": "integer", "description": "Catalog rows of the current version."}),
+                        json!({"type": ["integer", "null"], "description": "Catalog rows of the current version; a mirror: the pool files its last good sync counted, null for none."}),
                     ),
                     (
                         "downloads",
@@ -439,7 +443,7 @@ fn schemas() -> Value {
                     ),
                     (
                         "sync",
-                        json!({"type": ["object", "null"], "description": "Mirrors: the last sync (state, started, finished, summary), when one last went well (last_ok), the next scheduled (next).", "properties": {"state": {"type": ["string", "null"]}, "started": {"type": ["integer", "null"]}, "finished": {"type": ["integer", "null"]}, "summary": {"type": ["string", "null"]}, "last_ok": {"type": ["integer", "null"]}, "next": {"type": ["string", "null"]}}}),
+                        json!({"type": ["object", "null"], "description": "Mirrors: the last sync (state, started, finished, summary), when one last went well (last_ok), the next scheduled (next).", "properties": {"state": {"type": ["string", "null"]}, "started": {"type": ["integer", "null"]}, "finished": {"type": ["integer", "null"]}, "summary": {"type": ["string", "null"]}, "last_ok": {"type": ["integer", "null"]}, "next": {"type": ["integer", "null"], "description": "Unix seconds."}}}),
                     ),
                     (
                         "ok",
@@ -1475,7 +1479,7 @@ fn ops() -> Vec<Op> {
             .reply(201, "The new repository.", sref("Repo")),
         op("get", "/api/v1/repos/{repo}", "repo_get", "A repository.")
             .reply(200, "The repository.", sref("Repo")),
-        op("patch", "/api/v1/repos/{repo}", "repo_patch", "Change settings {settings} (repository admin); republishes.")
+        op("patch", "/api/v1/repos/{repo}", "repo_patch", "Change settings {settings} (repository admin; its addresses, urls, server admins only); republishes. A proxy given another upstream forgets what it cached (evicted).")
             .body("RepoPatch")
             .reply(200, "The repository as changed.", sref("Repo")),
         op("delete", "/api/v1/repos/{repo}", "repo_delete", "Delete a repository (server admin); a mirror's received tree stays unless ?remove_tree=1.")
@@ -1494,7 +1498,7 @@ fn ops() -> Vec<Op> {
             .query("version", string(), "Number or label; default: the current version.")
             .query("served", string(), "The served tree instead of the state tree (1 or true).")
             .reply(200, "The directory's entries, directories first.", sref("Tree")),
-        op("get", "/api/v1/repos/{repo}/packages", "packages", "Packages of the current version ?q=.")
+        op("get", "/api/v1/repos/{repo}/packages", "packages", "Packages of the current version ?q=; the header x-pkgpod-more: true says there were more than the limit.")
             .query("q", string(), "Name to look for; empty: all.")
             .query("limit", integer(), "At most this many (default 500, at most 5000).")
             .reply(200, "The packages.", array(sref("Package"))),
@@ -1521,7 +1525,8 @@ fn ops() -> Vec<Op> {
                     ("fetched", integer()), ("used", integer()), ("pinned", boolean()),
                     ("name", string()), ("version", string()),
                 ], &["path", "kind", "size", "sha256", "fetched", "used", "pinned", "name", "version"])),
-            }, "required": ["files_bytes", "bytes", "rows"]})),
+                "more": {"type": "boolean", "description": "There were more rows than the limit."},
+            }, "required": ["files_bytes", "bytes", "rows", "more"]})),
         op("post", "/api/v1/repos/{repo}/cache/{action}", "cache_change", "pin, unpin (pinned files stay over the size limit), evict (forgotten; the blobs go at the next garbage collection) or prefetch (fetched now, as a client asking would) paths of a proxy's cache.")
             .body("CachePaths")
             .reply(200, "pin, unpin, evict: {changed}; prefetch: each path's state.", json!({"oneOf": [
@@ -1556,6 +1561,7 @@ fn ops() -> Vec<Op> {
             .query("replace", string(), "deb, files: replace a file of the same name (files: path) with other content (true, yes, 1 or on).")
             .query("path", string(), "files: where the file goes: a directory ending in / (the file keeps its name) or its whole path.")
             .query("mtime", string(), "files: the file's modification time, unix seconds; default: now.")
+            .query("link", string(), "files: also point the link at this path to the upload: to the directory path names, else to the file.")
             .map(|mut o| {
                 o.v["requestBody"] = json!({
                     "required": true,
@@ -1591,7 +1597,7 @@ fn ops() -> Vec<Op> {
             .reply(200, "The labelled version.", sref("Version")),
         op("delete", "/api/v1/repos/{repo}/labels/{label}", "unlabel", "Remove a label.")
             .empty(204, "Removed."),
-        op("get", "/api/v1/repos/{repo}/grants", "grants", "Rights on the repository.")
+        op("get", "/api/v1/repos/{repo}/grants", "grants", "Rights on the repository (repository admin; * : those on every repository, server admin).")
             .reply(200, "The grants.", array(sref("Grant"))),
         op("put", "/api/v1/repos/{repo}/grants", "grant", "Give {subject: user:x|team:y, role}.")
             .body("GrantSet")
@@ -1604,7 +1610,7 @@ fn ops() -> Vec<Op> {
             .reply(200, "The plan.", sref("Plan")),
         op("post", "/api/v1/plans/{id}/apply", "plan_apply", "Apply a kept plan.")
             .reply(200, "What was done.", sref("Outcome")),
-        op("get", "/api/v1/search", "search", "Packages by name ?q=&repo=&limit=.")
+        op("get", "/api/v1/search", "search", "Packages by name ?q=&repo=&limit=; the header x-pkgpod-more: true says there were more than the limit.")
             .query("q", string(), "Name to look for.")
             .query("repo", string(), "Only in this repository.")
             .query("limit", integer(), "At most this many (default 200, at most 2000).")
@@ -1624,7 +1630,7 @@ fn ops() -> Vec<Op> {
             .reply(200, "The user as changed.", sref("User")),
         op("delete", "/api/v1/users/{user}", "user_delete", "Delete a user (server admin).")
             .empty(204, "Deleted."),
-        op("get", "/api/v1/teams", "teams", "Teams.")
+        op("get", "/api/v1/teams", "teams", "Teams: all for server admins, the caller's own for others.")
             .reply(200, "The teams.", array(sref("Team"))),
         op("post", "/api/v1/teams", "team_create", "Create {name} (server admin).")
             .body("TeamCreate")
@@ -1635,13 +1641,13 @@ fn ops() -> Vec<Op> {
             .empty(204, "Added."),
         op("delete", "/api/v1/teams/{team}/members/{user}", "member_remove", "Remove a member (server admin).")
             .empty(204, "Removed."),
-        op("get", "/api/v1/tokens", "tokens", "The caller's tokens (?all=1: everyone's, server admin).")
+        op("get", "/api/v1/tokens", "tokens", "The caller's tokens (?all=1: everyone's, server admin); not to a token limited to repositories, read-only, or given by a trust rule.")
             .query("all", string(), "Everyone's tokens (server admin); any value counts.")
             .reply(200, "The tokens.", array(sref("Token"))),
-        op("post", "/api/v1/tokens", "token_create", "Create {name, repos?, write?, expires_days?}; the token is shown once.")
+        op("post", "/api/v1/tokens", "token_create", "Create {name, repos?, write?, expires_days?}; the token is shown once. A token makes none that does more or lasts longer than itself, and one a trust rule gave makes none; names beginning with trust: are the rules' own.")
             .body("TokenCreate")
             .reply(201, "The token and its description.", sref("TokenCreated")),
-        op("delete", "/api/v1/tokens/{id}", "token_delete", "Delete a token.")
+        op("delete", "/api/v1/tokens/{id}", "token_delete", "Delete a token (not with a limited token, as for the list).")
             .empty(204, "Deleted."),
         op("get", "/api/v1/trust", "trust_rules", "Trust rules for CI jobs' OIDC tokens: all (server admin), or those naming a repository the caller admins.")
             .reply(200, "The rules.", array(sref("TrustRule"))),
@@ -1679,19 +1685,22 @@ fn ops() -> Vec<Op> {
             .empty(202, "Queued."),
         op("get", "/api/v1/listeners", "listeners", "Serving listeners (server admin).")
             .reply(200, "The listeners.", array(sref("Listener"))),
-        op("put", "/api/v1/listeners/{name}", "listener_set", "Add or change {addr, cert?, key?, enabled?, proto?, passive?} (server admin).")
+        op("put", "/api/v1/listeners/{name}", "listener_set", "Add or change {addr, cert?, key?, enabled?} (server admin); the management listener's address, or another listener's, is refused.")
             .body("ListenerSet")
             .empty(204, "Set; the listeners are restarted as needed."),
         op("delete", "/api/v1/listeners/{name}", "listener_delete", "Remove a listener (server admin).")
             .empty(204, "Removed."),
         op("get", "/api/v1/keys", "keys", "Signing keys (server admin).")
             .reply(200, "The keys.", array(sref("Key"))),
-        op("put", "/api/v1/keys/{name}", "key_set", "Import a secret key {secret_key, passphrase?} as this name (server admin).")
+        op("put", "/api/v1/keys/{name}", "key_set", "Import a secret key {secret_key, passphrase?} as this name (server admin); a key of that name is replaced only with ?replace=1 (or when its secret key file is gone).")
+            .query("replace", string(), &format!("Replace a key of that name ({YES})."))
             .body("KeySet")
             .reply(200, "The key.", sref("Key")),
-        op("delete", "/api/v1/keys/{name}", "key_delete", "Remove a key (server admin).")
+        op("delete", "/api/v1/keys/{name}", "key_delete", "Remove a key (server admin); one that repositories sign with (by name, or as the default) only with ?force=1.")
+            .query("force", string(), &format!("Remove it although repositories sign with it ({YES})."))
             .empty(204, "Removed."),
-        op("post", "/api/v1/keys/{name}/generate", "key_generate", "Make a new Ed25519 key {uid} (server admin).")
+        op("post", "/api/v1/keys/{name}/generate", "key_generate", "Make a new Ed25519 key {uid} (server admin); a key of that name is replaced only with ?replace=1.")
+            .query("replace", string(), &format!("Replace a key of that name ({YES})."))
             .body("KeyGenerate")
             .reply(200, "The new key.", sref("Key")),
         op("post", "/api/v1/keys/{name}/default", "key_default", "Make it the default key (server admin).")
@@ -1707,11 +1716,13 @@ fn ops() -> Vec<Op> {
             .empty(204, "Removed."),
         op("post", "/api/v1/repos/{repo}/sync", "sync", "Start a sync of a mirror (write); returns the job.")
             .reply(202, "Started.", sref("JobStarted")),
-        op("post", "/api/v1/repos/{repo}/import", "import", "Import an apt repository {source, dists, components?, architectures?, keyring?, replace?} as one version (write); returns the job.")
+        op("post", "/api/v1/repos/{repo}/import", "import", "Import into a hosted repository as one version (write): an apt archive (deb), a tree (files) or images (oci); returns the job.")
             .body("Import")
             .reply(202, "Started.", sref("JobStarted")),
         op("get", "/api/v1/repos/{repo}/jobs", "repo_jobs", "Recent jobs of a repository.")
-            .reply(200, "At most 50, newest first.", array(sref("Job"))),
+            .query("before", integer(), "Only jobs older than this one (the next page).")
+            .query("limit", integer(), "At most this many (1 to 500, default 50).")
+            .reply(200, "Newest first.", array(sref("Job"))),
         op("get", "/api/v1/jobs", "all_jobs", "Every repository's jobs, filtered (server admin).")
             .query("repo", string(), "Only this repository's.")
             .query("kind", json!({"type": "string", "enum": ["sync", "import"]}), "Only syncs or imports.")

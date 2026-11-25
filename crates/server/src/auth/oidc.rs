@@ -36,6 +36,12 @@ pub const AUDIENCE: &str = "pkgpod";
 const LEEWAY: i64 = 60;
 /// How long an issuer's keys are used before they are asked for again.
 const KEYS_KEPT: Duration = Duration::from_secs(600);
+/// How often at most an issuer's keys are asked for again for a token
+/// whose key is not among them: else any caller could make the server
+/// ask with every token it sends.
+const KEYS_ASKED_AGAIN: Duration = Duration::from_secs(60);
+/// The most an issuer's discovery document or key set may take.
+const MAX_DOC: usize = 1 << 20;
 
 /// A trust rule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,16 +126,25 @@ impl Rule {
 }
 
 /// An issuer's address: https, or http on the loopback (tests, a local
-/// CI).
+/// CI); never with a user or password in it.
 fn check_issuer(url: &str) -> Result<()> {
-    let ok = if let Some(rest) = url.strip_prefix("https://") {
-        !rest.is_empty()
-    } else if let Some(rest) = url.strip_prefix("http://") {
-        let host = rest.split(['/', ':']).next().unwrap_or("");
-        matches!(host, "127.0.0.1" | "localhost" | "[") || rest.starts_with("[::1]")
-    } else {
-        false
-    };
+    let ok = reqwest::Url::parse(url).is_ok_and(|u| {
+        let host = u.host_str().unwrap_or("");
+        let loopback = host == "localhost"
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|a| a.is_loopback());
+        u.username().is_empty()
+            && u.password().is_none()
+            && !host.is_empty()
+            && match u.scheme() {
+                "https" => true,
+                "http" => loopback,
+                _ => false,
+            }
+    });
     if ok {
         Ok(())
     } else {
@@ -265,7 +280,8 @@ pub fn put_rule(app: &App, mut r: Rule) -> Result<Rule> {
         tx.execute(
             "DELETE FROM publish_tokens WHERE rule = (SELECT id FROM trust_rules WHERE name = ?1)",
             [&r.name],
-        )
+        )?;
+        drop_user_tokens(tx, &r.name)
     })?;
     rules(app)?
         .into_iter()
@@ -297,13 +313,33 @@ pub fn forget_repo(app: &App, repo: &str) -> Result<()> {
 }
 
 pub fn remove_rule(app: &App, name: &str) -> Result<()> {
-    let n = app
-        .db
-        .write(|tx| tx.execute("DELETE FROM trust_rules WHERE name = ?1", [name]))?;
+    let n = app.db.write(|tx| {
+        let n = tx.execute("DELETE FROM trust_rules WHERE name = ?1", [name])?;
+        if n > 0 {
+            drop_user_tokens(tx, name)?;
+        }
+        Ok::<_, rusqlite::Error>(n)
+    })?;
     if n == 0 {
         return Err(Error::NotFound(format!("no trust rule {name:?}")));
     }
     Ok(())
+}
+
+/// The name of the tokens of a user that `rule` gives, before the CI's
+/// claims (no other token may begin with `trust:`).
+fn token_name(rule: &str) -> String {
+    format!("trust:{rule}")
+}
+
+/// Deletes the tokens of a user that `rule` gave (a publisher token is
+/// checked against its rule when used; these are not).
+fn drop_user_tokens(tx: &rusqlite::Transaction, rule: &str) -> rusqlite::Result<usize> {
+    let name = token_name(rule);
+    tx.execute(
+        "DELETE FROM tokens WHERE name = ?1 OR substr(name, 1, length(?2)) = ?2",
+        params![name, format!("{name} ")],
+    )
 }
 
 // ---- tokens ----
@@ -330,6 +366,8 @@ struct Jwk {
 #[derive(Default)]
 pub struct Verifier {
     keys: Mutex<HashMap<String, (Instant, Vec<Jwk>)>>,
+    /// When an issuer's keys were last asked for again for an unknown key.
+    asked: Mutex<HashMap<String, Instant>>,
     seen: Mutex<HashMap<String, i64>>,
 }
 
@@ -344,6 +382,24 @@ fn client() -> &'static reqwest::Client {
     })
 }
 
+/// A JSON document of at most [`MAX_DOC`] bytes.
+async fn fetch_json(url: &str) -> std::result::Result<Value, String> {
+    let mut r = client()
+        .get(url)
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| e.to_string())?;
+    let mut body = Vec::new();
+    while let Some(c) = r.chunk().await.map_err(|e| e.to_string())? {
+        body.extend_from_slice(&c);
+        if body.len() > MAX_DOC {
+            return Err(format!("{url}: more than {MAX_DOC} bytes"));
+        }
+    }
+    serde_json::from_slice(&body).map_err(|e| format!("{url}: {e}"))
+}
+
 fn b64(s: &str) -> Result<Vec<u8>> {
     base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(s.trim_end_matches('='))
@@ -352,41 +408,34 @@ fn b64(s: &str) -> Result<Vec<u8>> {
 
 impl Verifier {
     /// The issuer's keys (from its discovery document), fetched again
-    /// when old or when asked to.
+    /// when old or when asked to (that at most every
+    /// [`KEYS_ASKED_AGAIN`]).
     async fn keys(&self, issuer: &str, again: bool) -> Result<Vec<Jwk>> {
-        if !again
-            && let Some((at, k)) = self
-                .keys
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(issuer)
-            && at.elapsed() < KEYS_KEPT
         {
-            return Ok(k.clone());
+            let kept = self.keys.lock().unwrap_or_else(|e| e.into_inner());
+            let kept = kept.get(issuer);
+            let mut asked = self.asked.lock().unwrap_or_else(|e| e.into_inner());
+            let lately = asked
+                .get(issuer)
+                .is_some_and(|t| t.elapsed() < KEYS_ASKED_AGAIN);
+            match kept {
+                Some((at, k)) if !again && at.elapsed() < KEYS_KEPT => return Ok(k.clone()),
+                Some((_, k)) if again && lately => return Ok(k.clone()),
+                _ if again => {
+                    asked.insert(issuer.to_string(), Instant::now());
+                }
+                _ => {}
+            }
         }
         let fail = |e: String| Error::Forbidden(format!("the issuer's keys: {e}"));
-        let doc: Value = client()
-            .get(format!("{issuer}/.well-known/openid-configuration"))
-            .send()
+        let doc = fetch_json(&format!("{issuer}/.well-known/openid-configuration"))
             .await
-            .and_then(|r| r.error_for_status())
-            .map_err(|e| fail(e.to_string()))?
-            .json()
-            .await
-            .map_err(|e| fail(e.to_string()))?;
+            .map_err(fail)?;
         let uri = doc["jwks_uri"]
             .as_str()
             .ok_or_else(|| fail("no jwks_uri in its discovery document".into()))?;
         check_issuer(uri).map_err(|e| fail(e.to_string()))?;
-        let set: Value = client()
-            .get(uri)
-            .send()
-            .await
-            .and_then(|r| r.error_for_status())
-            .map_err(|e| fail(e.to_string()))?
-            .json()
-            .await
-            .map_err(|e| fail(e.to_string()))?;
+        let set = fetch_json(uri).await.map_err(fail)?;
         let keys: Vec<Jwk> = serde_json::from_value(set["keys"].clone()).unwrap_or_default();
         self.keys
             .lock()
@@ -449,7 +498,7 @@ impl Verifier {
         Ok(claims)
     }
 
-    /// Whether a token (by its `jti`, else its signature) was exchanged
+    /// Whether a token (by its issuer and what it signs) was exchanged
     /// before; remembers it until it expires.
     fn used_before(&self, id: &str, exp: i64) -> bool {
         let now = pkgpod_base::now();
@@ -561,10 +610,10 @@ pub async fn exchange(app: &Arc<App>, jwt: &str, rule: Option<&str>) -> Result<V
         }
     };
     let exp = claims["exp"].as_i64().unwrap_or(0);
-    let id = claims["jti"]
-        .as_str()
-        .map(String::from)
-        .unwrap_or_else(|| jwt.rsplit('.').next().unwrap_or("").to_string());
+    // By what is signed, not by the signature or a jti: a signature can
+    // be written in more than one way for the same token.
+    let signed = jwt.trim().rsplit_once('.').map_or("", |x| x.0);
+    let id = pkgpod_base::digest::hex(&sha2::Sha256::digest(signed.as_bytes()));
     if app.oidc.used_before(&format!("{iss} {id}"), exp) {
         return Err(Error::Forbidden(
             "this OIDC token was exchanged already: ask the CI for a new one".into(),
@@ -596,8 +645,14 @@ pub async fn exchange(app: &Arc<App>, jwt: &str, rule: Option<&str>) -> Result<V
             let token = app2.auth.create_publisher_token(id, expires)?;
             return Ok((token, Some(expires)));
         }
-        let mut name = format!("trust:{} {who2}", r2.name);
-        name.truncate(200);
+        // The claims cut to fit, never the rule's name its tokens are
+        // found by.
+        let mut name = format!("{} ", token_name(&r2.name));
+        let mut end = who2.len().min(200usize.saturating_sub(name.len()));
+        while !who2.is_char_boundary(end) {
+            end -= 1;
+        }
+        name.push_str(&who2[..end]);
         let (token, info) =
             app2.auth
                 .create_token(&r2.user, &name, &r2.repos, r2.write, Some(expires))?;
@@ -745,6 +800,70 @@ mod tests {
         assert!(check_issuer("http://example.org").is_err());
         assert!(check_issuer("http://127.0.0.1.example.org").is_err());
         assert!(check_issuer("ftp://x").is_err());
+        assert!(check_issuer("http://[::1]:8080").is_ok());
+        // What reads as the loopback to a prefix check, but is not.
+        assert!(check_issuer("http://localhost:80@example.invalid").is_err());
+        assert!(check_issuer("http://127.0.0.1@example.invalid/").is_err());
+        assert!(check_issuer("http://[::ffff:1.2.3.4]").is_err());
+        assert!(check_issuer("http://[2001:db8::1]/").is_err());
+        assert!(check_issuer("https://user:pass@token.example.org").is_err());
+        assert!(check_issuer("https://").is_err());
+    }
+
+    /// A token naming a key its issuer does not have makes the server
+    /// ask for the keys again, but not for every such token.
+    #[tokio::test]
+    async fn unknown_keys_are_asked_for_seldom() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
+        let iss = testutil::Issuer::new(&url);
+        let (doc, jwks) = (iss.discovery().to_string(), iss.jwks().to_string());
+        let asked = Arc::new(AtomicUsize::new(0));
+        let a2 = asked.clone();
+        std::thread::spawn(move || {
+            for conn in l.incoming() {
+                let Ok(mut conn) = conn else { continue };
+                let mut r = BufReader::new(conn.try_clone().unwrap());
+                let mut line = String::new();
+                let _ = r.read_line(&mut line);
+                loop {
+                    let mut h = String::new();
+                    if r.read_line(&mut h).unwrap_or(0) == 0 || h == "\r\n" {
+                        break;
+                    }
+                }
+                a2.fetch_add(1, Ordering::SeqCst);
+                let body = if line.contains("openid-configuration") {
+                    &doc
+                } else {
+                    &jwks
+                };
+                let _ = write!(
+                    conn,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        let v = Verifier::default();
+        let t = iss.token(json!({"aud": "pkgpod"}));
+        let rest = t.split_once('.').unwrap().1;
+        let other = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"alg":"ES256","kid":"other","typ":"JWT"}"#);
+        let issuers = [url.clone()];
+        for _ in 0..5 {
+            assert!(
+                v.verify(&format!("{other}.{rest}"), &issuers)
+                    .await
+                    .is_err()
+            );
+        }
+        // The two documents once, and once again for the unknown key.
+        assert_eq!(asked.load(Ordering::SeqCst), 4);
+        assert!(v.verify(&t, &issuers).await.is_ok());
+        assert_eq!(asked.load(Ordering::SeqCst), 4);
     }
 
     #[test]

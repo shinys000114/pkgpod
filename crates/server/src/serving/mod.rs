@@ -46,8 +46,8 @@ pub fn router(app: Arc<App>) -> Router {
 }
 
 /// The caller from a Basic `Authorization` header (anonymous without one;
-/// `Err` for wrong credentials).
-pub fn basic_caller(app: &App, h: &HeaderMap) -> Result<Caller, Error> {
+/// `Err` for wrong credentials), sent to `surface` (api or serving).
+pub fn basic_caller(app: &App, h: &HeaderMap, surface: &'static str) -> Result<Caller, Error> {
     use base64::Engine;
     let Some(v) = h.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) else {
         return Ok(Caller::anonymous());
@@ -76,7 +76,9 @@ pub fn basic_caller(app: &App, h: &HeaderMap) -> Result<Caller, Error> {
                 .map(|(u, p)| (u.to_string(), p.to_string()))
         })
         .ok_or(Error::Unauthorized)?;
-    app.auth.login(&user, &pw).ok_or(Error::Unauthorized)
+    app.auth
+        .login(&user, &pw, surface)
+        .ok_or(Error::Unauthorized)
 }
 
 /// Request path segments, percent-decoded; `None` for unsafe ones.
@@ -374,20 +376,14 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
     // A browser sends cached Basic credentials with a form posted from any
     // site; it also says where the form came from. Writes from another
     // origin are refused (clients outside browsers send no Origin).
-    if !matches!(method, Method::GET | Method::HEAD)
-        && let Some(origin) = req
-            .headers()
-            .get(header::ORIGIN)
-            .and_then(|v| v.to_str().ok())
-        && origin.split_once("://").map(|x| x.1) != Some(host.as_str())
-    {
+    if crate::api::cross_site_write(&method, req.headers(), &host) {
         return status(StatusCode::FORBIDDEN);
     }
     // Checking a password is slow on purpose: off the async threads.
     let authorized = req.headers().contains_key(header::AUTHORIZATION);
     let caller = if authorized {
         let (app2, h) = (app.clone(), req.headers().clone());
-        match tokio::task::spawn_blocking(move || basic_caller(&app2, &h)).await {
+        match tokio::task::spawn_blocking(move || basic_caller(&app2, &h, "serving")).await {
             Ok(Ok(c)) => c,
             _ => return deny(&Caller::anonymous()),
         }
