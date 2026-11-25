@@ -47,7 +47,53 @@ impl DebInfo {
             self.architecture()
         )
     }
+
+    /// Package, Version and Architecture by dpkg's rules. A stanza apt
+    /// cannot read fails `apt-get update` for the whole dist, and the
+    /// name and version make the pool path. (Not for Yocto's ipk, read
+    /// the same way: its architectures have underscores.)
+    pub fn check_fields(&self) -> Result<(), Error> {
+        let bad = |field: &str, v: &str, why: &str| {
+            Err(Error::Format(format!("invalid {field} {v:?}: {why}")))
+        };
+        // As dpkg-deb --build takes it (dpkg folds letters to lower case).
+        let name = self.name();
+        if !name.starts_with(|c: char| c.is_ascii_alphanumeric())
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+        {
+            return bad(
+                "Package",
+                name,
+                "letters, digits, '+', '-' and '.', starting with a letter or digit",
+            );
+        }
+        if let Some(why) = crate::version::problem(self.version()) {
+            return bad("Version", self.version(), why);
+        }
+        // dpkg's architecture names; dpkg-deb only warns about others,
+        // but apt then refuses the dist.
+        let arch = self.architecture();
+        if !arch.starts_with(|c: char| c.is_ascii_alphanumeric())
+            || !arch.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        {
+            return bad(
+                "Architecture",
+                arch,
+                "one architecture: letters, digits and '-'",
+            );
+        }
+        Ok(())
+    }
 }
+
+/// Largest control file read: dpkg's own are a few KiB, and one that
+/// inflates to gigabytes must not be taken in whole.
+const MAX_CONTROL: u64 = 1 << 20;
+/// How much of control.tar is read to find the control file: the
+/// maintainer scripts and md5sums come with it, a few MiB at most.
+const MAX_CONTROL_TAR: u64 = 64 << 20;
 
 /// Reads a `.deb` file.
 pub fn read_deb(path: &Path) -> Result<DebInfo, Error> {
@@ -67,7 +113,7 @@ pub fn read_deb_from<R: Read>(r: R) -> Result<DebInfo, Error> {
         match id {
             "debian-binary" => {
                 let mut v = String::new();
-                entry.read_to_string(&mut v)?;
+                entry.by_ref().take(16).read_to_string(&mut v)?;
                 if !v.starts_with("2.") {
                     return Err(Error::Format(format!(
                         "unsupported deb format {:?}",
@@ -112,22 +158,25 @@ fn decompressor<'a, R: Read + 'a>(ext: &str, r: R) -> Result<Box<dyn Read + 'a>,
     })
 }
 
+/// The control file of control.tar. What follows it is not read: the ar
+/// entry passes the rest of its bytes to the hasher when dropped.
 fn read_control_tar(r: impl Read) -> Result<Paragraph, Error> {
-    let mut tar = tar::Archive::new(r);
-    let mut found = None;
-    for entry in tar.entries()? {
-        let mut entry = entry?;
+    let mut tar = tar::Archive::new(r.take(MAX_CONTROL_TAR));
+    // Raw entries: tar reads a GNU long name or a pax header whole,
+    // whatever size it claims.
+    for entry in tar.entries()?.raw(true) {
+        let entry = entry?;
         let path = entry.path()?.to_string_lossy().to_string();
         if path.trim_start_matches("./") == "control" {
             let mut text = String::new();
-            entry.read_to_string(&mut text)?;
-            found = Some(parse_paragraph(&text)?);
+            entry.take(MAX_CONTROL + 1).read_to_string(&mut text)?;
+            if text.len() as u64 > MAX_CONTROL {
+                return Err(Error::Format("control file larger than 1 MiB".into()));
+            }
+            return parse_paragraph(&text);
         }
     }
-    // Drain so the outer ar member is fully consumed by the hasher.
-    let mut inner = tar.into_inner();
-    io::copy(&mut inner, &mut io::sink())?;
-    found.ok_or_else(|| Error::Format("control.tar has no control file".into()))
+    Err(Error::Format("control.tar has no control file".into()))
 }
 
 #[cfg(test)]
@@ -175,6 +224,45 @@ mod tests {
             );
             assert_eq!(info.hashes.size, std::fs::metadata(&deb).unwrap().len());
         }
+    }
+
+    /// A tar of `entries` (name, type, data), each header as given.
+    fn tar_of(entries: &[(&str, tar::EntryType, &[u8])]) -> Vec<u8> {
+        let mut b = tar::Builder::new(Vec::new());
+        for (name, kind, data) in entries {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(*kind);
+            h.set_size(data.len() as u64);
+            h.set_mode(0o644);
+            h.as_gnu_mut().unwrap().name[..name.len()].copy_from_slice(name.as_bytes());
+            h.set_cksum();
+            b.append(&h, *data).unwrap();
+        }
+        b.into_inner().unwrap()
+    }
+
+    #[test]
+    fn control_tar_extensions_are_not_read() {
+        // tar would read a GNU long name whole, whatever size it claims;
+        // it is not taken as the next entry's name.
+        let t = tar_of(&[
+            ("././@LongLink", tar::EntryType::GNULongName, b"./control\0"),
+            ("decoy", tar::EntryType::Regular, b"Package: x\n"),
+        ]);
+        let err = read_control_tar(&t[..]).unwrap_err();
+        assert!(err.to_string().contains("no control file"), "{err}");
+        // What comes before the control file is read only so far.
+        let pad = vec![0u8; (MAX_CONTROL_TAR + 1024) as usize];
+        let t = tar_of(&[
+            ("./big", tar::EntryType::Regular, &pad),
+            ("./control", tar::EntryType::Regular, b"Package: x\n"),
+        ]);
+        assert!(read_control_tar(&t[..]).is_err());
+        let t = tar_of(&[
+            ("./small", tar::EntryType::Regular, b"x"),
+            ("./control", tar::EntryType::Regular, b"Package: x\n"),
+        ]);
+        assert_eq!(read_control_tar(&t[..]).unwrap().get("Package"), Some("x"));
     }
 
     #[test]

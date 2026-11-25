@@ -46,7 +46,7 @@ extra/<path>                            blob: another file, served at <path>
 Served tree:
 dists/<dist>/{Release,InRelease,Release.gpg}
 dists/<dist>/<component>/binary-<arch>/{Packages,Packages.gz,Packages.xz,Release}
-dists/<dist>/<component>/binary-<arch>/by-hash/SHA256/<sha256>
+dists/<dist>/<component>/binary-<arch>/by-hash/{SHA256,SHA512}/<hash>
 pool/<component>/<prefix>/<source>/<file>.deb
 key.asc                                 the public key (signed repositories)
 <path>                                  the other files

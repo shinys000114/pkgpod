@@ -76,6 +76,22 @@ impl Fx {
         Ok(self.e.upload("ppa", &up, &p, "t")?.version.map(|v| v.seq))
     }
 
+    fn upload_bytes(
+        &self,
+        filename: Option<&str>,
+        data: &[u8],
+        p: Value,
+    ) -> pkgpod_engine::Result<Option<i64>> {
+        let r = self.e.repo("ppa").unwrap();
+        let (sha256, size) = r.store().put_bytes(data).unwrap();
+        let up = Upload {
+            sha256,
+            size,
+            filename: filename.map(String::from),
+        };
+        Ok(self.e.upload("ppa", &up, &p, "t")?.version.map(|v| v.seq))
+    }
+
     fn served(&self, path: &str) -> Option<Vec<u8>> {
         let r = self.e.repo("ppa").unwrap();
         let v = self.e.current(&r).unwrap().unwrap();
@@ -304,4 +320,274 @@ fn conflicts_operations_and_rollback() {
     let rel = String::from_utf8(f.served("dists/c/Release").unwrap()).unwrap();
     assert!(rel.contains("Components: main\n"), "{rel}");
     assert!(f.op("dist-remove", json!({"name": "zzz"})).is_err());
+}
+
+/// A `.deb` made by hand around `control` (dpkg-deb refuses to build
+/// the broken ones).
+fn raw_deb(control: &[u8]) -> Vec<u8> {
+    let tgz = |name: &str, data: &[u8]| {
+        let mut b = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::fast(),
+        ));
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Regular);
+        h.set_size(data.len() as u64);
+        h.set_mode(0o644);
+        b.append_data(&mut h, name, data).unwrap();
+        b.into_inner().unwrap().finish().unwrap()
+    };
+    let mut a = ar::Builder::new(Vec::new());
+    for (name, data) in [
+        ("debian-binary", b"2.0\n".to_vec()),
+        ("control.tar.gz", tgz("./control", control)),
+        ("data.tar.gz", tgz("./marker", b"x")),
+    ] {
+        a.append(
+            &ar::Header::new(name.as_bytes().to_vec(), data.len() as u64),
+            &data[..],
+        )
+        .unwrap();
+    }
+    a.into_inner().unwrap()
+}
+
+fn control(name: &str, version: &str, arch: &str, extra: &str) -> Vec<u8> {
+    format!(
+        "Package: {name}\nVersion: {version}\nArchitecture: {arch}\nMaintainer: T <t@example.invalid>\n{extra}Description: d\n"
+    )
+    .into_bytes()
+}
+
+#[test]
+fn control_file_is_bounded() {
+    let Some(f) = fx() else { return };
+    f.op("dist-set", json!({"name": "noble"})).unwrap();
+    f.upload_bytes(None, &raw_deb(&control("small", "1", "all", "")), json!({}))
+        .unwrap();
+    // A control file a little over 1 MiB (it may inflate to gigabytes:
+    // none of it is kept).
+    let big = format!("X-Padding: {}\n", "a".repeat(1 << 20));
+    let err = f
+        .upload_bytes(None, &raw_deb(&control("big", "1", "all", &big)), json!({}))
+        .unwrap_err();
+    assert!(err.to_string().contains("larger than 1 MiB"), "{err}");
+}
+
+#[test]
+fn package_fields_follow_dpkg() {
+    let Some(f) = fx() else { return };
+    f.op("dist-set", json!({"name": "noble"})).unwrap();
+    let up = |name: &str, version: &str, arch: &str, extra: &str| {
+        f.upload_bytes(
+            Some("x.deb"),
+            &raw_deb(&control(name, version, arch, extra)),
+            json!({}),
+        )
+    };
+    up("ok-name+1.0", "1:2.0~rc1+dfsg-1ubuntu0.1", "amd64", "").unwrap();
+    up("two", "2:1.0:3-4-5", "arm64", "").unwrap();
+    for (name, version, arch, extra, field) in [
+        ("a/b", "1.0", "all", "Source: ab\n", "Package"),
+        ("he_llo", "1.0", "all", "", "Package"),
+        ("-x", "1.0", "all", "", "Package"),
+        ("hello", "a1.0", "all", "", "Version"),
+        ("hello", "1.0/2", "all", "", "Version"),
+        ("hello", "x:1.0", "all", "", "Version"),
+        ("hello", "1.0-", "all", "", "Version"),
+        ("hello", "1.0-a_b", "all", "", "Version"),
+        ("hello", "99999999999:1", "all", "", "Version"),
+        ("hello", "1.0", "amd64 arm64", "", "Architecture"),
+        ("hello", "1.0", "am_d64", "", "Architecture"),
+    ] {
+        let err = up(name, version, arch, extra).unwrap_err();
+        assert!(
+            matches!(err, Error::Invalid(_))
+                && err.to_string().contains(&format!("invalid {field}")),
+            "{name} {version} {arch}: {err}"
+        );
+    }
+    // apt still reads the dist.
+    let pk =
+        String::from_utf8(f.served("dists/noble/main/binary-amd64/Packages").unwrap()).unwrap();
+    assert!(
+        pk.contains("Package: ok-name+1.0\n") && !pk.contains("hello"),
+        "{pk}"
+    );
+}
+
+#[test]
+fn upload_errors_name_the_upload_not_the_store() {
+    let Some(f) = fx() else { return };
+    f.op("dist-set", json!({"name": "noble"})).unwrap();
+    let bad = raw_deb(b"Package: x\nno colon here\n");
+    let store = f.dir.path().display().to_string();
+    let err = f
+        .upload_bytes(Some("bad_1_all.deb"), &bad, json!({}))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.starts_with("bad_1_all.deb: ") && !err.contains(&store),
+        "{err}"
+    );
+    let err = f
+        .upload_bytes(None, &bad, json!({}))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("line 2") && !err.contains(&store), "{err}");
+}
+
+#[test]
+fn by_hash_for_the_hashes_apt_asks_for() {
+    let Some(f) = fx() else { return };
+    f.op("dist-set", json!({"name": "noble"})).unwrap();
+    let hello = build_deb(f.dir.path(), "hello", "1.0-1", "amd64", "xz", "");
+    f.upload(&hello, json!({})).unwrap();
+    let rel = String::from_utf8(f.served("dists/noble/Release").unwrap()).unwrap();
+    // apt fetches an index by the strongest hash the Release lists
+    // (SHA512), or SHA256 when told to.
+    let mut n = 0;
+    for family in ["SHA256", "SHA512"] {
+        let list = rel
+            .split(&format!("\n{family}:\n"))
+            .nth(1)
+            .unwrap_or_else(|| panic!("no {family} in {rel}"));
+        for line in list.lines().take_while(|l| l.starts_with(' ')) {
+            let w: Vec<&str> = line.split_whitespace().collect();
+            let (hash, path) = (w[0], w[2]);
+            if path.ends_with("/Release") {
+                continue;
+            }
+            let dir = path.rsplit_once('/').unwrap().0;
+            let got = f
+                .served(&format!("dists/noble/{dir}/by-hash/{family}/{hash}"))
+                .unwrap_or_else(|| panic!("no by-hash/{family} for {path}"));
+            assert_eq!(got, f.served(&format!("dists/noble/{path}")).unwrap());
+            n += 1;
+        }
+    }
+    assert!(n >= 12, "{n}");
+}
+
+#[test]
+fn valid_until_goes_with_valid_days() {
+    let Some(f) = fx() else { return };
+    f.op("dist-set", json!({"name": "noble"})).unwrap();
+    f.e.update_settings("ppa", &json!({"valid_days": 7}))
+        .unwrap();
+    f.e.republish("ppa", "t").unwrap();
+    let rel = String::from_utf8(f.served("dists/noble/Release").unwrap()).unwrap();
+    assert!(rel.contains("\nValid-Until: "), "{rel}");
+    f.e.update_settings("ppa", &json!({"valid_days": 0}))
+        .unwrap();
+    f.e.republish("ppa", "t").unwrap();
+    let rel = String::from_utf8(f.served("dists/noble/Release").unwrap()).unwrap();
+    assert!(!rel.contains("Valid-Until"), "{rel}");
+}
+
+#[test]
+fn release_fields_are_one_line() {
+    let Some(f) = fx() else { return };
+    for k in ["suite", "codename", "origin", "label", "description"] {
+        let err = f
+            .op(
+                "dist-set",
+                json!({"name": "noble", k: "x\nNotAutomatic: yes"}),
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)), "{k}: {err}");
+    }
+    for k in ["origin", "label"] {
+        let err =
+            f.e.update_settings("ppa", &json!({k: "x\nNotAutomatic: yes"}))
+                .unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)), "{k}: {err}");
+    }
+    f.op(
+        "dist-set",
+        json!({"name": "noble", "label": "Team packages"}),
+    )
+    .unwrap();
+    let rel = String::from_utf8(f.served("dists/noble/Release").unwrap()).unwrap();
+    assert!(
+        !rel.contains("NotAutomatic") && rel.contains("Label: Team packages\n"),
+        "{rel}"
+    );
+}
+
+#[test]
+fn move_into_the_same_dist_is_refused() {
+    let Some(f) = fx() else { return };
+    f.op("dist-set", json!({"name": "a"})).unwrap();
+    let one = build_deb(f.dir.path(), "tool", "1.0", "all", "gzip", "");
+    f.upload(&one, json!({})).unwrap();
+    for op in ["move", "copy"] {
+        let err = f
+            .op(op, json!({"from": "a", "to": "a", "packages": ["tool"]}))
+            .unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)), "{op}: {err}");
+    }
+    let pk = String::from_utf8(f.served("dists/a/main/binary-all/Packages").unwrap()).unwrap();
+    assert!(pk.contains("Package: tool\n"), "{pk}");
+}
+
+#[test]
+fn copy_and_promote_keep_to_the_target_architectures() {
+    let Some(f) = fx() else { return };
+    f.op("dist-set", json!({"name": "wide"})).unwrap();
+    f.op(
+        "dist-set",
+        json!({"name": "only", "architectures": ["amd64"]}),
+    )
+    .unwrap();
+    let world = build_deb(f.dir.path(), "world", "2.0", "arm64", "gzip", "");
+    let tool = build_deb(f.dir.path(), "tool", "1.0", "all", "gzip", "");
+    f.upload(&world, json!({"dists": ["wide"]})).unwrap();
+    f.upload(&tool, json!({"dists": ["wide"]})).unwrap();
+    for op in ["copy", "move"] {
+        let err = f
+            .op(
+                op,
+                json!({"from": "wide", "to": "only", "packages": ["world"]}),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::Invalid(_)) && err.to_string().contains("publishes amd64"),
+            "{op}: {err}"
+        );
+    }
+    // arch:all goes anywhere.
+    f.op(
+        "copy",
+        json!({"from": "wide", "to": "only", "packages": ["tool"]}),
+    )
+    .unwrap();
+
+    // Promotion into another repository's dist of the same name.
+    f.e.create_repo(
+        NewRepo {
+            name: "stable".into(),
+            format: "deb".into(),
+            kind: Kind::Hosted,
+            storage: None,
+            settings: json!({}),
+        },
+        "t",
+    )
+    .unwrap();
+    f.e.op(
+        "stable",
+        "dist-set",
+        &json!({"name": "wide", "architectures": ["amd64"]}),
+        "t",
+        true,
+    )
+    .unwrap();
+    let paths = |p: &str| vec![format!("dists/wide/main/{p}")];
+    let err =
+        f.e.plan_promote("ppa", None, &paths("world_2.0_arm64.deb"), "stable", "t")
+            .unwrap_err();
+    assert!(err.to_string().contains("publishes amd64"), "{err}");
+    f.e.plan_promote("ppa", None, &paths("tool_1.0_all.deb"), "stable", "t")
+        .unwrap();
 }

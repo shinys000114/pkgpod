@@ -23,6 +23,55 @@ pub fn without_epoch(v: &str) -> &str {
     }
 }
 
+/// What dpkg finds wrong with a version (`parseversion`, with the
+/// warnings dpkg-deb refuses to build), or None. Blanks around it are
+/// refused too: the version is part of the pool file's name.
+pub fn problem(v: &str) -> Option<&'static str> {
+    if v.is_empty() {
+        return Some("empty");
+    }
+    if v.contains(char::is_whitespace) {
+        return Some("it has spaces");
+    }
+    let rest = match v.split_once(':') {
+        Some((epoch, rest)) => {
+            match epoch.parse::<i32>() {
+                Ok(n) if n >= 0 => {}
+                _ if epoch.is_empty() => return Some("the epoch is empty"),
+                Err(e) if *e.kind() == std::num::IntErrorKind::PosOverflow => {
+                    return Some("the epoch is too big");
+                }
+                _ => return Some("the epoch is not a number"),
+            }
+            if rest.is_empty() {
+                return Some("nothing after the epoch");
+            }
+            rest
+        }
+        None => v,
+    };
+    let (upstream, revision) = rest.rsplit_once('-').unwrap_or((rest, ""));
+    if rest.ends_with('-') {
+        return Some("the revision is empty");
+    }
+    if !upstream.starts_with(|c: char| c.is_ascii_digit()) {
+        return Some("it does not start with a digit");
+    }
+    if !upstream
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || ".+~-:".contains(c))
+    {
+        return Some("it has a character other than letters, digits and . + ~ - :");
+    }
+    if !revision
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || ".+~".contains(c))
+    {
+        return Some("its revision has a character other than letters, digits and . + ~");
+    }
+    None
+}
+
 fn split(v: &str) -> (&str, &str, &str) {
     let v = v.trim();
     let (epoch, rest) = match v.find(':') {
@@ -131,6 +180,47 @@ mod tests {
     fn epoch_is_stripped() {
         assert_eq!(without_epoch("1:2.0-1"), "2.0-1");
         assert_eq!(without_epoch("2.0"), "2.0");
+    }
+
+    #[test]
+    fn problems_match_dpkg() {
+        if Command::new("dpkg").arg("--version").output().is_err() {
+            crate::testutil::missing_tool("dpkg");
+            return;
+        }
+        for v in [
+            "1.0",
+            "0",
+            "1:2:3-4-5",
+            "+1:2",
+            "2147483647:1",
+            "1.0~rc1+dfsg-1ubuntu0.1",
+            "2:1.0~beta1+git20260101-0ubuntu0.1",
+            "a1.0",
+            "x:1.0",
+            ":1",
+            "1:",
+            "1:-1",
+            "-1:1",
+            "1.0-",
+            "1.0-1-",
+            "1.0-a_b",
+            "1.0/2",
+            "1.0_2",
+            "1.0-1:2",
+            "1:a",
+            "99999999999:1",
+            "2147483648:1",
+        ] {
+            let dpkg = Command::new("dpkg")
+                .args(["--validate-version", v])
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert_eq!(problem(v).is_none(), dpkg, "{v}: {:?}", problem(v));
+        }
+        assert!(problem("1.0 2").is_some() && problem("").is_some());
     }
 
     /// Cross-checks every pair against dpkg when it is installed. Only valid
