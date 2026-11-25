@@ -26,6 +26,13 @@ pub struct Incoming {
     len: u64,
 }
 
+impl Incoming {
+    /// Where its bytes are being written (another reader may follow it).
+    pub fn path(&self) -> &Path {
+        self.file.path()
+    }
+}
+
 impl Write for Incoming {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         use sha2::Digest as _;

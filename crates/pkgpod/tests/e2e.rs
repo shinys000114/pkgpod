@@ -5710,12 +5710,20 @@ fn files_hosted() {
 /// A file server that answers every request after `delay`: a listing of
 /// one file at a directory, the file's content otherwise.
 fn slow_files(delay: Duration) -> String {
+    slow_files_counted(delay).0
+}
+
+/// As slow_files, with the paths asked for.
+fn slow_files_counted(delay: Duration) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
     use std::io::{BufRead, BufReader, Write};
     let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
+    let asked: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let asked2 = asked.clone();
     std::thread::spawn(move || {
         for conn in l.incoming() {
             let Ok(mut conn) = conn else { continue };
+            let asked = asked2.clone();
             std::thread::spawn(move || {
                 let mut r = BufReader::new(conn.try_clone().unwrap());
                 let mut line = String::new();
@@ -5726,8 +5734,27 @@ fn slow_files(delay: Duration) -> String {
                         break;
                     }
                 }
-                std::thread::sleep(delay);
                 let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
+                asked.lock().unwrap().push(path.clone());
+                std::thread::sleep(delay);
+                if path.ends_with("big.bin") {
+                    // 4 MiB in 64 pieces, 20 ms apart.
+                    let _ = write!(
+                        conn,
+                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        4 << 20
+                    );
+                    for i in 0..64u32 {
+                        let piece: Vec<u8> = (0..(64u32 << 10))
+                            .map(|j| ((i * 7 + j) % 251) as u8)
+                            .collect();
+                        if conn.write_all(&piece).is_err() {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    return;
+                }
                 let body = if path.ends_with('/') {
                     "<html><body><a href=\"x.txt\">x.txt</a></body></html>".to_string()
                 } else {
@@ -5741,7 +5768,121 @@ fn slow_files(delay: Duration) -> String {
             });
         }
     });
-    url
+    (url, asked)
+}
+
+/// A files proxy: a file asked for by several at once is fetched once;
+/// as a group's last member it answers what the others do not have.
+#[test]
+fn files_proxy_shared_and_grouped() {
+    let s = Server::start();
+    let (up, asked) = slow_files_counted(Duration::from_millis(1500));
+    s.cli(&[
+        "repo",
+        "create",
+        "p",
+        "-f",
+        "files",
+        "-k",
+        "proxy",
+        "-s",
+        &format!("upstream={up}/"),
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    // Three at once: one upstream fetch, three answers.
+    let got: Vec<(u16, String)> = std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..3)
+            .map(|i| {
+                let u = s.url("/p/a/x.txt");
+                sc.spawn(move || {
+                    std::thread::sleep(Duration::from_millis(100 * i));
+                    get(&u, None)
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for (st, body) in &got {
+        assert_eq!((*st, body.as_str()), (200, "x"), "{got:?}");
+    }
+    let n = asked
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| *p == "/a/x.txt")
+        .count();
+    assert_eq!(n, 1, "{:?}", asked.lock().unwrap());
+    assert!(s.cli(&["cache", "p"]).unwrap().contains("a/x.txt"));
+    // A large one arriving slowly: those who come while it does read it
+    // as it is written, whole.
+    let want: Vec<u8> = (0..64u32)
+        .flat_map(|i| (0..(64u32 << 10)).map(move |j| ((i * 7 + j) % 251) as u8))
+        .collect();
+    let bodies: Vec<Vec<u8>> = std::thread::scope(|sc| {
+        let hs: Vec<_> = [0u64, 1700, 2200]
+            .into_iter()
+            .map(|wait| {
+                let u = s.url("/p/big.bin");
+                sc.spawn(move || {
+                    std::thread::sleep(Duration::from_millis(wait));
+                    reqwest::blocking::get(&u)
+                        .unwrap()
+                        .bytes()
+                        .unwrap()
+                        .to_vec()
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for b in &bodies {
+        assert!(b.len() == want.len() && *b == want, "{} bytes", b.len());
+    }
+    let big = asked
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| *p == "/big.bin")
+        .count();
+    assert_eq!(big, 1, "{:?}", asked.lock().unwrap());
+
+    // In a group, after a hosted repository: what that has comes from it,
+    // the rest from the upstream; listings show both.
+    s.cli(&["repo", "create", "h", "-f", "files", "-s", "public=true"])
+        .unwrap();
+    let f = s.dir.path().join("own.txt");
+    std::fs::write(&f, "own").unwrap();
+    s.cli(&["upload", "h", f.to_str().unwrap(), "-s", "path=a/own.txt"])
+        .unwrap();
+    s.cli(&[
+        "repo",
+        "create",
+        "g",
+        "-f",
+        "files",
+        "-k",
+        "group",
+        "-s",
+        "members=h,p",
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    assert_eq!(get(&s.url("/g/a/own.txt"), None).1, "own");
+    assert_eq!(get(&s.url("/g/a/x.txt"), None).1, "x");
+    let (st, l) = get(&s.url("/g/a/"), None);
+    assert_eq!(st, 200, "{l}");
+    assert!(
+        l.contains(r#"href="own.txt""#) && l.contains(r#"href="x.txt""#),
+        "{l}"
+    );
+    assert_eq!(
+        get(&s.url("/g/a/nothing.txt"), None).0,
+        200,
+        "the upstream answers every file here"
+    );
 }
 
 /// Syncs on one storage wait for a slot (syncs_per_storage).

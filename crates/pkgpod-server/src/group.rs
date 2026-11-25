@@ -291,25 +291,30 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
             crate::serve::status(StatusCode::NOT_FOUND)
         }
         Ask::Listing => {
-            let (app2, rel) = (app.clone(), at.rel.clone());
-            let entries = tokio::task::spawn_blocking(move || {
-                let mut out: Vec<ListEntry> = Vec::new();
-                let mut any = false;
-                for m in &ms {
-                    if let Some(es) = crate::serve::dir_entries(&app2, m, &rel) {
-                        any = true;
-                        for e in es {
-                            if !out.iter().any(|o| o.name == e.name) {
-                                out.push(e);
-                            }
+            // Every member's entries, in order; a files proxy's from its
+            // upstream.
+            let mut out: Vec<ListEntry> = Vec::new();
+            let mut any = false;
+            for m in &ms {
+                let es = if m.repo.kind == Kind::Proxy && m.repo.format == "files" {
+                    crate::proxy::group_entries(&app, m, &at.rel).await
+                } else {
+                    let (app2, m2, rel) = (app.clone(), m.clone(), at.rel.clone());
+                    tokio::task::spawn_blocking(move || crate::serve::dir_entries(&app2, &m2, &rel))
+                        .await
+                        .ok()
+                        .flatten()
+                };
+                if let Some(es) = es {
+                    any = true;
+                    for e in es {
+                        if !out.iter().any(|o| o.name == e.name) {
+                            out.push(e);
                         }
                     }
                 }
-                any.then_some(out)
-            })
-            .await
-            .ok()
-            .flatten();
+            }
+            let entries = any.then_some(out);
             match entries {
                 Some(es) => {
                     crate::serve::listing(&at.raw_path, es, &query, head, &Default::default())
