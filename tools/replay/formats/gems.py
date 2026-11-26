@@ -162,6 +162,8 @@ def seed(p, fx):
 
 
 Q = "/quick/Marshal.4.8"
+# Where a repository's badges are, on every serving listener.
+BADGES = "/.well-known/pkgpod/badges"
 
 
 def reads(c, who):
@@ -211,6 +213,13 @@ def reads(c, who):
     # Methods no repository takes, and the API's address in other case.
     for method, rel in (("OPTIONS", API), ("PATCH", API), ("GET", "/API/v1/gems")):
         add(f"gems gempub {method} {rel} {who}", who, method, f"/gempub{rel}")
+    # A gem's version badge: its latest version by Gem::Version's order
+    # (a prerelease and a platform's are versions too), which nothing in
+    # the served tree shows; one not there; none asked for.
+    for repo in REPOS:
+        for q in ("?package=hello-pk", "?package=yank-me", "?package=nope", ""):
+            add(f"gems badge {repo} version{q} {who}", who, "GET",
+                f"{BADGES}/{repo}/version.svg{q}")
 
 
 def writes(c, who):
@@ -479,6 +488,20 @@ def writes_end(c):
         ("DELETE", "/gempub" + YANK, dict(FORM, Origin="http://elsewhere.example"),
          b"gem_name=hello-pk&version=1.0.0"),
         ("GET", "/gempub/info/cross-site", {}, None)])
+    # Gem::Version's order, of versions of other lengths and with
+    # letters: the full index takes a name's newest release (1.0 is
+    # 1.0.0, older than 1.0.0.1), the version badge its latest of all (a
+    # letter is older than a number and than nothing; 1.0a1 is 1.0.a.1).
+    o = "/gempub"
+    c.seq("gems version order writer", "writer", [
+        ("POST", o + API, OCTET, gem("order-pk", v))
+        for v in ("1.0", "1.0.0", "1.0.1", "1.0.0.1", "1.0.0.a", "1.0.0.b", "1.0a1")] + [
+        ("POST", o + API, OCTET, gem("order-pk", "1.0.0", "x86_64-linux")),
+        ("GET", f"{o}/info/order-pk", {}, None),
+        ("GET", f"{o}/specs.4.8.gz", {}, None),
+        ("GET", f"{o}/latest_specs.4.8.gz", {}, None),
+        ("GET", f"{o}/prerelease_specs.4.8.gz", {}, None),
+        ("GET", f"{BADGES}{o}/version.svg?package=order-pk", {}, None)])
 
 
 def after(c, who):
@@ -493,6 +516,9 @@ def after(c, who):
             add(f"after gems {repo}{rel} {who}", who, "GET", f"/{repo}{rel}")
     for w in IDENTS:
         add(f"after gems gempriv/info/w-{w} {who}", who, "GET", f"/gempriv/info/w-{w}")
+    for name in ("hello-pk", "yank-me", "s-writer", "order-pk", "p-writer"):
+        add(f"after gems badge gempub version {name} {who}", who, "GET",
+            f"{BADGES}/gempub/version.svg?package={name}")
     # versions without its whole, after a whole of it: a HEAD, a 304 and
     # ranges.
     v = "/gempub/versions"
