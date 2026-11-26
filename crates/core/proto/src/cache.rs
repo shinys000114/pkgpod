@@ -157,6 +157,34 @@ mod tests {
         assert_eq!(cache_control(Class::Stored, 500, true), "no-store");
     }
 
+    #[test]
+    fn if_none_match_is_compared_weakly() {
+        let e = "\"abc\"";
+        // Weak or strong on either side, any of a list, `*`.
+        for inm in [
+            "\"abc\"",
+            "W/\"abc\"",
+            "\"x\",\"abc\"",
+            " \"x\" , W/\"abc\" ",
+            "*",
+            " * ",
+        ] {
+            assert!(inm_matches(inm, e), "{inm}");
+        }
+        assert!(inm_matches("\"abc\"", "W/\"abc\""));
+        // W/ is cased; an unquoted tag is not the quoted one.
+        for inm in [
+            "\"abcd\"",
+            "W/\"x\"",
+            "\"x\", \"y\"",
+            "w/\"abc\"",
+            "abc",
+            "",
+        ] {
+            assert!(!inm_matches(inm, e), "{inm}");
+        }
+    }
+
     /// On these four the server's `private()` gives the same value today
     /// (where it differs, [`private`] says).
     #[test]
