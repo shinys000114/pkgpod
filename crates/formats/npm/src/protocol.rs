@@ -137,11 +137,22 @@ pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
             (&Method::PUT, []) => Some(Change::Put { unpublish: false }),
             (&Method::PUT, ["-rev", r]) | (&Method::DELETE, ["-rev", r]) => {
                 // What the client read must still be what is here: else it
-                // would undo another's publish.
-                let here = a
-                    .current
-                    .as_ref()
-                    .map(|v| crate::rev(&name, &packages(&*app, v, &name)));
+                // would undo another's publish. The package's tree is read
+                // off the async threads.
+                let here = match a.current.clone() {
+                    Some(v) => {
+                        let (app2, name2) = (app.clone(), name.clone());
+                        match tokio::task::spawn_blocking(move || {
+                            crate::rev(&name2, &packages(&*app2, &v, &name2))
+                        })
+                        .await
+                        {
+                            Ok(here) => Some(here),
+                            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+                        }
+                    }
+                    None => None,
+                };
                 if here.as_deref() != Some(*r) {
                     return err(
                         StatusCode::CONFLICT,
