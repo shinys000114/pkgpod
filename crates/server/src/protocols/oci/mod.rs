@@ -30,6 +30,7 @@ use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
 use pkgpod_base::Digest;
 use pkgpod_base::store::Incoming;
+use pkgpod_engine::cache::CacheRow;
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{Kind, RepoInfo};
 use pkgpod_oci::{Images, Parsed, manifest_path, parse_digest, tag_path};
@@ -40,6 +41,7 @@ use crate::App;
 use crate::auth::{Caller, Role};
 
 mod group;
+mod host;
 mod lists;
 mod manifests;
 mod proxy;
@@ -138,6 +140,29 @@ fn parse_target(segs: &[String]) -> Option<(Vec<String>, Target)> {
         };
     }
     None
+}
+
+/// What the registry's code asks of the server it runs in.
+pub trait Host: Send + Sync {
+    /// Keeps a proxy's cache row, unless one was kept for its path
+    /// after `began` or the proxy's upstream changed meanwhile; whether
+    /// it was kept. Blocks.
+    fn keep(&self, r: &RepoInfo, row: &CacheRow, began: Option<i64>) -> crate::Result<bool>;
+    /// Whether proxy `repo`'s upstream is quiet: it did not answer in
+    /// time lately, and what is kept is served without asking it.
+    fn is_quiet(&self, repo: &str, path: &str) -> bool;
+    /// How long a proxy's upstream has to answer (seconds).
+    fn quiet_secs(&self) -> i64;
+    /// `fetch` waited for a while; past that `None` (and what is kept
+    /// is served), the fetch going on: what it brings is kept if `got`
+    /// says it got something.
+    fn waited(
+        &self,
+        repo: &str,
+        path: &str,
+        fetch: Fetch,
+        got: fn(&Option<Fetched>) -> bool,
+    ) -> futures_util::future::BoxFuture<'static, Option<Option<Fetched>>>;
 }
 
 /// A proxy's upstream registry, as the registry's code asks it; calls

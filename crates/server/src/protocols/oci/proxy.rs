@@ -217,7 +217,7 @@ pub(super) async fn proxy(
         let (app, r) = (app.clone(), r.clone());
         move |rw: CacheRow| {
             let (app2, r2) = (app.clone(), r.clone());
-            blocking(move || crate::serving::proxy::keep(&app2, &r2, &rw, Some(now)))
+            blocking(move || app2.keep(&r2, &rw, Some(now)))
         }
     };
     match target {
@@ -230,7 +230,7 @@ pub(super) async fn proxy(
                 .is_some_and(|h| !by_tag || now - h.fetched < ttl);
             // While the upstream did not answer in time: what a tag
             // named is kept, without asking it.
-            let quiet = have.is_some() && crate::serving::proxy::is_quiet(&r.name, &path);
+            let quiet = have.is_some() && app.is_quiet(&r.name, &path);
             let got = if fresh || quiet {
                 have.clone()
             } else {
@@ -244,8 +244,7 @@ pub(super) async fn proxy(
                     let (re3, name3) = (re2.clone(), r2.name.clone());
                     // Given up while its path is still held for it (the
                     // client's timeout is an hour, for blobs).
-                    let within =
-                        std::time::Duration::from_secs(crate::serving::proxy::QUIET_SECS as u64);
+                    let within = std::time::Duration::from_secs(app2.quiet_secs() as u64);
                     let Some(Ok((body, mt, digest))) = blocking(move || {
                         reg2.oci
                             .upstream
@@ -300,12 +299,8 @@ pub(super) async fn proxy(
                 let fetched = match &have {
                     // What a tag named is kept: not waited for long.
                     Some(_) => {
-                        let then = |got: Option<Fetched>| async move {
-                            !matches!(got, None | Some(Err(None)))
-                        };
-                        crate::serving::proxy::waited(&r.name, &path, fetch, then)
-                            .await
-                            .flatten()
+                        let got = |got: &Option<Fetched>| !matches!(got, None | Some(Err(None)));
+                        app.waited(&r.name, &path, fetch, got).await.flatten()
                     }
                     None => fetch.await,
                 };
