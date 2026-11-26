@@ -118,8 +118,8 @@ pub fn decide(g: &Gate) -> Result<(), Refusal> {
 mod tests {
     use super::*;
 
-    /// (case, role, anonymous, need, kind, labelled, today's status, the
-    /// row that changes it)
+    /// (case, role, anonymous, need, kind, labelled, today's status, what
+    /// the rule gives, the row that changes it)
     type Case = (
         &'static str,
         Option<Role>,
@@ -128,12 +128,15 @@ mod tests {
         Kind,
         bool,
         u16,
+        Result<(), Refusal>,
         Option<&'static str>,
     );
 
     /// The answers the request corpus records today (files, Debian, OCI,
-    /// npm and cargo repositories, tools/replay), held to the rule: equal
-    /// but for the rows the rule changes on purpose, each named.
+    /// npm and cargo repositories, tools/replay), held to the rule: its
+    /// status equal but for the rows the rule changes on purpose, each
+    /// named; and which refusal it is, as a format words a proxy's 405
+    /// and a label's apart.
     #[test]
     fn the_rule_gives_what_is_answered_today_but_for_the_named_rows() {
         use Kind::*;
@@ -153,6 +156,7 @@ mod tests {
                 Hosted,
                 false,
                 401,
+                Err(Refusal::Unauthenticated),
                 None,
             ),
             (
@@ -163,6 +167,7 @@ mod tests {
                 Hosted,
                 false,
                 404,
+                Err(Refusal::Hidden),
                 None,
             ),
             (
@@ -173,6 +178,7 @@ mod tests {
                 Hosted,
                 false,
                 200,
+                Ok(()),
                 None,
             ),
             (
@@ -183,6 +189,7 @@ mod tests {
                 Hosted,
                 false,
                 200,
+                Ok(()),
                 None,
             ),
             (
@@ -193,6 +200,7 @@ mod tests {
                 Hosted,
                 false,
                 401,
+                Err(Refusal::Unauthenticated),
                 None,
             ),
             (
@@ -203,6 +211,7 @@ mod tests {
                 Hosted,
                 false,
                 403,
+                Err(Refusal::Forbidden),
                 None,
             ),
             (
@@ -213,6 +222,7 @@ mod tests {
                 Hosted,
                 false,
                 403,
+                Err(Refusal::Forbidden),
                 None,
             ),
             (
@@ -223,6 +233,7 @@ mod tests {
                 Hosted,
                 false,
                 201,
+                Ok(()),
                 None,
             ),
             (
@@ -233,6 +244,7 @@ mod tests {
                 Proxy,
                 false,
                 405,
+                Err(Refusal::ReadThrough),
                 None,
             ),
             (
@@ -243,6 +255,7 @@ mod tests {
                 Proxy,
                 false,
                 405,
+                Err(Refusal::ReadThrough),
                 None,
             ),
             (
@@ -253,6 +266,7 @@ mod tests {
                 Group,
                 false,
                 404,
+                Err(Refusal::Hidden),
                 None,
             ),
             (
@@ -263,6 +277,7 @@ mod tests {
                 Group,
                 false,
                 200,
+                Ok(()),
                 None,
             ),
             // OCI proxies and groups answer a write as any write before
@@ -275,6 +290,7 @@ mod tests {
                 Proxy,
                 false,
                 401,
+                Err(Refusal::ReadThrough),
                 Some("R6"),
             ),
             (
@@ -285,6 +301,7 @@ mod tests {
                 Proxy,
                 false,
                 403,
+                Err(Refusal::ReadThrough),
                 Some("R6"),
             ),
             (
@@ -295,6 +312,7 @@ mod tests {
                 Proxy,
                 false,
                 405,
+                Err(Refusal::ReadThrough),
                 None,
             ),
             (
@@ -305,6 +323,7 @@ mod tests {
                 Group,
                 false,
                 403,
+                Err(Refusal::ReadThrough),
                 Some("R6"),
             ),
             (
@@ -315,6 +334,7 @@ mod tests {
                 Group,
                 false,
                 405,
+                Err(Refusal::ReadThrough),
                 None,
             ),
             (
@@ -325,6 +345,7 @@ mod tests {
                 Group,
                 false,
                 404,
+                Err(Refusal::Hidden),
                 None,
             ),
             (
@@ -335,6 +356,7 @@ mod tests {
                 Hosted,
                 false,
                 401,
+                Err(Refusal::Unauthenticated),
                 None,
             ),
             (
@@ -345,6 +367,7 @@ mod tests {
                 Hosted,
                 false,
                 200,
+                Ok(()),
                 None,
             ),
             (
@@ -355,6 +378,7 @@ mod tests {
                 Hosted,
                 false,
                 403,
+                Err(Refusal::Forbidden),
                 None,
             ),
             (
@@ -365,6 +389,7 @@ mod tests {
                 Hosted,
                 false,
                 403,
+                Err(Refusal::Forbidden),
                 None,
             ),
             // cargo refuses a write to a label before it looks at the
@@ -377,6 +402,7 @@ mod tests {
                 Hosted,
                 true,
                 405,
+                Err(Refusal::LabelReadOnly),
                 None,
             ),
             (
@@ -387,6 +413,7 @@ mod tests {
                 Hosted,
                 true,
                 405,
+                Err(Refusal::LabelReadOnly),
                 None,
             ),
             (
@@ -397,6 +424,41 @@ mod tests {
                 Hosted,
                 true,
                 405,
+                Err(Refusal::LabelReadOnly),
+                None,
+            ),
+            // A labelled version is read as the current one is.
+            (
+                "cargo labelled read, anonymous",
+                r,
+                true,
+                Need::READ,
+                Hosted,
+                true,
+                200,
+                Ok(()),
+                None,
+            ),
+            (
+                "cargo private labelled read, reader",
+                r,
+                false,
+                Need::READ,
+                Hosted,
+                true,
+                200,
+                Ok(()),
+                None,
+            ),
+            (
+                "cargo private labelled read, writer",
+                w,
+                false,
+                Need::READ,
+                Hosted,
+                true,
+                200,
+                Ok(()),
                 None,
             ),
             (
@@ -407,24 +469,24 @@ mod tests {
                 Hosted,
                 false,
                 404,
+                Err(Refusal::Hidden),
                 None,
             ),
         ];
-        for &(case, role, anonymous, need, kind, labelled, today, row) in cases {
-            let got = match decide(&Gate {
+        for &(case, role, anonymous, need, kind, labelled, today, rule, row) in cases {
+            let got = decide(&Gate {
                 role,
                 anonymous,
                 need,
                 kind,
                 labelled,
-            }) {
-                Ok(()) => None,
-                Err(e) => Some(e.status()),
-            };
+            });
+            assert_eq!(got, rule, "{case}");
+            let refused = got.err().map(Refusal::status);
             let today_refused = (today >= 400).then_some(today);
             match row {
-                None => assert_eq!(got, today_refused, "{case}"),
-                Some(row) => assert_ne!(got, today_refused, "{case}: {row} changes nothing"),
+                None => assert_eq!(refused, today_refused, "{case}"),
+                Some(row) => assert_ne!(refused, today_refused, "{case}: {row} changes nothing"),
             }
         }
     }
