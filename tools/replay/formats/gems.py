@@ -313,6 +313,51 @@ def writes(c, who):
         ("PUT", f"/gemempty/{u}.gem", OCTET, gem(u, "1.0.0")),
         ("PUT", f"/gempub/{u}.gem", OCTET, gem(u, "1.0.0", summary="other bytes")),
         ("GET", "/gempub/names", {}, None)])
+    spec_pushes(c, who)
+
+
+def swap(text, old, new):
+    """`text` with `old` (which must be in it) put as `new`."""
+    if old not in text:
+        raise SystemExit(f"gems: no {old!r} to swap")
+    return text.replace(old, new)
+
+
+def spec_pushes(c, who):
+    """Gems whose metadata has what bundler resolves with and gem
+    install shows, pushed and read back (the compact index line, the
+    quick gemspecs, the full index)."""
+    s = f"s-{who}"
+    # As hello-pk 1.1.0 of the seed: dependencies, the Ruby and RubyGems
+    # it needs, two emails, a description; and a dependency with no name
+    # and a requirement with no version, both left out.
+    deps = HELLO_11["deps"] + [("", [(">=", "0")], "runtime"),
+                               ("thor", [(">=", ""), ("~>", "1.2")], "runtime")]
+    full = gem(s, "1.1.0", **dict(HELLO_11, deps=deps))
+    # A prerelease whose one email is a string, whose summary is no
+    # string, which says no Ruby it needs and no day it was built.
+    pre = gemspec(s, "1.2.0.beta2", email=["one@example.invalid"])
+    pre = swap(pre, "email:\n- one@example.invalid\n", "email: one@example.invalid\n")
+    pre = swap(pre, f"summary: {s} for the replay\n", "summary: true\n")
+    pre = swap(pre, f"date: {DATE}\n", "date: someday\n")
+    ruby = "\n".join(["required_ruby_version: !ruby/object:Gem::Requirement",
+                      *requirement(((">=", "0"),), 2)]) + "\n"
+    pre = swap(pre, ruby, "")
+    # A version that is a number, of one email in a list.
+    num = gem(s, "2", email=["one@example.invalid"])
+    r = "/gempub"
+    c.seq(f"gems push with a spec {who}", who, [
+        ("POST", r + API, OCTET, full),
+        ("POST", r + API, OCTET, gem(s, "1.2.0.beta2", meta=pre)),
+        ("POST", r + API, OCTET, num),
+        ("GET", f"{r}/info/{s}", {}, None),
+        ("GET", f"{r}{Q}/{s}-1.1.0.gemspec.rz", {}, None),
+        ("GET", f"{r}{Q}/{s}-1.2.0.beta2.gemspec.rz", {}, None),
+        ("GET", f"{r}{Q}/{s}-2.gemspec.rz", {}, None),
+        ("GET", f"{r}/gems/{s}-1.1.0.gem", {}, None),
+        ("GET", f"{r}/specs.4.8.gz", {}, None),
+        ("GET", f"{r}/latest_specs.4.8.gz", {}, None),
+        ("GET", f"{r}/prerelease_specs.4.8.gz", {}, None)])
 
 
 def refused(c, who):
