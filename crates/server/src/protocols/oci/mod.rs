@@ -25,9 +25,9 @@ use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
 use axum::extract::Request;
-use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
+use http::{HeaderValue, Method, StatusCode, header};
 use pkgpod_base::Digest;
 use pkgpod_base::store::Incoming;
 use pkgpod_engine::cache::CacheRow;

@@ -136,8 +136,8 @@ pub(super) async fn proxy(
     image: &str,
     target: &Target,
     method: &Method,
-    uri: axum::http::Uri,
-    headers: axum::http::HeaderMap,
+    uri: http::Uri,
+    headers: http::HeaderMap,
 ) -> Response {
     use pkgpod_engine::cache::{CacheKind, CacheRow};
     let head = *method == Method::HEAD;

@@ -2647,6 +2647,7 @@ dependencies = [
  "ed25519-dalek",
  "futures-util",
  "glob",
+ "http",
  "httpdate",
  "hyper-util",
  "jiff",
