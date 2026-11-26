@@ -30,7 +30,8 @@ one past all others' to come last. The kinds:
   rule         (name, what it masks): one of the RULES
   mask         f(masker): for a run, g(path, headers, body, after_writes,
                etag) -> (headers, body), an answer masked, in turn, by
-               the rules (counted in masker.counts)
+               the rules (counted in masker.counts); after_writes,
+               whether its request is one of the writes or after them
   fuzz sample  bytes: a valid body, for the fuzz to cut and spoil
 
 And, where the format has them: FUZZ, its repositories and the words

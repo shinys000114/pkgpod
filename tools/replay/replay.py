@@ -364,13 +364,21 @@ def corpus(fx):
     answer says so. Reads first, then writes, then reads of what they
     made: as each identity, the formats' parts in order of their places
     (see formats/__init__.py)."""
+    return make_corpus(fx).out
+
+
+def make_corpus(fx):
+    """The corpus (see corpus) as a core.Corpus: its requests (out), and
+    where its writes start (writes_from)."""
     c = Corpus(fx)
     for who in IDENTS:
         for part in parts("reads"):
             part(c, who)
     for part in parts("reads end"):
         part(c)
-    # Writes, by each identity.
+    # Writes, by each identity: from the first on, an answer may hold
+    # the run's times.
+    c.writes_from = len(c.out)
     for who in IDENTS:
         for part in parts("writes"):
             part(c, who)
@@ -387,7 +395,7 @@ def corpus(fx):
         c.add(rid, who, method, path, h, body)
     for part in parts("last"):
         part(c)
-    return c.out
+    return c
 
 
 # ---- what is compared, and what is masked ---------------------------------
@@ -423,7 +431,8 @@ def run(root, binary, out_path, profdir=None):
                          f"this run's is {PORT_BASE}: run with REPLAY_PORT_BASE="
                          f"{seed_info['port_base']}, or seed again")
     # Answers are compared by the request's name: no two the same.
-    entries = corpus(os.path.join(s, "fixtures"))
+    made = make_corpus(os.path.join(s, "fixtures"))
+    entries = made.out
     names = set()
     for entry in entries:
         if entry["id"] in names:
@@ -448,11 +457,9 @@ def run(root, binary, out_path, profdir=None):
         p.start(profdir)
         wait_port(SERVE, p.proc)
         seen = {}
-        after_writes = False
-        for entry in entries:
+        for i, entry in enumerate(entries):
             rid, who = entry["id"], entry["who"]
-            if rid.startswith(("put ", "oci push", "oci mono")):
-                after_writes = True
+            after_writes = i >= made.writes_from
             loc = None
             last_body = b""
             got = []

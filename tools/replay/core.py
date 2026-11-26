@@ -270,6 +270,9 @@ class Corpus:
         # The seed's fixtures.
         self.fx = fx
         self.out = []
+        # The index in out of the first request of the writes (set when
+        # they start): the answers from it on are "after writes".
+        self.writes_from = None
 
     def seq(self, rid, ident, steps):
         self.out.append({"id": rid, "who": ident, "steps": steps})
