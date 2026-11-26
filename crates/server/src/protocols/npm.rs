@@ -9,19 +9,29 @@
 
 use std::sync::Arc;
 
-use axum::body::Body;
-use axum::extract::Request;
-use axum::http::{HeaderValue, Method, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use http::{HeaderValue, Method, StatusCode, header};
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Version};
 use pkgpod_npm::{Packages, VersionMeta, tag_path, tarball_name, version_path};
+use pkgpod_proto::body::{self, Request, Response};
 use serde_json::{Value, json};
 
 use pkgpod_proto::{Caller, Role};
 
+/// A status, no body.
+fn bare(st: StatusCode) -> Response {
+    let mut r = Response::new(body::empty());
+    *r.status_mut() = st;
+    r
+}
+
 fn reply(st: StatusCode, v: Value) -> Response {
-    let mut r = (st, axum::Json(v)).into_response();
+    let mut r = bare(st);
+    *r.body_mut() = body::full(serde_json::to_vec(&v).expect("a JSON value"));
+    r.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
     r.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     r
@@ -165,8 +175,7 @@ pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
             }
             return match change {
                 Change::Put { unpublish } => {
-                    let body = match axum::body::to_bytes(req.into_body(), pkgpod_npm::MAX_PUBLISH)
-                        .await
+                    let body = match body::to_bytes(req.into_body(), pkgpod_npm::MAX_PUBLISH).await
                     {
                         Ok(b) => b,
                         Err(_) => {
@@ -270,13 +279,13 @@ async fn read(
                 .and_then(|x| x.to_str().ok())
                 .is_some_and(|x| pkgpod_proto::cache::inm_matches(x, &etag))
             {
-                return StatusCode::NOT_MODIFIED.into_response();
+                return bare(StatusCode::NOT_MODIFIED);
             }
             let len = body.len();
             let mut resp = Response::new(if req.method() == Method::HEAD {
-                Body::empty()
+                body::empty()
             } else {
-                Body::from(body)
+                body::full(body)
             });
             let h = resp.headers_mut();
             h.insert(
@@ -488,7 +497,7 @@ async fn remove(app: &Arc<dyn Host>, a: &Ask, name: &str, version: Option<String
     }
 }
 
-async fn publish(app: &Arc<dyn Host>, a: &Ask, name: &str, body: axum::body::Bytes) -> Response {
+async fn publish(app: &Arc<dyn Host>, a: &Ask, name: &str, body: bytes::Bytes) -> Response {
     let (app2, r, actor, name2) = (
         app.clone(),
         a.repo.clone(),
@@ -580,7 +589,7 @@ async fn dist_tags(app: &Arc<dyn Host>, a: &Ask, rest: &[String], req: Request) 
                 return r;
             }
             let version = if *m == Method::PUT {
-                let Ok(b) = axum::body::to_bytes(req.into_body(), 4096).await else {
+                let Ok(b) = body::to_bytes(req.into_body(), 4096).await else {
                     return err(StatusCode::BAD_REQUEST, "the body is the version, as JSON");
                 };
                 match serde_json::from_slice::<Value>(&b)
@@ -639,7 +648,10 @@ impl Host for crate::App {
         req: Request,
     ) -> futures_util::future::BoxFuture<'a, Response> {
         Box::pin(async move {
-            crate::serving::serve_counted(self, repo, "", &file, &sha, name, None, false, req).await
+            let req = req.map(axum::body::Body::new);
+            crate::serving::serve_counted(self, repo, "", &file, &sha, name, None, false, req)
+                .await
+                .map(body::boxed)
         })
     }
 }

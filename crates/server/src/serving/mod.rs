@@ -629,7 +629,9 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
             caller: crate::protocols::who(&app, &caller),
             role: role.map(Into::into),
         };
-        return crate::protocols::npm::handle(app, ask, req).await;
+        return crate::protocols::npm::handle(app, ask, req.map(pkgpod_proto::body::boxed))
+            .await
+            .map(axum::body::Body::new);
     }
     if served.repo.format == "terraform" && matches!(method, Method::GET | Method::HEAD) {
         // A module archive through a signed URL needs no token.
