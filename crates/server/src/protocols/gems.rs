@@ -11,8 +11,8 @@ use axum::extract::Request;
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use pkgpod_engine::{RepoInfo, Upload};
+use pkgpod_proto::host::Host;
 
-use crate::App;
 use crate::auth::{Caller, Role};
 
 fn text(st: StatusCode, msg: impl Into<String>) -> Response {
@@ -34,7 +34,7 @@ pub fn is_api(method: &Method, rel: &[String]) -> bool {
 }
 
 pub async fn handle(
-    app: Arc<App>,
+    app: Arc<dyn Host>,
     repo: RepoInfo,
     caller: Caller,
     role: Option<Role>,
@@ -60,15 +60,16 @@ pub async fn handle(
     }
     let actor = caller.name().to_string();
     if req.method() == Method::POST {
-        let (sha256, size) = match crate::serving::body_to_store(
-            repo.store(),
-            req.into_body(),
-            pkgpod_gems::MAX_GEM,
-        )
-        .await
+        let (sha256, size) = match app
+            .store_body(
+                repo.store(),
+                pkgpod_proto::body::boxed(req.into_body()),
+                pkgpod_gems::MAX_GEM,
+            )
+            .await
         {
             Ok(x) => x,
-            Err(e) => return text(StatusCode::BAD_REQUEST, e.to_string()),
+            Err(e) => return text(StatusCode::BAD_REQUEST, e),
         };
         let up = Upload {
             sha256,
@@ -77,10 +78,10 @@ pub async fn handle(
         };
         let (app2, name) = (app.clone(), repo.name.clone());
         let res = tokio::task::spawn_blocking(move || {
-            app2.engine
+            app2.engine()
                 .upload(&name, &up, &serde_json::json!({}), &actor)
                 .inspect(|o| {
-                    app2.auth.audit(&actor, "push", &name, &o.summary);
+                    app2.audit(&actor, "push", &name, &o.summary);
                 })
         })
         .await;
@@ -96,9 +97,9 @@ pub async fn handle(
     let body = axum::body::to_bytes(req.into_body(), 64 << 10)
         .await
         .unwrap_or_default();
-    let mut p = crate::serving::query_params(&query);
+    let mut p = pkgpod_proto::query::params(&query);
     if let serde_json::Value::Object(b) =
-        crate::serving::query_params(&String::from_utf8_lossy(&body))
+        pkgpod_proto::query::params(&String::from_utf8_lossy(&body))
     {
         p.as_object_mut().expect("object").extend(b);
     }
@@ -112,11 +113,11 @@ pub async fn handle(
     let (app2, name) = (app.clone(), repo.name.clone());
     let (g, f) = (gem.clone(), full.clone());
     let res = tokio::task::spawn_blocking(move || {
-        app2.engine
+        app2.engine()
             .change(&name, &actor, |_, e| {
                 pkgpod_gems::Gems::yank(e, &g, &f, true)
             })
-            .inspect(|o| app2.auth.audit(&actor, "yank", &name, &o.summary))
+            .inspect(|o| app2.audit(&actor, "yank", &name, &o.summary))
     })
     .await;
     match res {
