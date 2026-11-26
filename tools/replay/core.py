@@ -21,15 +21,27 @@ import time
 
 
 def port_base():
-    """REPLAY_PORT_BASE, 29090 if unset (see replay.py)."""
-    v = os.environ.get("REPLAY_PORT_BASE", "29090")
-    if not re.fullmatch(r"[0-9]+", v) or not 1024 <= int(v) <= 65535 - 9:
-        raise SystemExit(f"REPLAY_PORT_BASE {v!r}: a port from 1024 to {65535 - 9}")
-    return int(v)
+    """REPLAY_PORT_BASE, 29090 if unset or empty (see replay.py), and
+    None; or, if it is no port base, None and why."""
+    v = os.environ.get("REPLAY_PORT_BASE") or "29090"
+    if re.fullmatch(r"[0-9]+", v) and 1024 <= int(v) <= 65535 - 9:
+        return int(v), None
+    return None, f"REPLAY_PORT_BASE {v!r}: a port from 1024 to {65535 - 9}"
 
 
-PORT_BASE = port_base()
-MGMT, SERVE, UP, UPB = PORT_BASE, PORT_BASE + 1, PORT_BASE + 9, PORT_BASE + 8
+# Only seed and run take the ports (they listen and connect), and they
+# ask need_ports() first; build, diff and cover take none, so a value
+# that is no port base refuses only seed and run. Until then such a base
+# stands as 0, whose ports are no run's.
+PORT_BASE, NO_PORT_BASE = port_base()
+_BASE = PORT_BASE or 0
+MGMT, SERVE, UP, UPB = _BASE, _BASE + 1, _BASE + 9, _BASE + 8
+
+
+def need_ports():
+    """Exits if REPLAY_PORT_BASE is no port base."""
+    if NO_PORT_BASE:
+        raise SystemExit(NO_PORT_BASE)
 
 
 def tool_hash():

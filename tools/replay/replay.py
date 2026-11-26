@@ -25,14 +25,15 @@ rules in RULES, each counted in the report.
                                         the runs reached, and those they did not
 
 Needs python3 (its standard library only) and dpkg-deb; nothing outside
-127.0.0.1. Ports from REPLAY_PORT_BASE (29090 if unset): the base
-(management), base+1 (serving), base+9 and base+8 (the upstream stubs,
-open and asking for a token). A seed is made at one base and holds it
-(the listener, the proxies' upstreams): a run at another is refused.
-Runs at other bases, each on its own ROOT, go on side by side. The seed
-is made again after every change of the schema baseline (a build
-refuses data of another baseline). A format's serving code moves only
-once the corpus covers it.
+127.0.0.1. Ports from REPLAY_PORT_BASE (29090 if unset or empty): the
+base (management), base+1 (serving), base+9 and base+8 (the upstream
+stubs, open and asking for a token); seed and run refuse a value that
+is no port base (build, diff and cover take no port). A seed is made at
+one base and holds it (the listener, the proxies' upstreams): a run at
+another is refused. Runs at other bases, each on its own ROOT, go on
+side by side. The seed is made again after every change of the schema
+baseline (a build refuses data of another baseline). A format's serving
+code moves only once the corpus covers it.
 
 The corpus is in formats/, a module per format with its part of the
 seed, the stub, the requests and the masks (see formats/__init__.py),
@@ -110,6 +111,7 @@ def start_upstream():
 # ---- the seed -------------------------------------------------------------
 
 def seed(root, binary):
+    core.need_ports()
     s = os.path.join(root, "seed")
     if os.path.exists(s):
         shutil.rmtree(s)
@@ -410,6 +412,7 @@ def built(binary):
 
 
 def run(root, binary, out_path, profdir=None):
+    core.need_ports()
     s = os.path.join(root, "seed")
     # Before anything is copied or moved: a seed is run at its own ports.
     seed_info = json.load(open(os.path.join(s, "SEED.json")))
