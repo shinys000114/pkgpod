@@ -63,4 +63,5 @@ FORMATS = [import_module(f"{__name__}.{name}") for name in (
     "cargo",
     "go",
     "gems",
+    "composer",
 )]
