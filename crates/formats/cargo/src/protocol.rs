@@ -16,7 +16,7 @@ use pkgpod_engine::{RepoInfo, Version};
 use pkgpod_proto::body::{self, Request, Response};
 use serde_json::{Value, json};
 
-use pkgpod_proto::{Caller, Role};
+use pkgpod_proto::{Caller, Gate, Need, Refusal, Role};
 
 /// A status, no body.
 fn bare(st: StatusCode) -> Response {
@@ -76,12 +76,8 @@ pub struct Ask {
 }
 
 pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
-    if a.role.is_none() {
-        return if a.caller.anonymous() {
-            unauthorized()
-        } else {
-            not_found()
-        };
+    if let Some(r) = gate(&a, Need::READ) {
+        return r;
     }
     let method = req.method().clone();
     let rel: Vec<&str> = a.rel.iter().map(String::as_str).collect();
@@ -184,7 +180,7 @@ pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
             search(&app, &a, req.uri().query().unwrap_or("").to_string()).await
         }
         (["api", "v1", "crates", "new"], false) if method == Method::PUT => {
-            if let Some(r) = no_write(&a) {
+            if let Some(r) = gate(&a, Need::WRITE) {
                 return r;
             }
             publish(&app, &a, req).await
@@ -193,7 +189,7 @@ pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
             if (method == Method::DELETE && *op == "yank")
                 || (method == Method::PUT && *op == "unyank") =>
         {
-            if let Some(r) = no_write(&a) {
+            if let Some(r) = gate(&a, Need::WRITE) {
                 return r;
             }
             let (app2, r, actor) = (
@@ -220,24 +216,33 @@ pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
     }
 }
 
-/// A change: only on the current version, by a writer.
-fn no_write(a: &Ask) -> Option<Response> {
-    if a.labelled {
-        return Some(err(
-            StatusCode::METHOD_NOT_ALLOWED,
-            "a labelled version is read-only",
-        ));
-    }
-    if a.role >= Some(Role::Write) {
-        return None;
-    }
-    Some(if a.caller.anonymous() {
-        unauthorized()
-    } else {
-        err(
+/// The answer to a request that needs `need` by a caller the rights
+/// rule refuses, if so: a change is only made to the current version,
+/// by a writer.
+fn gate(a: &Ask, need: Need) -> Option<Response> {
+    let g = Gate {
+        role: a.role,
+        anonymous: a.caller.anonymous(),
+        need,
+        kind: a.repo.kind,
+        labelled: a.labelled,
+    };
+    let refused = pkgpod_proto::decide(&g).err()?;
+    Some(match refused {
+        Refusal::Unauthenticated => unauthorized(),
+        Refusal::Hidden => not_found(),
+        Refusal::Forbidden => err(
             StatusCode::FORBIDDEN,
             format!("no write access to {}", a.repo.name),
-        )
+        ),
+        Refusal::LabelReadOnly => err(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "a labelled version is read-only",
+        ),
+        Refusal::ReadThrough => err(
+            StatusCode::METHOD_NOT_ALLOWED,
+            format!("{} is read only", a.repo.name),
+        ),
     })
 }
 

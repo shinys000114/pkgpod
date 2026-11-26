@@ -131,9 +131,9 @@ mod tests {
         Option<&'static str>,
     );
 
-    /// The answers the request corpus records today (files, Debian, OCI
-    /// and npm repositories, tools/replay), held to the rule: equal but
-    /// for the rows the rule changes on purpose, each named.
+    /// The answers the request corpus records today (files, Debian, OCI,
+    /// npm and cargo repositories, tools/replay), held to the rule: equal
+    /// but for the rows the rule changes on purpose, each named.
     #[test]
     fn the_rule_gives_what_is_answered_today_but_for_the_named_rows() {
         use Kind::*;
@@ -365,6 +365,48 @@ mod tests {
                 Hosted,
                 false,
                 403,
+                None,
+            ),
+            // cargo refuses a write to a label before it looks at the
+            // role, as the rule does.
+            (
+                "cargo labelled publish, anonymous",
+                r,
+                true,
+                Need::WRITE,
+                Hosted,
+                true,
+                405,
+                None,
+            ),
+            (
+                "cargo labelled publish, no grant",
+                r,
+                false,
+                Need::WRITE,
+                Hosted,
+                true,
+                405,
+                None,
+            ),
+            (
+                "cargo labelled publish, writer",
+                w,
+                false,
+                Need::WRITE,
+                Hosted,
+                true,
+                405,
+                None,
+            ),
+            (
+                "cargo private publish, no grant",
+                None,
+                false,
+                Need::WRITE,
+                Hosted,
+                false,
+                404,
                 None,
             ),
         ];
