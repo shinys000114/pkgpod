@@ -318,9 +318,7 @@ async fn base64_to_store(
             Ok(Some(chunk)) => {
                 sent += chunk.len() as u64;
                 if sent > MAX_SENT {
-                    Err(format!(
-                        "the form's field \"file\" is larger than {MAX_SENT} bytes"
-                    ))
+                    Err(pkgpod_proto::form::field_too_large("file", MAX_SENT))
                 } else {
                     b64.decode(&chunk).map_err(|e| format!("file: {e}"))
                 }

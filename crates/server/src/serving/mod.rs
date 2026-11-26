@@ -1963,7 +1963,7 @@ where
     futures_util::pin_mut!(stream);
     let mut n = 0u64;
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| Error::Invalid(format!("reading the upload: {e}")))?;
+        let chunk = chunk.map_err(|e| Error::Invalid(pkgpod_proto::form::reading_failed(e)))?;
         let chunk = chunk.as_ref();
         n += chunk.len() as u64;
         if n > limit {
@@ -1994,11 +1994,11 @@ pub async fn field_capped(
     while let Some(chunk) = field
         .chunk()
         .await
-        .map_err(|e| Error::Invalid(format!("reading the upload: {e}")))?
+        .map_err(|e| Error::Invalid(pkgpod_proto::form::reading_failed(e)))?
     {
         if out.len() + chunk.len() > max {
-            return Err(Error::Invalid(format!(
-                "the form's field {name:?} is larger than {max} bytes"
+            return Err(Error::Invalid(pkgpod_proto::form::field_too_large(
+                &name, max,
             )));
         }
         out.extend_from_slice(&chunk);
@@ -2314,6 +2314,46 @@ th, td {{ text-align:left; padding:.45rem .6rem; border-bottom:1px solid var(--l
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// axum's Multipart, as swift, Galaxy and the API read forms, and
+    /// pkgpod-proto's, as the moved formats do, refuse a field in the
+    /// same words.
+    #[tokio::test]
+    async fn form_fields_refused_alike() {
+        use axum::extract::FromRequest;
+        const CT: &str = "multipart/form-data; boundary=b";
+        let too_large =
+            b"--b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nxyz\r\n--b--\r\n";
+        let cut_short = b"--b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nxy";
+        for (body, words) in [
+            (
+                &too_large[..],
+                "the form's field \"a\" is larger than 2 bytes",
+            ),
+            (
+                &cut_short[..],
+                "reading the upload: Error parsing `multipart/form-data` request",
+            ),
+        ] {
+            let req = axum::http::Request::post("/")
+                .header(header::CONTENT_TYPE, CT)
+                .body(Body::from(body))
+                .unwrap();
+            let mut m = axum::extract::Multipart::from_request(req, &())
+                .await
+                .unwrap();
+            let f = m.next_field().await.unwrap().unwrap();
+            let axum_says = field_capped(f, 2).await.unwrap_err().to_string();
+            assert_eq!(axum_says, words);
+            let req = axum::http::Request::post("/")
+                .header(header::CONTENT_TYPE, CT)
+                .body(pkgpod_proto::body::full(body))
+                .unwrap();
+            let mut m = pkgpod_proto::form::Form::of(req, MAX_UPLOAD).unwrap();
+            let f = m.next_field().await.unwrap().unwrap();
+            assert_eq!(f.capped(2).await.unwrap_err(), axum_says);
+        }
+    }
 
     #[test]
     fn cache_rules() {

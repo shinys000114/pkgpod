@@ -24,6 +24,18 @@ pub const UNREADABLE: &str = "Error parsing `multipart/form-data` request";
 /// The text fields of upload forms are read up to this size.
 pub const MAX_FIELD: usize = 64 << 10;
 
+/// Said of an upload that cannot be read on (a form's part, or any body
+/// being stored), `e` being why.
+pub fn reading_failed(e: impl std::fmt::Display) -> String {
+    format!("reading the upload: {e}")
+}
+
+/// Said of a form's field `name` larger than the `max` bytes it is read
+/// up to.
+pub fn field_too_large(name: &str, max: impl std::fmt::Display) -> String {
+    format!("the form's field {name:?} is larger than {max} bytes")
+}
+
 /// Why a form is not read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormError {
@@ -142,12 +154,10 @@ impl Field<'_> {
             .part
             .chunk()
             .await
-            .map_err(|_| format!("reading the upload: {}", FormError::Unreadable))?
+            .map_err(|e| reading_failed(why(e)))?
         {
             if out.len() + chunk.len() > max {
-                return Err(format!(
-                    "the form's field {name:?} is larger than {max} bytes"
-                ));
+                return Err(field_too_large(&name, max));
             }
             out.extend_from_slice(&chunk);
         }
@@ -213,6 +223,16 @@ mod tests {
         assert_eq!(
             a.capped(1).await.unwrap_err(),
             "the form's field \"a\" is larger than 1 bytes"
+        );
+        // The server says these too, of the forms it reads with axum's
+        // Multipart.
+        assert_eq!(
+            field_too_large("file", 7u64),
+            "the form's field \"file\" is larger than 7 bytes"
+        );
+        assert_eq!(
+            reading_failed(FormError::Unreadable),
+            "reading the upload: Error parsing `multipart/form-data` request"
         );
         // Over the form's limit: unreadable, as a body cut short is.
         let mut f = Form::of(req(Some("multipart/form-data; boundary=b"), body), 40).unwrap();
