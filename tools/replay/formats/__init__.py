@@ -43,7 +43,11 @@ answers that may hold the run's times (their parts are masked as
 "parts of answers with times", and the roots of its versions made in
 the run as "NAME times").
 
-A new format is a module here and a line below.
+A new format is a module here and a line below. The curated requests
+keep their order around its own. The fuzz's are drawn from its FUZZ and
+fuzz samples too, and the mutants from its single requests, so most of
+them are others; and the tool's hash is another, so the seed is made
+again.
 """
 
 from importlib import import_module

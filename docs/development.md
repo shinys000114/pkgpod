@@ -363,9 +363,10 @@ tools/replay/replay.py run /tmp/r /tmp/r/new /tmp/r/new.json
 tools/replay/replay.py diff /tmp/r/old.json /tmp/r/new.json
 ```
 
-Its ports come from `REPLAY_PORT_BASE` (29090 if unset: the base,
-base+1, base+8 and base+9), and a seed is run only at the base it was
-made at, so runs at other bases, each on its own root, go side by side.
+Its ports come from `REPLAY_PORT_BASE` (29090 if unset or empty: the
+base, base+1, base+8 and base+9), and a seed is run only at the base it
+was made at, so runs at other bases, each on its own root, go side by
+side.
 The corpus is in `tools/replay/formats/`, a module per format with its
 part of the seed, the stub, the requests and the masks, each part at
 its place in the order; a new format is a module there and a line in
