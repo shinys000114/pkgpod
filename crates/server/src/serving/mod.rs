@@ -1018,7 +1018,10 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
             };
         }
         let who = crate::protocols::who(&app, &caller);
-        return crate::protocols::pypi::upload(app, served.repo, who, req).await;
+        let req = req.map(pkgpod_proto::body::boxed);
+        return crate::protocols::pypi::upload(app, served.repo, who, req)
+            .await
+            .map(axum::body::Body::new);
     }
     if method == Method::PUT {
         if role < Some(Role::Write) {
@@ -1086,7 +1089,7 @@ async fn get(
     if s.repo.format == "pypi"
         && let Some(r) = crate::protocols::pypi::redirect(&rel, raw_path)
     {
-        return r;
+        return r.map(axum::body::Body::new);
     }
     let rel_s = rel.join("/");
     let followed = if s.repo.format == "files" {
@@ -1146,7 +1149,7 @@ async fn get(
                     .map(String::from);
                 if let Some(r) = crate::protocols::pypi::index_page(&s.repo, &t, accept, head).await
                 {
-                    return r;
+                    return r.map(axum::body::Body::new);
                 }
             }
             let entries = t

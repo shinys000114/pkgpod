@@ -6,18 +6,22 @@
 
 use std::sync::Arc;
 
-use axum::body::Body;
-use axum::extract::Request;
-use axum::http::{HeaderValue, StatusCode, header};
-use axum::response::{IntoResponse, Redirect, Response};
+use http::{HeaderValue, StatusCode, header};
 use pkgpod_engine::tree::{Entry, Tree};
 use pkgpod_engine::{RepoInfo, Upload};
 use pkgpod_proto::Caller;
+use pkgpod_proto::body::{self, Request, Response};
 use pkgpod_proto::host::Host;
 use serde_json::json;
 
 fn text(st: StatusCode, msg: impl Into<String>) -> Response {
-    (st, msg.into()).into_response()
+    let mut r = Response::new(body::full(msg.into()));
+    *r.status_mut() = st;
+    r.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    r
 }
 
 /// A project page asked for by a name not normalized: there.
@@ -32,7 +36,15 @@ pub fn redirect(rel: &[String], raw_path: &str) -> Option<Response> {
     let base = raw_path.trim_end_matches('/');
     let cut = base.rfind('/').map_or(0, |i| i + 1);
     let to = format!("{}{norm}/", &base[..cut]);
-    Some(Redirect::permanent(&to).into_response())
+    Some(match HeaderValue::try_from(to) {
+        Ok(location) => {
+            let mut r = Response::new(body::empty());
+            *r.status_mut() = StatusCode::PERMANENT_REDIRECT;
+            r.headers_mut().insert(header::LOCATION, location);
+            r
+        }
+        Err(e) => text(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    })
 }
 
 /// The q-value `accept` gives `ty` (0 if absent).
@@ -76,9 +88,9 @@ pub async fn index_page(
         return None;
     };
     let body = if head {
-        Body::empty()
+        body::empty()
     } else {
-        Body::from(tokio::fs::read(r.store().path(sha256)).await.ok()?)
+        body::full(tokio::fs::read(r.store().path(sha256)).await.ok()?)
     };
     let mut resp = Response::new(body);
     let h = resp.headers_mut();
@@ -97,10 +109,7 @@ pub async fn index_page(
 /// `content`; the metadata fields are not trusted (the file's own are
 /// read), `sha256_digest` is checked when sent.
 pub async fn upload(app: Arc<dyn Host>, repo: RepoInfo, caller: Caller, req: Request) -> Response {
-    let form = pkgpod_proto::form::Form::of(
-        req.map(pkgpod_proto::body::boxed),
-        crate::serving::MAX_UPLOAD,
-    );
+    let form = pkgpod_proto::form::Form::of(req, crate::serving::MAX_UPLOAD);
     let mut m = match form {
         Ok(m) => m,
         Err(e) => return text(StatusCode::BAD_REQUEST, format!("not a form upload: {e}")),
