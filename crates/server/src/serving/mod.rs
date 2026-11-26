@@ -786,7 +786,9 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
             caller: crate::protocols::who(&app, &caller),
             role: role.map(Into::into),
         };
-        return crate::protocols::gems::handle(app, ask, req).await;
+        return crate::protocols::gems::handle(app, ask, req.map(pkgpod_proto::body::boxed))
+            .await
+            .map(axum::body::Body::new);
     }
     if served.repo.format == "swift" {
         if role.is_none() && caller.user.is_some() {

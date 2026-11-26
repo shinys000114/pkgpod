@@ -7,21 +7,12 @@
 
 use std::sync::Arc;
 
-use axum::extract::Request;
-use axum::http::{HeaderValue, Method, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use http::{HeaderValue, Method, StatusCode, header};
 use pkgpod_engine::{RepoInfo, Upload};
+use pkgpod_proto::body::{Request, Response};
 use pkgpod_proto::host::Host;
+use pkgpod_proto::reply::text;
 use pkgpod_proto::{Caller, Role};
-
-fn text(st: StatusCode, msg: impl Into<String>) -> Response {
-    (
-        st,
-        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        msg.into(),
-    )
-        .into_response()
-}
 
 /// Whether `rel` (with `method`) is the API's.
 pub fn is_api(method: &Method, rel: &[String]) -> bool {
@@ -32,6 +23,7 @@ pub fn is_api(method: &Method, rel: &[String]) -> bool {
     )
 }
 
+/// A request to the API: the repository, who asks and their role on it.
 pub struct Ask {
     pub repo: RepoInfo,
     pub caller: Caller,
@@ -60,11 +52,7 @@ pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
     let actor = a.caller.name().to_string();
     if req.method() == Method::POST {
         let (sha256, size) = match app
-            .store_body(
-                a.repo.store(),
-                pkgpod_proto::body::boxed(req.into_body()),
-                pkgpod_gems::MAX_GEM,
-            )
+            .store_body(a.repo.store(), req.into_body(), pkgpod_gems::MAX_GEM)
             .await
         {
             Ok(x) => x,
@@ -93,7 +81,7 @@ pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
     }
     // Yank: gem_name, version, platform, in the body or the query.
     let query = req.uri().query().unwrap_or("").to_string();
-    let body = axum::body::to_bytes(req.into_body(), 64 << 10)
+    let body = pkgpod_proto::body::to_bytes(req.into_body(), 64 << 10)
         .await
         .unwrap_or_default();
     let mut p = pkgpod_proto::query::params(&query);
