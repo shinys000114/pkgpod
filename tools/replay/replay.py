@@ -10,10 +10,16 @@ same ports; an upstream stub with fixed answers; builds stamped with the
 same PKGPOD_COMMIT. What still differs by time is masked by the named
 rules in RULES, each counted in the report.
 
-    replay.py build COMMIT OUT          a release build of COMMIT (git archive)
+    replay.py build [--cov] COMMIT OUT  a release build of COMMIT (git archive);
+                                        --cov: instrumented for coverage
     replay.py seed ROOT BINARY          ROOT/seed: data made by BINARY
-    replay.py run ROOT BINARY OUT.json  the corpus against a copy of the seed
+    replay.py run ROOT BINARY OUT.json [PROFDIR]
+                                        the corpus against a copy of the seed
+                                        (a --cov build's profiles into PROFDIR)
     replay.py diff A.json B.json        what differs (exit 1 if anything)
+    replay.py cover BINARY PROFDIR PATH...
+                                        lines of the sources under PATH that
+                                        the runs reached, and those they did not
 
 Needs python3 (its standard library only) and dpkg-deb; nothing outside
 127.0.0.1. Ports 29090 (management), 29091 (serving), 29099 (upstream).
@@ -57,6 +63,7 @@ USERS = {
             "dpriv": "write",
             "opub": "write",
             "opriv": "write",
+            "oburst": "write",
             "ogroup": "read",
         },
     ),
@@ -134,6 +141,9 @@ UP_FILES = {
 }
 
 
+BAD_DIGEST = blob_digest(b"not the manifest")
+
+
 def upstream_answer(method, path):
     """(status, headers, body) of the stub, fixed."""
     oci = "application/vnd.oci.image.manifest.v1+json"
@@ -143,7 +153,10 @@ def upstream_answer(method, path):
     m = re.fullmatch(r"/v2/up/hello/manifests/([^/]+)", path)
     if m:
         ref = m.group(1)
-        for names, body, ct in ((("1", blob_digest(UP_MANIFEST)), UP_MANIFEST, oci),
+        if ref == BAD_DIGEST:
+            # Not what that digest names.
+            return 200, {"Content-Type": oci, "Docker-Content-Digest": ref}, UP_MANIFEST
+        for names, body, ct in ((("1", "slow", blob_digest(UP_MANIFEST)), UP_MANIFEST, oci),
                                 (("2-arm", blob_digest(UP_MANIFEST2)), UP_MANIFEST2, oci),
                                 (("multi", blob_digest(UP_INDEX)), UP_INDEX, INDEX)):
             if ref in names:
@@ -170,6 +183,7 @@ def upstream_answer(method, path):
 
 class Upstream(http.server.BaseHTTPRequestHandler):
     log = []
+    asked = {}
 
     def handle_one(self, head_only):
         path = self.path.split("?")[0]
@@ -188,6 +202,12 @@ class Upstream(http.server.BaseHTTPRequestHandler):
             }, b'{"errors":[{"code":"UNAUTHORIZED"}]}'
         else:
             st, hd, body = upstream_answer(self.command, path)
+            # A tag that answers at once the first time, then slowly.
+            if path.endswith("/manifests/slow"):
+                n = Upstream.asked.get(path, 0)
+                Upstream.asked[path] = n + 1
+                if n > 0:
+                    time.sleep(7)
         self.send_response(st)
         for k, v in hd.items():
             self.send_header(k, v)
@@ -218,6 +238,7 @@ class Stubs:
 
     def __init__(self):
         Upstream.log = []
+        Upstream.asked = {}
         self.up = {"open": start_stub(UP, False), "bearer": start_stub(UPB, True)}
 
     def stop(self, name):
@@ -264,9 +285,13 @@ class Pkgpod:
             raise SystemExit(f"pkgpod {' '.join(args)}: {r.stderr.strip()}")
         return r.stdout
 
-    def start(self):
+    def start(self, profdir=None):
+        env = dict(self.env)
+        if profdir:
+            os.makedirs(profdir, exist_ok=True)
+            env["LLVM_PROFILE_FILE"] = os.path.join(os.path.abspath(profdir), "pkgpod-%p-%m.profraw")
         self.proc = subprocess.Popen([self.bin, "serve", "-c", self.cfg],
-                                     stdout=subprocess.DEVNULL,
+                                     stdout=subprocess.DEVNULL, env=env,
                                      stderr=open(os.path.join(self.root, "serve.log"), "a"))
         for port in (MGMT,):
             wait_port(port, self.proc)
@@ -308,9 +333,17 @@ def request(method, path, headers=None, body=None, port=SERVE):
     # A Location may be absolute.
     path = re.sub(r"^https?://[^/]+", "", path)
     c = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
-    c.request(method, path, body=body, headers=headers or {})
-    r = c.getresponse()
-    data = r.read()
+    try:
+        c.request(method, path, body=body, headers=headers or {})
+    except (BrokenPipeError, ConnectionResetError):
+        # Refused before the whole body was read: the answer may be there.
+        pass
+    try:
+        r = c.getresponse()
+        data = r.read()
+    except (http.client.HTTPException, OSError) as e:
+        c.close()
+        return 0, [("connection", f"closed: {type(e).__name__}")], b""
     hd = [(k.lower(), v) for k, v in r.getheaders()]
     c.close()
     return r.status, hd, data
@@ -444,7 +477,10 @@ def seed(root, binary):
         if st[-1] != 201:
             raise SystemExit(f"push to oroot: {st}")
         p.cli("repo", "create", "oproxy", "-f", "oci", "-k", "proxy", "-s",
-              f"upstream=http://127.0.0.1:{UP}/up", "-s", "public=true")
+              f"upstream=http://127.0.0.1:{UP}/up", "-s", "public=true", "-s",
+              "exclude=secret*", "-s", "max_mib=1")
+        # Where uploads are started until there are too many.
+        p.cli("repo", "create", "oburst", "-f", "oci", "-s", "public=true")
         # One whose upstream asks for a token, asked again each time.
         p.cli("repo", "create", "oproxy2", "-f", "oci", "-k", "proxy", "-s",
               f"upstream=http://127.0.0.1:{UPB}/up", "-s", "public=true", "-s",
@@ -557,6 +593,12 @@ def corpus(fx):
                 f"/v2/{repo}/hello/blobs/{blob_digest(UP_LAYER)}")
             add(f"oci {repo}/hello nope {who}", who, "GET", f"/v2/{repo}/hello/manifests/2",
                 oci_accept)
+        for rel in ("/app/manifests/sha256:xyz", "/app/manifests/bad!tag",
+                    "/app/blobs/sha256:xyz"):
+            add(f"oci opub{rel} {who}", who, "GET", f"/v2/opub{rel}", oci_accept)
+        for rel in (f"/hello/manifests/{BAD_DIGEST}", "/hello/blobs/notadigest",
+                    f"/hello/blobs/{zero}", "/secret-img/manifests/1"):
+            add(f"oci oproxy{rel} {who}", who, "GET", f"/v2/oproxy{rel}", oci_accept)
         root = dict(oci_accept, Host="reg.localhost")
         for rel in ("/v2/", "/v2/app/manifests/1", "/v2/app/tags/list", "/v2/nope/manifests/1",
                     "/"):
@@ -637,10 +679,33 @@ def corpus(fx):
             ("PATCH", "{loc}", dict(octet, **{"Content-Range": "9-12"}), b"6789")])
         seq(f"oci delete a child of an index {who}", who, [
             ("DELETE", f"/v2/opub/app/manifests/{blob_digest(app_image('opub')[2])}", {}, None)])
+        seq(f"oci manifests refs {who}", who, [
+            ("PUT", "/v2/opub/w/manifests/sha256:xyz", mt, manifest),
+            ("PUT", "/v2/opub/w/manifests/bad!tag", mt, manifest),
+            ("PUT", "/v2/opub/big/manifests/x", mt, b" " * (4 * 1024 * 1024 + 1)),
+            ("PUT", f"/v2/opub/w/manifests/{blob_digest(manifest)}", mt, manifest),
+            ("PUT", "/v2/opub/idx/manifests/bad", {"Content-Type": INDEX},
+             oci_index([(oci_manifest(b"never", [b"pushed"]), "amd64")])),
+            ("PUT", f"/v2/opub/w/manifests/{who}-sig", mt,
+             oci_manifest(config, [layer], manifest)),
+            ("DELETE", f"/v2/opub/w/manifests/{who}-sig", {}, None),
+            ("DELETE", "/v2/opub/w/manifests/no-such-tag", {}, None)])
+        mono_bad = b"a body that is not the digest"
+        seq(f"oci uploads refused {who}", who, [
+            ("POST", "/v2/opub/mono/blobs/uploads/?digest=notadigest", octet, mono_bad),
+            ("POST", f"/v2/opub/mono/blobs/uploads/?digest={blob_digest(b'x')}", octet, mono_bad),
+            ("PATCH", "/v2/opub/app/blobs/uploads/" + "0" * 32, octet, b"x"),
+            ("POST", "/v2/opub/other/blobs/uploads/", {}, None),
+            ("PATCH", "{loc|/v2/opub/=/v2/opriv/}", octet, b"x"),
+            ("DELETE", "{loc|/v2/opub/=/v2/opriv/}", {}, None),
+            ("POST", "/v2/opub/app/tags/list", {}, None),
+            ("PATCH", "/v2/opub/app/manifests/1", octet, b"x")])
         seq(f"oci deletes {who}", who, [
             ("DELETE", f"/v2/opub/w/manifests/{blob_digest(manifest)}", {}, None),
             ("DELETE", f"/v2/opub/app/blobs/{blob_digest(app_image('opub')[0])}", {}, None),
             ("DELETE", "/v2/opub/app/manifests/nope", {}, None)])
+    seq("oci too many uploads writer", "writer",
+        [("POST", "/v2/oburst/x/blobs/uploads/", {}, None)] * 66)
     # What the writes made.
     for who in ("anon", "writer"):
         for repo in ("fpub", "fpriv"):
@@ -652,6 +717,14 @@ def corpus(fx):
         for repo in ("opub", "opriv", "ogroup"):
             for rel in ("/w/tags/list", "/mono/tags/list", "/app/tags/list"):
                 add(f"after oci {repo}{rel} {who}", who, "GET", f"/v2/{repo}{rel}", oci_accept)
+    # Last, as it makes the proxy's upstream quiet for a while: a kept
+    # tag asked for again while the upstream is slow (what is kept is
+    # served; the late answer is kept when it comes).
+    seq("oci slow upstream anon", "anon", [
+        ("GET", "/v2/oproxy2/hello/manifests/slow", oci_accept, None),
+        ("GET", "/v2/oproxy2/hello/manifests/slow", oci_accept, None),
+        ("GET", "/v2/oproxy2/hello/manifests/slow", oci_accept, None),
+        ("SLEEP", "9", {}, None)])
     return out
 
 
@@ -747,7 +820,7 @@ def end_state(data, seed_time, counts):
     return out
 
 
-def run(root, binary, out_path):
+def run(root, binary, out_path, profdir=None):
     s = os.path.join(root, "seed")
     live = os.path.join(root, "live")
     if os.path.exists(live):
@@ -766,7 +839,7 @@ def run(root, binary, out_path):
     steps_sent = 0
     up = start_upstream()
     try:
-        p.start()
+        p.start(profdir)
         wait_port(SERVE, p.proc)
         seen = {}
         after_writes = False
@@ -782,6 +855,16 @@ def run(root, binary, out_path):
                     getattr(up, what)(name)
                     got.append({"stub": path})
                     continue
+                if method == "SLEEP":
+                    time.sleep(int(path))
+                    got.append({"slept": path})
+                    continue
+                m = re.fullmatch(r"\{loc\|([^=]*)=([^}]*)\}", path)
+                if m:
+                    if not loc:
+                        got.append({"skipped": "no Location before"})
+                        continue
+                    path = re.sub(r"^https?://[^/]+", "", loc).replace(m.group(1), m.group(2))
                 if "{loc}" in path:
                     if not loc:
                         got.append({"skipped": "no Location before"})
@@ -877,8 +960,9 @@ def diff(a_path, b_path):
     return 1 if bad else 0
 
 
-def build(commit, out):
-    """A release build of `commit`, from git archive, outside the tree."""
+def build(commit, out, cov=False):
+    """A release build of `commit`, from git archive, outside the tree
+    (with `cov`, instrumented for coverage)."""
     repo = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True,
                           text=True, check=True).stdout.strip()
     work = os.path.abspath(out) + ".src"
@@ -895,10 +979,63 @@ def build(commit, out):
         t.extractall(work)
     env = dict(os.environ, PKGPOD_COMMIT="replay",
                CARGO_TARGET_DIR=os.path.abspath(out) + ".target")
+    if cov:
+        env["RUSTFLAGS"] = (env.get("RUSTFLAGS", "") + " -C instrument-coverage").strip()
     subprocess.run(["cargo", "build", "--release", "--locked", "--offline", "-p", "pkgpod"],
                    cwd=work, env=env, check=True)
     shutil.copy(os.path.join(env["CARGO_TARGET_DIR"], "release", "pkgpod"), out)
     say(f"{out}: {commit}")
+
+
+def llvm_tool(name):
+    """The toolchain's llvm-tools binary `name` (rustup component llvm-tools)."""
+    sysroot = subprocess.run(["rustc", "--print", "sysroot"], capture_output=True, text=True,
+                             check=True).stdout.strip()
+    host = next(l.split()[1] for l in subprocess.run(["rustc", "-vV"], capture_output=True,
+                                                     text=True, check=True).stdout.splitlines()
+                if l.startswith("host:"))
+    p = os.path.join(sysroot, "lib", "rustlib", host, "bin", name)
+    if not os.path.exists(p):
+        raise SystemExit(f"no {name}: rustup component add llvm-tools")
+    return p
+
+
+def cover(binary, profdir, paths):
+    """Per source file under `paths`: lines reached of lines that can be,
+    then the lines not reached."""
+    raws = [os.path.join(profdir, f) for f in sorted(os.listdir(profdir)) if f.endswith(".profraw")]
+    if not raws:
+        raise SystemExit(f"no profiles in {profdir}")
+    merged = os.path.join(profdir, "merged.profdata")
+    subprocess.run([llvm_tool("llvm-profdata"), "merge", "-sparse", "-o", merged, *raws],
+                   check=True)
+    lcov = subprocess.run([llvm_tool("llvm-cov"), "export", "-format=lcov",
+                           f"-instr-profile={merged}", binary], capture_output=True, text=True,
+                          check=True).stdout
+    files = {}
+    cur = None
+    for line in lcov.splitlines():
+        if line.startswith("SF:"):
+            cur = line[3:]
+            files[cur] = {} if any(x in cur for x in paths) else None
+        elif line.startswith("DA:") and cur and files.get(cur) is not None:
+            n, count = line[3:].split(",")[:2]
+            files[cur][int(n)] = files[cur].get(int(n), 0) + int(count)
+    total = hit = 0
+    for f, lines in sorted((f, l) for f, l in files.items() if l is not None):
+        h = sum(1 for c in lines.values() if c > 0)
+        total += len(lines)
+        hit += h
+        print(f"{h:5}/{len(lines):5} {100 * h / max(1, len(lines)):5.1f}%  {f}")
+    for f, lines in sorted((f, l) for f, l in files.items() if l is not None):
+        src = open(f).read().split("\n") if os.path.exists(f) else []
+        missed = sorted(n for n, c in lines.items() if c == 0)
+        if not missed:
+            continue
+        print(f"\n--- not reached in {f}")
+        for n in missed:
+            print(f"{n:6}  {src[n - 1].rstrip() if n <= len(src) else ''}")
+    print(f"\n{hit}/{total} lines reached")
 
 
 def main():
@@ -906,12 +1043,16 @@ def main():
     if not a:
         print(__doc__)
         return 2
-    if a[0] == "build" and len(a) == 3:
+    if a[0] == "build" and len(a) == 4 and a[1] == "--cov":
+        build(a[2], a[3], cov=True)
+    elif a[0] == "build" and len(a) == 3:
         build(a[1], a[2])
+    elif a[0] == "cover" and len(a) >= 4:
+        cover(a[1], a[2], a[3:])
     elif a[0] == "seed" and len(a) == 3:
         seed(os.path.abspath(a[1]), a[2])
-    elif a[0] == "run" and len(a) == 4:
-        run(os.path.abspath(a[1]), a[2], a[3])
+    elif a[0] == "run" and len(a) in (4, 5):
+        run(os.path.abspath(a[1]), a[2], a[3], a[4] if len(a) == 5 else None)
     elif a[0] == "diff" and len(a) == 3:
         return diff(a[1], a[2])
     else:
