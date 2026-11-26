@@ -10,13 +10,15 @@ same ports; an upstream stub with fixed answers; builds stamped with the
 same PKGPOD_COMMIT. What still differs by time is masked by the named
 rules in RULES, each counted in the report.
 
-    replay.py build [--cov] COMMIT OUT  a release build of COMMIT (git archive);
+    replay.py build [--cov] COMMIT OUT  a release build of COMMIT (git archive),
+                                        the commit in OUT.commit;
                                         --cov: instrumented for coverage
     replay.py seed ROOT BINARY          ROOT/seed: data made by BINARY
     replay.py run ROOT BINARY OUT.json [PROFDIR]
                                         the corpus against a copy of the seed
                                         (a --cov build's profiles into PROFDIR)
-    replay.py diff A.json B.json        what differs (exit 1 if anything)
+    replay.py diff A.json B.json        which builds ran, what differs (exit 1 if
+                                        anything)
     replay.py cover BINARY PROFDIR PATH...
                                         lines of the sources under PATH that
                                         the runs reached, and those they did not
@@ -1881,8 +1883,28 @@ def fill(path, headers, loc, last_body, seen):
     return path, out, None
 
 
+def built(binary):
+    """Which build `binary` is: its sha256, and the commit build() wrote
+    next to it (None if none is there)."""
+    with open(binary, "rb") as f:
+        sha = hashlib.sha256(f.read()).hexdigest()
+    try:
+        with open(binary + ".commit") as f:
+            commit = f.read().strip()
+    except OSError:
+        commit = None
+    return {"path": binary, "sha256": sha, "commit": commit}
+
+
 def run(root, binary, out_path, profdir=None):
     s = os.path.join(root, "seed")
+    # Answers are compared by the request's name: no two the same.
+    entries = corpus(os.path.join(s, "fixtures"))
+    names = set()
+    for entry in entries:
+        if entry["id"] in names:
+            raise SystemExit(f"two requests are named {entry['id']!r}")
+        names.add(entry["id"])
     live = os.path.join(root, "live")
     if os.path.exists(live):
         shutil.rmtree(live)
@@ -1904,7 +1926,7 @@ def run(root, binary, out_path, profdir=None):
         wait_port(SERVE, p.proc)
         seen = {}
         after_writes = False
-        for entry in corpus(os.path.join(s, "fixtures")):
+        for entry in entries:
             rid, who = entry["id"], entry["who"]
             if rid.startswith(("put ", "oci push", "oci mono")):
                 after_writes = True
@@ -1952,7 +1974,8 @@ def run(root, binary, out_path, profdir=None):
         env["LLVM_PROFILE_FILE"] = os.path.join(os.path.abspath(profdir), "version-%p.profraw")
     bv = subprocess.run([p.bin, "--version"], capture_output=True, text=True,
                         env=env).stdout.strip()
-    result = {"binary": bv, "tool": TOOL, "seed": seed_info, "requests": steps_sent,
+    result = {"binary": bv, "build": built(p.bin), "tool": TOOL, "seed": seed_info,
+              "requests": steps_sent,
               "answers": answers,
               "upstream": Upstream.log, "state": state, "masked": mask.counts}
     with open(out_path, "w") as f:
@@ -1966,6 +1989,14 @@ def run(root, binary, out_path, profdir=None):
 
 def diff(a_path, b_path):
     a, b = json.load(open(a_path)), json.load(open(b_path))
+    # Which builds made the runs: two runs of one binary compare it with
+    # itself (as two runs of the old build do, to check the tool).
+    for name, r in (("A", a), ("B", b)):
+        x = r.get("build") or {}
+        print(f"{name} {x.get('path')} sha256 {x.get('sha256')} commit {x.get('commit')}")
+    sha = (a.get("build") or {}).get("sha256")
+    if sha is not None and sha == (b.get("build") or {}).get("sha256"):
+        print("warning: A and B are the same binary")
     # Only runs of the same tool on the same seed compare.
     for k in ("tool", "seed"):
         if a.get(k) != b.get(k) or a.get(k) is None:
@@ -1993,6 +2024,11 @@ def diff(a_path, b_path):
                         print(f"  step {i + 1} {k}:\n    A {sa.get(k)}\n    B {sb.get(k)}")
             if len(x["steps"]) != len(y["steps"]):
                 print(f"  steps: {len(x['steps'])} against {len(y['steps'])}")
+    ai = {x["id"] for x in a["answers"]}
+    for y in b["answers"]:
+        if y["id"] not in ai:
+            bad += 1
+            print(f"--- {y['id']}\n  only in B")
     if a["upstream"] != b["upstream"]:
         bad += 1
         print("--- upstream requests differ")
@@ -2025,7 +2061,9 @@ def build(commit, out, cov=False):
     if os.path.exists(work):
         shutil.rmtree(work)
     os.makedirs(work)
-    arch = subprocess.run(["git", "-C", repo, "archive", commit], capture_output=True,
+    rev = subprocess.run(["git", "-C", repo, "rev-parse", "--verify", commit + "^{commit}"],
+                         capture_output=True, text=True, check=True).stdout.strip()
+    arch = subprocess.run(["git", "-C", repo, "archive", rev], capture_output=True,
                           check=True).stdout
     t = tarfile.open(fileobj=io.BytesIO(arch))
     try:
@@ -2039,7 +2077,9 @@ def build(commit, out, cov=False):
     subprocess.run(["cargo", "build", "--release", "--locked", "--offline", "-p", "pkgpod"],
                    cwd=work, env=env, check=True)
     shutil.copy(os.path.join(env["CARGO_TARGET_DIR"], "release", "pkgpod"), out)
-    say(f"{out}: {commit}")
+    with open(out + ".commit", "w") as f:
+        f.write(rev + "\n")
+    say(f"{out}: {commit} ({rev})")
 
 
 def llvm_tool(name):
