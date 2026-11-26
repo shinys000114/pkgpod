@@ -212,8 +212,9 @@ impl Field<'_> {
 
 impl Field<'_> {
     /// The part's bytes as a body (to be stored); a form that cannot be
-    /// read ends it in an error. The body is let go of (read to its end,
-    /// or dropped) before the form's next part is asked for.
+    /// read ends it in an error. The body is dropped before the form's
+    /// next part is asked for: while it is held, even read to its end,
+    /// the next part is [`FormError::Held`].
     pub fn into_body(self) -> crate::body::Body {
         crate::body::from_stream(self.part.map(|c| c.map_err(why)))
     }
@@ -478,17 +479,25 @@ mod tests {
     async fn a_part_s_body_held_holds_back_the_next() {
         let body = b"--b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nxy\r\n--b\r\nContent-Disposition: form-data; name=\"c\"\r\n\r\nz\r\n--b--\r\n";
         let mut f = Form::of(req(Some("multipart/form-data; boundary=b"), body), 1 << 20).unwrap();
-        let held = f.next_field().await.unwrap().unwrap().into_body();
+        let mut held = f.next_field().await.unwrap().unwrap().into_body();
         assert_eq!(f.next_field().await.err(), Some(FormError::Held));
         assert_eq!(
             FormError::Held.to_string(),
             "the form's part before is still being read"
         );
-        // Let go of, the form goes on.
-        assert_eq!(crate::body::to_bytes(held, 10).await.unwrap(), "xy");
+        // Read to its end is not let go of.
+        let mut got = Vec::new();
+        while let Some(frame) = held.frame().await {
+            got.extend_from_slice(&frame.unwrap().into_data().unwrap());
+        }
+        assert_eq!(got, b"xy");
+        assert_eq!(f.next_field().await.err(), Some(FormError::Held));
+        // Dropped, the form goes on; a body read whole by to_bytes is
+        // dropped with it.
+        drop(held);
         let c = f.next_field().await.unwrap().unwrap();
         assert_eq!(c.name(), Some("c"));
-        assert_eq!(c.capped(1).await.unwrap(), b"z");
+        assert_eq!(crate::body::to_bytes(c.into_body(), 1).await.unwrap(), "z");
         assert!(f.next_field().await.unwrap().is_none());
     }
 
