@@ -44,6 +44,7 @@ mod lists;
 mod manifests;
 mod proxy;
 mod uploads;
+mod upstream;
 
 use group::*;
 use lists::*;
@@ -139,19 +140,59 @@ fn parse_target(segs: &[String]) -> Option<(Vec<String>, Target)> {
     None
 }
 
+/// A proxy's upstream registry, as the registry's code asks it; calls
+/// block (they are made off the async threads). `upstream` is the
+/// proxy's setting, `image` the name asked for.
+pub trait Upstream: Send + Sync {
+    /// Whether `upstream` and `image` name an image of a registry.
+    fn names(&self, upstream: &str, image: &str) -> bool;
+    /// Makes proxy `proxy`'s client ready (one each, kept: its tokens
+    /// are its own).
+    fn ready(&self, proxy: &str) -> Result<(), String>;
+    /// A manifest by tag or digest, given up after `within`: its bytes,
+    /// media type and digest.
+    fn manifest(
+        &self,
+        proxy: &str,
+        upstream: &str,
+        image: &str,
+        reference: &str,
+        within: std::time::Duration,
+    ) -> Result<(Vec<u8>, String, String), String>;
+    /// A blob, written to `w`: its size.
+    fn blob(
+        &self,
+        proxy: &str,
+        upstream: &str,
+        image: &str,
+        digest: &str,
+        w: &mut dyn Write,
+    ) -> Result<u64, String>;
+}
+
 /// What a repository's manifests reference, by the version's root.
 type Referenced = HashMap<String, (Digest, Arc<HashSet<Digest>>)>;
 
 /// What the registry keeps in memory, one for the server: uploads in
 /// progress, what each repository's manifests reference (by the
-/// version's root), the proxies' upstream registry clients (their
-/// Bearer tokens kept) and the manifests proxies are fetching.
-#[derive(Default)]
+/// version's root), the proxies' upstream and the manifests proxies are
+/// fetching.
 pub struct State {
     sessions: Mutex<HashMap<String, Session>>,
     referenced: Mutex<Referenced>,
-    registries: Mutex<HashMap<String, Arc<pkgpod_mirror::oci::Registry>>>,
+    upstream: Box<dyn Upstream>,
     fetching: Mutex<HashMap<(String, String), Fetch>>,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        State {
+            sessions: Default::default(),
+            referenced: Default::default(),
+            upstream: Box::new(upstream::Registries::default()),
+            fetching: Default::default(),
+        }
+    }
 }
 
 /// Blobs a repository's manifests reference (and the manifests), by

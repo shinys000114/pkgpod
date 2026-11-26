@@ -76,29 +76,6 @@ pub fn pin_closure(app: &App, repo: &str, paths: &[String]) -> Vec<String> {
     out
 }
 
-/// The upstream image a proxy's image is: `upstream` is a registry
-/// (`docker.io`, `https://ghcr.io`), with a name prefix as a path
-/// (`http://host/team`: `team/<image>`).
-pub(super) fn upstream_ref(r: &RepoInfo, image: &str) -> Option<pkgpod_mirror::oci::ImageRef> {
-    let u = r.setting_str("upstream").trim().trim_end_matches('/');
-    let (source, prefix) = match u.split_once("://") {
-        Some((scheme, rest)) => match rest.split_once('/') {
-            Some((host, p)) => (format!("{scheme}://{host}"), p.to_string()),
-            None => (u.to_string(), String::new()),
-        },
-        None => match u.split_once('/') {
-            Some((host, p)) => (host.to_string(), p.to_string()),
-            None => (u.to_string(), String::new()),
-        },
-    };
-    let name = if prefix.is_empty() {
-        image.to_string()
-    } else {
-        format!("{prefix}/{image}")
-    };
-    pkgpod_mirror::oci::parse_ref(&source, &name).ok()
-}
-
 /// What a proxy's fetch of a manifest brings: its row, kept, or why not
 /// (`None`: the upstream not there, or not in time).
 pub(super) type Fetched =
@@ -177,32 +154,21 @@ pub(super) async fn proxy(
     if excluded {
         return unknown("excluded");
     }
-    let Some(up) = upstream_ref(r, image) else {
+    let upstream = r.setting_str("upstream").to_string();
+    if !app.oci.upstream.names(&upstream, image) {
         return oci_err(
             StatusCode::BAD_GATEWAY,
             "UNKNOWN",
             "the proxy's upstream is not a registry",
         );
-    };
+    }
+    let up = (upstream, image.to_string());
     // A blocking client: made (and ever dropped) off the async threads.
     let (app2, name) = (app.clone(), r.name.clone());
-    let reg = blocking(move || {
-        let mut m = app2
-            .oci
-            .registries
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(x) = m.get(&name) {
-            return Ok(x.clone());
-        }
-        let x = Arc::new(pkgpod_mirror::oci::Registry::new(None)?);
-        m.insert(name, x.clone());
-        Ok::<_, pkgpod_mirror::Error>(x)
-    })
-    .await;
-    let reg = match reg {
-        Some(Ok(x)) => x,
-        Some(Err(e)) => return oci_err(StatusCode::BAD_GATEWAY, "UNKNOWN", e.to_string()),
+    let reg = blocking(move || app2.oci.upstream.ready(&name)).await;
+    match reg {
+        Some(Ok(())) => {}
+        Some(Err(e)) => return oci_err(StatusCode::BAD_GATEWAY, "UNKNOWN", e),
         None => {
             return oci_err(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -271,17 +237,21 @@ pub(super) async fn proxy(
                 // Fetched and kept by a task of its own, which requests
                 // for it meanwhile share: what a tag names, sent after the
                 // wait below, is kept all the same.
-                let (app2, r2, reg2, up2) = (app.clone(), r.clone(), reg.clone(), up.clone());
+                let (app2, r2, reg2, up2) = (app.clone(), r.clone(), app.clone(), up.clone());
                 let (re2, path2, image2) = (re.clone(), path.clone(), image.to_string());
                 let (row, put) = (row.clone(), put.clone());
                 let fetch = async move {
-                    let re3 = re2.clone();
+                    let (re3, name3) = (re2.clone(), r2.name.clone());
                     // Given up while its path is still held for it (the
                     // client's timeout is an hour, for blobs).
                     let within =
                         std::time::Duration::from_secs(crate::serving::proxy::QUIET_SECS as u64);
-                    let Some(Ok((body, mt, digest))) =
-                        blocking(move || reg2.manifest_within(&up2, &re3, within)).await
+                    let Some(Ok((body, mt, digest))) = blocking(move || {
+                        reg2.oci
+                            .upstream
+                            .manifest(&name3, &up2.0, &up2.1, &re3, within)
+                    })
+                    .await
                     else {
                         // The upstream not there, or not in time.
                         return Err(None);
@@ -386,10 +356,13 @@ pub(super) async fn proxy(
             };
             let path = format!("{image}/blobs/{d}");
             if cached(path.clone()).await.is_none() {
-                let (reg2, up2, d2, store) = (reg.clone(), up.clone(), d.clone(), r.store());
+                let (reg2, up2, d2, store) = (app.clone(), up.clone(), d.clone(), r.store());
+                let name2 = r.name.clone();
                 let stored = blocking(move || -> Result<(Digest, u64), String> {
                     let mut inc = store.incoming().map_err(|e| e.to_string())?;
-                    reg2.blob(&up2, &d2, &mut inc).map_err(|e| e.to_string())?;
+                    reg2.oci
+                        .upstream
+                        .blob(&name2, &up2.0, &up2.1, &d2, &mut inc)?;
                     store.commit(inc, Some(&want)).map_err(|e| e.to_string())
                 })
                 .await;
