@@ -376,6 +376,18 @@ def refused(c, who):
         ("DELETE", y, FORM, b"gem_name=\xff&version=1"),
         ("DELETE", y + "?gem_name=hello-pk", FORM, b"version=9.9.9"),
         ("GET", "/gempub/info/hello-pk", {}, None)])
+    # A yank whose body fails to read (a chunked body cut wrong, after a
+    # chunk that would yank hello-pk 1.0.0): it is yanked by its query
+    # alone, as if it had no body.
+    k = f"k-{who}"
+    part = b"gem_name=hello-pk&version=1.0.0"
+    c.seq(f"gems yank body unread {who}", who, [
+        ("POST", "/gempub" + API, OCTET, gem(k, "1.0.0")),
+        ("DELETE", f"{y}?gem_name={k}&version=1.0.0",
+         dict(FORM, **{"Transfer-Encoding": "chunked"}),
+         b"%x\r\n%s\r\nzz\r\n\r\n" % (len(part), part)),
+        ("GET", f"/gempub/info/{k}", {}, None),
+        ("GET", "/gempub/info/hello-pk", {}, None)])
 
 
 def limits(c, who):
