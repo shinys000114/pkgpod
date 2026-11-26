@@ -37,6 +37,7 @@ import http.server
 import io
 import json
 import os
+import random
 import re
 import shutil
 import sqlite3
@@ -790,6 +791,222 @@ def seed(root, binary):
 
 # ---- the corpus -----------------------------------------------------------
 
+# ---- fuzz: requests made at random, the same each run ---------------------
+
+# How many (REPLAY_FUZZ in the environment: more, for a deeper look).
+FUZZ_N = int(os.environ.get("REPLAY_FUZZ", "3000"))
+# The repositories of each format, and the words their addresses are made
+# of: what the corpus reaches, mixed, cut short, mis-cased and mis-escaped.
+FUZZ_FORMATS = {
+    "files": (["fpub", "fpriv", "fproxy"],
+              ["a.txt", "dir", "b.txt", "big.bin", "v2", "x.txt", "@stable", "latest", "w",
+               "a.img", "c.txt", "missing"]),
+    "deb": (["dpub", "dpriv"],
+            ["dists", "stable", "InRelease", "Release", "Release.gpg", "main", "binary-amd64",
+             "Packages", "Packages.gz", "pool", "h", "hello", "hello_1.0_amd64.deb", "key.asc",
+             "by-hash", "SHA256", "@first"]),
+    "npm": (["npub", "npriv", "nproxy", "ngroup"],
+            ["hello", "@team", "lib", "@team%2flib", "-", "ping", "whoami", "v1", "search",
+             "package", "dist-tags", "label", "first", "-rev", "1-x", "hello-1.0.0.tgz",
+             "1.0.0", "latest", "up-pkg", "x"]),
+    "pypi": (["ppub", "ppriv", "pproxy", "pgroup"],
+             ["simple", "files", "hello-world", "Hello_World", "legacy", "index.json",
+              "other-pkg", "up-pkg", "hello_world-1.0-py3-none-any.whl",
+              "hello_world-1.0-py3-none-any.whl.metadata", "@first", "x"]),
+    "cargo": (["cpub", "cpriv", "cproxy", "cgroup", "cempty"],
+              ["index", "config.json", "he", "ll", "hello_pod", "api", "v1", "crates",
+               "download", "owners", "yank", "unyank", "new", "1.0.0", "@first", "up", "-p",
+               "up-pkg"]),
+    "go": (["gpub", "gpriv", "gproxy", "ggroup"],
+           ["example.com", "hello", "!upper", "Upper", "@v", "list", "@latest", "v1.0.0.info",
+            "v1.0.0.mod", "v1.0.0.zip", "@first", "example.org", "up", "v9.9.9.info"]),
+    "oci": (["opub", "opriv", "oproxy", "ogroup"],
+            ["app", "manifests", "blobs", "uploads", "tags", "list", "referrers", "1.0", "1",
+             "latest", "w", "sha256:" + "0" * 64, "hello"]),
+}
+# Formats whose writes the fuzz may make: their times are masked (or they
+# keep none), so an accepted write leaves both runs alike.
+FUZZ_WRITABLE = {"npm", "pypi", "cargo", "go", "oci"}
+FUZZ_ACCEPT = ["*/*", "application/json", "text/html", "application/vnd.pypi.simple.v1+json",
+               "application/vnd.npm.install-v1+json", "application/vnd.oci.image.index.v1+json",
+               "application/vnd.oci.image.manifest.v1+json", "text/plain; q=0", ""]
+FUZZ_CT = ["application/json", "application/octet-stream", "text/plain",
+           "multipart/form-data", "multipart/form-data; boundary=replay-form",
+           "multipart/form-data; boundary=", "application/vnd.oci.image.manifest.v1+json", "x/y"]
+FUZZ_RANGE = ["bytes=0-0", "bytes=-5", "bytes=5-", "bytes=9999999-", "bytes=a-b",
+              "bytes=0-1,2-3", "bytes=3-1", "items=0-1"]
+FUZZ_INM = ["*", '"x"', 'W/"x"', "garbage", '"' + "0" * 64 + '"']
+
+
+def fuzz_samples():
+    """Valid bodies of each kind, for the fuzz to cut and spoil."""
+    return [
+        npm_doc("fz", "1.0.0", b"fz"),
+        cargo_publish("fz", "1.0.0"),
+        go_zip("example.com/fz", "v1.0.0"),
+        wheel("fz", "1.0")[1],
+        py_upload(*wheel("fz", "1.0"))[1],
+        oci_manifest(b'{"fz":1}', [b"fz"]),
+        b'"1.0.0"',
+        b"{}",
+    ]
+
+
+def fuzz_segment(rng, words):
+    w = rng.choice(words)
+    k = rng.random()
+    if k < 0.08:
+        w = w.upper()
+    elif k < 0.14:
+        w = w[: rng.randrange(len(w) + 1)]
+    elif k < 0.18:
+        w = w + rng.choice(["/", ".", "..", "%2f", "%00", "~", "!", "@", "%25"])
+    elif k < 0.22:
+        w = rng.choice(["..", ".", "", "%2e%2e", "@", "-", "x" * rng.randrange(1, 300)])
+    elif k < 0.25:
+        w = "".join(rng.choice("aZ09-_.!~@%") for _ in range(rng.randrange(1, 12)))
+    # What http.client would refuse to send is sent escaped.
+    return "".join(c if 0x20 < ord(c) < 0x7f and c not in "?#" else "%%%02X" % ord(c)
+                   for c in w)
+
+
+def fuzz_requests(n=FUZZ_N):
+    """(id, identity, method, path, headers, body) made at random from a
+    fixed seed: the same requests in every run."""
+    rng = random.Random(20261126)
+    samples = fuzz_samples()
+    fmts = sorted(FUZZ_FORMATS)
+    out = []
+    for i in range(n):
+        f = rng.choice(fmts)
+        repos, words = FUZZ_FORMATS[f]
+        repo = rng.choice(repos)
+        segs = [fuzz_segment(rng, words) for _ in range(rng.choice([0, 1, 1, 2, 2, 3, 3, 4, 5, 6]))]
+        if f == "oci":
+            path = "/v2/" + "/".join([repo] + segs)
+        else:
+            path = "/" + "/".join([repo] + segs)
+        if rng.random() < 0.15:
+            path += "/"
+        if rng.random() < 0.12:
+            path += "?" + rng.choice(["q=hello", "q=", "per_page=-1", "size=99999", "text=hello",
+                                      "from=-1", "force", "n=1&last=a", "digest=x", "mount=x&from=y",
+                                      "a=%ZZ", "replace", "mtime=1790000000"])
+        who = rng.choices(IDENTS, weights=[25, 15, 20, 25, 5, 5, 5])[0]
+        method = rng.choices(["GET", "HEAD", "PUT", "POST", "DELETE", "PATCH", "OPTIONS"],
+                             weights=[45, 15, 12, 10, 8, 5, 5])[0]
+        writes = method not in ("GET", "HEAD", "OPTIONS")
+        if writes and f not in FUZZ_WRITABLE and who in ("writer", "wtoken", "wbearer", "admin"):
+            method = rng.choice(["GET", "HEAD"])
+            writes = False
+        h = {}
+        for _ in range(rng.randrange(0, 4)):
+            k = rng.choice(["Accept", "If-None-Match", "Range", "Content-Type", "If-Modified-Since"])
+            h[k] = {"Accept": lambda: rng.choice(FUZZ_ACCEPT),
+                    "If-None-Match": lambda: rng.choice(FUZZ_INM),
+                    "Range": lambda: rng.choice(FUZZ_RANGE),
+                    "Content-Type": lambda: rng.choice(FUZZ_CT),
+                    "If-Modified-Since": lambda: rng.choice(
+                        ["Mon, 02 Nov 2026 10:00:00 GMT", "Fri, 01 Jan 2100 00:00:00 GMT", "x"]),
+                    }[k]()
+        body = None
+        if writes:
+            k = rng.random()
+            if k < 0.25:
+                body = b""
+            elif k < 0.5:
+                body = bytes(rng.randrange(256) for _ in range(rng.randrange(1, 512)))
+            else:
+                s = rng.choice(samples)
+                body = s[: rng.randrange(len(s) + 1)] if rng.random() < 0.6 else s
+                if body and rng.random() < 0.4:
+                    j = rng.randrange(len(body))
+                    body = body[:j] + bytes([body[j] ^ 0x5a]) + body[j + 1:]
+        out.append((f"fuzz {i:04d} {f} {who}", who, method, path, h, body))
+    return out
+
+
+def fuzz_escape(path):
+    return "".join(c if 0x20 < ord(c) < 0x7f and c != "#" else "%%%02X" % ord(c) for c in path)
+
+
+def fuzz_format(path):
+    repo_fmt = {r: f for f, (rs, _) in FUZZ_FORMATS.items() for r in rs}
+    segs = [s for s in path.split("?")[0].split("/") if s]
+    if segs[:1] == ["v2"]:
+        return "oci" if len(segs) > 1 and segs[1] in repo_fmt else "root"
+    return repo_fmt.get(segs[0], "other") if segs else "root"
+
+
+def fuzz_mutants(base, n=FUZZ_N):
+    """(id, identity, method, path, headers, body): the corpus's own
+    single requests, each changed a little at random from a fixed seed
+    (a segment cut, re-cased, added or dropped; the method, identity,
+    a header, the query or the body changed), so the fuzz reaches past
+    the first refusal."""
+    rng = random.Random(20261127)
+    singles = []
+    for x in base:
+        if len(x["steps"]) != 1:
+            continue
+        m, path, h, body = x["steps"][0]
+        if m in ("STUB", "SLEEP") or "{" in path or any("{" in str(v) for v in h.values()):
+            continue
+        if body is not None and len(body) > 1 << 20:
+            continue
+        singles.append((x["who"], m, path, h, body))
+    out = []
+    for i in range(n):
+        who, method, path, h, body = rng.choice(singles)
+        h = dict(h)
+        for _ in range(rng.randrange(1, 3)):
+            k = rng.random()
+            if k < 0.3:
+                base_path, _, q = path.partition("?")
+                segs = base_path.split("/")
+                j = rng.randrange(1, len(segs)) if len(segs) > 1 else 0
+                op = rng.random()
+                if op < 0.25:
+                    segs[j] = segs[j].upper()
+                elif op < 0.45 and len(segs) > 2:
+                    del segs[j]
+                elif op < 0.7:
+                    segs.insert(j, rng.choice(["..", "@first", "@nope", "x", "", "-", "%2e%2e"]))
+                else:
+                    segs[j] = segs[j][: rng.randrange(len(segs[j]) + 1)]
+                path = "/".join(segs) or "/"
+                if q:
+                    path += "?" + q
+            elif k < 0.42:
+                method = rng.choice(["GET", "HEAD", "PUT", "POST", "DELETE", "PATCH"])
+            elif k < 0.56:
+                who = rng.choice(IDENTS)
+            elif k < 0.74:
+                if h and rng.random() < 0.5:
+                    del h[rng.choice(sorted(h))]
+                else:
+                    kk = rng.choice(["Accept", "If-None-Match", "Range", "Content-Type"])
+                    h[kk] = rng.choice({"Accept": FUZZ_ACCEPT, "If-None-Match": FUZZ_INM,
+                                        "Range": FUZZ_RANGE, "Content-Type": FUZZ_CT}[kk])
+            elif k < 0.9 and body:
+                if rng.random() < 0.5:
+                    body = body[: rng.randrange(len(body) + 1)]
+                else:
+                    j = rng.randrange(len(body))
+                    body = body[:j] + bytes([body[j] ^ 0x5a]) + body[j + 1:]
+            else:
+                base_path, _, q = path.partition("?")
+                path = base_path if q else base_path + "?" + rng.choice(
+                    ["force", "q=x", "per_page=0", "size=1", "digest=x", "replace"])
+        path = fuzz_escape(path)
+        f = fuzz_format(path)
+        if (method not in ("GET", "HEAD", "OPTIONS") and f not in FUZZ_WRITABLE
+                and who in ("writer", "wtoken", "wbearer", "admin")):
+            method, body = rng.choice(["GET", "HEAD"]), None
+        out.append((f"mutant {i:04d} {f} {who}", who, method, path, h, body))
+    return out
+
+
 def corpus(fx):
     """The requests, in order: each a sequence of steps (most one), as
     one identity. A step's path may hold {loc}, the previous answer's
@@ -1272,6 +1489,11 @@ def corpus(fx):
         for repo in ("opub", "opriv", "ogroup"):
             for rel in ("/w/tags/list", "/mono/tags/list", "/app/tags/list"):
                 add(f"after oci {repo}{rel} {who}", who, "GET", f"/v2/{repo}{rel}", oci_accept)
+    # Requests made at random from a fixed seed, after the rest: some from
+    # the formats' words, some the corpus's own a little changed.
+    curated = list(out)
+    for rid, who, method, path, h, body in fuzz_requests() + fuzz_mutants(curated):
+        add(rid, who, method, path, h, body)
     # Last, as it makes the proxy's upstream quiet for a while: a kept
     # tag asked for again while the upstream is slow (what is kept is
     # served; the late answer is kept when it comes).
@@ -1292,7 +1514,7 @@ RULES = [
     # Debian indexes written during a run are signed then: their Date and
     # signature are of that second.
     ("deb Release written now", "Date and signature in the body, and the etag, of a "
-                                "/dists/ Release answer after writes"),
+                                "/dists/ Release answer after writes (a HEAD's etag)"),
     # OCI upload ids are random: numbered in the order they appear (in
     # location and docker-upload-uuid; where a body names one of them).
     ("oci upload ids", "upload ids in location, docker-upload-uuid and bodies"),
@@ -1380,7 +1602,8 @@ class Masker:
             nb = re.sub(rb"(?m)^Date: .*$", b"Date: *", body)
             nb = re.sub(rb"-----BEGIN PGP SIGNATURE-----.*?-----END PGP SIGNATURE-----", b"SIG",
                         nb, flags=re.S)
-            if nb != body:
+            # A HEAD has no body to look in: its etag is of one signed now.
+            if nb != body or not body:
                 self.counts["deb Release written now"] += 1
                 hd = [[k, "*" if k == "etag" else v] for k, v in hd]
             body = nb
