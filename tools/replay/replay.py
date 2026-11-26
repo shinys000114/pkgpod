@@ -1340,6 +1340,8 @@ def corpus(fx):
             ("PUT", f"/npub/{bt}", js, npm_doc(bt, "1.0.0", f"beta by {who}".encode(), "beta")),
             ("GET", f"/npub/{bt}", {}, None),
             ("GET", f"/npub/-/package/{bt}/dist-tags", {}, None),
+            ("GET", f"/npub/{bt}/-/{bt}-1.0.0.tgz", {}, None),
+            # A version's own document is not served: 404 to everyone.
             ("GET", f"/npub/{bt}/1.0.0", {}, None)])
         # PyPI: twine's upload to each kind, at the repository and legacy/;
         # what it refuses.
