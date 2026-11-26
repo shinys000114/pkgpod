@@ -1033,9 +1033,11 @@ def fuzz_mutants(base, n=FUZZ_N):
 
 def corpus(fx):
     """The requests, in order: each a sequence of steps (most one), as
-    one identity. A step's path may hold {loc}, the previous answer's
-    Location; a header may be {<id>.<header>}, from an earlier answer
-    of the same run. Reads first, then writes, then reads of what they
+    one identity. A step's path may hold {loc}, the last Location of the
+    sequence, or {json:KEY}, a key of the previous answer's JSON; a
+    header may be {<id>.<header>}, from an earlier answer of the same
+    run. A step whose template cannot be filled is not sent, and its
+    answer says so. Reads first, then writes, then reads of what they
     made."""
     out = []
 
@@ -1285,8 +1287,23 @@ def corpus(fx):
             ("DELETE", f"/npub/{d}/-/{d}-1.1.0.tgz/-rev/{{json:_rev}}", {}, None),
             ("DELETE", f"/npub/{d}/-/nope.tgz/-rev/x", {}, None),
             ("GET", f"/npub/{d}", {}, None),
+            # Published again: a packument put back at its revision, of no
+            # versions; a tarball's delete at a revision that is not it.
+            ("PUT", f"/npub/{d}", js, npm_doc(d, "1.2.0", b"d 1.2.0")),
+            ("GET", f"/npub/{d}", {}, None),
             ("PUT", f"/npub/{d}/-rev/{{json:_rev}}", js, b'{"name": "x"}'),
+            ("GET", f"/npub/{d}", {}, None),
+            ("DELETE", f"/npub/{d}/-/{d}-1.2.0.tgz/-rev/1-stale", {}, None),
             ("GET", f"/npub/{d}", {}, None)])
+        # One who may not write npub, at hello's revision as it is: what
+        # refuses them is not the revision.
+        if who in ("anon", "noone", "reader", "rtoken"):
+            seq(f"npm hello at its revision {who}", who, [
+                ("GET", "/npub/hello", {}, None),
+                ("PUT", "/npub/hello/-rev/{json:_rev}", js,
+                 json.dumps({"name": "hello", "versions": {"1.0.0": {}, "1.1.0": {}}}).encode()),
+                ("GET", "/npub/hello", {}, None),
+                ("DELETE", "/npub/hello/-rev/{json:_rev}", {}, None)])
         notags = json.loads(npm_doc(f"t-{who}", "1.0.0", b"no tags"))
         del notags["dist-tags"]
         seq(f"npm publishes refused {who}", who, [
@@ -1692,6 +1709,43 @@ def end_state(data, seed_time, counts):
     return out
 
 
+def fill(path, headers, loc, last_body, seen):
+    """A step's path and headers with their templates filled from what
+    the run answered before: (path, headers, None), or (None, None, the
+    template) when one cannot be filled (no such answer, header or key):
+    such a step is not sent."""
+    m = re.fullmatch(r"\{loc\|([^=]*)=([^}]*)\}", path)
+    if m:
+        if not loc:
+            return None, None, path
+        path = re.sub(r"^https?://[^/]+", "", loc).replace(m.group(1), m.group(2))
+    if "{loc}" in path:
+        if not loc:
+            return None, None, "{loc}"
+        base = re.sub(r"^https?://[^/]+", "", loc)
+        rest = path.replace("{loc}", "")
+        if rest.startswith("?") and "?" in base:
+            rest = "&" + rest[1:]
+        path = base + rest
+    for key in re.findall(r"\{json:([^}]+)\}", path):
+        try:
+            prev = json.loads(last_body)
+        except ValueError:
+            prev = None
+        if not isinstance(prev, dict) or key not in prev:
+            return None, None, "{json:%s}" % key
+        path = path.replace("{json:%s}" % key, str(prev[key]))
+    out = {}
+    for k, v in headers.items():
+        m = re.fullmatch(r"\{(.+)\.([a-z-]+)\}", v)
+        if m:
+            v = dict(seen.get(m.group(1), [])).get(m.group(2))
+            if v is None:
+                return None, None, m.group(0)
+        out[k] = v
+    return path, out, None
+
+
 def run(root, binary, out_path, profdir=None):
     s = os.path.join(root, "seed")
     live = os.path.join(root, "live")
@@ -1708,7 +1762,7 @@ def run(root, binary, out_path, profdir=None):
     os.rename(live, s)
     mask = Masker(seed_info["made"])
     answers = []
-    steps_sent = 0
+    steps_sent = skipped = 0
     up = start_upstream()
     try:
         p.start(profdir)
@@ -1732,33 +1786,13 @@ def run(root, binary, out_path, profdir=None):
                     time.sleep(int(path))
                     got.append({"slept": path})
                     continue
-                m = re.fullmatch(r"\{loc\|([^=]*)=([^}]*)\}", path)
-                if m:
-                    if not loc:
-                        got.append({"skipped": "no Location before"})
-                        continue
-                    path = re.sub(r"^https?://[^/]+", "", loc).replace(m.group(1), m.group(2))
-                if "{loc}" in path:
-                    if not loc:
-                        got.append({"skipped": "no Location before"})
-                        continue
-                    base = re.sub(r"^https?://[^/]+", "", loc)
-                    rest = path.replace("{loc}", "")
-                    if rest.startswith("?") and "?" in base:
-                        rest = "&" + rest[1:]
-                    path = base + rest
-                if "{json:" in path:
-                    try:
-                        prev = json.loads(last_body or b"{}")
-                    except ValueError:
-                        prev = {}
-                    path = re.sub(r"\{json:([^}]+)\}", lambda m: str(prev.get(m.group(1), "")), path)
+                path, filled, missing = fill(path, headers, loc, last_body, seen)
+                if missing:
+                    got.append({"skipped": missing})
+                    skipped += 1
+                    continue
                 hd = dict(auth_header(who))
-                for k, v in headers.items():
-                    m = re.fullmatch(r"\{(.+)\.([a-z-]+)\}", v)
-                    if m:
-                        v = dict(seen.get(m.group(1), [])).get(m.group(2), "")
-                    hd[k] = v
+                hd.update(filled)
                 st, rh, data = request(method, path, hd, body)
                 last_body = data
                 steps_sent += 1
@@ -1791,7 +1825,7 @@ def run(root, binary, out_path, profdir=None):
     errors = sum(1 for a in answers for x in a["steps"] if x.get("status", 0) >= 500)
     closed = sum(1 for a in answers for x in a["steps"] if x.get("status", 1) == 0)
     say(f"{steps_sent} requests in {len(answers)} sequences, {errors} answered 5xx, "
-        f"{closed} closed unanswered; "
+        f"{closed} closed unanswered, {skipped} skipped; "
         f"masked {mask.counts}; in {out_path}")
 
 
