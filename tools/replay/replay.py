@@ -1081,9 +1081,11 @@ def corpus(fx):
                 add(f"deb {repo}{rel} {who}", who, "GET", b + rel)
         # OCI: the registry's own paths, then each repository.
         add(f"oci /v2/ {who}", who, "GET", "/v2/")
+        # An image name that is not one is refused before the rights are
+        # looked at: also where the caller may not read.
         for rel in ("/v2/_catalog", "/v2/opub/app/other", "/v2/nope/app/manifests/1",
-                    "/v2/opub/App/manifests/1", "/v2/opub/app/blobs/uploads/nope",
-                    "/opub/", "/opub/x"):
+                    "/v2/opub/App/manifests/1", "/v2/opriv/App/manifests/1",
+                    "/v2/opub/app/blobs/uploads/nope", "/opub/", "/opub/x"):
             add(f"oci {rel} {who}", who, "GET", rel, oci_accept)
         for repo in ("opub", "opriv", "ogroup"):
             layer, config, manifest = app_image("opub" if repo == "ogroup" else repo)
@@ -1496,6 +1498,10 @@ def corpus(fx):
              oci_manifest(config, [layer], manifest)),
             ("DELETE", f"/v2/opub/w/manifests/{who}-sig", {}, None),
             ("DELETE", "/v2/opub/w/manifests/no-such-tag", {}, None)])
+        # A valid manifest to an image name that is not one: refused before
+        # the rights are looked at, also where the caller may not write.
+        add(f"oci manifest to an invalid name {who}", who, "PUT", "/v2/opub/App/manifests/1", mt,
+            manifest)
         # Bodies at and over the limit, only where the server reads them
         # (a refusal before the body is read races the client's send).
         if who in ("writer", "wtoken", "admin"):
