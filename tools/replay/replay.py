@@ -742,10 +742,13 @@ def corpus(fx):
             ("GET", "/npub/-/package/nope/dist-tags", {}, None),
             ("DELETE", "/npub/-/package/hello/dist-tags/never", {}, None),
             ("POST", "/npub/-/package/hello/dist-tags", js, b"{}")])
-        # A publish over the limit, by one who may (its body is read).
+        # A publish and a dist-tag over their limits, by one who may (their
+        # bodies are read).
         if who == "writer":
             add("npm publish over the limit writer", who, "PUT", "/npub/huge", js,
                 b" " * ((256 << 20) + 1))
+            add("npm dist-tag over the limit writer", who, "PUT",
+                "/npub/-/package/hello/dist-tags/x", js, b'"' + b"1" * 4095 + b'"')
         seq(f"npm unpublish {who}", who, [
             ("PUT", "/npub/hello/-rev/1-stale", js, npm_doc("hello", "1.1.0", b"hello 1.1.0")),
             ("GET", f"/npub/w-{who}", {}, None),
