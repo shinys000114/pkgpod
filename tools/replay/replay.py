@@ -52,7 +52,8 @@ USERS = {
     "noone": ("replay noone password", {}),
     "reader": (
         "replay reader password",
-        {"fpriv": "read", "dpriv": "read", "opriv": "read", "ogroup": "read"},
+        {"fpriv": "read", "dpriv": "read", "opriv": "read", "ogroup": "read", "npriv": "read",
+         "ngroup": "read"},
     ),
     "writer": (
         "replay writer password",
@@ -65,10 +66,13 @@ USERS = {
             "opriv": "write",
             "oburst": "write",
             "ogroup": "read",
+            "npub": "write",
+            "npriv": "write",
+            "ngroup": "read",
         },
     ),
 }
-IDENTS = ["anon", "noone", "reader", "writer", "wtoken", "admin"]
+IDENTS = ["anon", "noone", "reader", "writer", "wtoken", "wbearer", "admin"]
 # The plaintext tokens made with the seed (ident: token), read at run time.
 TOKENS = {}
 
@@ -144,6 +148,26 @@ UP_FILES = {
 BAD_DIGEST = blob_digest(b"not the manifest")
 
 
+def npm_doc(name, version, tgz, tag="latest", tarball=None):
+    """A package document of one version: to publish (with the tarball
+    attached), or as a registry gives it (with where its tarball is)."""
+    v = {"name": name, "version": version, "dist": {
+        "shasum": hashlib.sha1(tgz).hexdigest(),
+        "integrity": "sha512-" + base64.b64encode(hashlib.sha512(tgz).digest()).decode()}}
+    doc = {"name": name, "versions": {version: v}, "dist-tags": {tag: version}}
+    if tarball:
+        v["dist"]["tarball"] = tarball
+    else:
+        fn = name.split("/")[-1] + f"-{version}.tgz"
+        doc["_attachments"] = {fn: {"data": base64.b64encode(tgz).decode(), "length": len(tgz)}}
+    return json.dumps(doc, sort_keys=True).encode()
+
+
+UP_NPM_TGZ = b"upstream npm tarball\n" * 20
+UP_NPM_DOC = npm_doc("up-pkg", "1.0.0", UP_NPM_TGZ,
+                     tarball=f"http://127.0.0.1:{UP}/npm/up-pkg/-/up-pkg-1.0.0.tgz")
+
+
 def upstream_answer(method, path):
     """(status, headers, body) of the stub, fixed."""
     oci = "application/vnd.oci.image.manifest.v1+json"
@@ -171,6 +195,12 @@ def upstream_answer(method, path):
                     "Docker-Content-Digest": m.group(1),
                 }, b
         return 404, {}, b""
+    if path == "/npm/bad-json":
+        return 200, {"Content-Type": "application/json"}, b"not json"
+    if path == "/npm/up-pkg":
+        return 200, {"Content-Type": "application/json"}, UP_NPM_DOC
+    if path == "/npm/up-pkg/-/up-pkg-1.0.0.tgz":
+        return 200, {"Content-Type": "application/octet-stream"}, UP_NPM_TGZ
     if path in UP_FILES:
         b = UP_FILES[path]
         return 200, {
@@ -321,6 +351,9 @@ def wait_port(port, proc, timeout=30):
 def auth_header(ident):
     if ident == "anon":
         return {}
+    if ident == "wbearer":
+        # A token as npm, cargo and others send it.
+        return {"Authorization": f"Bearer {TOKENS['wtoken']}"}
     if ident in TOKENS:
         cred = f"token:{TOKENS[ident]}"
     else:
@@ -487,6 +520,25 @@ def seed(root, binary):
               "metadata_minutes=0")
         p.cli("repo", "create", "ogroup", "-f", "oci", "-k", "group", "-s",
               "members=opub,opriv,oproxy", "-s", "public=false")
+        # npm: hosted public and private (two versions, a scoped package,
+        # a dist-tag, a label), a proxy of the stub, a group.
+        ja = dict(auth_header("admin"), **{"Content-Type": "application/json"})
+        for repo, public in (("npub", "true"), ("npriv", "false")):
+            p.cli("repo", "create", repo, "-f", "npm", "-s", f"public={public}")
+            for path, doc in ((f"/{repo}/hello", npm_doc("hello", "1.0.0", b"hello 1.0.0")),):
+                st, _, body = request("PUT", path, ja, doc)
+                if st != 201:
+                    raise SystemExit(f"npm publish {path}: {st} {body[:200]}")
+            p.cli("label", repo, "first")
+            for path, doc in ((f"/{repo}/hello", npm_doc("hello", "1.1.0", b"hello 1.1.0", "beta")),
+                              (f"/{repo}/@team%2flib", npm_doc("@team/lib", "1.0.0", b"lib"))):
+                st, _, body = request("PUT", path, ja, doc)
+                if st != 201:
+                    raise SystemExit(f"npm publish {path}: {st} {body[:200]}")
+        p.cli("repo", "create", "nproxy", "-f", "npm", "-k", "proxy", "-s",
+              f"upstream=http://127.0.0.1:{UP}/npm/", "-s", "public=true")
+        p.cli("repo", "create", "ngroup", "-f", "npm", "-k", "group", "-s",
+              "members=npub,npriv,nproxy", "-s", "public=false")
         # A files proxy of the stub.
         p.cli("repo", "create", "fproxy", "-f", "files", "-k", "proxy", "-s",
               f"upstream=http://127.0.0.1:{UP}/files/", "-s", "public=true")
@@ -497,7 +549,7 @@ def seed(root, binary):
         w = Pkgpod(binary, s)
         w.env["XDG_CONFIG_HOME"] = os.path.join(s, "cli-writer")
         w.cli("login", "-u", "writer", "--password-stdin", stdin=USERS["writer"][0] + "\n")
-        tok = w.cli("token", "create", "replay", "--repos", "opub,opriv,fpub", "--write")
+        tok = w.cli("token", "create", "replay", "--repos", "opub,opriv,fpub,npub", "--write")
         with open(os.path.join(s, "tokens.json"), "w") as f:
             json.dump({"wtoken": tok.strip().splitlines()[-1]}, f)
     finally:
@@ -606,6 +658,26 @@ def corpus(fx):
         add(f"files proxy a {who}", who, "GET", "/fproxy/a.img")
         add(f"files proxy b range {who}", who, "GET", "/fproxy/dir/b.img", {"Range": "bytes=5-20"})
         add(f"files proxy nope {who}", who, "GET", "/fproxy/nope.img")
+        abbrev = {"Accept": "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8"}
+        for repo in ("npub", "npriv"):
+            for rel in ("/hello", "/hello/1.0.0", "/hello/latest", "/hello/9.9.9", "/@team%2flib",
+                        "/@team/lib", "/hello/-/hello-1.0.0.tgz", "/hello/-/hello-9.9.9.tgz",
+                        "/-/ping", "/-/whoami", "/-/v1/search?text=hello", "/-/v1/search?text=x&size=1",
+                        "/-/package/hello/dist-tags", "/-/label/first/hello",
+                        "/-/label/first/hello/-/hello-1.0.0.tgz", "/-/label/nope/hello", "/", "/nope",
+                        "/-/nope", "/hello/-/", "/hello/-/other-1.0.0.tgz", "/@team",
+                        "/@team%2flib/-/lib-1.0.0.tgz", "/@team%2flib/1.0.0"):
+                add(f"npm {repo}{rel} {who}", who, "GET", f"/{repo}{rel}")
+            add(f"npm {repo} abbreviated {who}", who, "GET", f"/{repo}/hello", abbrev)
+            add(f"npm {repo} HEAD {who}", who, "HEAD", f"/{repo}/hello")
+            add(f"npm {repo} inm {who}", who, "GET", f"/{repo}/hello",
+                {"If-None-Match": "{npm %s/hello %s.etag}" % (repo, who)})
+        for repo in ("nproxy", "ngroup"):
+            for rel in ("/up-pkg", "/up-pkg/-/up-pkg-1.0.0.tgz", "/nope-pkg", "/hello",
+                        "/hello/-/hello-1.0.0.tgz", "/", "/-/ping", "/-/whoami",
+                        "/-/v1/search?text=hello", "/-/v1/search?text=up", "/bad-json",
+                        "/-/label/x/hello"):
+                add(f"npm {repo}{rel} {who}", who, "GET", f"/{repo}{rel}")
         add(f"host index {who}", who, "GET", "/")
     # A proxy whose upstream is gone: what it kept, and what it did not.
     out.append({"id": "stub bearer stops", "who": "anon", "steps": [("STUB", "stop bearer", {}, None)]})
@@ -630,6 +702,46 @@ def corpus(fx):
         for repo in ("dpub", "dpriv"):
             add(f"put deb {repo} {who}", who, "PUT", f"/{repo}/later_2.0_amd64.deb", {}, later)
         add(f"put files proxy {who}", who, "PUT", "/fproxy/x.img", {}, b"x")
+        js = {"Content-Type": "application/json"}
+        for repo in ("npub", "npriv", "nproxy", "ngroup"):
+            name = f"w-{who}"
+            add(f"npm publish {repo} {who}", who, "PUT", f"/{repo}/{name}", js,
+                npm_doc(name, "1.0.0", f"by {who}".encode()))
+        seq(f"npm dist-tags {who}", who, [
+            ("PUT", "/npub/-/package/hello/dist-tags/next", js, b'"1.0.0"'),
+            ("GET", "/npub/-/package/hello/dist-tags", {}, None),
+            ("DELETE", "/npub/-/package/hello/dist-tags/next", {}, None),
+            ("PUT", "/npub/-/package/hello/dist-tags/next", js, b'"7.7.7"')])
+        d = f"d-{who}"
+        seq(f"npm deprecate and unpublish {who}", who, [
+            ("PUT", f"/npub/{d}", js, npm_doc(d, "1.0.0", b"d 1.0.0")),
+            ("PUT", f"/npub/{d}", js, npm_doc(d, "1.1.0", b"d 1.1.0")),
+            ("GET", f"/npub/{d}", {}, None),
+            ("PUT", f"/npub/{d}/-rev/{{json:_rev}}", js,
+             json.dumps({"name": d, "versions": {"1.1.0": {"deprecated": "use another"}}}).encode()),
+            ("GET", f"/npub/{d}", {}, None),
+            ("DELETE", f"/npub/{d}/-/{d}-1.1.0.tgz/-rev/{{json:_rev}}", {}, None),
+            ("DELETE", f"/npub/{d}/-/nope.tgz/-rev/x", {}, None),
+            ("GET", f"/npub/{d}", {}, None),
+            ("PUT", f"/npub/{d}/-rev/{{json:_rev}}", js, b'{"name": "x"}'),
+            ("GET", f"/npub/{d}", {}, None)])
+        notags = json.loads(npm_doc(f"t-{who}", "1.0.0", b"no tags"))
+        del notags["dist-tags"]
+        seq(f"npm publishes refused {who}", who, [
+            ("PUT", "/npub/hello", js, npm_doc("hello", "1.0.0", b"hello again")),
+            ("PUT", f"/npub/x-{who}", js, b"not json"),
+            ("PUT", f"/npub/t-{who}", js, json.dumps(notags).encode()),
+            ("GET", f"/npub/t-{who}", {}, None),
+            ("PUT", "/npub/-/package/hello/dist-tags/x", js, b"1.0.0"),
+            ("PUT", "/npub/-/package/hello/dist-tags/x", js, b'{"v": 1}'),
+            ("GET", "/npub/-/package/nope/dist-tags", {}, None),
+            ("DELETE", "/npub/-/package/hello/dist-tags/never", {}, None),
+            ("POST", "/npub/-/package/hello/dist-tags", js, b"{}")])
+        seq(f"npm unpublish {who}", who, [
+            ("PUT", "/npub/hello/-rev/1-stale", js, npm_doc("hello", "1.1.0", b"hello 1.1.0")),
+            ("GET", f"/npub/w-{who}", {}, None),
+            ("DELETE", f"/npub/w-{who}/-rev/{{json:_rev}}", {}, None),
+            ("GET", f"/npub/w-{who}", {}, None)])
         # OCI: a push in chunks, a blob in one request, a mount, an upload
         # looked at and cancelled, a manifest and a blob deleted.
         layer = b"layer by " + who.encode() * 32
@@ -747,6 +859,10 @@ RULES = [
     # OCI upload ids are random: numbered in the order they appear (in
     # location and docker-upload-uuid; where a body names one of them).
     ("oci upload ids", "upload ids in location, docker-upload-uuid and bodies"),
+    # npm keeps when each version was published (its packument's time,
+    # in the tree too) and a search says when it was made.
+    ("npm times", "time and a search hit's date in npm answers (and their etag), "
+                  "the root of an npm version made in the run"),
     ("audit time", "audit.time"),
     ("cache times", "cache.fetched, cache.used"),
     ("catalog times of writes", "catalog.added after the seed"),
@@ -777,6 +893,25 @@ class Masker:
             if raw.encode() in body:
                 body = body.replace(raw.encode(), n.encode())
                 self.counts["oci upload ids"] += 1
+        if re.match(r"/n(pub|priv|proxy|group)(/|$)", path) and body[:1] == b"{":
+            try:
+                doc = json.loads(body)
+            except ValueError:
+                doc = None
+            if isinstance(doc, dict):
+                masked = False
+                if "time" in doc:
+                    doc["time"] = "*"
+                    masked = True
+                for o in doc.get("objects") or []:
+                    if isinstance(o, dict) and isinstance(o.get("package"), dict) \
+                            and "date" in o["package"]:
+                        o["package"]["date"] = "*"
+                        masked = True
+                if masked:
+                    self.counts["npm times"] += 1
+                    body = json.dumps(doc, sort_keys=True).encode()
+                    hd = [[k, "*" if k in ("etag", "content-length") else v] for k, v in hd]
         if after_writes and re.search(r"/dists/[^?]*Release", path):
             nb = re.sub(rb"(?m)^Date: .*$", b"Date: *", body)
             nb = re.sub(rb"-----BEGIN PGP SIGNATURE-----.*?-----END PGP SIGNATURE-----", b"SIG",
@@ -815,12 +950,15 @@ def end_state(data, seed_time, counts):
             r[6] = "*"
             counts["catalog times of writes"] += 1
     out["catalog"] = cat
-    v = rows("SELECT r.name, v.seq, hex(v.root), v.view IS NOT NULL, v.created, v.actor, v.summary "
-             "FROM versions v JOIN repos r ON r.id = v.repo ORDER BY 1, 2")
+    v = rows("SELECT r.name, v.seq, hex(v.root), v.view IS NOT NULL, v.created, v.actor, v.summary, "
+             "r.format FROM versions v JOIN repos r ON r.id = v.repo ORDER BY 1, 2")
     for r in v:
         if r[4] >= seed_time:
             r[4] = "*"
             counts["version times"] += 1
+            if r[7] == "npm":
+                r[2] = "*"
+                counts["npm times"] += 1
     out["versions"] = v
     out["oci_uploads"] = rows("SELECT repo, digest FROM oci_uploads ORDER BY 1, 2")
     return out
@@ -854,6 +992,7 @@ def run(root, binary, out_path, profdir=None):
             if rid.startswith(("put ", "oci push", "oci mono")):
                 after_writes = True
             loc = None
+            last_body = b""
             got = []
             for method, path, headers, body in entry["steps"]:
                 if method == "STUB":
@@ -880,6 +1019,12 @@ def run(root, binary, out_path, profdir=None):
                     if rest.startswith("?") and "?" in base:
                         rest = "&" + rest[1:]
                     path = base + rest
+                if "{json:" in path:
+                    try:
+                        prev = json.loads(last_body or b"{}")
+                    except ValueError:
+                        prev = {}
+                    path = re.sub(r"\{json:([^}]+)\}", lambda m: str(prev.get(m.group(1), "")), path)
                 hd = dict(auth_header(who))
                 for k, v in headers.items():
                     m = re.fullmatch(r"\{(.+)\.([a-z-]+)\}", v)
@@ -887,12 +1032,13 @@ def run(root, binary, out_path, profdir=None):
                         v = dict(seen.get(m.group(1), [])).get(m.group(2), "")
                     hd[k] = v
                 st, rh, data = request(method, path, hd, body)
+                last_body = data
                 steps_sent += 1
                 seen[rid] = rh
                 loc = dict(rh).get("location", loc)
                 rh2, data2 = mask.answer(path, rh, data, after_writes)
                 ans = {"status": st, "headers": sorted(rh2),
-                       "sha256": hashlib.sha256(data2).hexdigest(), "len": len(data)}
+                       "sha256": hashlib.sha256(data2).hexdigest(), "len": len(data2)}
                 if len(data2) <= 600 and (not data2 or data2.isascii()):
                     ans["body"] = data2.decode("ascii", "replace")
                 got.append(ans)
