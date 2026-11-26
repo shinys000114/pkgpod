@@ -892,6 +892,7 @@ def corpus(fx):
         hfn, hdata = wheel("Hello_World", "1.0", "hello")
         steps = [
             ("POST", "/ppub/legacy/", {"Content-Type": "text/plain"}, b"not a form"),
+            ("POST", "/ppub/legacy/", {}, b"no Content-Type"),
             ("POST", "/ppub/legacy/", {"Content-Type": "multipart/form-data"}, b"no boundary"),
             ("POST", "/ppub/legacy/", {"Content-Type": "multipart/form-data; boundary=b"},
              b"--b\r\nContent-Disposition: form-data; name=\":action\"\r\n\r\nfile_up"),
