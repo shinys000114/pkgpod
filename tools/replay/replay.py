@@ -40,6 +40,7 @@ import os
 import re
 import shutil
 import sqlite3
+import struct
 import subprocess
 import sys
 import tarfile
@@ -57,7 +58,7 @@ USERS = {
     "reader": (
         "replay reader password",
         {"fpriv": "read", "dpriv": "read", "opriv": "read", "ogroup": "read", "npriv": "read",
-         "ngroup": "read", "ppriv": "read", "pgroup": "read"},
+         "ngroup": "read", "ppriv": "read", "pgroup": "read", "cpriv": "read", "cgroup": "read"},
     ),
     "writer": (
         "replay writer password",
@@ -76,6 +77,9 @@ USERS = {
             "ppub": "write",
             "ppriv": "write",
             "pgroup": "read",
+            "cpub": "write",
+            "cpriv": "write",
+            "cgroup": "read",
         },
     ),
 }
@@ -236,6 +240,46 @@ UP_PY_PAGE = json.dumps({
     sort_keys=True).encode()
 
 
+def krate(name, vers, files=None):
+    """A .crate of `name` `vers` (its Cargo.toml, or `files`), the same
+    bytes each time."""
+    raw = io.BytesIO()
+    if files is None:
+        files = {f"{name}-{vers}/Cargo.toml":
+                 f'[package]\nname = "{name}"\nversion = "{vers}"\n'.encode()}
+    with tarfile.open(fileobj=raw, mode="w", format=tarfile.USTAR_FORMAT) as t:
+        for fn, data in files.items():
+            info = tarfile.TarInfo(fn)
+            info.size, info.mtime = len(data), 1790000000
+            t.addfile(info, io.BytesIO(data))
+    return gzip.compress(raw.getvalue(), mtime=0)
+
+
+def cargo_publish(name, vers, crate=None, deps=(), description=None, meta=None):
+    """The body of `cargo publish`: the metadata's length and JSON, the
+    .crate's length and bytes."""
+    crate = krate(name, vers) if crate is None else crate
+    m = {"name": name, "vers": vers, "features": {}, "description": description,
+         "deps": [{"name": d, "version_req": req, "features": [], "optional": False,
+                   "default_features": True, "target": None, "kind": "normal",
+                   "registry": None} for d, req in deps]}
+    j = json.dumps(m, sort_keys=True).encode() if meta is None else meta
+    return struct.pack("<I", len(j)) + j + struct.pack("<I", len(crate)) + crate
+
+
+def cargo_index_file(name):
+    n = name.lower()
+    return {1: f"1/{n}", 2: f"2/{n}", 3: f"3/{n[0]}/{n}"}.get(len(n), f"{n[:2]}/{n[2:4]}/{n}")
+
+
+UP_CRATE = krate("up-pkg", "1.0.0")
+UP_CARGO_CONFIG = json.dumps({"dl": f"http://127.0.0.1:{UP}/cargo/api/v1/crates",
+                              "api": f"http://127.0.0.1:{UP}/cargo"}).encode()
+UP_CARGO_LINE = json.dumps({"name": "up-pkg", "vers": "1.0.0", "deps": [],
+                            "cksum": hashlib.sha256(UP_CRATE).hexdigest(), "features": {},
+                            "yanked": False}, sort_keys=True).encode() + b"\n"
+
+
 UP_NPM_TGZ = b"upstream npm tarball\n" * 20
 UP_NPM_DOC = npm_doc("up-pkg", "1.0.0", UP_NPM_TGZ,
                      tarball=f"http://127.0.0.1:{UP}/npm/up-pkg/-/up-pkg-1.0.0.tgz")
@@ -274,6 +318,12 @@ def upstream_answer(method, path):
         return 200, {"Content-Type": "application/json"}, UP_NPM_DOC
     if path == "/npm/up-pkg/-/up-pkg-1.0.0.tgz":
         return 200, {"Content-Type": "application/octet-stream"}, UP_NPM_TGZ
+    if path == "/cargo/index/config.json":
+        return 200, {"Content-Type": "application/json"}, UP_CARGO_CONFIG
+    if path == "/cargo/index/" + cargo_index_file("up-pkg"):
+        return 200, {"Content-Type": "text/plain"}, UP_CARGO_LINE
+    if path == "/cargo/api/v1/crates/up-pkg/1.0.0/download":
+        return 200, {"Content-Type": "application/octet-stream"}, UP_CRATE
     if path == "/pypi/simple/up-pkg/":
         return 200, {"Content-Type": "application/vnd.pypi.simple.v1+json"}, UP_PY_PAGE
     if path == "/pypi/simple/bad-json/":
@@ -640,6 +690,25 @@ def seed(root, binary):
               f"upstream=http://127.0.0.1:{UP}/pypi/simple/", "-s", "public=true")
         p.cli("repo", "create", "pgroup", "-f", "pypi", "-k", "group", "-s",
               "members=ppub,ppriv,pproxy", "-s", "public=false")
+        # cargo: hosted public and private (a crate named with an
+        # underscore, two versions, one with a dependency and a
+        # description, a label), a proxy of the stub's sparse index, a group.
+        for repo, public in (("cpub", "true"), ("cpriv", "false")):
+            p.cli("repo", "create", repo, "-f", "cargo", "-s", f"public={public}")
+            for i, body in enumerate((cargo_publish("hello_pod", "1.0.0"),
+                                      cargo_publish("hello_pod", "1.1.0", deps=[("serde", "^1")],
+                                                    description="says hello"),
+                                      cargo_publish("other-crate", "0.1.0"))):
+                st, _, out = request("PUT", f"/{repo}/api/v1/crates/new", aa, body)
+                if st != 200:
+                    raise SystemExit(f"cargo publish {i}: {st} {out[:200]}")
+                if i == 0:
+                    p.cli("label", repo, "first")
+        p.cli("repo", "create", "cempty", "-f", "cargo", "-s", "public=true")
+        p.cli("repo", "create", "cproxy", "-f", "cargo", "-k", "proxy", "-s",
+              f"upstream=http://127.0.0.1:{UP}/cargo/index/", "-s", "public=true")
+        p.cli("repo", "create", "cgroup", "-f", "cargo", "-k", "group", "-s",
+              "members=cpub,cpriv,cproxy", "-s", "public=false")
         # A files proxy of the stub.
         p.cli("repo", "create", "fproxy", "-f", "files", "-k", "proxy", "-s",
               f"upstream=http://127.0.0.1:{UP}/files/", "-s", "public=true")
@@ -650,7 +719,7 @@ def seed(root, binary):
         w = Pkgpod(binary, s)
         w.env["XDG_CONFIG_HOME"] = os.path.join(s, "cli-writer")
         w.cli("login", "-u", "writer", "--password-stdin", stdin=USERS["writer"][0] + "\n")
-        tok = w.cli("token", "create", "replay", "--repos", "opub,opriv,fpub,npub,ppub", "--write")
+        tok = w.cli("token", "create", "replay", "--repos", "opub,opriv,fpub,npub,ppub,cpub", "--write")
         with open(os.path.join(s, "tokens.json"), "w") as f:
             json.dump({"wtoken": tok.strip().splitlines()[-1]}, f)
     finally:
@@ -823,6 +892,35 @@ def corpus(fx):
             for page in ("up-pkg", "hello-world"):
                 add(f"pypi {repo} {page} json {who}", who, "GET", f"/{repo}/simple/{page}/",
                     pyjson)
+        hp = cargo_index_file("hello_pod")
+        dl = "/api/v1/crates/hello_pod/1.0.0/download"
+        for repo in ("cpub", "cpriv"):
+            for rel in ("/", "/index/config.json", f"/index/{hp}", "/index/he/ll/Hello_pod",
+                        "/index/he/ll/nope", "/index/xx/hello_pod", "/index/",
+                        f"/index/{cargo_index_file('other-crate')}", dl,
+                        "/api/v1/crates/hello_pod/9.9.9/download", "/api/v1/crates?q=hello",
+                        "/api/v1/crates?q=hello&per_page=1", "/api/v1/crates?q=nothing",
+                        "/api/v1/crates?q=HELLO+pod", "/api/v1/crates?per_page=0",
+                        "/api/v1/crates?q=hello&page=2", f"/index/{cargo_index_file('nope')}",
+                        "/api/v1/crates/hello_pod/owners", "/api/v1/crates/nope/owners",
+                        "/@first/index/config.json", f"/@first/index/{hp}", f"/@first{dl}",
+                        "/@first/", "/@nope/index/config.json", "/api/v1/nope", "/nope"):
+                add(f"cargo {repo}{rel} {who}", who, "GET", f"/{repo}{rel}")
+            add(f"cargo {repo} HEAD {who}", who, "HEAD", f"/{repo}/index/{hp}")
+            add(f"cargo {repo} inm {who}", who, "GET", f"/{repo}/index/{hp}",
+                {"If-None-Match": "{cargo %s/index/%s %s.etag}" % (repo, hp, who)})
+            add(f"cargo {repo} range {who}", who, "GET", f"/{repo}{dl}", {"Range": "bytes=0-9"})
+        # A registry with nothing in it yet.
+        for rel in ("/index/config.json", f"/index/{hp}", dl, "/api/v1/crates/hello_pod/owners",
+                    "/api/v1/crates?q=hello"):
+            add(f"cargo cempty{rel} {who}", who, "GET", f"/cempty{rel}")
+        up = cargo_index_file("up-pkg")
+        for repo in ("cproxy", "cgroup"):
+            for rel in ("/index/config.json", f"/index/{up}", "/api/v1/crates/up-pkg/1.0.0/download",
+                        "/api/v1/crates/up-pkg/9.9.9/download",
+                        f"/index/{cargo_index_file('nope-pkg')}", f"/index/{hp}", dl,
+                        "/api/v1/crates?q=hello", "/", "/@x/index/config.json"):
+                add(f"cargo {repo}{rel} {who}", who, "GET", f"/{repo}{rel}")
         add(f"host index {who}", who, "GET", "/")
     # A proxy whose upstream is gone: what it kept, and what it did not.
     out.append({"id": "stub bearer stops", "who": "anon", "steps": [("STUB", "stop bearer", {}, None)]})
@@ -918,6 +1016,42 @@ def corpus(fx):
              wheel(f"p-{who}", "1.0")[1]),
             ("GET", "/ppub/simple/hello-world/", {}, None)]
         seq(f"pypi uploads refused {who}", who, steps)
+        # cargo: a publish to each kind; what publishing refuses; yank and
+        # unyank; owners, which are pkgpod's rights.
+        for repo in ("cpub", "cpriv", "cproxy", "cgroup"):
+            add(f"cargo publish {repo} {who}", who, "PUT", f"/{repo}/api/v1/crates/new", {},
+                cargo_publish(f"w-{who}", "1.0.0"))
+        new = "/cpub/api/v1/crates/new"
+        seq(f"cargo publishes refused {who}", who, [
+            ("PUT", new, {}, b"abc"),
+            ("PUT", new, {}, struct.pack("<I", 2) + b"{}"),
+            ("PUT", new, {}, cargo_publish(f"j-{who}", "1.0.0", meta=b"not json")),
+            ("PUT", new, {}, cargo_publish(f"l-{who}", "1.0.0")[:-1]),
+            ("PUT", new, {}, cargo_publish("1bad", "1.0.0")),
+            ("PUT", new, {}, cargo_publish(f"v-{who}", "x")),
+            ("PUT", new, {}, cargo_publish(f"d-{who}", "1.0.0", deps=[("serde", "not a req")])),
+            ("PUT", new, {}, cargo_publish(f"m-{who}", "1.0.0", crate=krate(
+                f"m-{who}", "1.0.0", {f"m-{who}-1.0.0/src/lib.rs": b""}))),
+            ("PUT", new, {}, cargo_publish(f"o-{who}", "1.0.0", crate=krate(
+                f"o-{who}", "1.0.0", {f"o-{who}-1.0.0/Cargo.toml": b"", "elsewhere/x": b""}))),
+            ("PUT", new, {}, cargo_publish(f"g-{who}", "1.0.0", crate=b"not gzip")),
+            ("PUT", new, {}, cargo_publish("hello_pod", "1.0.0")),
+            ("PUT", "/cpub/@first/api/v1/crates/new", {}, cargo_publish(f"f-{who}", "1.0.0")),
+            ("POST", new, {}, cargo_publish(f"p-{who}", "1.0.0")),
+            ("GET", f"/cpub/index/{hp}", {}, None)])
+        y = "/cpub/api/v1/crates/hello_pod/1.1.0"
+        seq(f"cargo yank and unyank {who}", who, [
+            ("DELETE", f"{y}/yank", {}, None),
+            ("GET", f"/cpub/index/{hp}", {}, None),
+            ("GET", "/cpub/api/v1/crates?q=hello", {}, None),
+            ("PUT", f"{y}/unyank", {}, None),
+            ("GET", f"/cpub/index/{hp}", {}, None),
+            ("DELETE", "/cpub/api/v1/crates/hello_pod/9.9.9/yank", {}, None),
+            ("PUT", f"{y}/yank", {}, None),
+            ("DELETE", "/cpub/@first/api/v1/crates/hello_pod/1.0.0/yank", {}, None)])
+        seq(f"cargo owners {who}", who, [
+            ("PUT", "/cpub/api/v1/crates/hello_pod/owners", {}, b'{"users": ["x"]}'),
+            ("DELETE", "/cpub/api/v1/crates/hello_pod/owners", {}, b'{"users": ["x"]}')])
         # A publish and a dist-tag over their limits, by one who may (their
         # bodies are read).
         if who == "writer":
@@ -929,6 +1063,8 @@ def corpus(fx):
             add("pypi upload field over the limit writer", who, "POST", "/ppub/legacy/", hd, body)
             hd, body = py_form([(":action", "file_upload"), ("sha256_digest", "0" * (64 << 10) + "0")])
             add("pypi upload digest over the limit writer", who, "POST", "/ppub/legacy/", hd, body)
+            add("cargo publish over the limit writer", who, "PUT", new, {},
+                b"\0" * ((64 << 20) + 1))
         seq(f"npm unpublish {who}", who, [
             ("PUT", "/npub/hello/-rev/1-stale", js, npm_doc("hello", "1.1.0", b"hello 1.1.0")),
             ("GET", f"/npub/w-{who}", {}, None),
@@ -1056,6 +1192,11 @@ RULES = [
     ("npm times", "timestamps at or after the seed in npm answers (same length; a "
                   "search's of any length, with its content-length), the etag of an "
                   "answer they were in, the root of an npm version made in the run"),
+    # cargo keeps when each version was published (pubtime in its index
+    # entry, in the tree too).
+    ("cargo times", "pubtimes at or after the seed in cargo answers (same length), the "
+                    "etag of an answer they were in, the root of a cargo version made in "
+                    "the run"),
     ("audit time", "audit.time"),
     ("cache times", "cache.fetched, cache.used"),
     ("catalog times of writes", "catalog.added after the seed"),
@@ -1072,7 +1213,7 @@ class Masker:
         self.uploads = {}
         self.seed_time = seed_time
 
-    def npm_times(self, path, body):
+    def run_times(self, path, body):
         """`body` with the timestamps of the run masked; whether any were."""
         search = "/-/v1/search" in path
         hit = False
@@ -1106,12 +1247,17 @@ class Masker:
                 body = body.replace(raw.encode(), n.encode())
                 self.counts["oci upload ids"] += 1
         if re.match(r"/n(pub|priv|proxy|group)(/|$)", path):
-            body, hit = self.npm_times(path, body)
+            body, hit = self.run_times(path, body)
             if hit:
                 self.counts["npm times"] += 1
                 search = "/-/v1/search" in path
                 hd = [[k, "*" if k == "etag" or (search and k == "content-length") else v]
                       for k, v in hd]
+        if re.match(r"/c(pub|priv|proxy|group)(/|$)", path):
+            body, hit = self.run_times(path, body)
+            if hit:
+                self.counts["cargo times"] += 1
+                hd = [[k, "*" if k == "etag" else v] for k, v in hd]
         if after_writes and re.search(r"/dists/[^?]*Release", path):
             nb = re.sub(rb"(?m)^Date: .*$", b"Date: *", body)
             nb = re.sub(rb"-----BEGIN PGP SIGNATURE-----.*?-----END PGP SIGNATURE-----", b"SIG",
@@ -1156,9 +1302,9 @@ def end_state(data, seed_time, counts):
         if r[4] >= seed_time:
             r[4] = "*"
             counts["version times"] += 1
-            if r[7] == "npm":
+            if r[7] in ("npm", "cargo"):
                 r[2] = "*"
-                counts["npm times"] += 1
+                counts[f"{r[7]} times"] += 1
     out["versions"] = v
     out["oci_uploads"] = rows("SELECT repo, digest FROM oci_uploads ORDER BY 1, 2")
     return out
