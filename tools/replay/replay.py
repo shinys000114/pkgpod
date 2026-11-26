@@ -88,9 +88,17 @@ USERS = {
         },
     ),
 }
-IDENTS = ["anon", "noone", "reader", "writer", "wtoken", "wbearer", "admin"]
+# Who asks. wtoken is a token of writer's (sent in Basic, and as wbearer
+# as a Bearer); ptoken a trusted publisher's, of a trust rule without a
+# user (no user, yet it may write); rtoken a token of writer's that only
+# reads.
+IDENTS = ["anon", "noone", "reader", "writer", "wtoken", "wbearer", "admin", "ptoken", "rtoken"]
 # The plaintext tokens made with the seed (ident: token), read at run time.
 TOKENS = {}
+# The trust rule without a user, and the publisher token the seed gives
+# it (as the server gives one to a CI job), fixed.
+PUBLISHER = ("replay", "opub,opriv,npub,ppub,cpub,gpub")
+PTOKEN = "pkgpod_" + "7e57ab1e" * 5
 
 
 def say(*a):
@@ -768,16 +776,32 @@ def seed(root, binary):
         for u, (_, grants) in USERS.items():
             for repo, role in grants.items():
                 p.cli("grant", "set", repo, f"user:{u}", role)
-        # A token of writer's, for some of its repositories.
+        # Tokens of writer's, for some of its repositories: one that
+        # writes, one that only reads.
         w = Pkgpod(binary, s)
         w.env["XDG_CONFIG_HOME"] = os.path.join(s, "cli-writer")
         w.cli("login", "-u", "writer", "--password-stdin", stdin=USERS["writer"][0] + "\n")
         tok = w.cli("token", "create", "replay", "--repos", "opub,opriv,fpub,npub,ppub,cpub,gpub", "--write")
-        with open(os.path.join(s, "tokens.json"), "w") as f:
-            json.dump({"wtoken": tok.strip().splitlines()[-1]}, f)
+        tokens = {"wtoken": tok.strip().splitlines()[-1]}
+        tok = w.cli("token", "create", "replay-read", "--repos",
+                    "fpriv,opriv,npriv,ppriv,cpriv,gpriv")
+        tokens["rtoken"] = tok.strip().splitlines()[-1]
+        # A trust rule without a user: its tokens write its repositories.
+        p.cli("trust", "add", PUBLISHER[0], "--github", "replay/replay", "--repos", PUBLISHER[1])
     finally:
         up.shutdown()
         p.stop()
+    # The token a CI job would get for the rule, put where the server
+    # keeps them (it makes one only for a job's OIDC token): unexpired.
+    c = sqlite3.connect(os.path.join(s, "data", "pkgpod.db"))
+    with c:
+        rule = c.execute("SELECT id FROM trust_rules WHERE name = ?", (PUBLISHER[0],)).fetchone()[0]
+        c.execute("INSERT INTO publish_tokens (hash, rule, expires, created) VALUES (?, ?, ?, ?)",
+                  (hashlib.sha256(PTOKEN.encode()).digest(), rule, 4102444800, 1790000000))
+    c.close()
+    tokens["ptoken"] = PTOKEN
+    with open(os.path.join(s, "tokens.json"), "w") as f:
+        json.dump(tokens, f)
     # Times are kept in whole seconds: the seed's are all before the
     # second it is stamped with, a run's all at or after it.
     t = time.time()
@@ -892,7 +916,7 @@ def fuzz_requests(n=FUZZ_N):
             path += "?" + rng.choice(["q=hello", "q=", "per_page=-1", "size=99999", "text=hello",
                                       "from=-1", "force", "n=1&last=a", "digest=x", "mount=x&from=y",
                                       "a=%ZZ", "replace", "mtime=1790000000"])
-        who = rng.choices(IDENTS, weights=[25, 15, 20, 25, 5, 5, 5])[0]
+        who = rng.choices(IDENTS, weights=[25, 15, 20, 25, 5, 5, 5, 5, 5])[0]
         method = rng.choices(["GET", "HEAD", "PUT", "POST", "DELETE", "PATCH", "OPTIONS"],
                              weights=[45, 15, 12, 10, 8, 5, 5])[0]
         writes = method not in ("GET", "HEAD", "OPTIONS")
