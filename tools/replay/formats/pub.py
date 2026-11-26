@@ -342,6 +342,21 @@ def writes(c, who):
             ("GET", f"/dartpub/api/packages/o_{who}", {}, None),
             ("POST", f"/dartpub{UP}", dict(CT, Origin=f"http://127.0.0.1:{SERVE}"), body),
             ("GET", f"/dartpub/api/packages/o_{who}", {}, None)])
+        # The file whole, the form spoilt only past it: a delimiter of
+        # another boundary, one closing with a single dash, the body
+        # ending at it, a part whose header is not one. Publishing reads
+        # no part after the file's.
+        for i, (name, tail) in enumerate((
+                ("another boundary", b"--replay-formX"),
+                ("one dash", b"--replay-form-\r\n"),
+                ("ending at the delimiter", b"--replay-form"),
+                ("a bad part", b"--replay-form\r\nnot a header\r\n\r\nx")), 1):
+            g = f"g{i}_{who}"
+            seq(f"pub form spoilt past the file {name} {who}", who, [
+                ("POST", f"/dartpub{UP}", CT,
+                 part("file", pub_archive(g, "1.0.0"), "package.tar.gz") + tail),
+                ("GET", "{loc}", {}, None),
+                ("GET", f"/dartpub/api/packages/{g}", {}, None)])
 
 
 def limits(c, who):
