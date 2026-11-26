@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
 use axum::extract::Request;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use futures_util::StreamExt;
 use http::{HeaderValue, Method, StatusCode, header};
 use pkgpod_base::Digest;
@@ -62,13 +62,30 @@ const SESSION_TTL: i64 = 86400;
 const MAX_SESSIONS_REPO: usize = 64;
 const MAX_SESSIONS: usize = 1024;
 
+/// A JSON body with its status.
+fn json_reply(st: StatusCode, v: Value) -> Response {
+    let mut r = bare(st);
+    *r.body_mut() = Body::from(serde_json::to_vec(&v).expect("a JSON value"));
+    r.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    r
+}
+
+/// A status, no body.
+fn bare(st: StatusCode) -> Response {
+    let mut r = Response::new(Body::empty());
+    *r.status_mut() = st;
+    r
+}
+
 /// An OCI error reply.
 fn oci_err(st: StatusCode, code: &str, msg: impl Into<String>) -> Response {
-    let mut r = (
+    let mut r = json_reply(
         st,
-        axum::Json(json!({"errors": [{"code": code, "message": msg.into(), "detail": null}]})),
-    )
-        .into_response();
+        json!({"errors": [{"code": code, "message": msg.into(), "detail": null}]}),
+    );
     r.headers_mut().insert(
         "Docker-Distribution-API-Version",
         HeaderValue::from_static("registry/2.0"),
@@ -90,7 +107,7 @@ fn unauthorized() -> Response {
 }
 
 fn reply(st: StatusCode) -> Response {
-    let mut r = st.into_response();
+    let mut r = bare(st);
     r.headers_mut().insert(
         "Docker-Distribution-API-Version",
         HeaderValue::from_static("registry/2.0"),
@@ -338,7 +355,7 @@ pub async fn handle(
         return Some(if caller.user.is_none() {
             unauthorized()
         } else {
-            let mut r = (StatusCode::OK, axum::Json(json!({}))).into_response();
+            let mut r = json_reply(StatusCode::OK, json!({}));
             set(&mut r, "Docker-Distribution-API-Version", "registry/2.0");
             r
         });

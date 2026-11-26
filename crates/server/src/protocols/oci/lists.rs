@@ -37,11 +37,7 @@ pub(super) async fn tags(cx: &Ctx, q: &str) -> Response {
         Some(n) => after.iter().take(n).cloned().collect(),
         None => after.clone(),
     };
-    let mut resp = (
-        StatusCode::OK,
-        axum::Json(json!({"name": cx.name, "tags": page})),
-    )
-        .into_response();
+    let mut resp = json_reply(StatusCode::OK, json!({"name": cx.name, "tags": page}));
     if let (Some(n), Some(l)) = (n, page.last())
         && after.len() > n
     {
@@ -92,13 +88,10 @@ pub(super) async fn referrers(cx: &Ctx, d: &str, q: &str) -> Response {
     })
     .await
     .unwrap_or_default();
-    let mut resp = (
+    let mut resp = json_reply(
         StatusCode::OK,
-        axum::Json(
-            json!({"schemaVersion": 2, "mediaType": pkgpod_oci::OCI_INDEX, "manifests": list}),
-        ),
-    )
-        .into_response();
+        json!({"schemaVersion": 2, "mediaType": pkgpod_oci::OCI_INDEX, "manifests": list}),
+    );
     set(&mut resp, "Content-Type", pkgpod_oci::OCI_INDEX);
     if query(q).contains_key("artifactType") {
         set(&mut resp, "OCI-Filters-Applied", "artifactType");
