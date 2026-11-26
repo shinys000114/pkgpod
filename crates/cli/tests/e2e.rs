@@ -11923,9 +11923,17 @@ fn webhooks_and_trust_for_some_repositories() {
     }
     let t0 = Instant::now();
     loop {
-        let n = |p: &str| got.lock().unwrap().iter().filter(|g| g.0 == p).count();
-        // Each made (version 1) and uploaded to (version 2).
-        if n("/every") >= 6 && n("/two") >= 4 {
+        // Each uploaded to (version 2). Whether its making (version 1),
+        // before the hooks were, is sent depends on whether the worker
+        // looked in between.
+        let n = |p: &str| {
+            got.lock()
+                .unwrap()
+                .iter()
+                .filter(|g| g.0 == p && g.2.contains("\"version\":2"))
+                .count()
+        };
+        if n("/every") >= 3 && n("/two") >= 2 {
             break;
         }
         assert!(
