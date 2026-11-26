@@ -34,7 +34,7 @@ use pkgpod_oci::{Images, Parsed, manifest_path, parse_digest, tag_path};
 use pkgpod_proto::body::{self, Body, Request, Response};
 use serde_json::{Value, json};
 
-use crate::auth::{Caller, Role};
+use pkgpod_proto::Role;
 
 mod group;
 mod host;
@@ -50,6 +50,7 @@ use manifests::*;
 use proxy::*;
 use uploads::*;
 
+pub use host::who;
 pub use proxy::pin_closure;
 
 /// Largest blob taken in one upload.
@@ -155,6 +156,20 @@ fn parse_target(segs: &[String]) -> Option<(Vec<String>, Target)> {
     None
 }
 
+/// Who asks, as the registry sees them.
+pub trait Who: Send + Sync {
+    /// No user behind the request (Docker sends its credentials only
+    /// after a 401).
+    fn anonymous(&self) -> bool;
+    /// The name what they do is recorded under.
+    fn name(&self) -> &str;
+    /// Their role on `repo` (a public one is read by anyone).
+    fn role(&self, repo: &str, public: bool) -> Option<Role>;
+}
+
+/// The caller of a request.
+pub type Caller = Arc<dyn Who>;
+
 /// What the registry's code asks of the server it runs in.
 pub trait Host: Send + Sync {
     /// Keeps a proxy's cache row, unless one was kept for its path
@@ -205,8 +220,6 @@ pub trait Host: Send + Sync {
     fn routes(&self) -> crate::Result<Arc<crate::routes::Table>>;
     /// A repository and its current version.
     fn served(&self, repo: &str) -> crate::Result<crate::Served>;
-    /// `caller`'s role on `repo` (a public one is read by anyone).
-    fn role(&self, caller: &Caller, repo: &str, public: bool) -> Option<Role>;
     /// Whether blob `d` was uploaded to `repo` (it may serve it before a
     /// manifest names it).
     fn uploaded(&self, repo: &str, d: &Digest) -> bool;
@@ -350,7 +363,7 @@ pub async fn handle(
     let method = req.method().clone();
     if rest.is_empty() {
         // The version check; docker logs in here.
-        return Some(if caller.user.is_none() {
+        return Some(if caller.anonymous() {
             unauthorized()
         } else {
             let mut r = json_reply(StatusCode::OK, json!({}));
@@ -367,7 +380,7 @@ pub async fn handle(
     };
     let name = name_segs.join("/");
     let Some((repo, image)) = table.registry(host, &name_segs) else {
-        return Some(if caller.user.is_none() {
+        return Some(if caller.anonymous() {
             unauthorized()
         } else {
             oci_err(
@@ -386,12 +399,12 @@ pub async fn handle(
     }
     let served = app.served(&repo).ok()?;
     let r = served.repo;
-    let role = app.role(&caller, &repo, r.setting_bool("public"));
+    let role = caller.role(&repo, r.setting_bool("public"));
     let writing = !matches!(method, Method::GET | Method::HEAD);
     let need = if writing { Role::Write } else { Role::Read };
     if role < Some(need) {
         // Docker sends its credentials only after a 401.
-        return Some(if caller.user.is_none() {
+        return Some(if caller.anonymous() {
             unauthorized()
         } else if role.is_some() {
             oci_err(

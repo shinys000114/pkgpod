@@ -404,7 +404,7 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
         let reading = matches!(method, Method::GET | Method::HEAD);
         let mut r = match crate::protocols::oci::handle(
             app.clone(),
-            caller.clone(),
+            crate::protocols::oci::who(&app, &caller),
             &host,
             &rest,
             req.map(pkgpod_proto::body::boxed),

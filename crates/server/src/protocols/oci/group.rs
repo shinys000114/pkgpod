@@ -17,7 +17,7 @@ pub(super) async fn group(
     target: Target,
     req: Request,
 ) -> Response {
-    let public_only = app.role(&caller, &g.name, false).is_none();
+    let public_only = caller.role(&g.name, false).is_none();
     let members: Vec<RepoInfo> = g
         .setting_list("members")
         .iter()

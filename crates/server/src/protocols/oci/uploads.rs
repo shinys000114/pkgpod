@@ -139,8 +139,7 @@ pub(super) async fn mount(cx: &Ctx, d: &Digest, from: &str) -> Option<Response> 
     // another host's root does not hold it).
     let src = table.registry(&cx.host, &segs).map(|x| x.0)?;
     let src_r = cx.app.engine().repo(&src).ok()?;
-    cx.app
-        .role(&cx.caller, &src, src_r.setting_bool("public"))?;
+    cx.caller.role(&src, src_r.setting_bool("public"))?;
     let (app, d2, src_r2) = (cx.app.clone(), *d, src_r.clone());
     if blocking(move || has_blob(&*app, &src_r2, &d2)).await != Some(true) {
         return None;
