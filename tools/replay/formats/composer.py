@@ -380,8 +380,8 @@ def writes(c, who):
     # What an upload refuses: no zip, no composer.json where it is
     # looked for, one that is no JSON, of no name or a bad one, no
     # version or a bad one, a parameter an upload does not take,
-    # another zip at a version there (however spelt), a composer.json
-    # over its limit, a zip broken in each way.
+    # another zip at a version there (however spelt), a zip broken in
+    # each way. (A composer.json over its limit is in limits.)
     x = f"acme/x-{who}"
     named = {"name": x}
     hello = composer_zip({"name": "acme/hello", "description": f"another, by {who}"})
@@ -410,7 +410,6 @@ def writes(c, who):
         ("?version=1.0.0&path=x", composer_zip(named)),
         ("?version=v1.0.0", hello),
         ("?version=1.0", hello),
-        ("?version=1.0.0", composer_zip(padded(named, MAX_JSON + 1))),
     ] + [("", z) for z in broken(x)]
     seq(f"composer uploads refused {who}", who,
         [("PUT", f"/phppub/r.zip{q}", o, body) for q, body in bad]
@@ -419,13 +418,15 @@ def writes(c, who):
 
 
 def limits(c, who):
-    # A package over the format's limit, and a composer.json at its
-    # limit (one more byte is refused above), by one who may (the body
+    # A package over the format's limit; a composer.json one byte over
+    # its limit (refused), then at it (taken); by one who may (the body
     # is read).
     if who == "writer":
         c.add("composer upload over the limit writer", who, "PUT",
               "/phppub/huge.zip?version=1.0.0", OCTET, b"\0" * (MAX_ZIP + 1))
-        c.seq("composer composer.json at its limit writer", who, [
+        c.seq("composer composer.json over and at its limit writer", who, [
+            ("PUT", "/phppub/big.zip?version=1.0.0", OCTET,
+             composer_zip(padded({"name": "acme/big"}, MAX_JSON + 1))),
             ("PUT", "/phppub/big.zip?version=1.0.0", OCTET,
              composer_zip(padded({"name": "acme/big"}, MAX_JSON))),
             ("GET", "/phppub/p2/acme/big.json", {}, None)])
