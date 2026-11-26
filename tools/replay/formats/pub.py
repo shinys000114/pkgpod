@@ -67,6 +67,13 @@ def pub_form(archive, before=(), after=(), boundary="replay-form"):
     return {"Content-Type": f"multipart/form-data; boundary={boundary}"}, out
 
 
+def chunked(pieces):
+    """A body of HTTP/1.1 chunks, one for each of `pieces`, then the
+    last (sent as it is: http.client chunks nothing itself where the
+    request says Transfer-Encoding)."""
+    return b"".join(b"%x\r\n" % len(p) + p + b"\r\n" for p in pieces) + b"0\r\n\r\n"
+
+
 # A pubspec with a value of every kind YAML has, as JSON keeps them.
 KINDS = ("description: says hello\ndependencies:\n  path: ^1.8.0\ntopics: [a, b]\n"
          "x_int: 3\nx_real: 1.5\nx_big: 1e400\nx_nan: .nan\nx_bool: true\nx_null: ~\n"
@@ -357,6 +364,26 @@ def writes(c, who):
                  part("file", pub_archive(g, "1.0.0"), "package.tar.gz") + tail),
                 ("GET", "{loc}", {}, None),
                 ("GET", f"/dartpub/api/packages/{g}", {}, None)])
+        # Forms sent in chunks (no Content-Length): whole, in small
+        # ones; cut in the file; spoilt past the file, the byte after
+        # its delimiter in the delimiter's chunk, then in one of its own.
+        # Each is read back (and so is no single request: the fuzz cuts
+        # those, and a cut chunked body would be waited on).
+        te = dict(CT, **{"Transfer-Encoding": "chunked"})
+        _, whole = pub_form(pub_archive(f"c1_{who}", "1.0.0"))
+        _, cut = pub_form(pub_archive(f"c2_{who}", "1.0.0"))
+        cut = cut[:cut.index(b"\r\n\r\n") + 24]
+        file3 = part("file", pub_archive(f"c3_{who}", "1.0.0"), "package.tar.gz")
+        file4 = part("file", pub_archive(f"c4_{who}", "1.0.0"), "package.tar.gz")
+        for i, (name, pieces) in enumerate((
+                ("whole", [whole[j:j + 64] for j in range(0, len(whole), 64)]),
+                ("cut in the file", [cut[j:j + 64] for j in range(0, len(cut), 64)]),
+                ("spoilt past the file", [file3 + b"--replay-formX"]),
+                ("spoilt past the file a chunk later", [file4 + b"--replay-form", b"X"])), 1):
+            seq(f"pub chunked {name} {who}", who, [
+                ("POST", f"/dartpub{UP}", te, chunked(pieces)),
+                ("GET", "{loc}", {}, None),
+                ("GET", f"/dartpub/api/packages/c{i}_{who}", {}, None)])
 
 
 def limits(c, who):
