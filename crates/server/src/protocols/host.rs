@@ -2,11 +2,11 @@
 
 //! The server as every format's protocol sees it: the App as their
 //! common [`Host`] (its engine, its audit, its stored files served and
-//! counted), a request's caller as their [`Who`].
+//! counted, bodies stored), a request's caller as their [`Who`].
 
 use std::sync::Arc;
 
-use pkgpod_proto::body::{self, Request, Response};
+use pkgpod_proto::body::{self, Body, Request, Response};
 use pkgpod_proto::host::{Caller, Host, Who};
 
 use crate::App;
@@ -76,6 +76,19 @@ impl Host for App {
             crate::serving::serve_counted(self, repo, path, &file, &sha, name, None, false, req)
                 .await
                 .map(body::boxed)
+        })
+    }
+
+    fn store_body(
+        &self,
+        store: pkgpod_base::store::Store,
+        body: Body,
+        limit: u64,
+    ) -> futures_util::future::BoxFuture<'static, Result<(pkgpod_base::Digest, u64), String>> {
+        Box::pin(async move {
+            crate::serving::body_to_store(store, axum::body::Body::new(body), limit)
+                .await
+                .map_err(|e| e.to_string())
         })
     }
 }

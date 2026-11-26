@@ -36,7 +36,7 @@ use pkgpod_base::store::Incoming;
 use pkgpod_engine::cache::CacheRow;
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{Kind, RepoInfo};
-use pkgpod_proto::body::{self, Body, Request, Response};
+use pkgpod_proto::body::{self, Request, Response};
 use serde_json::{Value, json};
 
 pub use pkgpod_proto::{Caller, Who};
@@ -195,14 +195,6 @@ pub trait Host: pkgpod_proto::host::Host {
         sha: Digest,
         req: Request,
     ) -> futures_util::future::BoxFuture<'static, Response>;
-    /// Writes a request's body, of at most `limit` bytes, into `store`:
-    /// its digest and size.
-    fn store_body(
-        &self,
-        store: pkgpod_base::store::Store,
-        body: Body,
-        limit: u64,
-    ) -> futures_util::future::BoxFuture<'static, Result<(Digest, u64), String>>;
     /// `resp` answered a whole download of `name` `version` from `repo`
     /// (counted if it was served).
     fn downloaded(&self, status: StatusCode, repo: &str, name: &str, version: &str);

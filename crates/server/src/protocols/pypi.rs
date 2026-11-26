@@ -12,6 +12,7 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use pkgpod_engine::tree::{Entry, Tree};
 use pkgpod_engine::{RepoInfo, Upload};
+use pkgpod_proto::host::Host as _;
 use serde_json::json;
 
 use crate::App;
@@ -124,13 +125,9 @@ pub async fn upload(app: Arc<App>, repo: RepoInfo, caller: Caller, req: Request)
             },
             "content" => {
                 let filename = field.file_name().map(String::from);
-                match crate::serving::stream_to_store(
-                    repo.store(),
-                    field,
-                    crate::serving::MAX_UPLOAD,
-                )
-                .await
-                {
+                let stored =
+                    app.store_body(repo.store(), field.into_body(), crate::serving::MAX_UPLOAD);
+                match stored.await {
                     Ok((sha256, size)) => {
                         file = Some(Upload {
                             sha256,
@@ -138,7 +135,7 @@ pub async fn upload(app: Arc<App>, repo: RepoInfo, caller: Caller, req: Request)
                             filename,
                         })
                     }
-                    Err(e) => return text(StatusCode::BAD_REQUEST, e.to_string()),
+                    Err(e) => return text(StatusCode::BAD_REQUEST, e),
                 }
             }
             // The rest (metadata, gpg_signature) is read from the file

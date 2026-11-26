@@ -6,10 +6,9 @@
 use futures_util::future::BoxFuture;
 use http::StatusCode;
 use pkgpod_base::Digest;
-use pkgpod_base::store::Store;
 use pkgpod_engine::RepoInfo;
 use pkgpod_engine::cache::CacheRow;
-use pkgpod_proto::body::{self, Body, Request, Response};
+use pkgpod_proto::body::{self, Request, Response};
 use rusqlite::params;
 
 use super::{Fetch, Fetched, Host, Names, State};
@@ -59,19 +58,6 @@ impl Host for App {
             crate::serving::serve_blob(&file, &sha, "blob", None, false, req)
                 .await
                 .map(body::boxed)
-        })
-    }
-
-    fn store_body(
-        &self,
-        store: Store,
-        body: Body,
-        limit: u64,
-    ) -> BoxFuture<'static, Result<(Digest, u64), String>> {
-        Box::pin(async move {
-            crate::serving::body_to_store(store, axum::body::Body::new(body), limit)
-                .await
-                .map_err(|e| e.to_string())
         })
     }
 

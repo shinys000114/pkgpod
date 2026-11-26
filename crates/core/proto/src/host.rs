@@ -11,7 +11,7 @@ use futures_util::future::BoxFuture;
 use pkgpod_base::Digest;
 
 use crate::Role;
-use crate::body::{Request, Response};
+use crate::body::{Body, Request, Response};
 
 /// Who asks, as a format's protocol sees them.
 pub trait Who: Send + Sync {
@@ -46,4 +46,12 @@ pub trait Host: Send + Sync {
         name: &'a str,
         req: Request,
     ) -> BoxFuture<'a, Response>;
+    /// Writes a request's body, of at most `limit` bytes, into `store`:
+    /// its digest and size.
+    fn store_body(
+        &self,
+        store: pkgpod_base::store::Store,
+        body: Body,
+        limit: u64,
+    ) -> BoxFuture<'static, Result<(Digest, u64), String>>;
 }

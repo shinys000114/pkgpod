@@ -106,6 +106,15 @@ impl Field {
     }
 }
 
+impl Field {
+    /// The part's bytes as a body (to be stored); a form that cannot be
+    /// read ends it in an error.
+    pub fn into_body(self) -> crate::body::Body {
+        let frames = self.map(|c| c.map(http_body::Frame::data).map_err(BoxError::from));
+        crate::body::boxed(http_body_util::StreamBody::new(frames))
+    }
+}
+
 impl Stream for Field {
     type Item = Result<Bytes, FormError>;
 
