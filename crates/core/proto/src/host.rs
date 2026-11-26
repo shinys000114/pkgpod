@@ -20,7 +20,7 @@ pub trait Who: Send + Sync {
     fn anonymous(&self) -> bool;
     /// The name what they do is recorded under.
     fn name(&self) -> &str;
-    /// Their role on `repo` (a public one is read by anyone).
+    /// Their role on `repo` (a public one is read by anyone). Blocks.
     fn role(&self, repo: &str, public: bool) -> Option<Role>;
 }
 
@@ -29,7 +29,7 @@ pub type Caller = Arc<dyn Who>;
 
 /// What every format's protocol asks of the server.
 pub trait Host: Send + Sync {
-    /// Records what `actor` did.
+    /// Records what `actor` did. Blocks.
     fn audit(&self, actor: &str, action: &str, target: &str, detail: &str);
     /// The repositories, formats and their states.
     fn engine(&self) -> &pkgpod_engine::Engine;
