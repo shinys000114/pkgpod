@@ -17,9 +17,10 @@ from core import IDENTS, auth_header, request
 
 NAME = "composer"
 # The paths of Composer's answers, which may hold the run's times (a
-# version's upload time, in p2/). phproot, at a host's root, is asked
-# at the host's own paths, not these: of what the writes put there,
-# only its list and the zips are read, which hold no times.
+# version's upload time, in p2/). phproot is served at its host's root
+# only (/phproot/... is a 404 at either host), at paths not these: of
+# what the writes put there, only its list and the zips are read, which
+# hold no times.
 TIMES = r"/php(pub|priv|empty)(/|$)"
 
 OCTET = {"Content-Type": "application/octet-stream"}
@@ -447,7 +448,7 @@ def limits(c, who):
 def after(c, who):
     # What Composer's writes left: each identity's package in phppub
     # and phppriv, acme/hello after its zip was uploaded again, the
-    # label's version as it was.
+    # label's version as it was, the list at phproot's host.
     for repo in ("phppub", "phppriv"):
         for rel in ("/packages.json", "/p2/acme/hello.json", "/@first/packages.json",
                     "/files/acme/w-writer/1.0.0.zip"):
