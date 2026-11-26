@@ -30,9 +30,11 @@ only once the corpus covers it.
 
 import base64
 import calendar
+import gzip
 import hashlib
 import http.client
 import http.server
+import io
 import json
 import os
 import re
@@ -43,6 +45,7 @@ import sys
 import tarfile
 import threading
 import time
+import zipfile
 
 MGMT, SERVE, UP, UPB = 29090, 29091, 29099, 29098
 TOOL = hashlib.sha256(open(os.path.abspath(__file__), "rb").read()).hexdigest()[:16]
@@ -54,7 +57,7 @@ USERS = {
     "reader": (
         "replay reader password",
         {"fpriv": "read", "dpriv": "read", "opriv": "read", "ogroup": "read", "npriv": "read",
-         "ngroup": "read"},
+         "ngroup": "read", "ppriv": "read", "pgroup": "read"},
     ),
     "writer": (
         "replay writer password",
@@ -70,6 +73,9 @@ USERS = {
             "npub": "write",
             "npriv": "write",
             "ngroup": "read",
+            "ppub": "write",
+            "ppriv": "write",
+            "pgroup": "read",
         },
     ),
 }
@@ -164,6 +170,72 @@ def npm_doc(name, version, tgz, tag="latest", tarball=None):
     return json.dumps(doc, sort_keys=True).encode()
 
 
+def py_meta(name, version, summary=""):
+    m = f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n"
+    return (m + (f"Summary: {summary}\n" if summary else "")).encode()
+
+
+def wheel(name, version, summary=""):
+    """(filename, bytes) of a wheel of `name` `version`, the same bytes
+    each time."""
+    stem = f"{name.replace('-', '_')}-{version}"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for fn, data in ((f"{name.replace('-', '_')}/__init__.py", b""),
+                         (f"{stem}.dist-info/METADATA", py_meta(name, version, summary)),
+                         (f"{stem}.dist-info/WHEEL", b"Wheel-Version: 1.0\n")):
+            info = zipfile.ZipInfo(fn, date_time=(2026, 1, 1, 0, 0, 0))
+            info.create_system = 3
+            z.writestr(info, data)
+    return f"{stem}-py3-none-any.whl", buf.getvalue()
+
+
+def sdist(name, version):
+    """(filename, bytes) of an sdist of `name` `version`, the same bytes
+    each time."""
+    top = f"{name}-{version}"
+    raw = io.BytesIO()
+    with tarfile.open(fileobj=raw, mode="w", format=tarfile.USTAR_FORMAT) as t:
+        m = py_meta(name, version)
+        info = tarfile.TarInfo(f"{top}/PKG-INFO")
+        info.size, info.mtime = len(m), 1790000000
+        t.addfile(info, io.BytesIO(m))
+    return f"{top}.tar.gz", gzip.compress(raw.getvalue(), mtime=0)
+
+
+def py_form(fields, files=(), boundary="replay-form"):
+    """(headers, body) of a twine upload form: `fields` (name, value),
+    `files` (name, filename, bytes)."""
+    out = b""
+    for k, v in fields:
+        out += (f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n'
+                .encode() + (v if isinstance(v, bytes) else v.encode()) + b"\r\n")
+    for k, fn, data in files:
+        out += (f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"; '
+                f'filename="{fn}"\r\nContent-Type: application/octet-stream\r\n\r\n'
+                .encode() + data + b"\r\n")
+    out += f"--{boundary}--\r\n".encode()
+    return {"Content-Type": f"multipart/form-data; boundary={boundary}"}, out
+
+
+def py_upload(filename, data, action="file_upload", digest=None):
+    """A twine upload of one file."""
+    sha = hashlib.sha256(data).hexdigest() if digest is None else digest
+    return py_form([(":action", action), ("protocol_version", "1"), ("sha256_digest", sha)],
+                   [("content", filename, data)])
+
+
+UP_PY_WHEEL = wheel("up-pkg", "1.0.0", "from upstream")
+UP_PY_META = py_meta("up-pkg", "1.0.0", "from upstream")
+UP_PY_PAGE = json.dumps({
+    "meta": {"api-version": "1.0"}, "name": "up-pkg",
+    "files": [{"filename": UP_PY_WHEEL[0],
+               "url": f"http://127.0.0.1:{UP}/pypi/files/{UP_PY_WHEEL[0]}",
+               "hashes": {"sha256": hashlib.sha256(UP_PY_WHEEL[1]).hexdigest()},
+               "core-metadata": {"sha256": hashlib.sha256(UP_PY_META).hexdigest()}}]},
+    sort_keys=True).encode()
+
+
 UP_NPM_TGZ = b"upstream npm tarball\n" * 20
 UP_NPM_DOC = npm_doc("up-pkg", "1.0.0", UP_NPM_TGZ,
                      tarball=f"http://127.0.0.1:{UP}/npm/up-pkg/-/up-pkg-1.0.0.tgz")
@@ -202,6 +274,14 @@ def upstream_answer(method, path):
         return 200, {"Content-Type": "application/json"}, UP_NPM_DOC
     if path == "/npm/up-pkg/-/up-pkg-1.0.0.tgz":
         return 200, {"Content-Type": "application/octet-stream"}, UP_NPM_TGZ
+    if path == "/pypi/simple/up-pkg/":
+        return 200, {"Content-Type": "application/vnd.pypi.simple.v1+json"}, UP_PY_PAGE
+    if path == "/pypi/simple/bad-json/":
+        return 200, {"Content-Type": "application/vnd.pypi.simple.v1+json"}, b"not json"
+    if path == f"/pypi/files/{UP_PY_WHEEL[0]}":
+        return 200, {"Content-Type": "application/octet-stream"}, UP_PY_WHEEL[1]
+    if path == f"/pypi/files/{UP_PY_WHEEL[0]}.metadata":
+        return 200, {"Content-Type": "application/octet-stream"}, UP_PY_META
     if path in UP_FILES:
         b = UP_FILES[path]
         return 200, {
@@ -540,6 +620,26 @@ def seed(root, binary):
               f"upstream=http://127.0.0.1:{UP}/npm/", "-s", "public=true")
         p.cli("repo", "create", "ngroup", "-f", "npm", "-k", "group", "-s",
               "members=npub,npriv,nproxy", "-s", "public=false")
+        # PyPI: hosted public and private (a project whose name is not
+        # normalized, two versions, a wheel and an sdist, a label), a proxy
+        # of the stub, a group.
+        aa = auth_header("admin")
+        for repo, public in (("ppub", "true"), ("ppriv", "false")):
+            p.cli("repo", "create", repo, "-f", "pypi", "-s", f"public={public}")
+            for i, (fn, data) in enumerate((wheel("Hello_World", "1.0", "hello"),
+                                            wheel("Hello_World", "1.1", "hello again"),
+                                            sdist("hello_world", "1.1"),
+                                            sdist("other-pkg", "0.1"))):
+                hd, body = py_upload(fn, data)
+                st, _, out = request("POST", f"/{repo}/legacy/", dict(aa, **hd), body)
+                if st != 200:
+                    raise SystemExit(f"pypi upload {fn}: {st} {out[:200]}")
+                if i == 0:
+                    p.cli("label", repo, "first")
+        p.cli("repo", "create", "pproxy", "-f", "pypi", "-k", "proxy", "-s",
+              f"upstream=http://127.0.0.1:{UP}/pypi/simple/", "-s", "public=true")
+        p.cli("repo", "create", "pgroup", "-f", "pypi", "-k", "group", "-s",
+              "members=ppub,ppriv,pproxy", "-s", "public=false")
         # A files proxy of the stub.
         p.cli("repo", "create", "fproxy", "-f", "files", "-k", "proxy", "-s",
               f"upstream=http://127.0.0.1:{UP}/files/", "-s", "public=true")
@@ -550,7 +650,7 @@ def seed(root, binary):
         w = Pkgpod(binary, s)
         w.env["XDG_CONFIG_HOME"] = os.path.join(s, "cli-writer")
         w.cli("login", "-u", "writer", "--password-stdin", stdin=USERS["writer"][0] + "\n")
-        tok = w.cli("token", "create", "replay", "--repos", "opub,opriv,fpub,npub", "--write")
+        tok = w.cli("token", "create", "replay", "--repos", "opub,opriv,fpub,npub,ppub", "--write")
         with open(os.path.join(s, "tokens.json"), "w") as f:
             json.dump({"wtoken": tok.strip().splitlines()[-1]}, f)
     finally:
@@ -683,6 +783,46 @@ def corpus(fx):
                         "/-/v1/search?text=hello", "/-/v1/search?text=up", "/bad-json",
                         "/-/label/x/hello"):
                 add(f"npm {repo}{rel} {who}", who, "GET", f"/{repo}{rel}")
+        pyjson = {"Accept": "application/vnd.pypi.simple.v1+json"}
+        accepts = {
+            "pip": "application/vnd.pypi.simple.v1+json, application/vnd.pypi.simple.v1+html; "
+                   "q=0.1, text/html; q=0.01",
+            "json": "application/vnd.pypi.simple.v1+json",
+            "json q0": "application/vnd.pypi.simple.v1+json; q=0, text/html",
+            "html": "text/html",
+            "pep691 html": "application/vnd.pypi.simple.v1+html",
+            "any": "*/*",
+            "other": "application/json",
+        }
+        whl = wheel("Hello_World", "1.0", "hello")[0]
+        for repo in ("ppub", "ppriv"):
+            for rel in ("/", "/simple/", "/simple/hello-world/", "/simple/Hello_World/",
+                        "/simple/hello_world/", "/simple/hello-world", "/simple/Hello_World",
+                        "/simple/nope/", "/simple/other-pkg/", "/simple/index.json",
+                        f"/files/hello-world/{whl}", f"/files/hello-world/{whl}.metadata",
+                        "/files/hello-world/hello_world-1.1.tar.gz", "/files/hello-world/nope.whl",
+                        "/files/", "/@first/simple/hello-world/", f"/@first/files/hello-world/{whl}",
+                        "/@first/simple/Hello_World/", "/@nope/simple/", "/legacy/"):
+                add(f"pypi {repo}{rel} {who}", who, "GET", f"/{repo}{rel}")
+            for k, v in accepts.items():
+                add(f"pypi {repo} accept {k} {who}", who, "GET", f"/{repo}/simple/hello-world/",
+                    {"Accept": v})
+            add(f"pypi {repo} root json {who}", who, "GET", f"/{repo}/simple/", pyjson)
+            add(f"pypi {repo} HEAD {who}", who, "HEAD", f"/{repo}/simple/hello-world/", pyjson)
+            add(f"pypi {repo} inm {who}", who, "GET", f"/{repo}/simple/hello-world/",
+                {"If-None-Match": "{pypi %s/simple/hello-world/ %s.etag}" % (repo, who)})
+            add(f"pypi {repo} range {who}", who, "GET", f"/{repo}/files/hello-world/{whl}",
+                {"Range": "bytes=0-9"})
+        up_whl = UP_PY_WHEEL[0]
+        for repo in ("pproxy", "pgroup"):
+            for rel in ("/simple/", "/simple/up-pkg/", "/simple/Up_Pkg/",
+                        f"/files/up-pkg/{up_whl}", f"/files/up-pkg/{up_whl}.metadata",
+                        "/files/up-pkg/nope.whl", "/simple/nope/", "/simple/bad-json/",
+                        "/simple/hello-world/", f"/files/hello-world/{whl}", "/", "/@x/simple/"):
+                add(f"pypi {repo}{rel} {who}", who, "GET", f"/{repo}{rel}")
+            for page in ("up-pkg", "hello-world"):
+                add(f"pypi {repo} {page} json {who}", who, "GET", f"/{repo}/simple/{page}/",
+                    pyjson)
         add(f"host index {who}", who, "GET", "/")
     # A proxy whose upstream is gone: what it kept, and what it did not.
     out.append({"id": "stub bearer stops", "who": "anon", "steps": [("STUB", "stop bearer", {}, None)]})
@@ -742,6 +882,41 @@ def corpus(fx):
             ("GET", "/npub/-/package/nope/dist-tags", {}, None),
             ("DELETE", "/npub/-/package/hello/dist-tags/never", {}, None),
             ("POST", "/npub/-/package/hello/dist-tags", js, b"{}")])
+        # PyPI: twine's upload to each kind, at the repository and legacy/;
+        # what it refuses.
+        for repo in ("ppub", "ppriv", "pproxy", "pgroup"):
+            hd, body = py_upload(*wheel(f"w-{who}", "1.0"))
+            add(f"pypi upload {repo} {who}", who, "POST", f"/{repo}/legacy/", hd, body)
+        hd, body = py_upload(*sdist(f"r-{who}", "1.0"))
+        add(f"pypi upload at the root {who}", who, "POST", "/ppub/", hd, body)
+        hfn, hdata = wheel("Hello_World", "1.0", "hello")
+        steps = [
+            ("POST", "/ppub/legacy/", {"Content-Type": "text/plain"}, b"not a form"),
+            ("POST", "/ppub/legacy/", {"Content-Type": "multipart/form-data"}, b"no boundary"),
+            ("POST", "/ppub/legacy/", {"Content-Type": "multipart/form-data; boundary=b"},
+             b"--b\r\nContent-Disposition: form-data; name=\":action\"\r\n\r\nfile_up"),
+            ("POST", "/ppub/legacy/", {"Content-Type": "multipart/form-data; boundary=b"},
+             b"--b\r\nnot a header\r\n\r\nx\r\n--b--\r\n"),
+            ("POST", "/ppub/legacy/", {"Content-Type": "multipart/form-data; boundary=b"},
+             b"--b\r\nContent-Disposition: form-data; name=\"content\"; filename=\"c.whl\"\r\n"
+             b"\r\ncut short"),
+            ("POST", "/ppub/legacy/") + py_upload(*wheel(f"a-{who}", "1.0"), action="remove_pkg"),
+            ("POST", "/ppub/legacy/") + py_form([(":action", "file_upload")]),
+            ("POST", "/ppub/legacy/") + py_upload(*wheel(f"d-{who}", "1.0"), digest="0" * 64),
+            ("POST", "/ppub/legacy/") + py_upload(*wheel(f"e-{who}", "1.0"), digest=""),
+            ("POST", "/ppub/legacy/") + py_upload(*wheel("Hello_World", "1.0", "other")),
+            ("POST", "/ppub/legacy/") + py_upload(hfn, hdata),
+            ("POST", "/ppub/legacy/") + py_upload(f"x_{who}-1.0-py3-none-any.whl", b"not a zip"),
+            ("POST", "/ppub/legacy/") + py_upload(f"y_{who}-1.0-py3-none-any.whl",
+                                                 wheel(f"z-{who}", "1.0")[1]),
+            ("POST", "/ppub/legacy/") + py_upload(f"x-{who}.exe", b"MZ"),
+            ("POST", "/ppub/legacy/") + py_upload(f"t-{who}-1.0.tar.gz", b"not gzip"),
+            ("POST", "/ppub/simple/") + py_upload(*wheel(f"s-{who}", "1.0")),
+            ("DELETE", f"/ppub/files/hello-world/{hfn}", {}, None),
+            ("PUT", f"/ppub/files/hello-world/p_{who}-1.0-py3-none-any.whl", octet,
+             wheel(f"p-{who}", "1.0")[1]),
+            ("GET", "/ppub/simple/hello-world/", {}, None)]
+        seq(f"pypi uploads refused {who}", who, steps)
         # A publish and a dist-tag over their limits, by one who may (their
         # bodies are read).
         if who == "writer":
@@ -749,6 +924,10 @@ def corpus(fx):
                 b" " * ((256 << 20) + 1))
             add("npm dist-tag over the limit writer", who, "PUT",
                 "/npub/-/package/hello/dist-tags/x", js, b'"' + b"1" * 4095 + b'"')
+            hd, body = py_form([(":action", "file_upload" + " " * (64 << 10))])
+            add("pypi upload field over the limit writer", who, "POST", "/ppub/legacy/", hd, body)
+            hd, body = py_form([(":action", "file_upload"), ("sha256_digest", "0" * (64 << 10) + "0")])
+            add("pypi upload digest over the limit writer", who, "POST", "/ppub/legacy/", hd, body)
         seq(f"npm unpublish {who}", who, [
             ("PUT", "/npub/hello/-rev/1-stale", js, npm_doc("hello", "1.1.0", b"hello 1.1.0")),
             ("GET", f"/npub/w-{who}", {}, None),
@@ -1150,7 +1329,6 @@ def build(commit, out, cov=False):
     os.makedirs(work)
     arch = subprocess.run(["git", "-C", repo, "archive", commit], capture_output=True,
                           check=True).stdout
-    import io
     t = tarfile.open(fileobj=io.BytesIO(arch))
     try:
         t.extractall(work, filter="data")
