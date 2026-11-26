@@ -127,6 +127,12 @@ impl Field<'_> {
         self.part.file_name()
     }
 
+    /// The part's headers (its Content-Type, Content-Transfer-Encoding
+    /// and the like).
+    pub fn headers(&self) -> &http::HeaderMap {
+        self.part.headers()
+    }
+
     /// The part read whole, refused above `max` bytes (a part is
     /// otherwise bounded only by the form's limit, gigabytes).
     pub async fn capped(mut self, max: usize) -> Result<Vec<u8>, String> {
@@ -154,9 +160,7 @@ impl Field<'_> {
     /// read ends it in an error. The body is let go of (read to its end,
     /// or dropped) before the form's next part is asked for.
     pub fn into_body(self) -> crate::body::Body {
-        let part = self.part.map(|c| c.map_err(why));
-        let frames = part.map(|c| c.map(http_body::Frame::data).map_err(BoxError::from));
-        crate::body::boxed(http_body_util::StreamBody::new(frames))
+        crate::body::from_stream(self.part.map(|c| c.map_err(why)))
     }
 }
 
@@ -230,6 +234,21 @@ mod tests {
             }
         }
         assert_eq!(err.map(|e| e.to_string()).as_deref(), Some(UNREADABLE));
+    }
+
+    #[tokio::test]
+    async fn a_part_s_headers() {
+        let body = b"--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"c.tgz\"\r\nContent-Type: application/octet-stream\r\nContent-Transfer-Encoding: base64\r\n\r\neHk=\r\n--b--\r\n";
+        let mut f = Form::of(req(Some("multipart/form-data; boundary=b"), body), 1 << 20).unwrap();
+        let p = f.next_field().await.unwrap().unwrap();
+        let h = p.headers();
+        assert_eq!(h.len(), 3);
+        assert_eq!(h["content-transfer-encoding"], "base64");
+        assert_eq!(h["content-type"], "application/octet-stream");
+        assert_eq!(
+            crate::body::to_bytes(p.into_body(), 10).await.unwrap(),
+            "eHk="
+        );
     }
 
     #[tokio::test]

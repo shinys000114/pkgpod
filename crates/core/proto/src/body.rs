@@ -52,6 +52,19 @@ where
     b.map_err(Into::into).boxed_unsync()
 }
 
+/// The chunks `s` gives, as a body (its length not known); an error of
+/// `s` ends it in that error.
+pub fn from_stream<S, D, E>(s: S) -> Body
+where
+    S: futures_util::Stream<Item = Result<D, E>> + Send + 'static,
+    D: Into<Bytes>,
+    E: Into<BoxError>,
+{
+    use futures_util::StreamExt;
+    let frames = s.map(|c| c.map(|d| http_body::Frame::data(d.into())));
+    boxed(http_body_util::StreamBody::new(frames))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,5 +81,18 @@ mod tests {
         assert_eq!(full("abcd").size_hint().exact(), Some(4));
         assert_eq!(empty().size_hint().exact(), Some(0));
         assert_eq!(boxed(full("ab")).size_hint().exact(), Some(2));
+    }
+
+    #[test]
+    fn a_stream_s_chunks_and_its_error() {
+        let rt = |f| futures_util::FutureExt::now_or_never(f).expect("ready");
+        let chunks =
+            |c: Vec<Result<&'static str, &'static str>>| from_stream(futures_util::stream::iter(c));
+        let b = chunks(vec![Ok("ab"), Ok(""), Ok("cd")]);
+        assert_eq!(b.size_hint().exact(), None);
+        assert_eq!(rt(to_bytes(b, 4)).unwrap(), "abcd");
+        let b = chunks(vec![Ok("ab"), Err("cut short"), Ok("cd")]);
+        assert_eq!(rt(to_bytes(b, 10)).unwrap_err().to_string(), "cut short");
+        assert_eq!(rt(to_bytes(chunks(vec![]), 0)).unwrap(), "");
     }
 }
