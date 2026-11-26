@@ -62,4 +62,5 @@ FORMATS = [import_module(f"{__name__}.{name}") for name in (
     "pypi",
     "cargo",
     "go",
+    "gems",
 )]
