@@ -8,9 +8,9 @@
 //!
 //! multer, which reads the forms, holds all it has read while it looks
 //! for a form's first delimiter and for the end of a part's headers;
-//! those are read up to [`MAX_HEAD`], past it the form is unreadable. A
-//! part's bytes are handed on as they come, bounded only by the form's
-//! limit.
+//! those are read up to [`MAX_HEAD`]: past it the form is cut off, and
+//! is unreadable after the parts before. A part's bytes are handed on
+//! as they come, bounded only by the form's limit.
 
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -106,14 +106,25 @@ impl Form {
             .ok_or(FormError::NotAForm)?;
         let mut seen = 0u64;
         let mut framing = Framing::new(&boundary);
-        let data = req.into_body().into_data_stream().map(move |chunk| {
-            let chunk = chunk?;
+        let mut body = Some(req.into_body().into_data_stream());
+        let data = futures_util::stream::poll_fn(move |cx| {
+            // Cut off where its framing was refused: not read on.
+            let Some(b) = body.as_mut() else {
+                return Poll::Ready(None);
+            };
+            let chunk = match futures_util::ready!(b.poll_next_unpin(cx)) {
+                Some(Ok(chunk)) => chunk,
+                other => return Poll::Ready(other),
+            };
             seen += chunk.len() as u64;
             if seen > limit {
-                return Err::<Bytes, BoxError>("length limit exceeded".into());
+                return Poll::Ready(Some(Err::<Bytes, BoxError>("length limit exceeded".into())));
             }
-            framing.feed(&chunk)?;
-            Ok(chunk)
+            if let Some(at) = framing.feed(&chunk) {
+                body = None;
+                return Poll::Ready(Some(Ok(chunk.slice(..at))));
+            }
+            Poll::Ready(Some(Ok(chunk)))
         });
         Ok(Form {
             parts: multer::Multipart::new(data, boundary),
@@ -224,9 +235,14 @@ impl Stream for Field<'_> {
 /// not read), or spaces and tabs then CRLF; a part's headers, up to the
 /// blank line (CRLF CRLF); its bytes, up to the next delimiter (CRLF,
 /// `--` and the boundary). A form whose preamble or a part's headers run
-/// past MAX_HEAD is refused, and all that follows. Where the framing
-/// breaks after a delimiter it is not followed on: multer refuses the
-/// form there itself, as it did before, and is asked nothing after.
+/// past MAX_HEAD is cut off there: multer is handed its bytes up to that
+/// point and then its end, so it reads the parts before whole and finds
+/// the form cut short after them, however the bytes come. (An error in
+/// place of the end would not do: multer takes all the chunks there are
+/// before it looks at them, and an error among them is told first, the
+/// part before lost.) Where the framing breaks after a delimiter it is
+/// not followed on: multer refuses the form there itself, as it did
+/// before, and is asked nothing after.
 struct Framing {
     at: At,
     /// Bytes of the preamble, or of the headers, so far.
@@ -266,8 +282,14 @@ impl Framing {
         }
     }
 
-    /// Follows the form's next bytes: an error if the form is refused.
-    fn feed(&mut self, mut b: &[u8]) -> Result<(), BoxError> {
+    /// Follows the form's next bytes: where in them the form is cut off,
+    /// if it is (where its preamble or a part's headers pass MAX_HEAD;
+    /// once cut off, at their start).
+    fn feed(&mut self, chunk: &[u8]) -> Option<usize> {
+        if self.at == At::Refused {
+            return Some(0);
+        }
+        let mut b = chunk;
         while !b.is_empty() {
             let (seek, then, held) = match self.at {
                 At::Preamble => (&mut self.first, At::Delimiter, true),
@@ -298,13 +320,15 @@ impl Framing {
                     self.run += b.len();
                     break;
                 }
-                _ => self.at = At::Refused,
+                _ => {
+                    // MAX_HEAD of it is read; the byte that would end it
+                    // is not.
+                    self.at = At::Refused;
+                    return Some(chunk.len() - b.len() + MAX_HEAD - self.run);
+                }
             }
         }
-        if self.at == At::Refused {
-            return Err("the form's preamble or a part's headers are too large".into());
-        }
-        Ok(())
+        None
     }
 }
 
@@ -599,7 +623,7 @@ mod tests {
         let mut f = Framing::new(boundary);
         let mut refused = false;
         for c in chunks {
-            refused |= f.feed(c).is_err();
+            refused |= f.feed(c).is_some();
         }
         (refused, f.at)
     }
@@ -705,7 +729,7 @@ mod tests {
                 for y in bytes {
                     for z in bytes {
                         let mut f = Framing::new("b");
-                        f.feed(&[head, &[x, y, z]].concat()).unwrap();
+                        assert_eq!(f.feed(&[head, &[x, y, z]].concat()), None);
                         let body = [head, &[x, y, z], rest].concat();
                         let multer = multer_after(&body, before).await;
                         let at = [x, y, z];
@@ -714,7 +738,7 @@ mod tests {
                             At::Closed => assert_eq!(multer, Ok(false), "{at:?}"),
                             _ => assert_ne!(multer, Ok(false), "{at:?}"),
                         }
-                        assert!(f.feed(rest).is_ok());
+                        assert_eq!(f.feed(rest), None);
                     }
                 }
             }
@@ -735,6 +759,41 @@ mod tests {
             let stored = crate::body::to_bytes(p.into_body(), 1 << 20).await;
             assert_eq!(stored.unwrap(), file, "in chunks of {n}");
             assert_eq!(f.next_field().await.err(), Some(FormError::Unreadable));
+        }
+    }
+
+    /// A part, then a part whose headers run past MAX_HEAD: the first
+    /// is read whole and the form is unreadable after it, however the
+    /// bytes come, in one chunk, in chunks all there at once, or in
+    /// chunks that come one by one.
+    #[tokio::test]
+    async fn headers_too_large_after_a_part_refused_after_it() {
+        let file = vec![b'f'; 10 << 10];
+        let pad = format!("X-Pad: {}\r\n", "p".repeat(MAX_HEAD));
+        let body = form("b", &[("content", "", &file), ("c", &pad, b"z")]);
+        let at_once = |n: usize| {
+            let chunks: Vec<Vec<u8>> = body.chunks(n).map(<[u8]>::to_vec).collect();
+            crate::body::from_stream(futures_util::stream::iter(
+                chunks.into_iter().map(Ok::<_, BoxError>),
+            ))
+        };
+        let bodies = [
+            ("one chunk", crate::body::full(body.clone())),
+            ("7 at once", at_once(7)),
+            ("CHUNK at once", at_once(CHUNK)),
+            ("7 one by one", cut(&body, 7)),
+            ("CHUNK one by one", cut(&body, CHUNK)),
+        ];
+        for (how, b) in bodies {
+            let mut f = Form::of(post("b", b), 1 << 20).unwrap();
+            let p = f.next_field().await.unwrap().unwrap();
+            let stored = crate::body::to_bytes(p.into_body(), 1 << 20).await;
+            assert_eq!(stored.unwrap(), file, "{how}");
+            assert_eq!(
+                f.next_field().await.err(),
+                Some(FormError::Unreadable),
+                "{how}"
+            );
         }
     }
 
@@ -842,6 +901,22 @@ mod tests {
             assert_eq!(f.next_field().await.err(), Some(FormError::Unreadable));
             let n = pulled.load(Ordering::Relaxed);
             assert!(n <= head.len() + MAX_HEAD + CHUNK, "{n} of {len} read");
+        }
+    }
+
+    /// A form is cut off where MAX_HEAD is passed, however its bytes
+    /// are cut into chunks: multer is handed MAX_HEAD bytes of the
+    /// preamble or of the headers, and not the byte that would end them.
+    #[test]
+    fn cut_off_where_max_head_is_passed() {
+        let headers = [&b"--b\r\nX-A: "[..], &vec![b'a'; MAX_HEAD], b"\r\n\r\n"].concat();
+        let preamble = [&vec![b'x'; MAX_HEAD - 2][..], b"--b\r\n"].concat();
+        for (body, at) in [(headers, 5 + MAX_HEAD), (preamble, MAX_HEAD)] {
+            for n in [body.len(), CHUNK, 7, 1] {
+                let mut f = Framing::new("b");
+                let handed: usize = body.chunks(n).map(|c| f.feed(c).unwrap_or(c.len())).sum();
+                assert_eq!(handed, at, "in chunks of {n}");
+            }
         }
     }
 
