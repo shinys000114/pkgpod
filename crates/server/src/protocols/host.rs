@@ -25,15 +25,21 @@ impl Who for ServerWho {
     }
 
     fn role(&self, repo: &str, public: bool) -> Option<pkgpod_proto::Role> {
-        use crate::auth::Role as R;
         self.app
             .auth
             .role(&self.caller, repo, public)
-            .map(|r| match r {
-                R::Read => pkgpod_proto::Role::Read,
-                R::Write => pkgpod_proto::Role::Write,
-                R::Admin => pkgpod_proto::Role::Admin,
-            })
+            .map(Into::into)
+    }
+}
+
+impl From<crate::auth::Role> for pkgpod_proto::Role {
+    fn from(r: crate::auth::Role) -> Self {
+        use crate::auth::Role as R;
+        match r {
+            R::Read => pkgpod_proto::Role::Read,
+            R::Write => pkgpod_proto::Role::Write,
+            R::Admin => pkgpod_proto::Role::Admin,
+        }
     }
 }
 

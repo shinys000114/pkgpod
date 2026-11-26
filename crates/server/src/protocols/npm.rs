@@ -19,7 +19,7 @@ use pkgpod_npm::{Packages, VersionMeta, tag_path, tarball_name, version_path};
 use serde_json::{Value, json};
 
 use crate::App;
-use crate::auth::{Caller, Role};
+use pkgpod_proto::{Caller, Role};
 
 fn reply(st: StatusCode, v: Value) -> Response {
     let mut r = (st, axum::Json(v)).into_response();
@@ -71,7 +71,7 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
     let reading = method == Method::GET || method == Method::HEAD;
     // Reading first; what changes the repository asks for write itself.
     if a.role.is_none() {
-        return if a.caller.user.is_none() {
+        return if a.caller.anonymous() {
             unauthorized()
         } else {
             not_found()
@@ -82,10 +82,13 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
     if rel.first().map(String::as_str) == Some("-") {
         return match (&rel[1..], &method) {
             ([p], _) if p == "ping" => reply(StatusCode::OK, json!({})),
-            ([w], _) if w == "whoami" => match &a.caller.user {
-                Some(u) => reply(StatusCode::OK, json!({"username": u.name})),
-                None => unauthorized(),
-            },
+            ([w], _) if w == "whoami" => {
+                if a.caller.anonymous() {
+                    unauthorized()
+                } else {
+                    reply(StatusCode::OK, json!({"username": a.caller.name()}))
+                }
+            }
             ([l, label, rest @ ..], m)
                 if l == "label" && (*m == Method::GET || *m == Method::HEAD) =>
             {
@@ -193,7 +196,7 @@ fn no_write(a: &Ask) -> Option<Response> {
     if a.role >= Some(Role::Write) {
         return None;
     }
-    Some(if a.caller.user.is_none() {
+    Some(if a.caller.anonymous() {
         unauthorized()
     } else {
         err(
