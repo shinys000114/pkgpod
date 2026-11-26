@@ -3571,7 +3571,7 @@ fn one_server_per_data_directory() {
     let out = second.wait_with_output().unwrap();
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        !out.status.success() && err.contains("another pkgpod serve (pid "),
+        !out.status.success() && err.contains("another pkgpod (pid "),
         "{err}"
     );
     let j = &s.json(&["jobs", "slow"])[0];
@@ -16288,6 +16288,211 @@ fn backup_while_working_then_restore() {
     );
     // A restore never goes over data.
     assert!(!admin2(&["restore", backup.to_str().unwrap()]).0);
+}
+
+/// A dump of one server taken in by a new one, on new data: the same
+/// repositories, served and signed as before; a storage elsewhere taken
+/// over where it is, main's blobs taken from the old store.
+#[test]
+fn export_then_import_elsewhere() {
+    if !have("dpkg-deb") || !have("apt-get") || !have("python3") {
+        return;
+    }
+    let mut s = Server::start();
+    s.cli(&[
+        "key",
+        "generate",
+        "main",
+        "pkgpod e2e <e2e@example.invalid>",
+    ])
+    .unwrap();
+    let hdd = s.dir.path().join("hdd");
+    std::fs::create_dir_all(&hdd).unwrap();
+    s.cli(&["storage", "set", "hdd", hdd.to_str().unwrap()])
+        .unwrap();
+    // Debian, signed with the key; Alpine, with the server's RSA key;
+    // files on the other storage, with a link; PyPI, whose metadata
+    // files are blobs the entries name.
+    s.cli(&["repo", "create", "ppa", "-s", "public=true"])
+        .unwrap();
+    s.cli(&["op", "ppa", "dist-set", "name=stable", "-y"])
+        .unwrap();
+    let debs = s.dir.path().join("debs");
+    std::fs::create_dir_all(&debs).unwrap();
+    let deb = build_deb(&debs, "kept", "1.0", "amd64", "xz", "");
+    s.cli(&["upload", "ppa", deb.to_str().unwrap()]).unwrap();
+    s.cli(&["label", "ppa", "first"]).unwrap();
+    s.cli(&["repo", "create", "alp", "-f", "apk", "-s", "public=true"])
+        .unwrap();
+    let apk = s.dir.path().join("kept-1.0-r0.apk");
+    std::fs::write(
+        &apk,
+        pkgpod_apk::testutil::make_apk("kept", "1.0-r0", "x86_64", ("usr/bin/x", b"x")),
+    )
+    .unwrap();
+    s.cli(&["upload", "alp", apk.to_str().unwrap()]).unwrap();
+    s.cli(&[
+        "repo",
+        "create",
+        "f",
+        "-f",
+        "files",
+        "--storage",
+        "hdd",
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let tool = s.dir.path().join("tool.tar.gz");
+    std::fs::write(&tool, "tool 1.0").unwrap();
+    s.cli(&[
+        "upload",
+        "f",
+        tool.to_str().unwrap(),
+        "-s",
+        "path=tool/1.0/",
+        "-s",
+        "link=tool/latest",
+    ])
+    .unwrap();
+    s.cli(&["repo", "create", "py", "-f", "pypi", "-s", "public=true"])
+        .unwrap();
+    let tok = s
+        .cli(&["token", "create", "ci", "--repos", "py", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let dists = s.dir.path().join("dists");
+    std::fs::create_dir_all(&dists).unwrap();
+    let whl = make_dist(&dists, "Foo.Bar_baz", "1.0", "wheel", "", 0);
+    let (st, body) = twine_upload(&s.url("/py/"), Some(("__token__", &tok)), &whl);
+    assert_eq!(st, 200, "{body}");
+    s.cli_in(
+        &["user", "add", "alice", "--password-stdin"],
+        "alice password 1",
+    )
+    .unwrap();
+    s.cli(&["grant", "set", "ppa", "user:alice", "read"])
+        .unwrap();
+    let served = |s: &Server| {
+        [
+            "/f/tool/latest/tool.tar.gz",
+            "/py/files/foo-bar-baz/foo_bar_baz-1.0-py3-none-any.whl.metadata",
+            "/py/simple/foo-bar-baz/",
+        ]
+        .map(|p| get(&s.url(p), None))
+    };
+    let before = served(&s);
+    for (st, body) in &before {
+        assert_eq!(*st, 200, "{body}");
+    }
+    let alp_key = |s: &Server| {
+        let (_, listing) = get(&s.url("/alp/"), None);
+        let name = listing
+            .split(['"', '>', '<', '/'])
+            .find(|w| w.starts_with("pkgpod-") && w.ends_with(".rsa.pub"))
+            .unwrap_or_else(|| panic!("no key in {listing}"))
+            .to_string();
+        let (_, pem) = get(&s.url(&format!("/alp/{name}")), None);
+        (name, pem)
+    };
+    let rsa_before = alp_key(&s);
+
+    // Stopped, exported, taken in on new data.
+    let _ = s.child.kill();
+    let _ = s.child.wait();
+    let dump = s.dir.path().join("dump");
+    let (ok, out) = s.admin(&["export", dump.to_str().unwrap()]);
+    assert!(ok, "{out}");
+    let d2 = s.dir.path().join("new-data");
+    let cfg2 = s.dir.path().join("new.toml");
+    let mport = free_port();
+    std::fs::write(
+        &cfg2,
+        format!(
+            "data_dir = \"{}\"\nlisten = \"127.0.0.1:{mport}\"\nlog = \"warn\"\n",
+            d2.display()
+        ),
+    )
+    .unwrap();
+    let admin2 = |args: &[&str]| {
+        let o = Command::new(env!("CARGO_BIN_EXE_pkgpod"))
+            .arg("admin")
+            .arg("-c")
+            .arg(&cfg2)
+            .args(args)
+            .output()
+            .unwrap();
+        (
+            o.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            ),
+        )
+    };
+    let old_main = s.dir.path().join("data/storages/main/store");
+    let (ok, out) = admin2(&[
+        "import",
+        dump.to_str().unwrap(),
+        "--blobs-from",
+        old_main.to_str().unwrap(),
+    ]);
+    assert!(ok, "{out}");
+    for r in ["ppa", "alp", "f", "py"] {
+        assert!(
+            out.lines().any(
+                |l| l.starts_with(&format!("{r} (hosted)")) && l.ends_with("the tree exported")
+            ),
+            "{r}: {out}"
+        );
+    }
+    // The CLI login's and ci's.
+    assert!(out.contains("to make again: 2 API token(s)"), "{out}");
+    assert!(!out.contains("warning:"), "{out}");
+    assert!(!d2.join("admin-password").exists());
+    // Taken in once only.
+    let (ok, out) = admin2(&["import", dump.to_str().unwrap()]);
+    assert!(!ok && out.contains("new data directory"), "{out}");
+    let (ok, out) = admin2(&["check", "--deep"]);
+    assert!(ok, "{out}");
+
+    // Served from the new data on the old ports, by the old admin.
+    s.api = format!("http://127.0.0.1:{mport}");
+    s.child = Command::new(env!("CARGO_BIN_EXE_pkgpod"))
+        .args(["serve", "-c"])
+        .arg(&cfg2)
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    s.wait_api();
+    s.wait_listening(s.serve_port, Some("default"));
+    let pw = std::fs::read_to_string(s.dir.path().join("data/admin-password")).unwrap();
+    s.cli_in(&["login", "-u", "admin", "--password-stdin"], pw.trim())
+        .unwrap();
+    assert_eq!(served(&s), before);
+    assert_eq!(alp_key(&s), rsa_before);
+    let grants = s.cli(&["grant", "list", "ppa"]).unwrap();
+    assert!(grants.contains("alice"), "{grants}");
+    let labels = s.cli(&["versions", "ppa"]).unwrap();
+    assert!(labels.contains("first"), "{labels}");
+    // apt reads the Debian repository with the key it had.
+    let (_, key) = get(&s.url("/ppa/key.asc"), None);
+    let a = apt_dir(s.dir.path(), "apt-imported", &s.url("/ppa/"), &key);
+    let out = apt(&a, &["update"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = apt(&a, &["download", "kept"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// The current time as an HTTP date (a client's If-Modified-Since).

@@ -451,6 +451,48 @@ silent copy) and `--blobs copy` copies them. Either way every blob the
 dump names is checked to be in its storage, whole; the missing ones are
 listed in `DUMP.json` and the export exits 1.
 
+A dump goes into a new data directory, with no database yet and no
+server on it (the import holds the server's lock):
+
+```sh
+systemctl stop pkgpod
+sudo -u pkgpod pkgpod admin export /srv/backups/dump
+mv /var/lib/pkgpod /var/lib/pkgpod.old
+install -d -o pkgpod -g pkgpod -m 0750 /var/lib/pkgpod
+sudo -u pkgpod pkgpod admin import /srv/backups/dump \
+    --blobs-from /var/lib/pkgpod.old/storages/main/store
+systemctl start pkgpod
+```
+
+It sets the storages, takes the keys in (each loaded with its
+passphrase, its fingerprint checked), then the server's rows in one
+transaction, then each repository, whole or not at all. The storage
+`main` is the new data directory's; the others keep the dump's paths
+(`--storage NAME=PATH` puts one elsewhere; one that was inside the old
+data directory must be given its place), so a mirror's received tree
+there is served again as it is. A hosted repository's blobs are kept
+when its storage has them, else taken from the dump's `blobs/` or the
+`--blobs-from` stores, hard-linked where they can be, otherwise copied
+and hashed. Its tree becomes one new version (its summary says which
+version it was), with the times its files came in; the labels on it
+come along. The import prints, per repository, whether its tree is the
+one exported, then runs the check `admin check` runs.
+
+The dump's listeners replace the new data's (`--keep-listeners` keeps
+the new one, on 127.0.0.1:8080). The first admin the new data made is
+replaced by the old server's users, and `admin-password` removed. Trust
+rules and API tokens are not taken in: the import prints the `pkgpod
+trust add` commands that make the rules again, and how many tokens to
+make anew. A repository that cannot be taken in (a setting this pkgpod
+refuses, a blob in none of the places) is left out whole and named, and
+the import exits 1; edit `repos/<name>/repo.json` or give the store, and
+import again into a new data directory.
+
+Keep the old data directory until the new server is checked: its
+stores still hold the blobs of versions the dump left out, and a
+storage taken over in place is collected by the new server like any
+other (blobs no version names, after a day).
+
 ## Garbage collection and checks
 
 Every day (the first time an hour after the server starts) the server

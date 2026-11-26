@@ -18,7 +18,7 @@ pub(crate) struct LoginPage {
 
 /// Set at the console's first login: from then on the login page no
 /// longer tells anyone where the first admin's password is kept.
-const LOGGED_IN: &str = "console_logged_in";
+pub(crate) const LOGGED_IN: &str = "console_logged_in";
 
 /// Does the login page say where the first admin's password is? While
 /// its file is there and nobody has logged in here yet.

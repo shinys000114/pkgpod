@@ -1048,6 +1048,36 @@ impl Engine {
         })?)
     }
 
+    /// Sets when catalog rows came in (a dump's times, taken in again);
+    /// returns how many of the paths had a row.
+    pub fn set_added(&self, repo: &str, added: &[(String, i64)]) -> Result<usize> {
+        let r = self.repo(repo)?;
+        Ok(self.db.write(|tx| {
+            let mut st =
+                tx.prepare_cached("UPDATE catalog SET added = ?3 WHERE repo = ?1 AND path = ?2")?;
+            let mut n = 0;
+            for (path, t) in added {
+                n += st.execute(params![r.id, path, t])?;
+            }
+            Ok::<_, rusqlite::Error>(n)
+        })?)
+    }
+
+    /// Sets when a repository was made (a dump's time, taken in again).
+    pub fn set_created(&self, repo: &str, created: i64) -> Result<()> {
+        let n = self.db.write(|tx| {
+            tx.execute(
+                "UPDATE repos SET created = ?2 WHERE name = ?1",
+                params![repo, created],
+            )
+        })?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("no repository {repo}")));
+        }
+        self.bump();
+        Ok(())
+    }
+
     /// Catalog rows of one repository's current version.
     pub fn catalog_count(&self, repo: &str) -> Result<i64> {
         Ok(self.db.read(|c| {

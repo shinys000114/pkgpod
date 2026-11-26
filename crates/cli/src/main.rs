@@ -49,7 +49,7 @@ pub(crate) enum Cmd {
     /// Run the server.
     Serve(ServerArgs),
     /// Server commands that work on the database directly (no server
-    /// needed): set a password, back up, export.
+    /// needed): set a password, back up, export and import.
     Admin {
         #[command(flatten)]
         server: ServerArgs,
@@ -453,6 +453,28 @@ enum AdminCmd {
         #[arg(long)]
         audit: bool,
     },
+    /// Take a dump (from admin export) into a new data directory: the
+    /// configured one, with no database yet, the server not running on
+    /// it. Repositories are taken in whole or not at all; trust rules
+    /// and API tokens are made again (it prints what to make). Exits 1 if
+    /// a repository could not be taken in or the check after it finds
+    /// problems.
+    Import {
+        /// The dump's directory.
+        from: PathBuf,
+        /// A store directory (a storage's store/) to take blobs from that
+        /// the dump does not hold (hard links where they can be); may be
+        /// given more than once.
+        #[arg(long = "blobs-from", value_name = "DIR")]
+        blobs_from: Vec<PathBuf>,
+        /// A storage somewhere else than the dump says (the storage main
+        /// is always the new data directory's).
+        #[arg(long = "storage", value_name = "NAME=PATH")]
+        storages: Vec<String>,
+        /// Keep the new data directory's listener rather than the dump's.
+        #[arg(long)]
+        keep_listeners: bool,
+    },
     /// Check that every version can be read whole and every blob it
     /// names is in the store (with --deep, with its sha256); exits 1 on
     /// problems. Safe while the server runs.
@@ -595,6 +617,15 @@ fn admin(a: &ServerArgs, cmd: AdminCmd) -> Result<(), client::CliError> {
         println!("restored into {}", cfg.data_dir.display());
         return Ok(());
     }
+    if let AdminCmd::Import {
+        from,
+        blobs_from,
+        storages,
+        keep_listeners,
+    } = &cmd
+    {
+        return import(cfg, from, blobs_from, storages, *keep_listeners);
+    }
     if matches!(cmd, AdminCmd::Export { .. }) && !cfg.db_path().is_file() {
         // Opening would make a new, empty data directory to export.
         return Err(client::CliError::other(format!(
@@ -629,7 +660,7 @@ fn admin(a: &ServerArgs, cmd: AdminCmd) -> Result<(), client::CliError> {
             show(&rep);
             println!("backed up into {}", to.display());
         }
-        AdminCmd::Restore { .. } => unreachable!("handled above"),
+        AdminCmd::Restore { .. } | AdminCmd::Import { .. } => unreachable!("handled above"),
         AdminCmd::Export {
             to,
             blobs,
@@ -691,6 +722,95 @@ fn admin(a: &ServerArgs, cmd: AdminCmd) -> Result<(), client::CliError> {
             println!("ok");
         }
     }
+    Ok(())
+}
+
+/// `admin import`: into a new data directory, held locked.
+fn import(
+    cfg: pkgpod_server::config::Config,
+    from: &std::path::Path,
+    blobs_from: &[PathBuf],
+    storages: &[String],
+    keep_listeners: bool,
+) -> Result<(), client::CliError> {
+    use pkgpod_server::jobs::dump;
+    let err = |e: pkgpod_server::Error| client::CliError::other(e.to_string());
+    if !from.join("DUMP.json").is_file() {
+        return Err(client::CliError::usage(format!(
+            "{}: not a whole dump (no DUMP.json)",
+            from.display()
+        )));
+    }
+    let mut opt = dump::ImportOptions {
+        blobs_from: blobs_from.to_vec(),
+        storages: Vec::new(),
+        keep_listeners,
+    };
+    for s in storages {
+        let Some((name, path)) = s.split_once('=') else {
+            return Err(client::CliError::usage(format!("--storage {s}: NAME=PATH")));
+        };
+        opt.storages.push((name.to_string(), PathBuf::from(path)));
+    }
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o750)
+            .create(&cfg.data_dir)
+            .map_err(|e| client::CliError::other(format!("{}: {e}", cfg.data_dir.display())))?;
+    }
+    // Held to the end: no server starts on the data meanwhile.
+    let _lock = pkgpod_server::lock_data_dir(&cfg.data_dir).map_err(client::CliError::usage)?;
+    if cfg.db_path().exists() {
+        return Err(client::CliError::usage(format!(
+            "{} has a database already: an import goes into a new data directory",
+            cfg.data_dir.display()
+        )));
+    }
+    let app = pkgpod_server::App::open(cfg).map_err(err)?;
+    let rep = dump::import(&app, from, &opt, &mut |m| println!("{m}")).map_err(err)?;
+    for r in &rep.repos {
+        let mut line = format!("{} ({})", r.name, r.kind);
+        if r.kind == "hosted" {
+            line.push_str(&format!(
+                ": {} entries; blobs {} there, {} linked, {} copied",
+                r.entries, r.present, r.linked, r.copied
+            ));
+        }
+        if r.kind == "proxy" {
+            line.push_str(&format!(
+                ": {} cache rows ({} left out)",
+                r.cache_rows, r.cache_skipped
+            ));
+        }
+        match r.same_root {
+            Some(true) => line.push_str("; the tree exported"),
+            Some(false) => line.push_str("; a tree other than the one exported"),
+            None => {}
+        }
+        println!("{line}");
+    }
+    for (n, why) in &rep.failed {
+        println!("not taken in: {n}: {why}");
+    }
+    for w in &rep.warnings {
+        println!("warning: {w}");
+    }
+    for p in &rep.problems {
+        println!("problem: {p}");
+    }
+    for m in &rep.remake {
+        println!("to make again: {m}");
+    }
+    if !rep.failed.is_empty() || !rep.problems.is_empty() {
+        return Err(client::CliError::other(format!(
+            "{} repositories not taken in, {} problem(s) found",
+            rep.failed.len(),
+            rep.problems.len()
+        )));
+    }
+    println!("imported {} repositories", rep.repos.len());
     Ok(())
 }
 

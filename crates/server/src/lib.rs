@@ -293,7 +293,7 @@ impl App {
 pub async fn run(app: Arc<App>) -> Result<(), String> {
     // One server per data directory: a second would take the first's
     // running jobs for ones a stop left. Held until this returns.
-    let lock = lock(&app.cfg.data_dir)?;
+    let lock = lock_data_dir(&app.cfg.data_dir)?;
     // Only the running server owns jobs: admin commands open the same
     // database while a server runs.
     jobs::recover(&app.db).map_err(|e| e.to_string())?;
@@ -449,9 +449,9 @@ async fn jobs_end(app: &Arc<App>, within: Duration) {
 }
 
 /// Takes `<data_dir>/pkgpod.lock`, an exclusive lock held while the file
-/// is open, with the server's pid in it; refused while another server
-/// has it.
-fn lock(data_dir: &std::path::Path) -> Result<std::fs::File, String> {
+/// is open, with the pid in it; refused while another server (or an
+/// import) has it.
+pub fn lock_data_dir(data_dir: &std::path::Path) -> Result<std::fs::File, String> {
     use std::io::{Read, Seek, Write};
     let p = data_dir.join("pkgpod.lock");
     let mut f = std::fs::OpenOptions::new()
@@ -467,7 +467,7 @@ fn lock(data_dir: &std::path::Path) -> Result<std::fs::File, String> {
             let mut pid = String::new();
             let _ = f.read_to_string(&mut pid);
             return Err(format!(
-                "another pkgpod serve (pid {}) has the data directory {}",
+                "another pkgpod (pid {}) has the data directory {}",
                 pid.trim(),
                 data_dir.display()
             ));

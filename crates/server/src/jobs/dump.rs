@@ -53,6 +53,9 @@ use serde_json::{Map, Value, json};
 
 use crate::{App, Error, Result};
 
+mod load;
+pub use load::{ImportOptions, ImportReport, RepoReport, import};
+
 /// The dump format this build writes.
 pub const FORMAT: i64 = 1;
 
@@ -452,6 +455,8 @@ pub fn export(
     if opt.tokens {
         server.insert("tokens".into(), Value::Array(rows(&c, TOKENS)?));
     }
+    // How many there are, in any case: an import says to make them again.
+    let tokens: i64 = c.query_row("SELECT count(*) FROM tokens", [], |r| r.get(0))?;
     write_json(&to.join("server.json"), &server)?;
     let keys = copy_files(app.keys.dir(), &to.join("keys"))?
         + copy_files(&app.cfg.data_dir.join("rsa"), &to.join("rsa"))?;
@@ -734,6 +739,7 @@ pub fn export(
             "format": FORMAT,
             "made_by": pkgpod_base::version(),
             "made": pkgpod_base::now(),
+            "data_dir": app.cfg.data_dir,
             "source_schema": schema,
             "options": {
                 "blobs": opt.blobs.as_str(),
@@ -743,6 +749,7 @@ pub fn export(
             },
             "repos": repos.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
             "counts": {
+                "tokens": tokens,
                 "entries": rep.entries,
                 "cache_rows": rep.cache_rows,
                 "blobs": rep.blobs,
@@ -758,11 +765,11 @@ pub fn export(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    fn app(d: &Path) -> Arc<App> {
+    pub(super) fn app(d: &Path) -> Arc<App> {
         App::open(crate::config::Config {
             data_dir: d.join("data"),
             ..Default::default()
@@ -774,11 +781,11 @@ mod tests {
         std::fs::metadata(p).unwrap().permissions().mode() & 0o777
     }
 
-    fn json_file(p: &Path) -> Value {
+    pub(super) fn json_file(p: &Path) -> Value {
         serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap()
     }
 
-    fn lines(p: &Path) -> Vec<Map<String, Value>> {
+    pub(super) fn lines(p: &Path) -> Vec<Map<String, Value>> {
         std::fs::read_to_string(p)
             .unwrap()
             .lines()
@@ -812,13 +819,21 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_dump_carries_the_data_by_name() {
-        let d = tempfile::tempdir().unwrap();
-        let app = app(d.path());
+    /// What [`seed`] made that tests look for.
+    pub(super) struct Seeded {
+        pub slow: PathBuf,
+        pub cached: Digest,
+    }
+
+    /// Data of every kind a dump carries: a second storage (`slow`), a
+    /// user in a team with grants, a token, a trust rule without a user,
+    /// a webhook, a page, a key, download counts; a hosted files tree
+    /// `tree` on `slow` in three versions with labels; a proxy `prox`
+    /// with a pinned file and a miss.
+    pub(super) fn seed(app: &App, d: &Path) -> Seeded {
         // A second storage, a user in a team with grants, a token, a
         // trust rule without a user, a webhook, a page, a key.
-        let slow = d.path().join("slow");
+        let slow = d.join("slow");
         std::fs::create_dir_all(&slow).unwrap();
         app.engine.set_storage("slow", &slow).unwrap();
         app.auth
@@ -839,7 +854,7 @@ mod tests {
             .write(|tx| {
                 tx.execute_batch(
                     "INSERT INTO trust_rules (name, issuer, audience, claims, user, repos, write, minutes, created)
-                       VALUES ('ci', 'https://issuer.example.invalid', 'aud', '{\"ref\":\"main\"}', NULL, 'tree', 1, 15, 1);
+                       VALUES ('ci', 'https://issuer.example.invalid', 'aud', '{\"ref\":\"main\"}', NULL, '[\"tree\"]', 1, 15, 1);
                      INSERT INTO webhooks (name, url, kind, secret, events, repos, active, created)
                        VALUES ('hook', 'https://hooks.example.invalid/x', 'json', 's3cret', '*', '*', 1, 2);
                      INSERT INTO host_pages (host, title, header, footer, updated, actor)
@@ -852,9 +867,10 @@ mod tests {
         app.keys
             .generate("main", "Test <test@example.invalid>", false)
             .unwrap();
+        app.keys.url_secret().unwrap();
 
-        // A hosted tree in three versions: nested files, a link; a label on an older version and one on the
-        // current; a blob lost from the store.
+        // A hosted tree in three versions: nested files, a link, a value;
+        // a label on an older version and one on the current.
         let n = pkgpod_engine::NewRepo {
             name: "tree".into(),
             format: "files".into(),
@@ -898,9 +914,6 @@ mod tests {
         app.engine
             .label("tree", "now", None, "the newest", false, "test")
             .unwrap();
-        let st = Store::new(slow.join("store"));
-        let lost = Digest::of(b"lost");
-        std::fs::remove_file(st.path(&lost)).unwrap();
 
         // A proxy's cache: a file and a miss.
         let n = pkgpod_engine::NewRepo {
@@ -938,6 +951,21 @@ mod tests {
                 &row("nope.img", None, pkgpod_engine::cache::CacheKind::Miss),
             )
             .unwrap();
+
+        app.engine
+            .cache_pin("prox", &["x.img".into()], true)
+            .unwrap();
+        Seeded { slow, cached: sha }
+    }
+
+    #[test]
+    fn a_dump_carries_the_data_by_name() {
+        let d = tempfile::tempdir().unwrap();
+        let app = app(d.path());
+        let Seeded { slow, cached: sha } = seed(&app, d.path());
+        // A blob lost from the store.
+        let lost = Digest::of(b"lost");
+        std::fs::remove_file(Store::new(slow.join("store")).path(&lost)).unwrap();
 
         let to = d.path().join("dump");
         let opt = ExportOptions {

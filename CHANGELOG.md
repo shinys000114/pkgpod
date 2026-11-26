@@ -351,7 +351,12 @@ Operations:
   repository's settings and current tree, proxies' caches), for data
   that has to cross a change of the database schema. Its blobs stay in
   the stores or are hard-linked or copied in (`--blobs`); blobs it
-  names that are missing are listed, and it exits 1.
+  names that are missing are listed, and it exits 1. `pkgpod admin
+  import <dir>` takes one into a new data directory: keys checked by
+  fingerprint, the server's rows at once, each repository whole or not
+  at all (blobs from the dump or `--blobs-from` stores), each tree
+  reported the same as exported or not; trust rules and tokens are
+  made again, as it prints.
 - `pkgpod serve` holds a lock on `<data_dir>/pkgpod.lock` (its pid in
   it): a second server on the same data directory is refused. At start
   it removes what a stopped or killed server left half done (import

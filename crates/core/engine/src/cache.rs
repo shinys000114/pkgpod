@@ -60,7 +60,7 @@ pub enum CacheKind {
 }
 
 impl CacheKind {
-    fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             CacheKind::File => "file",
             CacheKind::Meta => "meta",
@@ -68,7 +68,7 @@ impl CacheKind {
         }
     }
 
-    fn parse(s: &str) -> CacheKind {
+    pub fn parse(s: &str) -> CacheKind {
         match s {
             "file" => CacheKind::File,
             "meta" => CacheKind::Meta,
@@ -167,6 +167,38 @@ impl Engine {
                     r.version
                 ],
             )
+        })?;
+        Ok(())
+    }
+
+    /// Puts rows back as they were (a pin and when they were used
+    /// included), over any of the same paths: a dump's, taken in again.
+    pub fn cache_restore(&self, repo: &str, rows: &[CacheRow]) -> Result<()> {
+        let id = self.repo_id(repo)?;
+        self.db().write(|tx| {
+            let mut st = tx.prepare_cached(
+                "INSERT OR REPLACE INTO cache (repo, path, kind, sha256, size, content_type, etag,
+                   last_modified, fetched, used, pinned, name, version)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            )?;
+            for r in rows {
+                st.execute(params![
+                    id,
+                    r.path,
+                    r.kind.as_str(),
+                    r.sha256,
+                    r.size as i64,
+                    r.content_type,
+                    r.etag,
+                    r.last_modified,
+                    r.fetched,
+                    r.used,
+                    r.pinned,
+                    r.name,
+                    r.version
+                ])?;
+            }
+            Ok::<_, rusqlite::Error>(())
         })?;
         Ok(())
     }
