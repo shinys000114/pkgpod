@@ -333,13 +333,7 @@ pub(super) async fn proxy(
             set(&mut resp, "Docker-Content-Digest", &digest);
             set(&mut resp, "Docker-Distribution-API-Version", "registry/2.0");
             if by_tag && !head {
-                app.stats.named(
-                    crate::serving::stats::Counts::Whole,
-                    &resp,
-                    &r.name,
-                    image,
-                    re,
-                );
+                app.downloaded(&resp, &r.name, image, re);
             }
             used(app, r, &path);
             used(app, r, &format!("{image}/manifests/{digest}"));
@@ -389,8 +383,7 @@ pub(super) async fn proxy(
             *again.uri_mut() = uri;
             *again.headers_mut() = headers;
             used(app, r, &path);
-            crate::serving::serve_blob(&r.store().path(&want), &want, "blob", None, false, again)
-                .await
+            app.serve_blob(r.store().path(&want), want, again).await
         }
         _ => oci_err(
             StatusCode::NOT_FOUND,

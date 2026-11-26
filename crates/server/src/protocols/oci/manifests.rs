@@ -95,13 +95,7 @@ pub(super) async fn get_manifest(cx: &Ctx, re: &str, head: bool) -> Response {
             Some(re.to_string())
         };
         if let Some(tag) = tag {
-            cx.app.stats.named(
-                crate::serving::stats::Counts::Whole,
-                &resp,
-                &cx.r.name,
-                &cx.image,
-                &tag,
-            );
+            cx.app.downloaded(&resp, &cx.r.name, &cx.image, &tag);
         }
     }
     resp
@@ -219,7 +213,7 @@ pub(super) async fn put_manifest(cx: &Ctx, re: &str, req: Request) -> Response {
         });
         match out {
             Ok(o) => {
-                app.auth.audit(&actor, "push", &r.name, &o.summary);
+                app.audit(&actor, "push", &r.name, &o.summary);
                 Ok(())
             }
             Err(pkgpod_engine::Error::NotFound(m)) if m.starts_with("MANIFEST_UNKNOWN") => {

@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The server as the registry's [`Host`]: its proxy engine.
+//! The server as the registry's [`Host`]: its proxy engine, how files
+//! are served and bodies stored, downloads counted, actions audited.
 
+use axum::body::Body;
+use axum::extract::Request;
+use axum::response::Response;
 use futures_util::future::BoxFuture;
+use pkgpod_base::Digest;
+use pkgpod_base::store::Store;
 use pkgpod_engine::RepoInfo;
 use pkgpod_engine::cache::CacheRow;
 
@@ -34,5 +40,39 @@ impl Host for App {
         Box::pin(async move {
             proxy::waited(&repo, &path, fetch, move |g| async move { got(&g) }).await
         })
+    }
+
+    fn serve_blob(
+        &self,
+        file: std::path::PathBuf,
+        sha: Digest,
+        req: Request,
+    ) -> BoxFuture<'static, Response> {
+        Box::pin(
+            async move { crate::serving::serve_blob(&file, &sha, "blob", None, false, req).await },
+        )
+    }
+
+    fn store_body(
+        &self,
+        store: Store,
+        body: Body,
+        limit: u64,
+    ) -> BoxFuture<'static, crate::Result<(Digest, u64)>> {
+        Box::pin(crate::serving::body_to_store(store, body, limit))
+    }
+
+    fn downloaded(&self, resp: &Response, repo: &str, name: &str, version: &str) {
+        self.stats.named(
+            crate::serving::stats::Counts::Whole,
+            resp,
+            repo,
+            name,
+            version,
+        );
+    }
+
+    fn audit(&self, actor: &str, action: &str, target: &str, detail: &str) {
+        self.auth.audit(actor, action, target, detail);
     }
 }

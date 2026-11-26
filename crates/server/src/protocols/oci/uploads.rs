@@ -24,8 +24,7 @@ pub(super) async fn get_blob(cx: &Ctx, d: &str, req: Request) -> Response {
             format!("{d} is not here"),
         );
     }
-    let mut resp =
-        crate::serving::serve_blob(&cx.r.store().path(&dg), &dg, "blob", None, false, req).await;
+    let mut resp = cx.app.serve_blob(cx.r.store().path(&dg), dg, req).await;
     set(&mut resp, "Docker-Content-Digest", d);
     set(&mut resp, "Content-Type", "application/octet-stream");
     set(&mut resp, "Docker-Distribution-API-Version", "registry/2.0");
@@ -72,7 +71,11 @@ pub(super) async fn start_upload(cx: &Ctx, req: Request) -> Response {
         let Ok(d) = parse_digest(dg) else {
             return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", dg.clone());
         };
-        return match crate::serving::body_to_store(cx.r.store(), req.into_body(), MAX_BLOB).await {
+        return match cx
+            .app
+            .store_body(cx.r.store(), req.into_body(), MAX_BLOB)
+            .await
+        {
             Ok((got, _)) if got == d => {
                 record_upload(&cx.app, &cx.r.name, &d);
                 blob_created(&cx.name, &d)

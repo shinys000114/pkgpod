@@ -163,6 +163,27 @@ pub trait Host: Send + Sync {
         fetch: Fetch,
         got: fn(&Option<Fetched>) -> bool,
     ) -> futures_util::future::BoxFuture<'static, Option<Option<Fetched>>>;
+    /// Answers a request for blob `sha` at `file` as stored files are
+    /// served (ranges, validators).
+    fn serve_blob(
+        &self,
+        file: std::path::PathBuf,
+        sha: Digest,
+        req: Request,
+    ) -> futures_util::future::BoxFuture<'static, Response>;
+    /// Writes a request's body, of at most `limit` bytes, into `store`:
+    /// its digest and size.
+    fn store_body(
+        &self,
+        store: pkgpod_base::store::Store,
+        body: Body,
+        limit: u64,
+    ) -> futures_util::future::BoxFuture<'static, crate::Result<(Digest, u64)>>;
+    /// `resp` answered a whole download of `name` `version` from `repo`
+    /// (counted if it was served).
+    fn downloaded(&self, resp: &Response, repo: &str, name: &str, version: &str);
+    /// Records what `actor` did.
+    fn audit(&self, actor: &str, action: &str, target: &str, detail: &str);
 }
 
 /// A proxy's upstream registry, as the registry's code asks it; calls
@@ -471,7 +492,7 @@ fn query(q: &str) -> BTreeMap<String, String> {
         .map(|(k, v)| {
             (
                 k.to_string(),
-                String::from_utf8_lossy(&crate::serving::percent_decode(v)).into_owned(),
+                String::from_utf8_lossy(&pkgpod_base::percent::percent_decode(v)).into_owned(),
             )
         })
         .collect()
