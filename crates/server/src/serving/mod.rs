@@ -40,7 +40,9 @@ use crate::{App, Error};
 pub fn router(app: Arc<App>) -> Router {
     Router::new()
         .fallback(handle)
-        // Uploads in a form (twine) as large as PUT ones.
+        // Forms read with axum's Multipart (helm, NuGet, pub, Galaxy,
+        // Swift) as large as PUT uploads; PyPI's is held to its limit by
+        // pkgpod_proto::form.
         .layer(axum::extract::DefaultBodyLimit::max(MAX_UPLOAD as usize))
         .with_state(app)
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The server as the registry's [`Host`]: its proxy engine, how files
-//! are served and bodies stored, downloads counted.
+//! The server as the registry's [`Host`]: its proxy engine, how blobs
+//! are served, downloads counted, uploads recorded.
 
 use futures_util::future::BoxFuture;
 use http::StatusCode;
