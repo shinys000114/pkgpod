@@ -1622,6 +1622,12 @@ def corpus(fx):
             for q in ("size=1", "size=1&from=1", "text=w-", "text=w-&size=2&from=1",
                       "text=w-&size=2&from=4", "text=w-&from=99"):
                 add(f"after npm {repo} search {q} {who}", who, "GET", f"/{repo}/-/v1/search?{q}")
+        # What npm's writes left: each one's package in npriv, hello's
+        # dist-tags after they were set and removed.
+        for w in IDENTS:
+            add(f"after npm npriv/w-{w} {who}", who, "GET", f"/npriv/w-{w}")
+        for rel in ("/-/package/hello/dist-tags", "/hello"):
+            add(f"after npm npub{rel} {who}", who, "GET", f"/npub{rel}")
     # Requests made at random from a fixed seed, after the rest: some from
     # the formats' words, some the corpus's own a little changed.
     curated = list(out)
@@ -1811,14 +1817,14 @@ def end_state(data, seed_time, counts):
     out["audit"] = a
     out["downloads"] = rows("SELECT repo, day, name, version, n FROM downloads ORDER BY 1,2,3,4")
     ca = rows("SELECT r.name, c.path, c.kind, hex(c.sha256), c.size, c.content_type, c.etag, "
-              "c.last_modified, c.fetched, c.used, c.pinned FROM cache c JOIN repos r ON r.id = c.repo "
-              "ORDER BY 1, 2")
+              "c.last_modified, c.fetched, c.used, c.pinned, c.name, c.version FROM cache c "
+              "JOIN repos r ON r.id = c.repo ORDER BY 1, 2")
     for r in ca:
         r[8] = r[9] = "*"
     counts["cache times"] += len(ca)
     out["cache"] = ca
-    cat = rows("SELECT r.name, c.path, c.name, c.version, hex(c.sha256), c.size, c.added "
-               "FROM catalog c JOIN repos r ON r.id = c.repo ORDER BY 1, 2")
+    cat = rows("SELECT r.name, c.path, c.name, c.version, hex(c.sha256), c.size, c.added, "
+               "c.extra FROM catalog c JOIN repos r ON r.id = c.repo ORDER BY 1, 2")
     for r in cat:
         if r[6] >= seed_time:
             r[6] = "*"
