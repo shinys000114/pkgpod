@@ -1536,10 +1536,16 @@ RULES = [
     ("cache times", "cache.fetched, cache.used"),
     ("catalog times of writes", "catalog.added after the seed"),
     ("version times", "versions.created after the seed"),
+    # The host index says when each repository's version was made, to
+    # the minute (the system's time zone): of one made in the run, the
+    # run's minute.
+    ("host index times", "a version's minute on the host index after writes, if the "
+                         "seed's or later"),
 ]
 
 
 NPM_TIME = re.compile(rb'"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)"')
+HOST_TIME = re.compile(rb"(version \d+ \xc2\xb7 )(\d{4}-\d\d-\d\d \d\d:\d\d)<")
 
 
 class Masker:
@@ -1562,6 +1568,15 @@ class Masker:
             return b'"<time>"' if search else b'"' + b"X" * len(m.group(1)) + b'"'
         out = NPM_TIME.sub(one, body)
         return out, hit
+
+    def host_time(self, m):
+        """A version's minute on the host index, masked if a version of
+        the run could have been made in it."""
+        t = time.mktime(time.strptime(m.group(2).decode(), "%Y-%m-%d %H:%M"))
+        if t + 60 <= self.seed_time:
+            return m.group(0)
+        self.counts["host index times"] += 1
+        return m.group(1) + b"X" * len(m.group(2)) + b"<"
 
     def upload_id(self, m):
         n = self.uploads.setdefault(m.group(0), f"U{len(self.uploads) + 1}")
@@ -1598,6 +1613,8 @@ class Masker:
             if hit:
                 self.counts["cargo times"] += 1
                 hd = [[k, "*" if k == "etag" else v] for k, v in hd]
+        if after_writes:
+            body = HOST_TIME.sub(self.host_time, body)
         if after_writes and re.search(r"/dists/[^?]*Release", path):
             nb = re.sub(rb"(?m)^Date: .*$", b"Date: *", body)
             nb = re.sub(rb"-----BEGIN PGP SIGNATURE-----.*?-----END PGP SIGNATURE-----", b"SIG",
