@@ -2,15 +2,14 @@
 
 //! The OCI registry's side in the server: its protocol is pkgpod-oci's
 //! ([`pkgpod_oci::protocol`]); here are what the server lends it (the
-//! App as its [`Host`], a caller's view, the routes' names, the
-//! upstream registries' clients) and which requests are its.
+//! App as its [`Host`], the routes' names, the upstream registries'
+//! clients) and which requests are its.
 
 mod host;
 mod upstream;
 
-pub use host::who;
 pub use pkgpod_oci::protocol::{
-    Caller, Fetch, Fetched, Host, Names, State, Upstream, Who, forget, handle, pin_closure,
+    Fetch, Fetched, Host, Names, State, Upstream, forget, handle, pin_closure,
 };
 pub(crate) use upstream::Registries;
 
@@ -90,7 +89,7 @@ mod tests {
         let req = http::Request::get(path)
             .body(pkgpod_proto::body::empty())
             .unwrap();
-        let caller = who(app, &crate::auth::Caller::anonymous());
+        let caller = crate::protocols::who(app, &crate::auth::Caller::anonymous());
         let names = app.routes().unwrap();
         let resp = handle(app.clone(), caller, "localhost", names, &rest, req)
             .await
@@ -158,13 +157,12 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         let (app2, name) = (app.clone(), r.name.clone());
-        let kept = tokio::task::spawn_blocking(move || {
-            app2.engine().cache_get(&name, "app/manifests/1.0")
-        })
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+        let kept =
+            tokio::task::spawn_blocking(move || app2.engine.cache_get(&name, "app/manifests/1.0"))
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
         assert_eq!(*asked.lock().unwrap(), [1, 2]);
         assert_eq!(
             format!("sha256:{}", kept.sha256.unwrap().hex()),

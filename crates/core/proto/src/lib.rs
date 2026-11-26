@@ -4,11 +4,14 @@
 //! may do what ([`gate`]) and how long an answer may be kept
 //! ([`cache`]), pure tables, so that every format answers alike and a
 //! format's own tests can run them; the bodies its requests and replies
-//! carry ([`body`]) and how its query is read ([`query`]).
+//! carry ([`body`]) and how its query is read ([`query`]); what it asks
+//! of the server and of its caller ([`host`]).
 
 pub mod body;
 pub mod cache;
 pub mod gate;
+pub mod host;
 pub mod query;
 
 pub use gate::{Gate, Need, Refusal, Role, decide};
+pub use host::{Caller, Who};

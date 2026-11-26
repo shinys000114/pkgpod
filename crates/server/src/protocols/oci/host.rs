@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! The server as the registry's [`Host`]: its proxy engine, how files
-//! are served and bodies stored, downloads counted, actions audited.
-
-use std::sync::Arc;
+//! are served and bodies stored, downloads counted.
 
 use futures_util::future::BoxFuture;
 use http::StatusCode;
@@ -14,45 +12,9 @@ use pkgpod_engine::cache::CacheRow;
 use pkgpod_proto::body::{self, Body, Request, Response};
 use rusqlite::params;
 
-use super::{Caller, Fetch, Fetched, Host, Names, State, Who};
+use super::{Fetch, Fetched, Host, Names, State};
 use crate::App;
 use crate::serving::proxy;
-
-/// A request's caller, as the registry asks of them.
-struct ServerWho {
-    app: Arc<App>,
-    caller: crate::auth::Caller,
-}
-
-impl Who for ServerWho {
-    fn anonymous(&self) -> bool {
-        self.caller.user.is_none()
-    }
-
-    fn name(&self) -> &str {
-        self.caller.name()
-    }
-
-    fn role(&self, repo: &str, public: bool) -> Option<pkgpod_proto::Role> {
-        use crate::auth::Role as R;
-        self.app
-            .auth
-            .role(&self.caller, repo, public)
-            .map(|r| match r {
-                R::Read => pkgpod_proto::Role::Read,
-                R::Write => pkgpod_proto::Role::Write,
-                R::Admin => pkgpod_proto::Role::Admin,
-            })
-    }
-}
-
-/// The registry's view of `caller`.
-pub fn who(app: &Arc<App>, caller: &crate::auth::Caller) -> Caller {
-    Arc::new(ServerWho {
-        app: app.clone(),
-        caller: caller.clone(),
-    })
-}
 
 impl Names for crate::routes::Table {
     fn registry(&self, host: &str, name: &[String]) -> Option<(String, String)> {
@@ -121,14 +83,6 @@ impl Host for App {
             name,
             version,
         );
-    }
-
-    fn audit(&self, actor: &str, action: &str, target: &str, detail: &str) {
-        self.auth.audit(actor, action, target, detail);
-    }
-
-    fn engine(&self) -> &pkgpod_engine::Engine {
-        &self.engine
     }
 
     fn state(&self) -> &State {

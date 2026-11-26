@@ -39,7 +39,8 @@ use pkgpod_engine::{Kind, RepoInfo};
 use pkgpod_proto::body::{self, Body, Request, Response};
 use serde_json::{Value, json};
 
-use pkgpod_proto::{Gate, Need, Refusal, Role};
+pub use pkgpod_proto::{Caller, Who};
+use pkgpod_proto::{Gate, Need, Refusal};
 
 mod group;
 mod lists;
@@ -158,28 +159,15 @@ pub fn parse_target(segs: &[String]) -> Option<(Vec<String>, Target)> {
     None
 }
 
-/// Who asks, as the registry sees them.
-pub trait Who: Send + Sync {
-    /// No user behind the request (Docker sends its credentials only
-    /// after a 401).
-    fn anonymous(&self) -> bool;
-    /// The name what they do is recorded under.
-    fn name(&self) -> &str;
-    /// Their role on `repo` (a public one is read by anyone).
-    fn role(&self, repo: &str, public: bool) -> Option<Role>;
-}
-
-/// The caller of a request.
-pub type Caller = Arc<dyn Who>;
-
 /// Which repository a registry's name is on a host, and the image in it
 /// (the rest of the name).
 pub trait Names: Send + Sync {
     fn registry(&self, host: &str, name: &[String]) -> Option<(String, String)>;
 }
 
-/// What the registry's code asks of the server it runs in.
-pub trait Host: Send + Sync {
+/// What the registry's code asks of the server it runs in, besides what
+/// every format does.
+pub trait Host: pkgpod_proto::host::Host {
     /// Keeps a proxy's cache row, unless one was kept for its path
     /// after `began` or the proxy's upstream changed meanwhile; whether
     /// it was kept. Blocks.
@@ -218,10 +206,6 @@ pub trait Host: Send + Sync {
     /// `resp` answered a whole download of `name` `version` from `repo`
     /// (counted if it was served).
     fn downloaded(&self, status: StatusCode, repo: &str, name: &str, version: &str);
-    /// Records what `actor` did.
-    fn audit(&self, actor: &str, action: &str, target: &str, detail: &str);
-    /// The repositories, formats and their states.
-    fn engine(&self) -> &pkgpod_engine::Engine;
     /// What the registry keeps in memory.
     fn state(&self) -> &State;
     /// A repository by its name.
