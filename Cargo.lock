@@ -2567,11 +2567,16 @@ name = "pkgpod-npm"
 version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
+ "bytes",
+ "futures-util",
+ "http",
  "pkgpod-base",
  "pkgpod-engine",
+ "pkgpod-proto",
  "serde_json",
  "sha1 0.11.0",
  "sha2 0.11.0",
+ "tokio",
 ]
 
 [[package]]
