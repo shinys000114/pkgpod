@@ -5,17 +5,17 @@
 use super::*;
 
 /// The images of the current version.
-pub(super) fn images(app: &App, r: &RepoInfo) -> Images {
-    let Ok(Some(v)) = app.engine.current(r) else {
+pub(super) fn images(app: &dyn Host, r: &RepoInfo) -> Images {
+    let Ok(Some(v)) = app.engine().current(r) else {
         return Images::default();
     };
-    Images::of(&app.engine.objects().walk(&v.root, "").unwrap_or_default())
+    Images::of(&app.engine().objects().walk(&v.root, "").unwrap_or_default())
 }
 
 pub(super) async fn tags(cx: &Ctx, q: &str) -> Response {
     let q = query(q);
     let (app, r, image) = (cx.app.clone(), cx.r.clone(), cx.image.clone());
-    let Some(im) = blocking(move || images(&app, &r)).await else {
+    let Some(im) = blocking(move || images(&*app, &r)).await else {
         return oci_err(StatusCode::INTERNAL_SERVER_ERROR, "UNKNOWN", "failed");
     };
     if !im.manifests.contains_key(&cx.image) {
@@ -62,7 +62,7 @@ pub(super) async fn referrers(cx: &Ctx, d: &str, q: &str) -> Response {
     let (app, r, image) = (cx.app.clone(), cx.r.clone(), cx.image.clone());
     let store = cx.r.store();
     let list = blocking(move || {
-        let im = images(&app, &r);
+        let im = images(&*app, &r);
         let mut out = Vec::new();
         for (dg, p) in im.manifests.get(&image).into_iter().flatten() {
             if p.subject != Some(subject) {

@@ -7,13 +7,13 @@ use super::*;
 /// The manifest `re` (a tag or a digest) names in the current version:
 /// (digest, size, media type).
 pub(super) fn find_manifest(
-    app: &App,
+    app: &dyn Host,
     r: &RepoInfo,
     image: &str,
     re: &str,
 ) -> Option<(Digest, u64, String)> {
-    let v = app.engine.current(r).ok()??;
-    let objs = app.engine.objects();
+    let v = app.engine().current(r).ok()??;
+    let objs = app.engine().objects();
     let path = if re.starts_with("sha256:") {
         manifest_path(image, &parse_digest(re).ok()?)
     } else {
@@ -52,7 +52,7 @@ pub(super) async fn get_manifest(cx: &Ctx, re: &str, head: bool) -> Response {
         cx.image.clone(),
         re.to_string(),
     );
-    let Some(Some((d, size, mt))) = blocking(move || find_manifest(&app, &r, &image, &re2)).await
+    let Some(Some((d, size, mt))) = blocking(move || find_manifest(&*app, &r, &image, &re2)).await
     else {
         return oci_err(
             StatusCode::NOT_FOUND,
@@ -88,7 +88,7 @@ pub(super) async fn get_manifest(cx: &Ctx, re: &str, head: bool) -> Response {
     if !head {
         let tag = if re.starts_with("sha256:") {
             let (app, r, image) = (cx.app.clone(), cx.r.clone(), cx.image.clone());
-            blocking(move || tag_of(&app, &r, &image, &d))
+            blocking(move || tag_of(&*app, &r, &image, &d))
                 .await
                 .flatten()
         } else {
@@ -102,9 +102,9 @@ pub(super) async fn get_manifest(cx: &Ctx, re: &str, head: bool) -> Response {
 }
 
 /// The first tag of `image` that names the manifest `d`.
-pub(super) fn tag_of(app: &App, r: &RepoInfo, image: &str, d: &Digest) -> Option<String> {
-    let v = app.engine.current(r).ok()??;
-    let objs = app.engine.objects();
+pub(super) fn tag_of(app: &dyn Host, r: &RepoInfo, image: &str, d: &Digest) -> Option<String> {
+    let v = app.engine().current(r).ok()??;
+    let objs = app.engine().objects();
     let Entry::Dir { id } = objs
         .resolve(&v.root, &format!("{image}/{}", pkgpod_oci::TAGS))
         .ok()??
@@ -170,7 +170,7 @@ pub(super) async fn put_manifest(cx: &Ctx, re: &str, req: Request) -> Response {
         // index's children in the image.
         for b in &parsed.blobs {
             // keep(): the blob stays young until this manifest names it.
-            if !has_blob(&app, &r, b) || !r.store().keep(b) {
+            if !has_blob(&*app, &r, b) || !r.store().keep(b) {
                 return Err(oci_err(
                     StatusCode::BAD_REQUEST,
                     "MANIFEST_BLOB_UNKNOWN",
@@ -188,7 +188,7 @@ pub(super) async fn put_manifest(cx: &Ctx, re: &str, req: Request) -> Response {
             Some(t) => format!("push {image}:{t} (sha256:{short})"),
             None => format!("push {image}@sha256:{short}"),
         };
-        let out = app.engine.change(&r.name, &actor, |_, e| {
+        let out = app.engine().change(&r.name, &actor, |_, e| {
             for c in &parsed.children {
                 if e.get(&manifest_path(&image, c))?.is_none() {
                     return Err(pkgpod_engine::Error::NotFound(format!(
@@ -271,7 +271,7 @@ pub(super) async fn delete_manifest(cx: &Ctx, re: &str) -> Response {
         re.to_string(),
     );
     let res = blocking(move || {
-        app.engine.change(&r.name, &actor, |_, e| {
+        app.engine().change(&r.name, &actor, |_, e| {
             if re2.starts_with("sha256:") {
                 let d = parse_digest(&re2)?;
                 let path = manifest_path(&image, &d);

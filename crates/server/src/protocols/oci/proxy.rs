@@ -5,7 +5,7 @@
 use super::*;
 
 /// The proxy's size limit, after a new file.
-pub(super) async fn shrink(app: &Arc<App>, r: &RepoInfo) {
+pub(super) async fn shrink(app: &Arc<dyn Host>, r: &RepoInfo) {
     let max = (r
         .settings
         .get("max_mib")
@@ -15,24 +15,24 @@ pub(super) async fn shrink(app: &Arc<App>, r: &RepoInfo) {
         << 20;
     if max > 0 {
         let (app2, name) = (app.clone(), r.name.clone());
-        let _ = blocking(move || app2.engine.cache_shrink(&name, max)).await;
+        let _ = blocking(move || app2.engine().cache_shrink(&name, max)).await;
     }
 }
 
-pub(super) fn used(app: &Arc<App>, r: &RepoInfo, path: &str) {
+pub(super) fn used(app: &Arc<dyn Host>, r: &RepoInfo, path: &str) {
     let (app2, name, path) = (app.clone(), r.name.clone(), path.to_string());
     tokio::spawn(async move {
-        let _ = blocking(move || app2.engine.cache_used(&name, &path)).await;
+        let _ = blocking(move || app2.engine().cache_used(&name, &path)).await;
     });
 }
 
 /// A cached manifest's pins go to what it names: an index's platform
 /// manifests, a manifest's config and layers (these are shared, so
 /// they carry no tag of their own).
-pub fn pin_closure(app: &App, repo: &str, paths: &[String]) -> Vec<String> {
+pub fn pin_closure(app: &dyn Host, repo: &str, paths: &[String]) -> Vec<String> {
     let mut out: Vec<String> = paths.to_vec();
     let mut todo: Vec<String> = paths.to_vec();
-    let Ok(r) = app.engine.repo(repo) else {
+    let Ok(r) = app.engine().repo(repo) else {
         return out;
     };
     while let Some(p) = todo.pop() {
@@ -40,7 +40,7 @@ pub fn pin_closure(app: &App, repo: &str, paths: &[String]) -> Vec<String> {
             continue;
         };
         let image = image.to_string();
-        let Ok(Some(row)) = app.engine.cache_get(repo, &p) else {
+        let Ok(Some(row)) = app.engine().cache_get(repo, &p) else {
             continue;
         };
         let Some(sha) = row.sha256 else { continue };
@@ -91,18 +91,18 @@ pub(super) type Fetch =
 /// thread and a connection while the registry is slow, and an answer
 /// sent later could be kept first, then replaced by the earlier one).
 pub(super) fn shared(
-    app: &Arc<App>,
+    app: &Arc<dyn Host>,
     repo: &str,
     path: &str,
     fetch: impl std::future::Future<Output = Fetched> + Send + 'static,
 ) -> Fetch {
     use futures_util::FutureExt;
     /// Forgotten when its task ends (what it brings is kept by then).
-    struct Ends(Arc<App>, (String, String));
+    struct Ends(Arc<dyn Host>, (String, String));
     impl Drop for Ends {
         fn drop(&mut self) {
             self.0
-                .oci
+                .state()
                 .fetching
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -110,7 +110,11 @@ pub(super) fn shared(
         }
     }
     let key = (repo.to_string(), path.to_string());
-    let mut m = app.oci.fetching.lock().unwrap_or_else(|e| e.into_inner());
+    let mut m = app
+        .state()
+        .fetching
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if let Some(f) = m.get(&key) {
         return f.clone();
     }
@@ -127,7 +131,7 @@ pub(super) fn shared(
 /// A proxy's answer: manifests by tag (metadata) and by digest, and
 /// blobs (files), each checked against its digest.
 pub(super) async fn proxy(
-    app: &Arc<App>,
+    app: &Arc<dyn Host>,
     r: &RepoInfo,
     image: &str,
     target: &Target,
@@ -155,7 +159,7 @@ pub(super) async fn proxy(
         return unknown("excluded");
     }
     let upstream = r.setting_str("upstream").to_string();
-    if !app.oci.upstream.names(&upstream, image) {
+    if !app.state().upstream.names(&upstream, image) {
         return oci_err(
             StatusCode::BAD_GATEWAY,
             "UNKNOWN",
@@ -165,7 +169,7 @@ pub(super) async fn proxy(
     let up = (upstream, image.to_string());
     // A blocking client: made (and ever dropped) off the async threads.
     let (app2, name) = (app.clone(), r.name.clone());
-    let reg = blocking(move || app2.oci.upstream.ready(&name)).await;
+    let reg = blocking(move || app2.state().upstream.ready(&name)).await;
     match reg {
         Some(Ok(())) => {}
         Some(Err(e)) => return oci_err(StatusCode::BAD_GATEWAY, "UNKNOWN", e),
@@ -189,7 +193,7 @@ pub(super) async fn proxy(
     let cached = move |path: String| {
         let (app2, repo2) = (app2.clone(), repo2.clone());
         async move {
-            blocking(move || app2.engine.cache_get(&repo2, &path).ok().flatten())
+            blocking(move || app2.engine().cache_get(&repo2, &path).ok().flatten())
                 .await
                 .flatten()
         }
@@ -246,7 +250,7 @@ pub(super) async fn proxy(
                     // client's timeout is an hour, for blobs).
                     let within = std::time::Duration::from_secs(app2.quiet_secs() as u64);
                     let Some(Ok((body, mt, digest))) = blocking(move || {
-                        reg2.oci
+                        reg2.state()
                             .upstream
                             .manifest(&name3, &up2.0, &up2.1, &re3, within)
                     })
@@ -349,7 +353,7 @@ pub(super) async fn proxy(
                 let name2 = r.name.clone();
                 let stored = blocking(move || -> Result<(Digest, u64), String> {
                     let mut inc = store.incoming().map_err(|e| e.to_string())?;
-                    reg2.oci
+                    reg2.state()
                         .upstream
                         .blob(&name2, &up2.0, &up2.1, &d2, &mut inc)?;
                     store.commit(inc, Some(&want)).map_err(|e| e.to_string())

@@ -12,8 +12,13 @@ use pkgpod_base::store::Store;
 use pkgpod_engine::RepoInfo;
 use pkgpod_engine::cache::CacheRow;
 
-use super::{Fetch, Fetched, Host};
+use std::sync::Arc;
+
+use rusqlite::params;
+
+use super::{Fetch, Fetched, Host, State};
 use crate::App;
+use crate::auth::{Caller, Role};
 use crate::serving::proxy;
 
 impl Host for App {
@@ -74,5 +79,52 @@ impl Host for App {
 
     fn audit(&self, actor: &str, action: &str, target: &str, detail: &str) {
         self.auth.audit(actor, action, target, detail);
+    }
+
+    fn engine(&self) -> &pkgpod_engine::Engine {
+        &self.engine
+    }
+
+    fn state(&self) -> &State {
+        &self.oci
+    }
+
+    fn routes(&self) -> crate::Result<Arc<crate::routes::Table>> {
+        App::routes(self)
+    }
+
+    fn served(&self, repo: &str) -> crate::Result<crate::Served> {
+        App::served(self, repo)
+    }
+
+    fn role(&self, caller: &Caller, repo: &str, public: bool) -> Option<Role> {
+        self.auth.role(caller, repo, public)
+    }
+
+    fn uploaded(&self, repo: &str, d: &Digest) -> bool {
+        self.db
+            .read(|c| {
+                c.query_row(
+                    "SELECT 1 FROM oci_uploads WHERE repo = ?1 AND digest = ?2",
+                    params![repo, d.hex()],
+                    |_| Ok(()),
+                )
+            })
+            .is_ok()
+    }
+
+    fn record_upload(&self, repo: &str, d: &Digest) {
+        let _ = self.db.write(|tx| {
+            tx.execute(
+                "INSERT OR REPLACE INTO oci_uploads (repo, digest, created) VALUES (?1, ?2, ?3)",
+                params![repo, d.hex(), pkgpod_base::now()],
+            )
+        });
+    }
+
+    fn forget_uploads(&self, repo: &str) {
+        let _ = self
+            .db
+            .write(|tx| tx.execute("DELETE FROM oci_uploads WHERE repo = ?1", [repo]));
     }
 }

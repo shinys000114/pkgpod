@@ -17,7 +17,7 @@ pub(super) async fn get_blob(cx: &Ctx, d: &str, req: Request) -> Response {
         return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", format!("{d:?}"));
     };
     let (app, r) = (cx.app.clone(), cx.r.clone());
-    if blocking(move || has_blob(&app, &r, &dg)).await != Some(true) {
+    if blocking(move || has_blob(&*app, &r, &dg)).await != Some(true) {
         return oci_err(
             StatusCode::NOT_FOUND,
             "BLOB_UNKNOWN",
@@ -77,7 +77,7 @@ pub(super) async fn start_upload(cx: &Ctx, req: Request) -> Response {
             .await
         {
             Ok((got, _)) if got == d => {
-                record_upload(&cx.app, &cx.r.name, &d);
+                cx.app.record_upload(&cx.r.name, &d);
                 blob_created(&cx.name, &d)
             }
             Ok(_) => oci_err(
@@ -104,7 +104,7 @@ pub(super) async fn start_upload(cx: &Ctx, req: Request) -> Response {
     let now = pkgpod_base::now();
     let mut s = cx
         .app
-        .oci
+        .state()
         .sessions
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -138,19 +138,18 @@ pub(super) async fn mount(cx: &Ctx, d: &Digest, from: &str) -> Option<Response> 
     // this host, as the request's own name is found (a registry at
     // another host's root does not hold it).
     let src = table.registry(&cx.host, &segs).map(|x| x.0)?;
-    let src_r = cx.app.engine.repo(&src).ok()?;
+    let src_r = cx.app.engine().repo(&src).ok()?;
     cx.app
-        .auth
         .role(&cx.caller, &src, src_r.setting_bool("public"))?;
     let (app, d2, src_r2) = (cx.app.clone(), *d, src_r.clone());
-    if blocking(move || has_blob(&app, &src_r2, &d2)).await != Some(true) {
+    if blocking(move || has_blob(&*app, &src_r2, &d2)).await != Some(true) {
         return None;
     }
     let (dst, srcp) = (cx.r.store(), src_r.store().path(d));
     if !dst.keep(d) {
         blocking(move || dst.put_file(&srcp)).await?.ok()?;
     }
-    record_upload(&cx.app, &cx.r.name, d);
+    cx.app.record_upload(&cx.r.name, d);
     Some(blob_created(&cx.name, d))
 }
 
@@ -171,7 +170,7 @@ pub(super) async fn append(cx: &Ctx, id: &str, req: Request) -> Result<u64, Resp
     let mut s = {
         let mut map = cx
             .app
-            .oci
+            .state()
             .sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -186,7 +185,7 @@ pub(super) async fn append(cx: &Ctx, id: &str, req: Request) -> Result<u64, Resp
     };
     let put_back = |s: Session| {
         cx.app
-            .oci
+            .state()
             .sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -254,7 +253,7 @@ pub(super) async fn finish_upload(cx: &Ctx, id: &str, req: Request) -> Response 
     }
     let Some(s) = cx
         .app
-        .oci
+        .state()
         .sessions
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -265,7 +264,7 @@ pub(super) async fn finish_upload(cx: &Ctx, id: &str, req: Request) -> Response 
     let store = cx.r.store();
     match blocking(move || store.commit(s.incoming, Some(&d))).await {
         Some(Ok(_)) => {
-            record_upload(&cx.app, &cx.r.name, &d);
+            cx.app.record_upload(&cx.r.name, &d);
             blob_created(&cx.name, &d)
         }
         Some(Err(e)) => oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", e.to_string()),
@@ -276,7 +275,7 @@ pub(super) async fn finish_upload(cx: &Ctx, id: &str, req: Request) -> Response 
 pub(super) fn upload_status(cx: &Ctx, id: &str) -> Response {
     match cx
         .app
-        .oci
+        .state()
         .sessions
         .lock()
         .unwrap_or_else(|e| e.into_inner())

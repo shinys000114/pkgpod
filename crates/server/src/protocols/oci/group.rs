@@ -8,7 +8,7 @@ use super::*;
 /// alone (a proxy has it if its upstream does).
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn group(
-    app: Arc<App>,
+    app: Arc<dyn Host>,
     caller: Caller,
     host: &str,
     g: RepoInfo,
@@ -17,11 +17,11 @@ pub(super) async fn group(
     target: Target,
     req: Request,
 ) -> Response {
-    let public_only = app.auth.role(&caller, &g.name, false).is_none();
+    let public_only = app.role(&caller, &g.name, false).is_none();
     let members: Vec<RepoInfo> = g
         .setting_list("members")
         .iter()
-        .filter_map(|m| app.engine.repo(m).ok())
+        .filter_map(|m| app.engine().repo(m).ok())
         .filter(|m| m.format == "oci" && m.kind != Kind::Group)
         .filter(|m| !public_only || m.setting_bool("public"))
         .collect();
@@ -37,8 +37,8 @@ pub(super) async fn group(
         }
         let (app2, m2, image2) = (app.clone(), m.clone(), image.clone());
         let has = blocking(move || {
-            let v = app2.engine.current(&m2).ok()??;
-            app2.engine
+            let v = app2.engine().current(&m2).ok()??;
+            app2.engine()
                 .objects()
                 .resolve(&v.root, &image2)
                 .ok()

@@ -34,10 +34,8 @@ use pkgpod_engine::cache::CacheRow;
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{Kind, RepoInfo};
 use pkgpod_oci::{Images, Parsed, manifest_path, parse_digest, tag_path};
-use rusqlite::params;
 use serde_json::{Value, json};
 
-use crate::App;
 use crate::auth::{Caller, Role};
 
 mod group;
@@ -184,6 +182,23 @@ pub trait Host: Send + Sync {
     fn downloaded(&self, resp: &Response, repo: &str, name: &str, version: &str);
     /// Records what `actor` did.
     fn audit(&self, actor: &str, action: &str, target: &str, detail: &str);
+    /// The repositories, formats and their states.
+    fn engine(&self) -> &pkgpod_engine::Engine;
+    /// What the registry keeps in memory.
+    fn state(&self) -> &State;
+    /// Where repositories are, by host and path.
+    fn routes(&self) -> crate::Result<Arc<crate::routes::Table>>;
+    /// A repository and its current version.
+    fn served(&self, repo: &str) -> crate::Result<crate::Served>;
+    /// `caller`'s role on `repo` (a public one is read by anyone).
+    fn role(&self, caller: &Caller, repo: &str, public: bool) -> Option<Role>;
+    /// Whether blob `d` was uploaded to `repo` (it may serve it before a
+    /// manifest names it).
+    fn uploaded(&self, repo: &str, d: &Digest) -> bool;
+    /// Records that blob `d` was uploaded to `repo`.
+    fn record_upload(&self, repo: &str, d: &Digest);
+    /// Drops what was recorded uploaded to `repo` (it is deleted).
+    fn forget_uploads(&self, repo: &str);
 }
 
 /// A proxy's upstream registry, as the registry's code asks it; calls
@@ -243,9 +258,9 @@ impl Default for State {
 
 /// Blobs a repository's manifests reference (and the manifests), by
 /// the version's root.
-fn referenced(app: &App, r: &RepoInfo) -> Arc<HashSet<Digest>> {
-    let c = &app.oci.referenced;
-    let Ok(Some(v)) = app.engine.current(r) else {
+fn referenced(app: &dyn Host, r: &RepoInfo) -> Arc<HashSet<Digest>> {
+    let c = &app.state().referenced;
+    let Ok(Some(v)) = app.engine().current(r) else {
         return Arc::new(HashSet::new());
     };
     if let Some((root, set)) = c.lock().unwrap_or_else(|e| e.into_inner()).get(&r.name)
@@ -254,7 +269,7 @@ fn referenced(app: &App, r: &RepoInfo) -> Arc<HashSet<Digest>> {
         return set.clone();
     }
     let mut set = HashSet::new();
-    for (p, e) in app.engine.objects().walk(&v.root, "").unwrap_or_default() {
+    for (p, e) in app.engine().objects().walk(&v.root, "").unwrap_or_default() {
         if let Entry::Blob { sha256, meta, .. } = &e
             && pkgpod_oci::split_path(&p).is_some()
         {
@@ -271,30 +286,11 @@ fn referenced(app: &App, r: &RepoInfo) -> Arc<HashSet<Digest>> {
 
 /// May `r` serve blob `d`: referenced by its manifests or uploaded to
 /// it, and in its store?
-fn has_blob(app: &App, r: &RepoInfo, d: &Digest) -> bool {
+fn has_blob(app: &dyn Host, r: &RepoInfo, d: &Digest) -> bool {
     if !r.store().has(d) {
         return false;
     }
-    referenced(app, r).contains(d)
-        || app
-            .db
-            .read(|c| {
-                c.query_row(
-                    "SELECT 1 FROM oci_uploads WHERE repo = ?1 AND digest = ?2",
-                    params![r.name, d.hex()],
-                    |_| Ok(()),
-                )
-            })
-            .is_ok()
-}
-
-fn record_upload(app: &App, repo: &str, d: &Digest) {
-    let _ = app.db.write(|tx| {
-        tx.execute(
-            "INSERT OR REPLACE INTO oci_uploads (repo, digest, created) VALUES (?1, ?2, ?3)",
-            params![repo, d.hex(), pkgpod_base::now()],
-        )
-    });
+    referenced(app, r).contains(d) || app.uploaded(&r.name, d)
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
@@ -329,7 +325,7 @@ pub fn claimed(table: &crate::routes::Table, host: &str, rest: &[String]) -> Opt
 
 /// Handles `/v2/<rest>`, which [`claims`] said is the registry's.
 pub async fn handle(
-    app: Arc<App>,
+    app: Arc<dyn Host>,
     caller: Caller,
     host: &str,
     rest: &[String],
@@ -375,7 +371,7 @@ pub async fn handle(
     }
     let served = app.served(&repo).ok()?;
     let r = served.repo;
-    let role = app.auth.role(&caller, &repo, r.setting_bool("public"));
+    let role = app.role(&caller, &repo, r.setting_bool("public"));
     let writing = !matches!(method, Method::GET | Method::HEAD);
     let need = if writing { Role::Write } else { Role::Read };
     if role < Some(need) {
@@ -454,7 +450,7 @@ async fn answer(cx: Ctx, target: Target, req: Request) -> Response {
             // requests; one that is not here was not cancelled.
             let mut s = cx
                 .app
-                .oci
+                .state()
                 .sessions
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
@@ -474,7 +470,7 @@ async fn answer(cx: Ctx, target: Target, req: Request) -> Response {
 }
 
 struct Ctx {
-    app: Arc<App>,
+    app: Arc<dyn Host>,
     caller: Caller,
     /// The host the request came to: a mount's `from` is a name of the
     /// same registry.
@@ -499,10 +495,8 @@ fn query(q: &str) -> BTreeMap<String, String> {
 }
 
 /// Drops the uploads table's rows of a repository (when it is deleted).
-pub fn forget(app: &App, repo: &str) {
-    let _ = app
-        .db
-        .write(|tx| tx.execute("DELETE FROM oci_uploads WHERE repo = ?1", [repo]));
+pub fn forget(app: &dyn Host, repo: &str) {
+    app.forget_uploads(repo);
 }
 
 #[cfg(test)]
@@ -574,10 +568,11 @@ mod tests {
     }
 
     /// Tag 1.0 of proxy `r`'s image app, as it is served: the digest.
-    async fn tag(app: &Arc<App>, r: &RepoInfo) -> String {
+    async fn tag(app: &Arc<crate::App>, r: &RepoInfo) -> String {
         let uri = format!("/v2/{}/app/manifests/1.0", r.name).parse().unwrap();
         let t = Target::Manifest("1.0".into());
-        let resp = proxy(app, r, "app", &t, &Method::GET, uri, Default::default()).await;
+        let host: Arc<dyn Host> = app.clone();
+        let resp = proxy(&host, r, "app", &t, &Method::GET, uri, Default::default()).await;
         assert_eq!(resp.status(), StatusCode::OK);
         resp.headers()["docker-content-digest"]
             .to_str()
@@ -637,7 +632,7 @@ mod tests {
         assert_eq!(tag(&app, &r).await, digest(&manifest('0')));
         let t = std::time::Instant::now();
         while app
-            .oci
+            .state()
             .fetching
             .lock()
             .unwrap()
@@ -648,7 +643,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         let (app2, name) = (app.clone(), r.name.clone());
-        let kept = blocking(move || app2.engine.cache_get(&name, "app/manifests/1.0"))
+        let kept = blocking(move || app2.engine().cache_get(&name, "app/manifests/1.0"))
             .await
             .unwrap()
             .unwrap()
