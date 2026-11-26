@@ -304,6 +304,8 @@ def writes(c, who):
     seq(f"gems put {who}", who, [
         ("PUT", f"/gempub/{u}.gem", OCTET, gem(u, "1.0.0")),
         ("GET", f"/gempub/info/{u}", {}, None),
+        ("PUT", f"/gempriv/{u}.gem", OCTET, gem(u, "1.0.0")),
+        ("GET", f"/gempriv/info/{u}", {}, None),
         ("PUT", "/gempub/x.gem?foo=1", OCTET, gem(f"x{u}", "1.0.0")),
         ("PUT", "/gempub" + API, OCTET, gem(f"a{u}", "1.0.0")),
         ("PUT", f"/gemempty/{u}.gem", OCTET, gem(u, "1.0.0")),
