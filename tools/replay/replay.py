@@ -59,7 +59,9 @@ USERS = {
         },
     ),
 }
-IDENTS = ["anon", "noone", "reader", "writer", "admin"]
+IDENTS = ["anon", "noone", "reader", "writer", "wtoken", "admin"]
+# The plaintext tokens made with the seed (ident: token), read at run time.
+TOKENS = {}
 
 
 def say(*a):
@@ -76,9 +78,8 @@ UP_LAYER = b"upstream layer bytes\n" * 50
 UP_CONFIG = b'{"architecture":"amd64","os":"linux"}'
 
 
-def oci_manifest(config, layers):
-    return json.dumps(
-        {
+def oci_manifest(config, layers, subject=None):
+    m = {
             "schemaVersion": 2,
             "mediaType": "application/vnd.oci.image.manifest.v1+json",
             "config": {
@@ -94,10 +95,18 @@ def oci_manifest(config, layers):
                 }
                 for layer in layers
             ],
-        },
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode()
+        }
+    if subject:
+        m["subject"] = {"mediaType": "application/vnd.oci.image.manifest.v1+json",
+                        "digest": blob_digest(subject), "size": len(subject)}
+    return json.dumps(m, separators=(",", ":"), sort_keys=True).encode()
+
+
+def app_image(repo):
+    """The image app:1 the seed pushes to `repo`: (layer, config, manifest)."""
+    layer = b"layer of " + repo.encode() * 64
+    config = b'{"os":"linux","repo":"' + repo.encode() + b'"}'
+    return layer, config, oci_manifest(config, [layer])
 
 
 UP_MANIFEST = oci_manifest(UP_CONFIG, [UP_LAYER])
@@ -232,8 +241,12 @@ def wait_port(port, proc, timeout=30):
 def auth_header(ident):
     if ident == "anon":
         return {}
-    pw = ADMIN_PW if ident == "admin" else USERS[ident][0]
-    return {"Authorization": "Basic " + base64.b64encode(f"{ident}:{pw}".encode()).decode()}
+    if ident in TOKENS:
+        cred = f"token:{TOKENS[ident]}"
+    else:
+        pw = ADMIN_PW if ident == "admin" else USERS[ident][0]
+        cred = f"{ident}:{pw}"
+    return {"Authorization": "Basic " + base64.b64encode(cred.encode()).decode()}
 
 
 def request(method, path, headers=None, body=None, port=SERVE):
@@ -266,9 +279,11 @@ def make_deb(d, name, version):
     return out
 
 
-def oci_push(name, tag, layer, config, ident, prefix="/v2"):
-    """Pushes an image as `ident`; the statuses of the steps."""
+def oci_push(name, tag, layer, config, ident, prefix="/v2", host=None, subject=None):
+    """Pushes an image as `ident` (for the seed); the statuses of the steps."""
     a = auth_header(ident)
+    if host:
+        a["Host"] = host
     steps = []
     digests = []
     for b in (layer, config):
@@ -286,7 +301,7 @@ def oci_push(name, tag, layer, config, ident, prefix="/v2"):
         st, hd, _ = request("PUT", f"{loc}{sep}digest={blob_digest(b)}", a)
         steps.append(st)
         digests.append(blob_digest(b))
-    m = oci_manifest(config, [layer])
+    m = oci_manifest(config, [layer], subject)
     st, _, _ = request("PUT", f"{prefix}/{name}/manifests/{tag}",
                        dict(a, **{"Content-Type": "application/vnd.oci.image.manifest.v1+json"}), m)
     steps.append(st)
@@ -325,6 +340,11 @@ def seed(root, binary):
                 if d:
                     args += ["-s", "link=latest"]
                 p.cli(*args)
+            f = os.path.join(fx, "x.txt")
+            with open(f, "wb") as fh:
+                fh.write(b"a file under v2/\n")
+            # A files tree with its own v2/ (not the registry's).
+            p.cli("upload", repo, f, "-s", "path=v2/")
             p.cli("label", repo, "stable")
             f = os.path.join(fx, "c.txt")
             with open(f, "wb") as fh:
@@ -341,10 +361,22 @@ def seed(root, binary):
         # OCI: hosted public and private, a proxy of the stub, a group.
         for repo, public in (("opub", "true"), ("opriv", "false")):
             p.cli("repo", "create", repo, "-f", "oci", "-s", f"public={public}")
-            st = oci_push(f"{repo}/app", "1", b"layer of " + repo.encode() * 64,
-                          b'{"os":"linux","repo":"' + repo.encode() + b'"}', "admin")
+            layer, config, _ = app_image(repo)
+            st = oci_push(f"{repo}/app", "1", layer, config, "admin")
             if st[-1] != 201:
                 raise SystemExit(f"push to {repo}: {st}")
+        # A referrer of opub's app:1, and a second tag.
+        st = oci_push("opub/app", "sig", b"a signature", b'{"kind":"sig"}', "admin",
+                      subject=app_image("opub")[2])
+        if st[-1] != 201:
+            raise SystemExit(f"referrer push: {st}")
+        # A registry at a host's root.
+        p.cli("repo", "create", "oroot", "-f", "oci", "-s", "public=true", "-s",
+              "urls=http://reg.localhost/")
+        layer, config, _ = app_image("oroot")
+        st = oci_push("app", "1", layer, config, "admin", host="reg.localhost")
+        if st[-1] != 201:
+            raise SystemExit(f"push to oroot: {st}")
         p.cli("repo", "create", "oproxy", "-f", "oci", "-k", "proxy", "-s",
               f"upstream=http://127.0.0.1:{UP}/up", "-s", "public=true")
         p.cli("repo", "create", "ogroup", "-f", "oci", "-k", "group", "-s",
@@ -355,6 +387,13 @@ def seed(root, binary):
         for u, (_, grants) in USERS.items():
             for repo, role in grants.items():
                 p.cli("grant", "set", repo, f"user:{u}", role)
+        # A token of writer's, for some of its repositories.
+        w = Pkgpod(binary, s)
+        w.env["XDG_CONFIG_HOME"] = os.path.join(s, "cli-writer")
+        w.cli("login", "-u", "writer", "--password-stdin", stdin=USERS["writer"][0] + "\n")
+        tok = w.cli("token", "create", "replay", "--repos", "opub,opriv,fpub", "--write")
+        with open(os.path.join(s, "tokens.json"), "w") as f:
+            json.dump({"wtoken": tok.strip().splitlines()[-1]}, f)
     finally:
         up.shutdown()
         p.stop()
@@ -368,22 +407,28 @@ def seed(root, binary):
 # ---- the corpus -----------------------------------------------------------
 
 def corpus(fx):
-    """(id, ident, method, path, headers, body, needs) in order; `needs`
-    names an earlier answer whose headers fill {name.header} in the
-    headers. Reads first, then writes, then reads of what they made."""
+    """The requests, in order: each a sequence of steps (most one), as
+    one identity. A step's path may hold {loc}, the previous answer's
+    Location; a header may be {<id>.<header>}, from an earlier answer
+    of the same run. Reads first, then writes, then reads of what they
+    made."""
     out = []
 
+    def seq(rid, ident, steps):
+        out.append({"id": rid, "who": ident, "steps": steps})
+
     def add(rid, ident, method, path, headers=None, body=None):
-        out.append((rid, ident, method, path, headers or {}, body))
+        seq(rid, ident, [(method, path, headers or {}, body)])
 
     oci_accept = {"Accept": "application/vnd.oci.image.manifest.v1+json, "
                             "application/vnd.oci.image.index.v1+json"}
+    zero = "sha256:" + "0" * 64
     for who in IDENTS:
         for repo in ("fpub", "fpriv"):
             b = f"/{repo}"
             for rel in ("/", "/a.txt", "/dir/", "/dir/b.txt", "/latest/b.txt", "/c.txt",
                         "/@stable/a.txt", "/@stable/c.txt", "/@stable/", "/missing",
-                        "/big.bin"):
+                        "/big.bin", "/v2/", "/v2/x.txt"):
                 add(f"files {repo}{rel} {who}", who, "GET", b + rel)
             add(f"files {repo} HEAD {who}", who, "HEAD", b + "/a.txt")
             add(f"files {repo} range {who}", who, "GET", b + "/big.bin", {"Range": "bytes=10-99"})
@@ -407,15 +452,38 @@ def corpus(fx):
                         "/pool/main/h/hello/hello_1.0_amd64.deb", "/key.asc",
                         "/@first/dists/stable/InRelease", "/dists/nope/InRelease"):
                 add(f"deb {repo}{rel} {who}", who, "GET", b + rel)
+        # OCI: the registry's own paths, then each repository.
         add(f"oci /v2/ {who}", who, "GET", "/v2/")
+        for rel in ("/v2/_catalog", "/v2/opub/app/other", "/v2/nope/app/manifests/1",
+                    "/v2/opub/App/manifests/1", "/v2/opub/app/blobs/uploads/nope",
+                    "/opub/", "/opub/x"):
+            add(f"oci {rel} {who}", who, "GET", rel, oci_accept)
         for repo in ("opub", "opriv", "ogroup"):
-            for rel in ("/app/manifests/1", "/app/tags/list", "/app/manifests/nope"):
+            layer, config, manifest = app_image("opub" if repo == "ogroup" else repo)
+            for rel in ("/app/manifests/1", "/app/tags/list", "/app/manifests/nope",
+                        f"/app/manifests/{blob_digest(manifest)}",
+                        f"/app/blobs/{blob_digest(layer)}", f"/app/blobs/{blob_digest(config)}",
+                        f"/app/blobs/{zero}", "/app/tags/list?n=1", "/app/tags/list?n=1&last=1",
+                        f"/app/referrers/{blob_digest(manifest)}",
+                        f"/app/referrers/{blob_digest(manifest)}?artifactType=x"):
                 add(f"oci {repo}{rel} {who}", who, "GET", f"/v2/{repo}{rel}", oci_accept)
             add(f"oci {repo} HEAD {who}", who, "HEAD", f"/v2/{repo}/app/manifests/1", oci_accept)
+            add(f"oci {repo} HEAD blob {who}", who, "HEAD",
+                f"/v2/{repo}/app/blobs/{blob_digest(layer)}")
+            add(f"oci {repo} blob range {who}", who, "GET",
+                f"/v2/{repo}/app/blobs/{blob_digest(layer)}", {"Range": "bytes=3-12"})
         for repo in ("oproxy", "ogroup"):
             add(f"oci {repo}/hello {who}", who, "GET", f"/v2/{repo}/hello/manifests/1", oci_accept)
+            add(f"oci {repo}/hello HEAD {who}", who, "HEAD", f"/v2/{repo}/hello/manifests/1",
+                oci_accept)
             add(f"oci {repo}/hello layer {who}", who, "GET",
                 f"/v2/{repo}/hello/blobs/{blob_digest(UP_LAYER)}")
+            add(f"oci {repo}/hello nope {who}", who, "GET", f"/v2/{repo}/hello/manifests/2",
+                oci_accept)
+        root = dict(oci_accept, Host="reg.localhost")
+        for rel in ("/v2/", "/v2/app/manifests/1", "/v2/app/tags/list", "/v2/nope/manifests/1",
+                    "/"):
+            add(f"oci root {rel} {who}", who, "GET", rel, root)
         add(f"files proxy a {who}", who, "GET", "/fproxy/a.img")
         add(f"files proxy b range {who}", who, "GET", "/fproxy/dir/b.img", {"Range": "bytes=5-20"})
         add(f"files proxy nope {who}", who, "GET", "/fproxy/nope.img")
@@ -423,6 +491,7 @@ def corpus(fx):
     # Writes, by each identity.
     with open(os.path.join(fx, "later_2.0_amd64.deb"), "rb") as f:
         later = f.read()
+    octet = {"Content-Type": "application/octet-stream"}
     for who in IDENTS:
         for repo in ("fpub", "fpriv"):
             # A fixed mtime: the same input in both runs.
@@ -435,7 +504,43 @@ def corpus(fx):
         for repo in ("dpub", "dpriv"):
             add(f"put deb {repo} {who}", who, "PUT", f"/{repo}/later_2.0_amd64.deb", {}, later)
         add(f"put files proxy {who}", who, "PUT", "/fproxy/x.img", {}, b"x")
-        out.append((f"push oci {who}", who, "OCI", "", {}, None))
+        # OCI: a push in chunks, a blob in one request, a mount, an upload
+        # looked at and cancelled, a manifest and a blob deleted.
+        layer = b"layer by " + who.encode() * 32
+        config = b'{"by":"' + who.encode() + b'"}'
+        manifest = oci_manifest(config, [layer])
+        mt = {"Content-Type": "application/vnd.oci.image.manifest.v1+json"}
+        for repo in ("opub", "opriv", "oproxy", "ogroup"):
+            steps = []
+            for b in (layer, config):
+                half = len(b) // 2
+                steps += [("POST", f"/v2/{repo}/w/blobs/uploads/", {}, None),
+                          ("PATCH", "{loc}", dict(octet, **{"Content-Range": f"0-{half - 1}"}),
+                           b[:half]),
+                          ("PATCH", "{loc}", octet, b[half:]),
+                          ("PUT", "{loc}?digest=" + blob_digest(b), {}, None)]
+            steps += [("PUT", f"/v2/{repo}/w/manifests/{who}", mt, manifest),
+                      ("GET", f"/v2/{repo}/w/manifests/{who}", oci_accept, None)]
+            seq(f"oci push {repo} {who}", who, steps)
+        mono = b"one request blob by " + who.encode()
+        seq(f"oci monolithic {who}", who, [
+            ("POST", f"/v2/opub/mono/blobs/uploads/?digest={blob_digest(mono)}", octet, mono),
+            ("HEAD", f"/v2/opub/mono/blobs/{blob_digest(mono)}", {}, None)])
+        seq(f"oci mount {who}", who, [
+            ("POST", f"/v2/opriv/mnt/blobs/uploads/?mount={blob_digest(app_image('opub')[0])}"
+                     "&from=opub/app", {}, None),
+            ("POST", f"/v2/opub/mnt/blobs/uploads/?mount={blob_digest(app_image('opriv')[0])}"
+                     "&from=opriv/app", {}, None)])
+        seq(f"oci upload status {who}", who, [
+            ("POST", "/v2/opub/st/blobs/uploads/", {}, None),
+            ("PATCH", "{loc}", octet, b"part"),
+            ("GET", "{loc}", {}, None),
+            ("DELETE", "{loc}", {}, None),
+            ("GET", "{loc}", {}, None)])
+        seq(f"oci deletes {who}", who, [
+            ("DELETE", f"/v2/opub/w/manifests/{blob_digest(manifest)}", {}, None),
+            ("DELETE", f"/v2/opub/app/blobs/{blob_digest(app_image('opub')[0])}", {}, None),
+            ("DELETE", "/v2/opub/app/manifests/nope", {}, None)])
     # What the writes made.
     for who in ("anon", "writer"):
         for repo in ("fpub", "fpriv"):
@@ -443,51 +548,65 @@ def corpus(fx):
                 add(f"after files {repo}{rel} {who}", who, "GET", f"/{repo}{rel}")
         for repo in ("dpub", "dpriv"):
             add(f"after deb {repo} {who}", who, "GET", f"/{repo}/dists/stable/main/binary-amd64/Packages")
+            add(f"after deb {repo} Release {who}", who, "GET", f"/{repo}/dists/stable/Release")
         for repo in ("opub", "opriv", "ogroup"):
-            add(f"after oci {repo} {who}", who, "GET", f"/v2/{repo}/w/tags/list", oci_accept)
+            for rel in ("/w/tags/list", "/mono/tags/list", "/app/tags/list"):
+                add(f"after oci {repo}{rel} {who}", who, "GET", f"/v2/{repo}{rel}", oci_accept)
     return out
 
 
 # ---- what is compared, and what is masked ---------------------------------
 
-# Each rule: (name, what it applies to, how). Reviewed with the corpus;
-# the report says how many values each masked.
+# Each rule: (name, what it applies to). Reviewed with the corpus; the
+# report says how many values each masked.
 RULES = [
-    ("date header", "header date", None),
+    ("date header", "header date"),
     # Debian indexes written during a run are signed then: their Date and
     # signature are of that second.
-    ("deb Release written now", "body of /dists/*Release* answers after writes", None),
-    # OCI upload ids are random.
-    ("oci upload ids", "header location, docker-upload-uuid", None),
-    ("audit time", "audit.time", None),
-    ("cache times", "cache.fetched, cache.used", None),
-    ("catalog times of writes", "catalog.added after the seed", None),
-    ("version times", "versions.created after the seed", None),
+    ("deb Release written now", "Date and signature in the body, and the etag, of a "
+                                "/dists/ Release answer after writes"),
+    # OCI upload ids are random: numbered in the order they appear (in
+    # location and docker-upload-uuid; where a body names one of them).
+    ("oci upload ids", "upload ids in location, docker-upload-uuid and bodies"),
+    ("audit time", "audit.time"),
+    ("cache times", "cache.fetched, cache.used"),
+    ("catalog times of writes", "catalog.added after the seed"),
+    ("version times", "versions.created after the seed"),
 ]
 
 
-def mask_answer(rid, status, headers, body, counts, after_writes):
-    hd = []
-    for k, v in headers:
-        if k == "date":
-            counts["date header"] += 1
-            v = "*"
-        elif k in ("location", "docker-upload-uuid") and "/blobs/uploads/" in v + rid:
-            nv = re.sub(r"uploads/[0-9a-f-]{8,}", "uploads/*", v)
-            if k == "docker-upload-uuid":
-                nv = "*"
-            if nv != v:
-                counts["oci upload ids"] += 1
-            v = nv
-        hd.append([k, v])
-    if after_writes and re.search(r"/dists/[^ ]*Release", rid):
-        nb = re.sub(rb"(?m)^Date: .*$", b"Date: *", body)
-        nb = re.sub(rb"-----BEGIN PGP SIGNATURE-----.*?-----END PGP SIGNATURE-----", b"SIG", nb,
-                    flags=re.S)
-        if nb != body:
-            counts["deb Release written now"] += 1
-        body = nb
-    return hd, body
+class Masker:
+    def __init__(self):
+        self.counts = {name: 0 for name, _ in RULES}
+        self.uploads = {}
+
+    def upload_id(self, m):
+        n = self.uploads.setdefault(m.group(0), f"U{len(self.uploads) + 1}")
+        self.counts["oci upload ids"] += 1
+        return n
+
+    def answer(self, path, headers, body, after_writes):
+        hd = []
+        for k, v in headers:
+            if k == "date":
+                self.counts["date header"] += 1
+                v = "*"
+            elif k in ("location", "docker-upload-uuid"):
+                v = re.sub(r"(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])", self.upload_id, v)
+            hd.append([k, v])
+        for raw, n in self.uploads.items():
+            if raw.encode() in body:
+                body = body.replace(raw.encode(), n.encode())
+                self.counts["oci upload ids"] += 1
+        if after_writes and re.search(r"/dists/[^?]*Release", path):
+            nb = re.sub(rb"(?m)^Date: .*$", b"Date: *", body)
+            nb = re.sub(rb"-----BEGIN PGP SIGNATURE-----.*?-----END PGP SIGNATURE-----", b"SIG",
+                        nb, flags=re.S)
+            if nb != body:
+                self.counts["deb Release written now"] += 1
+                hd = [[k, "*" if k == "etag" else v] for k, v in hd]
+            body = nb
+        return hd, body
 
 
 def end_state(data, seed_time, counts):
@@ -524,6 +643,7 @@ def end_state(data, seed_time, counts):
             r[4] = "*"
             counts["version times"] += 1
     out["versions"] = v
+    out["oci_uploads"] = rows("SELECT repo, digest FROM oci_uploads ORDER BY 1, 2")
     return out
 
 
@@ -534,55 +654,69 @@ def run(root, binary, out_path):
         shutil.rmtree(live)
     shutil.copytree(s, live, symlinks=True)
     seed_info = json.load(open(os.path.join(s, "SEED.json")))
+    TOKENS.clear()
+    TOKENS.update(json.load(open(os.path.join(s, "tokens.json"))))
     # The seed's paths are its own: the live copy takes its place.
     p = Pkgpod(binary, s)
     held = s + ".held"
     os.rename(s, held)
     os.rename(live, s)
-    counts = {name: 0 for name, _, _ in RULES}
+    mask = Masker()
     answers = []
+    steps_sent = 0
     up = start_upstream()
     try:
         p.start()
         wait_port(SERVE, p.proc)
         seen = {}
         after_writes = False
-        for rid, who, method, path, headers, body in corpus(os.path.join(s, "fixtures")):
-            if rid.startswith("put ") or rid.startswith("push "):
+        for entry in corpus(os.path.join(s, "fixtures")):
+            rid, who = entry["id"], entry["who"]
+            if rid.startswith(("put ", "oci push", "oci mono")):
                 after_writes = True
-            if method == "OCI":
-                steps = [oci_push(f"{r}/w", who, b"layer by " + who.encode() * 32,
-                                  b'{"by":"' + who.encode() + b'"}', who)
-                         for r in ("opub", "opriv", "oproxy", "ogroup")]
-                answers.append({"id": rid, "steps": steps})
-                continue
-            hd = dict(auth_header(who))
-            for k, v in headers.items():
-                m = re.fullmatch(r"\{(.+)\.([a-z-]+)\}", v)
-                if m:
-                    v = dict(seen.get(m.group(1), [])).get(m.group(2), "")
-                hd[k] = v
-            st, rh, data = request(method, path, hd, body)
-            seen[rid] = rh
-            rh2, data2 = mask_answer(rid, st, rh, data, counts, after_writes)
-            ans = {"id": rid, "status": st, "headers": sorted(rh2),
-                   "sha256": hashlib.sha256(data2).hexdigest(), "len": len(data)}
-            if len(data2) <= 600 and (not data2 or data2.isascii()):
-                ans["body"] = data2.decode("ascii", "replace")
-            answers.append(ans)
+            loc = None
+            got = []
+            for method, path, headers, body in entry["steps"]:
+                if "{loc}" in path:
+                    if not loc:
+                        got.append({"skipped": "no Location before"})
+                        continue
+                    base = re.sub(r"^https?://[^/]+", "", loc)
+                    rest = path.replace("{loc}", "")
+                    if rest.startswith("?") and "?" in base:
+                        rest = "&" + rest[1:]
+                    path = base + rest
+                hd = dict(auth_header(who))
+                for k, v in headers.items():
+                    m = re.fullmatch(r"\{(.+)\.([a-z-]+)\}", v)
+                    if m:
+                        v = dict(seen.get(m.group(1), [])).get(m.group(2), "")
+                    hd[k] = v
+                st, rh, data = request(method, path, hd, body)
+                steps_sent += 1
+                seen[rid] = rh
+                loc = dict(rh).get("location", loc)
+                rh2, data2 = mask.answer(path, rh, data, after_writes)
+                ans = {"status": st, "headers": sorted(rh2),
+                       "sha256": hashlib.sha256(data2).hexdigest(), "len": len(data)}
+                if len(data2) <= 600 and (not data2 or data2.isascii()):
+                    ans["body"] = data2.decode("ascii", "replace")
+                got.append(ans)
+            answers.append({"id": rid, "steps": got})
     finally:
         p.stop()
         up.shutdown()
-        state = end_state(os.path.join(s, "data"), seed_info["made"], counts)
+        state = end_state(os.path.join(s, "data"), seed_info["made"], mask.counts)
         os.rename(s, live)
         os.rename(held, s)
     bv = subprocess.run([p.bin, "--version"], capture_output=True, text=True).stdout.strip()
-    result = {"binary": bv, "seed": seed_info, "requests": len(answers), "answers": answers,
-              "upstream": Upstream.log, "state": state, "masked": counts}
+    result = {"binary": bv, "seed": seed_info, "requests": steps_sent, "answers": answers,
+              "upstream": Upstream.log, "state": state, "masked": mask.counts}
     with open(out_path, "w") as f:
         json.dump(result, f, indent=1)
-    errors = sum(1 for a in answers if a.get("status", 0) >= 500)
-    say(f"{len(answers)} requests, {errors} answered 5xx; masked {counts}; in {out_path}")
+    errors = sum(1 for a in answers for x in a["steps"] if x.get("status", 0) >= 500)
+    say(f"{steps_sent} requests in {len(answers)} sequences, {errors} answered 5xx; "
+        f"masked {mask.counts}; in {out_path}")
 
 
 def diff(a_path, b_path):
@@ -600,9 +734,12 @@ def diff(a_path, b_path):
             if y is None:
                 print("  missing in B")
                 continue
-            for k in sorted(set(x) | set(y)):
-                if x.get(k) != y.get(k):
-                    print(f"  {k}:\n    A {x.get(k)}\n    B {y.get(k)}")
+            for i, (sa, sb) in enumerate(zip(x["steps"], y["steps"])):
+                for k in sorted(set(sa) | set(sb)):
+                    if sa.get(k) != sb.get(k):
+                        print(f"  step {i + 1} {k}:\n    A {sa.get(k)}\n    B {sb.get(k)}")
+            if len(x["steps"]) != len(y["steps"]):
+                print(f"  steps: {len(x['steps'])} against {len(y['steps'])}")
     if a["upstream"] != b["upstream"]:
         bad += 1
         print("--- upstream requests differ")
