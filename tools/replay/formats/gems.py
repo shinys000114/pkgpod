@@ -440,12 +440,17 @@ def after(c, who):
 
 # A versions file's first line: when its version was made.
 CREATED = re.compile(rb"created_at: (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)\n")
+# Where in a versions file that time is: the bytes after "created_at: ".
+STAMP = (len(b"created_at: "), len(b"created_at: ") + len(b"2026-01-01T00:00:00Z"))
+# A range served: the first and the last byte of it in the file.
+RANGE = re.compile(r"bytes (\d+)-(\d+)/")
 
 
 def mask(masker):
-    # The etags of whole versions answers of the run: with the run's
-    # created_at, and without.
-    timed, plain = set(), set()
+    # The etags of whole versions answers without the run's created_at:
+    # a part (a HEAD, a 304, a range) with one of them is of a version
+    # the seed made.
+    plain = set()
 
     def answer(path, hd, body, after_writes, etag):
         # Its segments as pkgpod finds the repository and the file by them
@@ -458,8 +463,8 @@ def mask(masker):
         if m:
             t = calendar.timegm(time.strptime(m.group(1).decode(), "%Y-%m-%dT%H:%M:%SZ"))
             hit = t >= masker.seed_time
-            if etag is not None:
-                (timed if hit else plain).add(etag)
+            if etag is not None and not hit:
+                plain.add(etag)
             if hit:
                 masker.counts["gems times"] += 1
                 body = body[:m.start(1)] + b"X" * len(m.group(1)) + body[m.end(1):]
@@ -469,9 +474,15 @@ def mask(masker):
               and (len(segs) == 2 or len(segs) == 3 and segs[1].startswith("@"))):
             masker.counts["gems versions parts"] += 1
             hd = [[k, "*" if k == "etag" else v] for k, v in hd]
-            # The bytes of a range of it (a range not served has none).
-            if cr is not None and not cr.startswith("bytes */"):
-                body = b"X" * len(body)
+            # Of a range's bytes, those of the time (a range not served,
+            # or a HEAD's, has none; one of another form is left whole).
+            r = RANGE.match(cr) if cr is not None else None
+            if r:
+                first = int(r.group(1))
+                lo = max(STAMP[0], first) - first
+                hi = min(STAMP[1] - first, len(body))
+                if lo < hi:
+                    body = body[:lo] + b"X" * (hi - lo) + body[hi:]
         return hd, body
     return answer
 
@@ -502,16 +513,18 @@ PARTS = [
     ("rule", 140, ("gems times", "created_at at or after the seed in a RubyGems versions answer "
                                  "(same length), and the etag of an answer it was in")),
     # A HEAD, a 304 or a range of versions has no whole body to look in.
-    # Its etag (and a range's bytes) are masked after writes unless a
-    # whole answer without the run's times had that etag: one that a
-    # whole answer with them had is of the run's, and so is one that no
-    # whole answer had, since the reads before the writes take every
-    # version the seed made that is served (each repository's and its
-    # label's) whole.
-    ("rule", 150, ("gems versions parts", "after writes, the etag and a range's bytes (not their "
-                                          "length) of a RubyGems versions answer with no body or "
-                                          "a range, unless a whole answer without the run's "
-                                          "times had that etag")),
+    # Its etag is masked after writes unless a whole answer without the
+    # run's times had that etag: one that a whole answer with them had is
+    # of the run's, and so is one that no whole answer had, since the
+    # reads before the writes take every version the seed made that is
+    # served (each repository's and its label's) whole. Of a range's
+    # bytes only those of the time are masked: the file's bytes 12 to 31
+    # (after "created_at: "), where every versions file has it.
+    ("rule", 150, ("gems versions parts", "after writes, the etag of a RubyGems versions answer "
+                                          "with no body or a range, and of a range's bytes those "
+                                          "of created_at (the file's 12 to 31, same length), "
+                                          "unless a whole answer without the run's times had "
+                                          "that etag")),
     ("mask", 80, mask),
     ("fuzz sample", 90, gem("fz", "1.0.0")),
     ("fuzz sample", 100, b"gem_name=fz&version=1.0.0"),
