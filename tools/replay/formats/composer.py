@@ -479,7 +479,10 @@ FUZZ = (["phppub", "phppriv", "phpempty"],
         ["packages.json", "p2", "files", "acme", "hello", "hello.json", "hello~dev.json",
          "hello-world.json", "1.0.0.zip", "v1.1.0.zip", "other.vendor", "pkg_x.json", "pkg_x",
          "1.0.zip", "@first", "@1", "upload", "x"])
-# An upload keeps its time in p2 and in the tree, both masked above.
+# An upload keeps its time in p2 and in the tree (masked by the
+# "composer times" rule), and where every write keeps one:
+# catalog.added, versions.created, audit.time, a version's minute on
+# the host index (masked by the core's rules).
 FUZZ_WRITABLE = True
 
 
