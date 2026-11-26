@@ -897,7 +897,12 @@ def run(root, binary, out_path, profdir=None):
         state = end_state(os.path.join(s, "data"), seed_info["made"], mask.counts)
         os.rename(s, live)
         os.rename(held, s)
-    bv = subprocess.run([p.bin, "--version"], capture_output=True, text=True).stdout.strip()
+    env = dict(os.environ)
+    if profdir:
+        # An instrumented build writes a profile wherever it runs.
+        env["LLVM_PROFILE_FILE"] = os.path.join(os.path.abspath(profdir), "version-%p.profraw")
+    bv = subprocess.run([p.bin, "--version"], capture_output=True, text=True,
+                        env=env).stdout.strip()
     result = {"binary": bv, "tool": TOOL, "seed": seed_info, "requests": steps_sent,
               "answers": answers,
               "upstream": Upstream.log, "state": state, "masked": mask.counts}
