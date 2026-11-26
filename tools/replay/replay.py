@@ -1582,6 +1582,18 @@ RULES = [
     # run's minute.
     ("host index times", "a version's minute on the host index after writes, if the "
                          "seed's or later"),
+    # A range of a Release signed during the run: where its Date and
+    # signature fall in the part is not known, and its etag is of the
+    # whole.
+    ("deb Release part written now", "the body (not its length) and the etag of a range "
+                                     "of a /dists/ Release answer after writes"),
+    # A HEAD, a 304 or a range has no whole body to look in: its etag is
+    # of one that may hold the run's times (a GET's is masked when it
+    # does), and a range may hold a part of one.
+    ("parts of answers with times", "after writes, the etag and the bytes (not their length) "
+                                    "of an npm, Go or cargo answer with no body or a range, "
+                                    "unless a whole answer without the run's times had that "
+                                    "etag"),
 ]
 
 
@@ -1594,6 +1606,8 @@ class Masker:
         self.counts = {name: 0 for name, _ in RULES}
         self.uploads = {}
         self.seed_time = seed_time
+        # Etags of whole npm, Go and cargo answers without the run's times.
+        self.plain = set()
 
     def run_times(self, path, body):
         """`body` with the timestamps of the run masked; whether any were."""
@@ -1618,6 +1632,21 @@ class Masker:
             return m.group(0)
         self.counts["host index times"] += 1
         return m.group(1) + b"X" * len(m.group(2)) + b"<"
+
+    def part(self, hd, body, hit, after_writes):
+        """`hd` and `body` of an npm, Go or cargo answer that is not a
+        whole body (none, or a range), masked after writes unless a whole
+        answer without the run's times had its etag; a whole one without
+        them is noted."""
+        h = dict(hd)
+        if body and "content-range" not in h:
+            if not hit and "etag" in h:
+                self.plain.add(h["etag"])
+            return hd, body
+        if not after_writes or "etag" not in h or h["etag"] in self.plain:
+            return hd, body
+        self.counts["parts of answers with times"] += 1
+        return [[k, "*" if k == "etag" else v] for k, v in hd], b"X" * len(body)
 
     def upload_id(self, m):
         n = self.uploads.setdefault(m.group(0), f"U{len(self.uploads) + 1}")
@@ -1644,19 +1673,27 @@ class Masker:
                 search = "/-/v1/search" in path
                 hd = [[k, "*" if k == "etag" or (search and k == "content-length") else v]
                       for k, v in hd]
+            hd, body = self.part(hd, body, hit, after_writes)
         if re.match(r"/g(pub|priv|proxy|group)(/|$)", path):
             body, hit = self.run_times(path, body)
             if hit:
                 self.counts["go times"] += 1
                 hd = [[k, "*" if k == "etag" else v] for k, v in hd]
+            hd, body = self.part(hd, body, hit, after_writes)
         if re.match(r"/c(pub|priv|proxy|group)(/|$)", path):
             body, hit = self.run_times(path, body)
             if hit:
                 self.counts["cargo times"] += 1
                 hd = [[k, "*" if k == "etag" else v] for k, v in hd]
+            hd, body = self.part(hd, body, hit, after_writes)
         if after_writes:
             body = HOST_TIME.sub(self.host_time, body)
-        if after_writes and re.search(r"/dists/[^?]*Release", path):
+        if (after_writes and re.search(r"/dists/[^?]*Release", path)
+                and any(k == "content-range" for k, _ in hd)):
+            self.counts["deb Release part written now"] += 1
+            hd = [[k, "*" if k == "etag" else v] for k, v in hd]
+            body = b"X" * len(body)
+        elif after_writes and re.search(r"/dists/[^?]*Release", path):
             nb = re.sub(rb"(?m)^Date: .*$", b"Date: *", body)
             nb = re.sub(rb"-----BEGIN PGP SIGNATURE-----.*?-----END PGP SIGNATURE-----", b"SIG",
                         nb, flags=re.S)
