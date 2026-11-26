@@ -29,6 +29,7 @@ only once the corpus covers it.
 """
 
 import base64
+import calendar
 import hashlib
 import http.client
 import http.server
@@ -555,10 +556,14 @@ def seed(root, binary):
     finally:
         up.shutdown()
         p.stop()
+    # Times are kept in whole seconds: the seed's are all before the
+    # second it is stamped with, a run's all at or after it.
+    t = time.time()
+    time.sleep(int(t) + 1 - t)
     with open(os.path.join(s, "SEED.json"), "w") as f:
         json.dump({"binary": subprocess.run([p.bin, "--version"], capture_output=True,
                                             text=True).stdout.strip(),
-                   "made": int(time.time()), "tool": TOOL}, f)
+                   "made": int(t) + 1, "tool": TOOL}, f)
     say(f"seed in {s}")
 
 
@@ -737,6 +742,10 @@ def corpus(fx):
             ("GET", "/npub/-/package/nope/dist-tags", {}, None),
             ("DELETE", "/npub/-/package/hello/dist-tags/never", {}, None),
             ("POST", "/npub/-/package/hello/dist-tags", js, b"{}")])
+        # A publish over the limit, by one who may (its body is read).
+        if who == "writer":
+            add("npm publish over the limit writer", who, "PUT", "/npub/huge", js,
+                b" " * ((256 << 20) + 1))
         seq(f"npm unpublish {who}", who, [
             ("PUT", "/npub/hello/-rev/1-stale", js, npm_doc("hello", "1.1.0", b"hello 1.1.0")),
             ("GET", f"/npub/w-{who}", {}, None),
@@ -861,8 +870,9 @@ RULES = [
     ("oci upload ids", "upload ids in location, docker-upload-uuid and bodies"),
     # npm keeps when each version was published (its packument's time,
     # in the tree too) and a search says when it was made.
-    ("npm times", "time and a search hit's date in npm answers (and their etag), "
-                  "the root of an npm version made in the run"),
+    ("npm times", "timestamps at or after the seed in npm answers (same length; a "
+                  "search's of any length, with its content-length), the etag of an "
+                  "answer they were in, the root of an npm version made in the run"),
     ("audit time", "audit.time"),
     ("cache times", "cache.fetched, cache.used"),
     ("catalog times of writes", "catalog.added after the seed"),
@@ -870,10 +880,29 @@ RULES = [
 ]
 
 
+NPM_TIME = re.compile(rb'"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)"')
+
+
 class Masker:
-    def __init__(self):
+    def __init__(self, seed_time=0):
         self.counts = {name: 0 for name, _ in RULES}
         self.uploads = {}
+        self.seed_time = seed_time
+
+    def npm_times(self, path, body):
+        """`body` with the timestamps of the run masked; whether any were."""
+        search = "/-/v1/search" in path
+        hit = False
+
+        def one(m):
+            nonlocal hit
+            t = calendar.timegm(time.strptime(m.group(1).decode()[:19], "%Y-%m-%dT%H:%M:%S"))
+            if t < self.seed_time:
+                return m.group(0)
+            hit = True
+            return b'"<time>"' if search else b'"' + b"X" * len(m.group(1)) + b'"'
+        out = NPM_TIME.sub(one, body)
+        return out, hit
 
     def upload_id(self, m):
         n = self.uploads.setdefault(m.group(0), f"U{len(self.uploads) + 1}")
@@ -893,25 +922,13 @@ class Masker:
             if raw.encode() in body:
                 body = body.replace(raw.encode(), n.encode())
                 self.counts["oci upload ids"] += 1
-        if re.match(r"/n(pub|priv|proxy|group)(/|$)", path) and body[:1] == b"{":
-            try:
-                doc = json.loads(body)
-            except ValueError:
-                doc = None
-            if isinstance(doc, dict):
-                masked = False
-                if "time" in doc:
-                    doc["time"] = "*"
-                    masked = True
-                for o in doc.get("objects") or []:
-                    if isinstance(o, dict) and isinstance(o.get("package"), dict) \
-                            and "date" in o["package"]:
-                        o["package"]["date"] = "*"
-                        masked = True
-                if masked:
-                    self.counts["npm times"] += 1
-                    body = json.dumps(doc, sort_keys=True).encode()
-                    hd = [[k, "*" if k in ("etag", "content-length") else v] for k, v in hd]
+        if re.match(r"/n(pub|priv|proxy|group)(/|$)", path):
+            body, hit = self.npm_times(path, body)
+            if hit:
+                self.counts["npm times"] += 1
+                search = "/-/v1/search" in path
+                hd = [[k, "*" if k == "etag" or (search and k == "content-length") else v]
+                      for k, v in hd]
         if after_writes and re.search(r"/dists/[^?]*Release", path):
             nb = re.sub(rb"(?m)^Date: .*$", b"Date: *", body)
             nb = re.sub(rb"-----BEGIN PGP SIGNATURE-----.*?-----END PGP SIGNATURE-----", b"SIG",
@@ -978,7 +995,7 @@ def run(root, binary, out_path, profdir=None):
     held = s + ".held"
     os.rename(s, held)
     os.rename(live, s)
-    mask = Masker()
+    mask = Masker(seed_info["made"])
     answers = []
     steps_sent = 0
     up = start_upstream()
