@@ -32,6 +32,7 @@ only once the corpus covers it.
 
 import base64
 import calendar
+import email.utils
 import gzip
 import hashlib
 import http.client
@@ -1684,9 +1685,14 @@ RULES = [
                          "seed's or later"),
     # A range of a Release signed during the run: where its Date and
     # signature fall in the part is not known, and its etag is of the
-    # whole.
-    ("deb Release part written now", "the body (not its length) and the etag of a range "
-                                     "of a /dists/ Release answer after writes"),
+    # whole. Signed during the run: a whole Release or InRelease of its
+    # dist after writes was dated at or after the seed, and the three
+    # are signed together (a label's, /<repo>/@<label>/dists/, is not
+    # one of them).
+    ("deb Release part written now", "the body (not its length) and the etag of a range of "
+                                     "/<repo>/dists/<dist>/ InRelease, Release or Release.gpg "
+                                     "after writes, if a whole Release of the dist was dated "
+                                     "in the run"),
     # A HEAD, a 304 or a range has no whole body to look in: its etag is
     # of one that may hold the run's times (a GET's is masked when it
     # does), and a range may hold a part of one. Masked only where a whole
@@ -1702,6 +1708,8 @@ RULES = [
 
 NPM_TIME = re.compile(rb'"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)"')
 HOST_TIME = re.compile(rb"(version \d+ \xc2\xb7 )(\d{4}-\d\d-\d\d \d\d:\d\d)<")
+# A dist's signed Release files, the dist's address the first group.
+DIST_RELEASE = re.compile(r"(/[^/@][^/]*/dists/[^/?]+/)(InRelease|Release|Release\.gpg)(\?|$)")
 
 
 class Masker:
@@ -1713,6 +1721,8 @@ class Masker:
         # run's times, and with them.
         self.plain = set()
         self.timed = set()
+        # Dists (by address) a whole Release of the run was dated in.
+        self.signed = set()
 
     def run_times(self, path, body):
         """`body` with the timestamps of the run masked; whether any were."""
@@ -1804,12 +1814,18 @@ class Masker:
             hd, body = self.part(hd, body, hit, after_writes, etag)
         if after_writes:
             body = HOST_TIME.sub(self.host_time, body)
+        dist = DIST_RELEASE.match(path)
         if (after_writes and re.search(r"/dists/[^?]*Release", path)
                 and any(k == "content-range" for k, _ in hd)):
-            self.counts["deb Release part written now"] += 1
-            hd = [[k, "*" if k == "etag" else v] for k, v in hd]
-            body = b"X" * len(body)
+            if dist and dist.group(1) in self.signed:
+                self.counts["deb Release part written now"] += 1
+                hd = [[k, "*" if k == "etag" else v] for k, v in hd]
+                body = b"X" * len(body)
         elif after_writes and re.search(r"/dists/[^?]*Release", path):
+            m = re.search(rb"(?m)^Date: (.*)$", body)
+            t = m and email.utils.parsedate_tz(m.group(1).decode("ascii", "replace"))
+            if dist and t and email.utils.mktime_tz(t) >= self.seed_time:
+                self.signed.add(dist.group(1))
             nb = re.sub(rb"(?m)^Date: .*$", b"Date: *", body)
             nb = re.sub(rb"-----BEGIN PGP SIGNATURE-----.*?-----END PGP SIGNATURE-----", b"SIG",
                         nb, flags=re.S)
