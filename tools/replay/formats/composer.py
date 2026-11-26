@@ -407,6 +407,14 @@ def mask(masker):
     return answer
 
 
+FUZZ = (["phppub", "phppriv", "phpempty"],
+        ["packages.json", "p2", "files", "acme", "hello", "hello.json", "hello~dev.json",
+         "hello-world.json", "1.0.0.zip", "v1.1.0.zip", "other.vendor", "pkg_x.json", "pkg_x",
+         "1.0.zip", "@first", "@1", "upload", "x"])
+# An upload keeps its time in p2 and in the tree, both masked above.
+FUZZ_WRITABLE = True
+
+
 PARTS = [
     ("seed", 90, seed),
     ("grants", 80, {"reader": {"phppriv": "read"},
@@ -424,4 +432,5 @@ PARTS = [
                                      "(same length), the etag of an answer they were in, the "
                                      "root of a Composer version made in the run")),
     ("mask", 80, mask),
+    ("fuzz sample", 90, composer_zip({"name": "acme/fz", "version": "1.0.0"})),
 ]
