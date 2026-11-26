@@ -16455,6 +16455,45 @@ fn export_then_import_elsewhere() {
     // Taken in once only.
     let (ok, out) = admin2(&["import", dump.to_str().unwrap()]);
     assert!(!ok && out.contains("new data directory"), "{out}");
+    // A key that is not the one the dump names stops the import, which
+    // says what is left.
+    let bad = s.dir.path().join("bad-dump");
+    assert!(
+        Command::new("cp")
+            .arg("-a")
+            .arg(&dump)
+            .arg(&bad)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let sj = bad.join("server.json");
+    let mut v: Value = serde_json::from_slice(&std::fs::read(&sj).unwrap()).unwrap();
+    v["keys"][0]["fingerprint"] = "0000".into();
+    std::fs::write(&sj, serde_json::to_vec(&v).unwrap()).unwrap();
+    let cfg3 = s.dir.path().join("bad.toml");
+    let d3 = s.dir.path().join("bad-data");
+    std::fs::write(
+        &cfg3,
+        format!(
+            "data_dir = \"{}\"\nlisten = \"127.0.0.1:{}\"\n",
+            d3.display(),
+            free_port()
+        ),
+    )
+    .unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_pkgpod"))
+        .args(["admin", "-c"])
+        .arg(&cfg3)
+        .args(["import", bad.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success(), "{err}");
+    assert!(
+        err.contains("fingerprint") && err.contains("half made"),
+        "{err}"
+    );
     let (ok, out) = admin2(&["check", "--deep"]);
     assert!(ok, "{out}");
 

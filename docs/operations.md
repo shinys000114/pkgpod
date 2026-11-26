@@ -491,7 +491,13 @@ import again into a new data directory.
 Keep the old data directory until the new server is checked: its
 stores still hold the blobs of versions the dump left out, and a
 storage taken over in place is collected by the new server like any
-other (blobs no version names, after a day).
+other (blobs no version names, after a day). So do not serve data an
+import left repositories out of when they were on such a storage: their
+blobs there would go. Fix the cause and import again into a new data
+directory first. An import that stops on an error (a key whose
+fingerprint is not the dump's, a row it cannot write) leaves its data
+directory half made; it says so, and that directory is removed before
+the next try.
 
 ## Garbage collection and checks
 

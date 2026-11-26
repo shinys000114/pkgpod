@@ -734,7 +734,6 @@ fn import(
     keep_listeners: bool,
 ) -> Result<(), client::CliError> {
     use pkgpod_server::jobs::dump;
-    let err = |e: pkgpod_server::Error| client::CliError::other(e.to_string());
     if !from.join("DUMP.json").is_file() {
         return Err(client::CliError::usage(format!(
             "{}: not a whole dump (no DUMP.json)",
@@ -768,8 +767,17 @@ fn import(
             cfg.data_dir.display()
         )));
     }
-    let app = pkgpod_server::App::open(cfg).map_err(err)?;
-    let rep = dump::import(&app, from, &opt, &mut |m| println!("{m}")).map_err(err)?;
+    // From here on a failure leaves the data half made: a rerun refuses
+    // it, so say so.
+    let dir = cfg.data_dir.clone();
+    let half = move |e: pkgpod_server::Error| {
+        client::CliError::other(format!(
+            "{e}\n{} is half made now: remove it before importing again",
+            dir.display()
+        ))
+    };
+    let app = pkgpod_server::App::open(cfg).map_err(&half)?;
+    let rep = dump::import(&app, from, &opt, &mut |m| println!("{m}")).map_err(&half)?;
     for r in &rep.repos {
         let mut line = format!("{} ({})", r.name, r.kind);
         if r.kind == "hosted" {
