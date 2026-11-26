@@ -21,7 +21,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -133,17 +133,25 @@ struct Session {
     created: i64,
 }
 
-fn sessions() -> &'static Mutex<HashMap<String, Session>> {
-    static S: OnceLock<Mutex<HashMap<String, Session>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(HashMap::new()))
+/// What a repository's manifests reference, by the version's root.
+type Referenced = HashMap<String, (Digest, Arc<HashSet<Digest>>)>;
+
+/// What the registry keeps in memory, one for the server: uploads in
+/// progress, what each repository's manifests reference (by the
+/// version's root), the proxies' upstream registry clients (their
+/// Bearer tokens kept) and the manifests proxies are fetching.
+#[derive(Default)]
+pub struct State {
+    sessions: Mutex<HashMap<String, Session>>,
+    referenced: Mutex<Referenced>,
+    registries: Mutex<HashMap<String, Arc<pkgpod_mirror::oci::Registry>>>,
+    fetching: Mutex<HashMap<(String, String), Fetch>>,
 }
 
 /// Blobs a repository's manifests reference (and the manifests), by
 /// the version's root.
 fn referenced(app: &App, r: &RepoInfo) -> Arc<HashSet<Digest>> {
-    type Cache = Mutex<HashMap<String, (Digest, Arc<HashSet<Digest>>)>>;
-    static C: OnceLock<Cache> = OnceLock::new();
-    let c = C.get_or_init(|| Mutex::new(HashMap::new()));
+    let c = &app.oci.referenced;
     let Ok(Some(v)) = app.engine.current(r) else {
         return Arc::new(HashSet::new());
     };
@@ -351,7 +359,12 @@ async fn answer(cx: Ctx, target: Target, req: Request) -> Response {
         (Target::Upload(id), Method::DELETE) => {
             // Only this repository's session, as for the other upload
             // requests; one that is not here was not cancelled.
-            let mut s = sessions().lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = cx
+                .app
+                .oci
+                .sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if s.get(&id).is_some_and(|x| x.repo == cx.r.name) {
                 s.remove(&id);
                 reply(StatusCode::NO_CONTENT)
@@ -506,12 +519,6 @@ pub fn pin_closure(app: &App, repo: &str, paths: &[String]) -> Vec<String> {
     out
 }
 
-/// Upstream registry clients, by proxy (their Bearer tokens kept).
-fn registries() -> &'static Mutex<HashMap<String, Arc<pkgpod_mirror::oci::Registry>>> {
-    static R: OnceLock<Mutex<HashMap<String, Arc<pkgpod_mirror::oci::Registry>>>> = OnceLock::new();
-    R.get_or_init(Default::default)
-}
-
 /// The upstream image a proxy's image is: `upstream` is a registry
 /// (`docker.io`, `https://ghcr.io`), with a name prefix as a path
 /// (`http://host/team`: `team/<image>`).
@@ -543,39 +550,36 @@ type Fetched = Result<pkgpod_engine::cache::CacheRow, Option<(StatusCode, &'stat
 type Fetch =
     futures_util::future::Shared<futures_util::future::BoxFuture<'static, Option<Fetched>>>;
 
-/// Proxies' manifests being fetched, by repository and path.
-fn fetching() -> &'static Mutex<HashMap<(String, String), Fetch>> {
-    static F: OnceLock<Mutex<HashMap<(String, String), Fetch>>> = OnceLock::new();
-    F.get_or_init(Default::default)
-}
-
 /// The fetch of `path` for proxy `repo` that runs now, or else `fetch`,
 /// run as a task of its own: a request for a manifest while it is
 /// fetched shares that fetch rather than ask again (each would hold a
 /// thread and a connection while the registry is slow, and an answer
 /// sent later could be kept first, then replaced by the earlier one).
 fn shared(
+    app: &Arc<App>,
     repo: &str,
     path: &str,
     fetch: impl std::future::Future<Output = Fetched> + Send + 'static,
 ) -> Fetch {
     use futures_util::FutureExt;
     /// Forgotten when its task ends (what it brings is kept by then).
-    struct Ends((String, String));
+    struct Ends(Arc<App>, (String, String));
     impl Drop for Ends {
         fn drop(&mut self) {
-            fetching()
+            self.0
+                .oci
+                .fetching
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .remove(&self.0);
+                .remove(&self.1);
         }
     }
     let key = (repo.to_string(), path.to_string());
-    let mut m = fetching().lock().unwrap_or_else(|e| e.into_inner());
+    let mut m = app.oci.fetching.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(f) = m.get(&key) {
         return f.clone();
     }
-    let ends = Ends(key.clone());
+    let ends = Ends(app.clone(), key.clone());
     let task = tokio::spawn(async move {
         let _ends = ends;
         fetch.await
@@ -623,9 +627,13 @@ async fn proxy(
         );
     };
     // A blocking client: made (and ever dropped) off the async threads.
-    let name = r.name.clone();
+    let (app2, name) = (app.clone(), r.name.clone());
     let reg = blocking(move || {
-        let mut m = registries().lock().unwrap_or_else(|e| e.into_inner());
+        let mut m = app2
+            .oci
+            .registries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(x) = m.get(&name) {
             return Ok(x.clone());
         }
@@ -760,7 +768,7 @@ async fn proxy(
                     shrink(&app2, &r2).await;
                     Ok(tagged)
                 };
-                let fetch = shared(&r.name, &path, fetch);
+                let fetch = shared(app, &r.name, &path, fetch);
                 let fetched = match &have {
                     // What a tag named is kept: not waited for long.
                     Some(_) => {
@@ -1286,7 +1294,12 @@ async fn start_upload(cx: &Ctx, req: Request) -> Response {
     };
     let id = session_id();
     let now = pkgpod_base::now();
-    let mut s = sessions().lock().unwrap_or_else(|e| e.into_inner());
+    let mut s = cx
+        .app
+        .oci
+        .sessions
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     s.retain(|_, x| now - x.created < SESSION_TTL);
     // Each open upload holds a file: bounded per repository and in all.
     if s.len() >= MAX_SESSIONS
@@ -1348,7 +1361,12 @@ async fn append(cx: &Ctx, id: &str, req: Request) -> Result<u64, Response> {
                 .ok()
         });
     let mut s = {
-        let mut map = sessions().lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = cx
+            .app
+            .oci
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         match map.remove(id) {
             Some(s) if s.repo == cx.r.name => s,
             Some(s) => {
@@ -1359,7 +1377,9 @@ async fn append(cx: &Ctx, id: &str, req: Request) -> Result<u64, Response> {
         }
     };
     let put_back = |s: Session| {
-        sessions()
+        cx.app
+            .oci
+            .sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(id.to_string(), s);
@@ -1424,7 +1444,10 @@ async fn finish_upload(cx: &Ctx, id: &str, req: Request) -> Response {
     if let Err(r) = append(cx, id, req).await {
         return r;
     }
-    let Some(s) = sessions()
+    let Some(s) = cx
+        .app
+        .oci
+        .sessions
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(id)
@@ -1443,7 +1466,14 @@ async fn finish_upload(cx: &Ctx, id: &str, req: Request) -> Response {
 }
 
 fn upload_status(cx: &Ctx, id: &str) -> Response {
-    match sessions().lock().unwrap_or_else(|e| e.into_inner()).get(id) {
+    match cx
+        .app
+        .oci
+        .sessions
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(id)
+    {
         Some(s) if s.repo == cx.r.name => {
             upload_reply(StatusCode::NO_CONTENT, &cx.name, id, s.size)
         }
@@ -1691,7 +1721,14 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(1)).await;
         assert_eq!(tag(&app, &r).await, digest(&manifest('0')));
         let t = std::time::Instant::now();
-        while fetching().lock().unwrap().keys().any(|k| k.0 == r.name) {
+        while app
+            .oci
+            .fetching
+            .lock()
+            .unwrap()
+            .keys()
+            .any(|k| k.0 == r.name)
+        {
             assert!(t.elapsed() < Duration::from_secs(20), "the fetch goes on");
             tokio::time::sleep(Duration::from_millis(100)).await;
         }

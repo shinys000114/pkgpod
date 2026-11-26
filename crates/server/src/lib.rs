@@ -117,6 +117,8 @@ pub struct App {
     pub plans: Mutex<HashMap<String, Kept>>,
     /// Conan revisions being uploaded: their files before the manifest.
     pub conan_staged: conan::Staged,
+    /// The registry's uploads in progress, caches and fetches.
+    pub oci: crate::protocols::oci::State,
     pub resigner: resign::Resigner,
     pub stats: stats::Stats,
     /// Trusted publishing: issuers' keys, tokens exchanged.
@@ -207,6 +209,7 @@ impl App {
             jobs: jobs::Jobs::default(),
             plans: Mutex::new(HashMap::new()),
             conan_staged: conan::Staged::default(),
+            oci: Default::default(),
             resigner: resign::Resigner::default(),
             stats: stats::Stats::default(),
             oidc: oidc::Verifier::default(),
