@@ -67,7 +67,7 @@ yaml-rust2 = "0.13"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 quick-xml = "0.42"
 rand = "0.8"
-ed25519-dalek = "2.2"
+ed25519-dalek = "3.0"
 bzip2 = "0.6"
 base64 = "0.22"
 httpdate = "1"
