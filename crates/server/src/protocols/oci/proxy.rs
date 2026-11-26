@@ -330,14 +330,14 @@ pub(super) async fn proxy(
                     Err(_) => return unknown(re),
                 }
             };
-            let mut resp = Response::new(Body::from(body));
+            let mut resp = Response::new(body::full(body));
             let digest = format!("sha256:{}", sha.hex());
             set(&mut resp, "Content-Type", &got.content_type);
             set(&mut resp, "Content-Length", &got.size.to_string());
             set(&mut resp, "Docker-Content-Digest", &digest);
             set(&mut resp, "Docker-Distribution-API-Version", "registry/2.0");
             if by_tag && !head {
-                app.downloaded(&resp, &r.name, image, re);
+                app.downloaded(resp.status(), &r.name, image, re);
             }
             used(app, r, &path);
             used(app, r, &format!("{image}/manifests/{digest}"));
@@ -382,7 +382,7 @@ pub(super) async fn proxy(
                     }
                 }
             }
-            let mut again = Request::new(Body::empty());
+            let mut again = Request::new(body::empty());
             *again.method_mut() = method.clone();
             *again.uri_mut() = uri;
             *again.headers_mut() = headers;

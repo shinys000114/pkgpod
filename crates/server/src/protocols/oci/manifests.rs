@@ -61,10 +61,10 @@ pub(super) async fn get_manifest(cx: &Ctx, re: &str, head: bool) -> Response {
         );
     };
     let body = if head {
-        Body::empty()
+        body::empty()
     } else {
         match tokio::fs::read(cx.r.store().path(&d)).await {
-            Ok(b) => Body::from(b),
+            Ok(b) => body::full(b),
             Err(_) => {
                 return oci_err(
                     StatusCode::NOT_FOUND,
@@ -95,7 +95,8 @@ pub(super) async fn get_manifest(cx: &Ctx, re: &str, head: bool) -> Response {
             Some(re.to_string())
         };
         if let Some(tag) = tag {
-            cx.app.downloaded(&resp, &cx.r.name, &cx.image, &tag);
+            cx.app
+                .downloaded(resp.status(), &cx.r.name, &cx.image, &tag);
         }
     }
     resp
@@ -125,7 +126,7 @@ pub(super) async fn put_manifest(cx: &Ctx, re: &str, req: Request) -> Response {
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .map(String::from);
-    let body = match axum::body::to_bytes(req.into_body(), pkgpod_oci::MAX_MANIFEST + 1).await {
+    let body = match body::to_bytes(req.into_body(), pkgpod_oci::MAX_MANIFEST + 1).await {
         Ok(b) if b.len() <= pkgpod_oci::MAX_MANIFEST => b,
         _ => {
             return oci_err(

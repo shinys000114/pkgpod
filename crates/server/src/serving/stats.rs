@@ -84,7 +84,11 @@ pub fn counts(method: &Method, h: &HeaderMap) -> Counts {
 /// Answered with the file from its start: 200 (also to a range whose
 /// If-Range no longer holds), or 206 from the start.
 fn served(counts: Counts, resp: &Response) -> bool {
-    match resp.status() {
+    served_status(counts, resp.status())
+}
+
+fn served_status(counts: Counts, status: StatusCode) -> bool {
+    match status {
         StatusCode::OK => counts != Counts::No,
         StatusCode::PARTIAL_CONTENT => counts == Counts::Whole,
         _ => false,
@@ -155,7 +159,19 @@ impl Stats {
     /// A package named already (an image pulled by its tag) was answered
     /// with `resp`.
     pub fn named(&self, counts: Counts, resp: &Response, repo: &str, name: &str, version: &str) {
-        if served(counts, resp) {
+        self.named_status(counts, resp.status(), repo, name, version);
+    }
+
+    /// [`Stats::named`], by the answer's status alone (all it looks at).
+    pub fn named_status(
+        &self,
+        counts: Counts,
+        status: StatusCode,
+        repo: &str,
+        name: &str,
+        version: &str,
+    ) {
+        if served_status(counts, status) {
             self.add(repo, What::Named(name.to_string(), version.to_string()));
         }
     }

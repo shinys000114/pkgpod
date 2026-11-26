@@ -3,17 +3,15 @@
 //! The server as the registry's [`Host`]: its proxy engine, how files
 //! are served and bodies stored, downloads counted, actions audited.
 
-use axum::body::Body;
-use axum::extract::Request;
-use axum::response::Response;
+use std::sync::Arc;
+
 use futures_util::future::BoxFuture;
+use http::StatusCode;
 use pkgpod_base::Digest;
 use pkgpod_base::store::Store;
 use pkgpod_engine::RepoInfo;
 use pkgpod_engine::cache::CacheRow;
-
-use std::sync::Arc;
-
+use pkgpod_proto::body::{self, Body, Request, Response};
 use rusqlite::params;
 
 use super::{Fetch, Fetched, Host, State};
@@ -53,9 +51,12 @@ impl Host for App {
         sha: Digest,
         req: Request,
     ) -> BoxFuture<'static, Response> {
-        Box::pin(
-            async move { crate::serving::serve_blob(&file, &sha, "blob", None, false, req).await },
-        )
+        Box::pin(async move {
+            let req = req.map(axum::body::Body::new);
+            crate::serving::serve_blob(&file, &sha, "blob", None, false, req)
+                .await
+                .map(body::boxed)
+        })
     }
 
     fn store_body(
@@ -64,13 +65,17 @@ impl Host for App {
         body: Body,
         limit: u64,
     ) -> BoxFuture<'static, crate::Result<(Digest, u64)>> {
-        Box::pin(crate::serving::body_to_store(store, body, limit))
+        Box::pin(crate::serving::body_to_store(
+            store,
+            axum::body::Body::new(body),
+            limit,
+        ))
     }
 
-    fn downloaded(&self, resp: &Response, repo: &str, name: &str, version: &str) {
-        self.stats.named(
+    fn downloaded(&self, status: StatusCode, repo: &str, name: &str, version: &str) {
+        self.stats.named_status(
             crate::serving::stats::Counts::Whole,
-            resp,
+            status,
             repo,
             name,
             version,

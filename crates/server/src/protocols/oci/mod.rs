@@ -23,9 +23,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-use axum::body::Body;
-use axum::extract::Request;
-use axum::response::Response;
 use futures_util::StreamExt;
 use http::{HeaderValue, Method, StatusCode, header};
 use pkgpod_base::Digest;
@@ -34,6 +31,7 @@ use pkgpod_engine::cache::CacheRow;
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{Kind, RepoInfo};
 use pkgpod_oci::{Images, Parsed, manifest_path, parse_digest, tag_path};
+use pkgpod_proto::body::{self, Body, Request, Response};
 use serde_json::{Value, json};
 
 use crate::auth::{Caller, Role};
@@ -65,7 +63,7 @@ const MAX_SESSIONS: usize = 1024;
 /// A JSON body with its status.
 fn json_reply(st: StatusCode, v: Value) -> Response {
     let mut r = bare(st);
-    *r.body_mut() = Body::from(serde_json::to_vec(&v).expect("a JSON value"));
+    *r.body_mut() = body::full(serde_json::to_vec(&v).expect("a JSON value"));
     r.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
@@ -75,7 +73,7 @@ fn json_reply(st: StatusCode, v: Value) -> Response {
 
 /// A status, no body.
 fn bare(st: StatusCode) -> Response {
-    let mut r = Response::new(Body::empty());
+    let mut r = Response::new(body::empty());
     *r.status_mut() = st;
     r
 }
@@ -196,7 +194,7 @@ pub trait Host: Send + Sync {
     ) -> futures_util::future::BoxFuture<'static, crate::Result<(Digest, u64)>>;
     /// `resp` answered a whole download of `name` `version` from `repo`
     /// (counted if it was served).
-    fn downloaded(&self, resp: &Response, repo: &str, name: &str, version: &str);
+    fn downloaded(&self, status: StatusCode, repo: &str, name: &str, version: &str);
     /// Records what `actor` did.
     fn audit(&self, actor: &str, action: &str, target: &str, detail: &str);
     /// The repositories, formats and their states.

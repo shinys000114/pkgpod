@@ -49,7 +49,7 @@ pub(super) async fn group(
         .flatten()
         .is_some();
         if has {
-            let mut again = Request::new(Body::empty());
+            let mut again = Request::new(body::empty());
             *again.method_mut() = method.clone();
             *again.uri_mut() = req.uri().clone();
             *again.headers_mut() = req.headers().clone();

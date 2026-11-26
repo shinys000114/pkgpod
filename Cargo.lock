@@ -2598,6 +2598,11 @@ dependencies = [
 name = "pkgpod-proto"
 version = "0.0.0"
 dependencies = [
+ "bytes",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
  "pkgpod-engine",
 ]
 
@@ -2648,6 +2653,7 @@ dependencies = [
  "futures-util",
  "glob",
  "http",
+ "http-body-util",
  "httpdate",
  "hyper-util",
  "jiff",
@@ -2673,6 +2679,7 @@ dependencies = [
  "pkgpod-npm",
  "pkgpod-nuget",
  "pkgpod-oci",
+ "pkgpod-proto",
  "pkgpod-pub",
  "pkgpod-pypi",
  "pkgpod-rpm",

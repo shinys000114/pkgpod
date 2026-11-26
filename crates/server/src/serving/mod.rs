@@ -402,13 +402,18 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
     if registry && crate::protocols::oci::claims(&table, &host, &path[1..]) {
         let rest = path[1..].to_vec();
         let reading = matches!(method, Method::GET | Method::HEAD);
-        let mut r =
-            match crate::protocols::oci::handle(app.clone(), caller.clone(), &host, &rest, req)
-                .await
-            {
-                Some(r) => r,
-                None => status(StatusCode::NOT_FOUND),
-            };
+        let mut r = match crate::protocols::oci::handle(
+            app.clone(),
+            caller.clone(),
+            &host,
+            &rest,
+            req.map(pkgpod_proto::body::boxed),
+        )
+        .await
+        {
+            Some(r) => r.map(axum::body::Body::new),
+            None => status(StatusCode::NOT_FOUND),
+        };
         // What a tag names, the tags and referrers lists and the catalog
         // change in place: revalidated, as other indexes are (blobs say
         // how long they keep).

@@ -12,6 +12,7 @@ repository = "https://github.com/shinys000114/pkgpod"
 [workspace.dependencies]
 pkgpod-base = { path = "crates/core/base" }
 pkgpod-engine = { path = "crates/core/engine" }
+pkgpod-proto = { path = "crates/core/proto" }
 pkgpod-deb = { path = "crates/formats/deb" }
 pkgpod-files = { path = "crates/formats/files" }
 pkgpod-oci = { path = "crates/formats/oci" }
@@ -74,6 +75,9 @@ mimalloc = { version = "0.1", default-features = false }
 toml = { version = "1", features = ["preserve_order"] }
 axum = { version = "0.8", features = ["multipart"] }
 http = "1.5"
+http-body = "1.1"
+http-body-util = "0.1"
+bytes = "1.12"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "fs", "io-util", "net", "time"] }
 tower-http = { version = "0.7", features = ["limit", "trace", "fs"] }
 tower = { version = "0.5", features = ["util"] }

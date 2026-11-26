@@ -204,7 +204,7 @@ pub(super) async fn append(cx: &Ctx, id: &str, req: Request) -> Result<u64, Resp
         set(&mut r, "Range", &format!("0-{}", size.saturating_sub(1)));
         return Err(r);
     }
-    let mut stream = req.into_body().into_data_stream();
+    let mut stream = http_body_util::BodyExt::into_data_stream(req.into_body());
     while let Some(chunk) = stream.next().await {
         let chunk = match chunk {
             Ok(c) => c,
