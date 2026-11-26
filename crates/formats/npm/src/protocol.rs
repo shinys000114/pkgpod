@@ -185,15 +185,23 @@ pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
                             );
                         }
                     };
-                    let doc: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-                    if !unpublish
-                        && doc
-                            .get("_attachments")
-                            .is_some_and(|x| x.as_object().is_some_and(|o| !o.is_empty()))
-                    {
-                        publish(&app, &a, &name, body).await
-                    } else {
-                        update(&app, &a, &name, doc, unpublish).await
+                    // Whether a version is attached, read off the async
+                    // threads: the document for update, none for a publish
+                    // (which parses the body again itself).
+                    let b2 = body.clone();
+                    let doc = tokio::task::spawn_blocking(move || {
+                        let doc: Value = serde_json::from_slice(&b2).unwrap_or(Value::Null);
+                        let attached = !unpublish
+                            && doc
+                                .get("_attachments")
+                                .is_some_and(|x| x.as_object().is_some_and(|o| !o.is_empty()));
+                        (!attached).then_some(doc)
+                    })
+                    .await;
+                    match doc {
+                        Ok(None) => publish(&app, &a, &name, body).await,
+                        Ok(Some(doc)) => update(&app, &a, &name, doc, unpublish).await,
+                        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
                     }
                 }
                 Change::DeleteAll => remove(&app, &a, &name, None).await,
