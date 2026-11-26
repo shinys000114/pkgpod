@@ -223,9 +223,10 @@ impl Stream for Field<'_> {
 /// anywhere; after each delimiter `--` (the form ends: what follows is
 /// not read), or spaces and tabs then CRLF; a part's headers, up to the
 /// blank line (CRLF CRLF); its bytes, up to the next delimiter (CRLF,
-/// `--` and the boundary). What multer refuses there is refused at once,
-/// and so is a form whose preamble or a part's headers run past
-/// MAX_HEAD; once refused, all that follows is.
+/// `--` and the boundary). A form whose preamble or a part's headers run
+/// past MAX_HEAD is refused, and all that follows. Where the framing
+/// breaks after a delimiter it is not followed on: multer refuses the
+/// form there itself, as it did before, and is asked nothing after.
 struct Framing {
     at: At,
     /// Bytes of the preamble, or of the headers, so far.
@@ -249,6 +250,8 @@ enum At {
     Headers,
     Data,
     Closed,
+    /// Broken after a delimiter, where multer refuses the form.
+    Broken,
     Refused,
 }
 
@@ -270,7 +273,7 @@ impl Framing {
                 At::Preamble => (&mut self.first, At::Delimiter, true),
                 At::Headers => (&mut self.blank, At::Data, true),
                 At::Data => (&mut self.delimiter, At::Delimiter, false),
-                At::Closed | At::Refused => break,
+                At::Closed | At::Broken | At::Refused => break,
                 at => {
                     self.at = match (at, b[0]) {
                         (At::Delimiter | At::Padding, b' ' | b'\t') => At::Padding,
@@ -278,7 +281,7 @@ impl Framing {
                         (At::Delimiter | At::Padding, b'\r') => At::Cr,
                         (At::Dash, b'-') => At::Closed,
                         (At::Cr, b'\n') => At::Headers,
-                        _ => At::Refused,
+                        _ => At::Broken,
                     };
                     b = &b[1..];
                     continue;
@@ -299,7 +302,7 @@ impl Framing {
             }
         }
         if self.at == At::Refused {
-            return Err("not a form as multer reads one, or its headers too large".into());
+            return Err("the form's preamble or a part's headers are too large".into());
         }
         Ok(())
     }
@@ -537,8 +540,8 @@ mod tests {
         ]
     }
 
-    /// Forms multer refuses, and whether their framing is refused
-    /// already (or only their headers or their end are wrong).
+    /// Forms multer refuses, and whether their framing breaks after a
+    /// delimiter (or only their headers or their end are wrong).
     fn invalid() -> Vec<(&'static [u8], bool)> {
         vec![
             (b"--b\r\nnot a header\r\n\r\nx\r\n--b--\r\n", false),
@@ -636,30 +639,31 @@ mod tests {
     }
 
     /// The framing of a form is read alike however its bytes are cut
-    /// into chunks; it never refuses what multer reads, and refuses only
-    /// what multer does.
+    /// into chunks, and as multer reads it; only its preamble or headers
+    /// too large are refused.
     #[tokio::test]
     async fn framing_follows_multer_in_any_chunks() {
         let mut all: Vec<(&str, Vec<u8>, Option<bool>)> = Vec::new();
         for (b, body) in valid() {
             all.push((b, body, None));
         }
-        for (body, refused) in invalid() {
-            all.push(("b", body.to_vec(), Some(refused)));
+        for (body, broken) in invalid() {
+            all.push(("b", body.to_vec(), Some(broken)));
         }
-        for (boundary, body, refused) in all {
+        for (boundary, body, broken) in all {
             let whole = framed(boundary, std::iter::once(&body[..]));
             let reads = multer_reads(boundary, &body).await;
-            match refused {
+            match broken {
                 None => {
                     assert!(reads.is_some_and(|n| n > 0), "{body:?}");
                     assert_eq!(whole, (false, At::Closed), "{body:?}");
                     // Each part where multer finds it.
                     assert_eq!(Some(headers_found(boundary, &body)), reads, "{body:?}");
                 }
-                Some(refused) => {
+                Some(broken) => {
                     assert_eq!(reads, None, "{body:?}");
-                    assert_eq!(whole.0, refused, "{body:?}");
+                    assert!(!whole.0, "{body:?}");
+                    assert_eq!(whole.1 == At::Broken, broken, "{body:?}");
                 }
             }
             assert_eq!(framed(boundary, body.chunks(1)), whole, "{body:?}");
@@ -671,6 +675,66 @@ mod tests {
                     "{body:?} at {cut}"
                 );
             }
+        }
+    }
+
+    /// What multer alone answers when asked for the part after `before`
+    /// parts of `body`, each read whole: a part, the form's end, or an
+    /// error.
+    async fn multer_after(body: &[u8], before: usize) -> Result<bool, ()> {
+        let body = Bytes::copy_from_slice(body);
+        let data = futures_util::stream::once(async { Ok::<_, std::convert::Infallible>(body) });
+        let mut m = multer::Multipart::new(data, "b");
+        for _ in 0..before {
+            let mut f = m.next_field().await.unwrap().unwrap();
+            while f.chunk().await.unwrap().is_some() {}
+        }
+        m.next_field().await.map(|f| f.is_some()).map_err(|_| ())
+    }
+
+    /// Whatever three bytes follow a delimiter (of those that tell there),
+    /// the framing ends the form only where multer does, and gives up on
+    /// it only where multer refuses it; it never refuses it itself.
+    #[tokio::test]
+    async fn after_a_delimiter_as_multer() {
+        let part = b"--b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nxy\r\n--b";
+        let rest = b"\r\nContent-Disposition: form-data; name=\"c\"\r\n\r\nz\r\n--b--\r\n";
+        let bytes = *b"- \t\r\nx";
+        for (head, before) in [(&b"--b"[..], 0), (&part[..], 1)] {
+            for x in bytes {
+                for y in bytes {
+                    for z in bytes {
+                        let mut f = Framing::new("b");
+                        f.feed(&[head, &[x, y, z]].concat()).unwrap();
+                        let body = [head, &[x, y, z], rest].concat();
+                        let multer = multer_after(&body, before).await;
+                        let at = [x, y, z];
+                        match f.at {
+                            At::Broken => assert_eq!(multer, Err(()), "{at:?}"),
+                            At::Closed => assert_eq!(multer, Ok(false), "{at:?}"),
+                            _ => assert_ne!(multer, Ok(false), "{at:?}"),
+                        }
+                        assert!(f.feed(rest).is_ok());
+                    }
+                }
+            }
+        }
+    }
+
+    /// A form broken after a part is refused where multer refuses it,
+    /// however it comes: the part is read whole, the next is not.
+    #[tokio::test]
+    async fn broken_after_a_part_refused_after_it() {
+        let file = vec![b'f'; 10 << 10];
+        let mut body = form("b", &[("content", "", &file)]);
+        body.truncate(body.len() - 4);
+        body.extend_from_slice(b"x\r\nX-A: 1\r\n\r\nmore\r\n--b--\r\n");
+        for n in [body.len(), CHUNK, 7] {
+            let mut f = Form::of(post("b", cut(&body, n)), 1 << 20).unwrap();
+            let p = f.next_field().await.unwrap().unwrap();
+            let stored = crate::body::to_bytes(p.into_body(), 1 << 20).await;
+            assert_eq!(stored.unwrap(), file, "in chunks of {n}");
+            assert_eq!(f.next_field().await.err(), Some(FormError::Unreadable));
         }
     }
 
