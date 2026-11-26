@@ -1,6 +1,6 @@
 [package]
 name = "pkgpod-proto"
-description = "pkgpod platform: what a format's protocol is held to and given (rights, caching, bodies, forms, queries, the server as host)"
+description = "pkgpod platform: what a format's protocol is held to and given (rights, caching, bodies, replies, forms, queries, the server as host)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

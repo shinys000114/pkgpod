@@ -64,29 +64,11 @@ const SESSION_TTL: i64 = 86400;
 const MAX_SESSIONS_REPO: usize = 64;
 const MAX_SESSIONS: usize = 1024;
 
-/// A JSON body with its status.
-fn json_reply(st: StatusCode, v: Value) -> Response {
-    let mut r = bare(st);
-    *r.body_mut() = body::full(serde_json::to_vec(&v).expect("a JSON value"));
-    r.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-    r
-}
-
-/// A status, no body.
-fn bare(st: StatusCode) -> Response {
-    let mut r = Response::new(body::empty());
-    *r.status_mut() = st;
-    r
-}
-
 /// An OCI error reply.
 fn oci_err(st: StatusCode, code: &str, msg: impl Into<String>) -> Response {
-    let mut r = json_reply(
+    let mut r = pkgpod_proto::reply::json(
         st,
-        json!({"errors": [{"code": code, "message": msg.into(), "detail": null}]}),
+        &json!({"errors": [{"code": code, "message": msg.into(), "detail": null}]}),
     );
     r.headers_mut().insert(
         "Docker-Distribution-API-Version",
@@ -109,7 +91,7 @@ fn unauthorized() -> Response {
 }
 
 fn reply(st: StatusCode) -> Response {
-    let mut r = bare(st);
+    let mut r = pkgpod_proto::reply::status(st);
     r.headers_mut().insert(
         "Docker-Distribution-API-Version",
         HeaderValue::from_static("registry/2.0"),
@@ -334,7 +316,7 @@ pub async fn handle(
         return Some(if caller.anonymous() {
             unauthorized()
         } else {
-            let mut r = json_reply(StatusCode::OK, json!({}));
+            let mut r = pkgpod_proto::reply::json(StatusCode::OK, &json!({}));
             set(&mut r, "Docker-Distribution-API-Version", "registry/2.0");
             r
         });

@@ -19,13 +19,7 @@ use pkgpod_proto::body::{self, Request, Response};
 use pkgpod_proto::host::Host;
 
 fn not_found() -> Response {
-    let mut r = Response::new(body::full("not found\n"));
-    *r.status_mut() = StatusCode::NOT_FOUND;
-    r.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("text/plain; charset=utf-8"),
-    );
-    r
+    pkgpod_proto::reply::text(StatusCode::NOT_FOUND, "not found\n")
 }
 
 fn text(req: &Request, ctype: &'static str, body: String) -> Response {

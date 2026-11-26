@@ -16,17 +16,8 @@ use pkgpod_engine::{RepoInfo, Upload};
 use pkgpod_proto::Caller;
 use pkgpod_proto::body::{self, Request, Response};
 use pkgpod_proto::host::Host;
+use pkgpod_proto::reply::{self, text};
 use serde_json::json;
-
-fn text(st: StatusCode, msg: impl Into<String>) -> Response {
-    let mut r = Response::new(body::full(msg.into()));
-    *r.status_mut() = st;
-    r.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("text/plain; charset=utf-8"),
-    );
-    r
-}
 
 /// A project page asked for by a name not normalized: there.
 pub fn redirect(rel: &[String], raw_path: &str) -> Option<Response> {
@@ -42,8 +33,7 @@ pub fn redirect(rel: &[String], raw_path: &str) -> Option<Response> {
     let to = format!("{}{norm}/", &base[..cut]);
     Some(match HeaderValue::try_from(to) {
         Ok(location) => {
-            let mut r = Response::new(body::empty());
-            *r.status_mut() = StatusCode::PERMANENT_REDIRECT;
+            let mut r = reply::status(StatusCode::PERMANENT_REDIRECT);
             r.headers_mut().insert(header::LOCATION, location);
             r
         }

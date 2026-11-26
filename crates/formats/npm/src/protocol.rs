@@ -20,20 +20,8 @@ use serde_json::{Value, json};
 
 use pkgpod_proto::{Caller, Gate, Need, Refusal, Role};
 
-/// A status, no body.
-fn bare(st: StatusCode) -> Response {
-    let mut r = Response::new(body::empty());
-    *r.status_mut() = st;
-    r
-}
-
 fn reply(st: StatusCode, v: Value) -> Response {
-    let mut r = bare(st);
-    *r.body_mut() = body::full(serde_json::to_vec(&v).expect("a JSON value"));
-    r.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
+    let mut r = pkgpod_proto::reply::json(st, &v);
     r.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     r
@@ -296,7 +284,7 @@ async fn read(
                 .and_then(|x| x.to_str().ok())
                 .is_some_and(|x| pkgpod_proto::cache::inm_matches(x, &etag))
             {
-                return bare(StatusCode::NOT_MODIFIED);
+                return pkgpod_proto::reply::status(StatusCode::NOT_MODIFIED);
             }
             let len = body.len();
             let mut resp = Response::new(if req.method() == Method::HEAD {

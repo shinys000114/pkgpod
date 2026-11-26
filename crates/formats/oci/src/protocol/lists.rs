@@ -37,7 +37,8 @@ pub(super) async fn tags(cx: &Ctx, q: &str) -> Response {
         Some(n) => after.iter().take(n).cloned().collect(),
         None => after.clone(),
     };
-    let mut resp = json_reply(StatusCode::OK, json!({"name": cx.name, "tags": page}));
+    let mut resp =
+        pkgpod_proto::reply::json(StatusCode::OK, &json!({"name": cx.name, "tags": page}));
     if let (Some(n), Some(l)) = (n, page.last())
         && after.len() > n
     {
@@ -88,9 +89,9 @@ pub(super) async fn referrers(cx: &Ctx, d: &str, q: &str) -> Response {
     })
     .await
     .unwrap_or_default();
-    let mut resp = json_reply(
+    let mut resp = pkgpod_proto::reply::json(
         StatusCode::OK,
-        json!({"schemaVersion": 2, "mediaType": crate::OCI_INDEX, "manifests": list}),
+        &json!({"schemaVersion": 2, "mediaType": crate::OCI_INDEX, "manifests": list}),
     );
     set(&mut resp, "Content-Type", crate::OCI_INDEX);
     if query(q).contains_key("artifactType") {
