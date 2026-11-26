@@ -107,26 +107,30 @@ def registry(path):
 
 def stub(method, path, auth, bearer):
     """The registry; on the stub that asks for a token, the token, and
-    the registry only to one who has it."""
+    nothing of /v2 but to one who has it.
+
+    The first of the stubs' answers (place 10), as these were the stub's
+    own before any format's: what it lets past goes on to the registry
+    (/v2) or to the other formats' answers."""
     if bearer and path == "/token":
         return 200, {"Content-Type": "application/json"}, \
             b'{"token":"stub-token","expires_in":300}'
-    if not path.startswith("/v2"):
-        return None
-    if bearer and auth != "Bearer stub-token":
+    if bearer and path.startswith("/v2") and auth != "Bearer stub-token":
         return 401, {
             "Content-Type": "application/json",
             "WWW-Authenticate": f'Bearer realm="http://127.0.0.1:{UPB}/token",'
                                 'service="stub",scope="repository:up/hello:pull"',
         }, b'{"errors":[{"code":"UNAUTHORIZED"}]}'
-    got = registry(path)
-    # A tag that answers at once the first time, then slowly.
+    # A tag that answers at once the first time, then slowly: on any
+    # path let past, whichever format's (the answers take no time).
     if path.endswith("/manifests/slow"):
         n = Upstream.asked.get(path, 0)
         Upstream.asked[path] = n + 1
         if n > 0:
             time.sleep(7)
-    return got
+    if not path.startswith("/v2"):
+        return None
+    return registry(path)
 
 
 def oci_push(name, tag, layer, config, ident, prefix="/v2", host=None, subject=None):
