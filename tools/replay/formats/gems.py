@@ -476,6 +476,14 @@ def mask(masker):
     return answer
 
 
+FUZZ = (list(REPOS),
+        ["api", "v1", "gems", "yank", "versions", "names", "info", "hello-pk", "Upper_Pk",
+         "quick", "Marshal.4.8", "hello-pk-1.0.0.gem", "hello-pk-1.1.0.gemspec.rz",
+         "specs.4.8.gz", "latest_specs.4.8.gz", "prerelease_specs.4.8.gz", "@first",
+         "dependencies", "other-pk", "yank-me", "w-writer"])
+# Its writes leave the run's times only in versions answers, masked.
+FUZZ_WRITABLE = True
+
 PARTS = [
     ("seed", 90, seed),
     ("grants", 80, {"reader": {"gempriv": "read"},
@@ -505,4 +513,6 @@ PARTS = [
                                           "a range, unless a whole answer without the run's "
                                           "times had that etag")),
     ("mask", 80, mask),
+    ("fuzz sample", 90, gem("fz", "1.0.0")),
+    ("fuzz sample", 100, b"gem_name=fz&version=1.0.0"),
 ]
