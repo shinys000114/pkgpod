@@ -16,7 +16,9 @@ one past all others' to come last. The kinds:
   rtoken       [repo]: of writer's token that only reads
   publisher    [repo]: of the trust rule without a user
   stub         f(method, path, auth, bearer): the upstream stub's
-               (status, headers, body), or None for a path not its
+               (status, headers, body), or None for a path not its;
+               OCI's come first, and on the stub that asks for a token
+               they are what /token and, without it, any /v2 path get
   reads        f(c, who): requests that read, as each identity (c the
                core.Corpus)
   reads end    f(c): once, after all identities' reads

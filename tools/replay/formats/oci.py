@@ -8,7 +8,7 @@ import json
 import re
 import time
 
-from core import UP, UPB, NOT_HERE, Upstream, auth_header, request
+from core import UP, UPB, Upstream, auth_header, request
 
 NAME = "oci"
 INDEX = "application/vnd.oci.image.index.v1+json"
@@ -77,7 +77,7 @@ BAD_DIGEST = blob_digest(b"not the manifest")
 
 
 def registry(path):
-    """The stub's registry (all of /v2), image up/hello."""
+    """The stub's registry, image up/hello; None for a path not its."""
     oci = "application/vnd.oci.image.manifest.v1+json"
     if path == "/v2/" or path == "/v2":
         return 200, {"Docker-Distribution-API-Version": "registry/2.0"}, b"{}"
@@ -102,7 +102,7 @@ def registry(path):
                     "Docker-Content-Digest": m.group(1),
                 }, b
         return 404, {}, b""
-    return NOT_HERE
+    return None
 
 
 def stub(method, path, auth, bearer):
@@ -111,7 +111,7 @@ def stub(method, path, auth, bearer):
 
     The first of the stubs' answers (place 10), as these were the stub's
     own before any format's: what it lets past goes on to the registry
-    (/v2) or to the other formats' answers."""
+    and then to the other formats' answers."""
     if bearer and path == "/token":
         return 200, {"Content-Type": "application/json"}, \
             b'{"token":"stub-token","expires_in":300}'
@@ -128,8 +128,6 @@ def stub(method, path, auth, bearer):
         Upstream.asked[path] = n + 1
         if n > 0:
             time.sleep(7)
-    if not path.startswith("/v2"):
-        return None
     return registry(path)
 
 
