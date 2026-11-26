@@ -1318,6 +1318,26 @@ def corpus(fx):
             ("GET", "/npub/-/package/nope/dist-tags", {}, None),
             ("DELETE", "/npub/-/package/hello/dist-tags/never", {}, None),
             ("POST", "/npub/-/package/hello/dist-tags", js, b"{}")])
+        # What only the seed wrote, by each and read back: a scoped package
+        # of two versions, one's tarball deleted (at a revision the server
+        # does not look at); a first publish tagged other than latest.
+        sc = f"@team/w-{who}"
+        sp = f"/npub/@team%2fw-{who}"
+        tgz = f"/npub/{sc}/-/w-{who}-1.1.0.tgz"
+        seq(f"npm scoped publish {who}", who, [
+            ("PUT", sp, js, npm_doc(sc, "1.0.0", f"scoped by {who}".encode())),
+            ("PUT", sp, js, npm_doc(sc, "1.1.0", f"scoped again by {who}".encode())),
+            ("GET", sp, {}, None),
+            ("GET", tgz, {}, None),
+            ("DELETE", f"{tgz}/-rev/2-x", {}, None),
+            ("GET", sp, {}, None),
+            ("GET", tgz, {}, None)])
+        bt = f"b-{who}"
+        seq(f"npm first publish tagged beta {who}", who, [
+            ("PUT", f"/npub/{bt}", js, npm_doc(bt, "1.0.0", f"beta by {who}".encode(), "beta")),
+            ("GET", f"/npub/{bt}", {}, None),
+            ("GET", f"/npub/-/package/{bt}/dist-tags", {}, None),
+            ("GET", f"/npub/{bt}/1.0.0", {}, None)])
         # PyPI: twine's upload to each kind, at the repository and legacy/;
         # what it refuses.
         for repo in ("ppub", "ppriv", "pproxy", "pgroup"):
@@ -1363,6 +1383,18 @@ def corpus(fx):
                 ("GET", f"{m}/@v/v1.0.0.info", {}, None),
                 ("GET", f"{m}/@v/v1.0.0.mod", {}, None),
                 ("GET", f"{m}/@latest", {}, None)])
+        # A module whose path has an upper-case letter, read back by the
+        # escaped path and by the path as it is.
+        for repo in ("gpub", "gpriv"):
+            m = f"/{repo}/example.com/!u{who}"
+            seq(f"go upload upper-case {repo} {who}", who, [
+                ("PUT", f"/{repo}/u.zip", octet, go_zip(f"example.com/U{who}", "v1.0.0")),
+                ("GET", f"{m}/@v/list", {}, None),
+                ("GET", f"{m}/@v/v1.0.0.info", {}, None),
+                ("GET", f"{m}/@v/v1.0.0.mod", {}, None),
+                ("GET", f"{m}/@v/v1.0.0.zip", {}, None),
+                ("GET", f"{m}/@latest", {}, None),
+                ("GET", f"/{repo}/example.com/U{who}/@v/list", {}, None)])
         x = f"example.com/x{who}"
         seq(f"go uploads refused {who}", who, [
             ("PUT", "/gpub/r.zip", octet, b"not a zip"),
@@ -1390,6 +1422,15 @@ def corpus(fx):
                 ("PUT", f"/{repo}/api/v1/crates/new", {}, cargo_publish(f"w-{who}", "1.0.0")),
                 ("GET", f"/{repo}/index/{cargo_index_file(f'w-{who}')}", {}, None),
                 ("GET", f"/{repo}/api/v1/crates/w-{who}/1.0.0/download", {}, None)])
+        # A publish with dependencies and a description, read back.
+        dep = f"dep-{who}"
+        seq(f"cargo publish with dependencies {who}", who, [
+            ("PUT", "/cpub/api/v1/crates/new", {},
+             cargo_publish(dep, "1.0.0", deps=[("serde", "^1"), ("hello_pod", "^1.0")],
+                           description=f"published by {who}")),
+            ("GET", f"/cpub/index/{cargo_index_file(dep)}", {}, None),
+            ("GET", f"/cpub/api/v1/crates?q={dep}", {}, None),
+            ("GET", f"/cpub/api/v1/crates/{dep}/1.0.0/download", {}, None)])
         new = "/cpub/api/v1/crates/new"
         seq(f"cargo publishes refused {who}", who, [
             ("PUT", new, {}, b"abc"),
@@ -1466,6 +1507,45 @@ def corpus(fx):
                      "&from=opub/app", {}, None),
             ("POST", f"/v2/opub/mnt/blobs/uploads/?mount={blob_digest(app_image('opriv')[0])}"
                      "&from=opriv/app", {}, None)])
+        # What only the seed wrote, by each and read back: an image index
+        # of two platforms (its own image: an index's children are not
+        # deleted), blobs in one request each.
+        il = b"index layer by " + who.encode()
+        ics = [b'{"arch":"%s","by":"%s"}' % (a.encode(), who.encode()) for a in ("amd64", "arm64")]
+        ims = [(oci_manifest(c, [il]), a) for c, a in zip(ics, ("amd64", "arm64"))]
+        ix = f"/v2/opub/wi-{who}"
+        steps = [("POST", f"{ix}/blobs/uploads/?digest={blob_digest(b)}", octet, b)
+                 for b in [il] + ics]
+        steps += [("PUT", f"{ix}/manifests/{blob_digest(m)}", mt, m) for m, _ in ims]
+        steps += [("PUT", f"{ix}/manifests/multi", {"Content-Type": INDEX}, oci_index(ims)),
+                  ("GET", f"{ix}/manifests/multi", oci_accept, None),
+                  ("HEAD", f"{ix}/manifests/multi", oci_accept, None),
+                  ("GET", f"{ix}/manifests/{blob_digest(ims[1][0])}", oci_accept, None),
+                  ("GET", f"{ix}/tags/list", {}, None)]
+        seq(f"oci index push {who}", who, steps)
+        # A push and a mount to the registry at reg.localhost's root (oroot,
+        # where only admin may write): `from` is a name of that registry.
+        rh = {"Host": "reg.localhost"}
+        rl = b"root layer by " + who.encode() * 8
+        rc = b'{"root":"' + who.encode() + b'"}'
+        rm = oci_manifest(rc, [rl])
+        seq(f"oci root push {who}", who, [
+            ("POST", "/v2/w/blobs/uploads/", rh, None),
+            ("PATCH", "{loc}", dict(rh, **octet), rl),
+            ("PUT", "{loc}?digest=" + blob_digest(rl), rh, None),
+            ("POST", f"/v2/w/blobs/uploads/?digest={blob_digest(rc)}", dict(rh, **octet), rc),
+            ("PUT", f"/v2/w/manifests/{who}", dict(rh, **mt), rm),
+            ("GET", f"/v2/w/manifests/{who}", dict(rh, **oci_accept), None),
+            ("GET", "/v2/w/tags/list", rh, None)])
+        root_layer = blob_digest(app_image("oroot")[0])
+        seq(f"oci root mount {who}", who, [
+            ("POST", f"/v2/m-{who}/blobs/uploads/?mount={root_layer}&from=app", rh, None),
+            ("HEAD", f"/v2/m-{who}/blobs/{root_layer}", rh, None),
+            # Not a name of that registry: an upload is started instead,
+            # and cancelled.
+            ("POST", f"/v2/m-{who}/blobs/uploads/?mount={blob_digest(app_image('opub')[0])}"
+                     "&from=opub/app", rh, None),
+            ("DELETE", "{loc}", rh, None)])
         seq(f"oci upload status {who}", who, [
             ("POST", "/v2/opub/st/blobs/uploads/", {}, None),
             ("PATCH", "{loc}", octet, b"part"),
