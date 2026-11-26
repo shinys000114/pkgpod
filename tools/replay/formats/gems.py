@@ -367,6 +367,37 @@ def spec_pushes(c, who):
         ("GET", f"{r}/specs.4.8.gz", {}, None),
         ("GET", f"{r}/latest_specs.4.8.gz", {}, None),
         ("GET", f"{r}/prerelease_specs.4.8.gz", {}, None)])
+    variants(c, who)
+
+
+def variants(c, who):
+    """A push and a yank as clients other than gem may send them: what
+    they are is told by the method and the path (its segments
+    percent-decoded, %2f a slash), not by the body's type or the query;
+    a yank's form is read as a query is."""
+    q = [f"q{i}-{who}" for i in range(1, 7)]
+    r = "/gempub"
+    c.seq(f"gems push and yank variants {who}", who, [
+        ("POST", r + API, {}, gem(q[0], "1.0.0")),
+        ("POST", r + API, FORM, gem(q[1], "1.0.0")),
+        ("POST", r + API, {"Content-Type": "multipart/form-data; boundary=x"},
+         gem(q[2], "1.0.0")),
+        ("POST", f"{r}{API}?x=1", OCTET, gem(q[3], "1.0.0")),
+        ("POST", f"{r}/api/v1/gem%73", OCTET, gem(q[4], "1.0.0")),
+        ("POST", f"{r}/api%2fv1%2Fgems", OCTET, gem(q[5], "1.0.0")),
+        ("GET", "/gempub/names", {}, None),
+        ("DELETE", f"{r}{YANK}?x=1", FORM, f"gem_name={q[0]}&version=1.0.0".encode()),
+        ("DELETE", r + YANK, {}, f"gem_name={q[1]}&version=1.0.0".encode()),
+        ("DELETE", f"{r}/api/v1/gems/yan%6B", FORM, f"gem_name={q[2]}&version=1.0.0".encode()),
+        ("DELETE", f"{r}/api%2Fv1%2fgems%2Fyank", FORM,
+         f"gem_name={q[3]}&version=1.0.0".encode()),
+        # A key twice; a + in a value (a space in a form).
+        ("DELETE", r + YANK, FORM, f"gem_name=nope&gem_name={q[4]}&version=1.0.0".encode()),
+        ("DELETE", r + YANK, FORM, f"gem_name={q[5]}&version=1.0.0&version=9".encode()),
+        ("DELETE", r + YANK, FORM, b"gem_name=hello+pk&version=1.0.0"),
+        ("DELETE", r + YANK, FORM, b"gem_name=hello-pk&version=1.0.0+"),
+        *[("GET", f"{r}/info/{n}", {}, None) for n in q],
+        ("GET", "/gempub/versions", {}, None)])
 
 
 def refused(c, who):
