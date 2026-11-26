@@ -16374,6 +16374,50 @@ fn export_then_import_elsewhere() {
     .unwrap();
     s.cli(&["grant", "set", "ppa", "user:alice", "read"])
         .unwrap();
+    // Trust rules, with a user and without: made again by the commands
+    // the import prints.
+    s.cli(&[
+        "trust",
+        "add",
+        "release",
+        "--github",
+        "example/project",
+        "--ref",
+        "refs/tags/v*",
+        "--workflow",
+        "release.yml",
+        "--user",
+        "alice",
+        "--repos",
+        "ppa,f",
+        "--minutes",
+        "20",
+    ])
+    .unwrap();
+    s.cli(&[
+        "trust",
+        "add",
+        "builds",
+        "--github",
+        "example/project",
+        "--ref",
+        "refs/heads/main",
+        "--repos",
+        "f",
+        "--read-only",
+    ])
+    .unwrap();
+    let rules = |s: &Server| {
+        let mut v = s.json(&["trust", "list"]);
+        for r in v.as_array_mut().unwrap() {
+            let r = r.as_object_mut().unwrap();
+            r.remove("created");
+            r.remove("used");
+        }
+        v
+    };
+    let rules_before = rules(&s);
+    assert_eq!(rules_before.as_array().unwrap().len(), 2);
     let served = |s: &Server| {
         [
             "/f/tool/latest/tool.tar.gz",
@@ -16440,6 +16484,7 @@ fn export_then_import_elsewhere() {
         old_main.to_str().unwrap(),
     ]);
     assert!(ok, "{out}");
+    let import_out = out.clone();
     for r in ["ppa", "alp", "f", "py"] {
         assert!(
             out.lines().any(
@@ -16513,6 +16558,30 @@ fn export_then_import_elsewhere() {
         .unwrap();
     assert_eq!(served(&s), before);
     assert_eq!(alp_key(&s), rsa_before);
+    // The trust rules are made again as the import said.
+    assert_eq!(s.json(&["trust", "list"]), json!([]));
+    let remake: Vec<&str> = import_out
+        .lines()
+        .filter_map(|l| l.strip_prefix("to make again: pkgpod trust add "))
+        .collect();
+    assert_eq!(remake.len(), 2, "{import_out}");
+    for line in remake {
+        let o = Command::new("sh")
+            .arg("-c")
+            .arg(format!("\"$PKGPOD\" trust add {line}"))
+            .env("PKGPOD", env!("CARGO_BIN_EXE_pkgpod"))
+            .env("XDG_CONFIG_HOME", s.dir.path().join("cfg"))
+            .env("PKGPOD_URL", &s.api)
+            .env_remove("PKGPOD_TOKEN")
+            .output()
+            .unwrap();
+        assert!(
+            o.status.success(),
+            "{line}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
+    assert_eq!(rules(&s), rules_before);
     let grants = s.cli(&["grant", "list", "ppa"]).unwrap();
     assert!(grants.contains("alice"), "{grants}");
     let labels = s.cli(&["versions", "ppa"]).unwrap();
