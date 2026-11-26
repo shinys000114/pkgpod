@@ -25,6 +25,8 @@ use pkgpod_engine::tree::{Edit, Entry};
 use pkgpod_engine::{Cx, Error, Format, Item, Kind, Result, Upload};
 use serde_json::{Map, Value, json};
 
+pub mod protocol;
+
 pub struct Cargo;
 
 /// Largest `cargo publish` request (metadata and the .crate).
