@@ -1,9 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! How long an answer may be kept: a format says what kind of answer it
-//! gives (its [`Class`]); the header comes from here, the same for every
-//! format. Then an answer that depends on who asked is kept by nobody
-//! but that client ([`private`]).
+//! How long an answer may be kept. [`inm_matches`] is how the server
+//! and the formats moved out of it compare an If-None-Match today. The
+//! rest is the planned table, which nothing uses yet: a format would
+//! say what kind of answer it gives (its [`Class`]) and the header would
+//! come from here, the same for every format ([`cache_control`]); an
+//! answer that depends on who asked would be kept by nobody but that
+//! client ([`Shared`], [`private`]). Today the server's serving module
+//! and the formats give these headers themselves, the server by its
+//! rules for file names and its own `private()`, which differs from
+//! [`private`] as that says.
 
 /// What an answer is, for caching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,8 +18,10 @@ pub enum Class {
     /// hosted repository): it changes when a new version names another,
     /// so it is revalidated.
     Stored,
-    /// Named by its content (OCI blobs and manifests by digest): it never
-    /// changes.
+    /// Named by its content (apt's by-hash files): it never changes. OCI
+    /// blobs and manifests by digest are named so too, but the server's
+    /// rules serve them today: a blob is kept an hour (the rule for any
+    /// other name), a manifest revalidated.
     Immutable,
     /// Made per request (packuments, tags lists, index lines, an index
     /// page): revalidated.
@@ -91,8 +99,17 @@ impl Shared {
 
 /// The Cache-Control of an answer only its client may keep: `no-cache`
 /// becomes `private, no-cache`; `no-store` and what is private already
-/// stay; anything else is made private. With it goes `Vary:
-/// Authorization`.
+/// stay; anything else is made private, a `public` dropped wherever it
+/// is. `Vary: Authorization` is to go with it; this gives the
+/// Cache-Control only.
+///
+/// The server's `private()` (in its serving module) differs today: it
+/// rewrites only a `public` the value begins with, even beside a
+/// `no-store`, and keeps the rest of the value as it is (here the
+/// directives are trimmed and joined again); otherwise it leaves alone
+/// a value with `private` or `no-store` anywhere in it, as cased (here
+/// a whole directive, in any case); without a Cache-Control it puts
+/// `private` on a 2xx answer only; and it adds the Vary itself.
 pub fn private(cache_control: &str) -> String {
     let cc = cache_control.trim();
     if cc.split(',').any(|d| {
@@ -140,7 +157,8 @@ mod tests {
         assert_eq!(cache_control(Class::Stored, 500, true), "no-store");
     }
 
-    /// As the server's `private()` does today.
+    /// On these four the server's `private()` gives the same value today
+    /// (where it differs, [`private`] says).
     #[test]
     fn private_keeps_no_store_and_what_is_private() {
         assert_eq!(private("no-cache"), "private, no-cache");
