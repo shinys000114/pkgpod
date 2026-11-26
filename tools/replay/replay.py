@@ -1689,11 +1689,14 @@ RULES = [
                                      "of a /dists/ Release answer after writes"),
     # A HEAD, a 304 or a range has no whole body to look in: its etag is
     # of one that may hold the run's times (a GET's is masked when it
-    # does), and a range may hold a part of one.
+    # does), and a range may hold a part of one. Masked only where a whole
+    # answer with that etag shows the times: when no whole answer of the
+    # run had the etag yet, the run asks for the whole right after (as
+    # the same caller, without the range and the conditions) and keeps it
+    # with the part, as "whole".
     ("parts of answers with times", "after writes, the etag and the bytes (not their length) "
                                     "of an npm, Go or cargo answer with no body or a range, "
-                                    "unless a whole answer without the run's times had that "
-                                    "etag"),
+                                    "if a whole answer with the run's times had that etag"),
 ]
 
 
@@ -1706,8 +1709,10 @@ class Masker:
         self.counts = {name: 0 for name, _ in RULES}
         self.uploads = {}
         self.seed_time = seed_time
-        # Etags of whole npm, Go and cargo answers without the run's times.
+        # Etags of whole npm, Go and cargo answers, as sent: without the
+        # run's times, and with them.
         self.plain = set()
+        self.timed = set()
 
     def run_times(self, path, body):
         """`body` with the timestamps of the run masked; whether any were."""
@@ -1733,20 +1738,30 @@ class Masker:
         self.counts["host index times"] += 1
         return m.group(1) + b"X" * len(m.group(2)) + b"<"
 
-    def part(self, hd, body, hit, after_writes):
-        """`hd` and `body` of an npm, Go or cargo answer that is not a
-        whole body (none, or a range), masked after writes unless a whole
-        answer without the run's times had its etag; a whole one without
-        them is noted."""
-        h = dict(hd)
-        if body and "content-range" not in h:
-            if not hit and "etag" in h:
-                self.plain.add(h["etag"])
+    def part(self, hd, body, hit, after_writes, etag):
+        """`hd` and `body` of an npm, Go or cargo answer (`etag` as it was
+        sent): a whole one's etag is noted, as of a body with the run's
+        times or without; one that is not whole (no body, or a range) is
+        masked after writes if a whole answer with the run's times had
+        its etag."""
+        if etag is None:
             return hd, body
-        if not after_writes or "etag" not in h or h["etag"] in self.plain:
+        if body and "content-range" not in dict(hd):
+            (self.timed if hit else self.plain).add(etag)
+            return hd, body
+        if not after_writes or etag not in self.timed:
             return hd, body
         self.counts["parts of answers with times"] += 1
         return [[k, "*" if k == "etag" else v] for k, v in hd], b"X" * len(body)
+
+    def unknown_part(self, path, headers, body, after_writes):
+        """Whether an answer after writes is a part (no body, or a range)
+        of an npm, Go or cargo body whose etag no whole answer has had:
+        whether that body holds the run's times is not known."""
+        h = dict(headers)
+        return bool(after_writes and re.match(r"/[ngc](pub|priv|proxy|group)(/|$)", path)
+                    and "etag" in h and (not body or "content-range" in h)
+                    and h["etag"] not in self.plain and h["etag"] not in self.timed)
 
     def upload_id(self, m):
         n = self.uploads.setdefault(m.group(0), f"U{len(self.uploads) + 1}")
@@ -1754,6 +1769,7 @@ class Masker:
         return n
 
     def answer(self, path, headers, body, after_writes):
+        etag = dict(headers).get("etag")
         hd = []
         for k, v in headers:
             if k == "date":
@@ -1773,19 +1789,19 @@ class Masker:
                 search = "/-/v1/search" in path
                 hd = [[k, "*" if k == "etag" or (search and k == "content-length") else v]
                       for k, v in hd]
-            hd, body = self.part(hd, body, hit, after_writes)
+            hd, body = self.part(hd, body, hit, after_writes, etag)
         if re.match(r"/g(pub|priv|proxy|group)(/|$)", path):
             body, hit = self.run_times(path, body)
             if hit:
                 self.counts["go times"] += 1
                 hd = [[k, "*" if k == "etag" else v] for k, v in hd]
-            hd, body = self.part(hd, body, hit, after_writes)
+            hd, body = self.part(hd, body, hit, after_writes, etag)
         if re.match(r"/c(pub|priv|proxy|group)(/|$)", path):
             body, hit = self.run_times(path, body)
             if hit:
                 self.counts["cargo times"] += 1
                 hd = [[k, "*" if k == "etag" else v] for k, v in hd]
-            hd, body = self.part(hd, body, hit, after_writes)
+            hd, body = self.part(hd, body, hit, after_writes, etag)
         if after_writes:
             body = HOST_TIME.sub(self.host_time, body)
         if (after_writes and re.search(r"/dists/[^?]*Release", path)
@@ -1883,6 +1899,21 @@ def fill(path, headers, loc, last_body, seen):
     return path, out, None
 
 
+# What asks for a part of an answer, or for none of it.
+WHOLE_DROPS = ("range", "if-range", "if-match", "if-none-match", "if-modified-since",
+               "if-unmodified-since")
+
+
+def kept(st, headers, body):
+    """What a run keeps of an answer (masked): its status, headers, the
+    digest and length of its body, and a short ASCII body itself."""
+    ans = {"status": st, "headers": sorted(headers),
+           "sha256": hashlib.sha256(body).hexdigest(), "len": len(body)}
+    if len(body) <= 600 and (not body or body.isascii()):
+        ans["body"] = body.decode("ascii", "replace")
+    return ans
+
+
 def built(binary):
     """Which build `binary` is: its sha256, and the commit build() wrote
     next to it (None if none is there)."""
@@ -1955,11 +1986,18 @@ def run(root, binary, out_path, profdir=None):
                 steps_sent += 1
                 seen[rid] = rh
                 loc = dict(rh).get("location", loc)
-                rh2, data2 = mask.answer(path, rh, data, after_writes)
-                ans = {"status": st, "headers": sorted(rh2),
-                       "sha256": hashlib.sha256(data2).hexdigest(), "len": len(data2)}
-                if len(data2) <= 600 and (not data2 or data2.isascii()):
-                    ans["body"] = data2.decode("ascii", "replace")
+                whole = None
+                if method in ("GET", "HEAD") and mask.unknown_part(path, rh, data, after_writes):
+                    # A part of a body no whole answer had: the whole, to
+                    # see whether it holds the run's times (see RULES).
+                    # Later steps are filled from the part, not from it.
+                    wh = {k: v for k, v in hd.items() if k.lower() not in WHOLE_DROPS}
+                    wst, wrh, wdata = request("GET", path, wh, None)
+                    steps_sent += 1
+                    whole = kept(wst, *mask.answer(path, wrh, wdata, after_writes))
+                ans = kept(st, *mask.answer(path, rh, data, after_writes))
+                if whole is not None:
+                    ans["whole"] = whole
                 got.append(ans)
             answers.append({"id": rid, "steps": got})
     finally:
