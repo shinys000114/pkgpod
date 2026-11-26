@@ -288,11 +288,23 @@ STAMP = re.compile(rb'"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)"')
 HOST_TIME = re.compile(rb"(version \d+ \xc2\xb7 )(\d{4}-\d\d-\d\d \d\d:\d\d)<")
 
 
+def served(path):
+    """`path` as pkgpod takes it to find what serves it: an escaped
+    slash (%2f) is a slash, and a run of slashes one (it drops empty
+    segments); the query as sent. Its other escapes are left as sent
+    (pkgpod decodes each segment's): in the corpus none is where a mask
+    looks."""
+    p, q, rest = path.partition("?")
+    return re.sub(r"/{2,}", "/", re.sub(r"%2[fF]", "/", p)) + q + rest
+
+
 class Masker:
     """What a run masks of its answers (see replay.RULES): `rules` (name,
     what), each counted; `masks`, each made for the run and given each
     answer in turn (see formats/__init__.py); `times`, the paths of the
-    answers that hold the run's times (the formats' TIMES)."""
+    answers that hold the run's times (the formats' TIMES). The masks
+    and the times match the path served (see served): //npub/x is
+    npub's as /npub/x is."""
 
     def __init__(self, seed_time, rules, masks, times):
         self.counts = {name: 0 for name, _ in rules}
@@ -340,11 +352,13 @@ class Masker:
         of an npm, Go or cargo body whose etag no whole answer has had:
         whether that body holds the run's times is not known."""
         h = dict(headers)
+        path = served(path)
         return bool(after_writes and any(re.match(t, path) for t in self.times)
                     and "etag" in h and (not body or "content-range" in h)
                     and h["etag"] not in self.plain and h["etag"] not in self.timed)
 
     def answer(self, path, headers, body, after_writes):
+        path = served(path)
         etag = dict(headers).get("etag")
         hd = [[k, v] for k, v in headers]
         for mask in self.masks:
