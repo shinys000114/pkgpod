@@ -354,8 +354,11 @@ def spec_pushes(c, who):
     ruby = "\n".join(["required_ruby_version: !ruby/object:Gem::Requirement",
                       *requirement(((">=", "0"),), 2)]) + "\n"
     pre = swap(pre, ruby, "")
+    # Specification versions below zero, one and four bytes in Marshal.
+    pre = swap(pre, "specification_version: 4\n", "specification_version: -1000\n")
     # A version that is a number, of one email in a list.
-    num = gem(s, "2", email=["one@example.invalid"])
+    num = gemspec(s, "2", email=["one@example.invalid"])
+    num = gem(s, "2", meta=swap(num, "specification_version: 4\n", "specification_version: -1\n"))
     r = "/gempub"
     c.seq(f"gems push with a spec {who}", who, [
         ("POST", r + API, OCTET, full),
@@ -503,6 +506,11 @@ def limits(c, who):
     c.seq("gems push over the limit writer", who, [
         ("POST", "/gempub" + API, dict(OCTET, **{"Content-Length": str(n)}), Zeros(n)),
         ("GET", "/gempub/names", {}, None)])
+    # A PUT takes any file up to pkgpod's upload limit: the gem's own is
+    # the format's.
+    c.seq("gems put over the limit writer", who, [
+        ("PUT", "/gempub/huge.gem", dict(OCTET, **{"Content-Length": str(n)}), Zeros(n)),
+        ("GET", "/gempub/names", {}, None)])
 
 
 def seed_tokens(c):
@@ -549,11 +557,12 @@ def writes_end(c):
     # Gem::Version's order, of versions of other lengths and with
     # letters: the full index takes a name's newest release (1.0 is
     # 1.0.0, older than 1.0.0.1), the version badge its latest of all (a
-    # letter is older than a number and than nothing; 1.0a1 is 1.0.a.1).
+    # letter is older than a number and than nothing; 1.0a1 is 1.0.a.1;
+    # 1.0- ends in an empty segment).
     o = "/gempub"
     c.seq("gems version order writer", "writer", [
         ("POST", o + API, OCTET, gem("order-pk", v))
-        for v in ("1.0", "1.0.0", "1.0.1", "1.0.0.1", "1.0.0.a", "1.0.0.b", "1.0a1")] + [
+        for v in ("1.0", "1.0.0", "1.0.1", "1.0.0.1", "1.0.0.a", "1.0.0.b", "1.0a1", "1.0-")] + [
         ("POST", o + API, OCTET, gem("order-pk", "1.0.0", "x86_64-linux")),
         ("GET", f"{o}/info/order-pk", {}, None),
         ("GET", f"{o}/specs.4.8.gz", {}, None),
