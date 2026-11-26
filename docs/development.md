@@ -344,6 +344,25 @@ After the release the baseline is frozen and steps are only appended.
 A database with more steps than the binary knows is refused, and so is
 one whose steps were others.
 
+**Moving serving code.** A change meant to change nothing a client
+sees is checked with `tools/replay/replay.py`: the same request corpus
+(each identity, public and private repositories, labels, ranges and
+conditional requests, writes, proxies and groups) against a build of
+the commit before and one of the commit after, on one seed copied to
+the same path, with an upstream stub of fixed answers. It compares
+status, headers and body of every answer, the upstream's requests and
+the end state (audit, downloads, cache, catalog, versions), and masks
+only what its named rules say (each counted in the report):
+
+```sh
+tools/replay/replay.py build <before> /tmp/r/old
+tools/replay/replay.py build <after> /tmp/r/new
+tools/replay/replay.py seed /tmp/r /tmp/r/old
+tools/replay/replay.py run /tmp/r /tmp/r/old /tmp/r/old.json
+tools/replay/replay.py run /tmp/r /tmp/r/new /tmp/r/new.json
+tools/replay/replay.py diff /tmp/r/old.json /tmp/r/new.json
+```
+
 ## Adding a format
 
 A format is a crate implementing `pkgpod_engine::Format`
