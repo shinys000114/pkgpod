@@ -682,7 +682,6 @@ def corpus(fx):
         seq(f"oci manifests refs {who}", who, [
             ("PUT", "/v2/opub/w/manifests/sha256:xyz", mt, manifest),
             ("PUT", "/v2/opub/w/manifests/bad!tag", mt, manifest),
-            ("PUT", "/v2/opub/big/manifests/x", mt, b" " * (4 * 1024 * 1024 + 1)),
             ("PUT", f"/v2/opub/w/manifests/{blob_digest(manifest)}", mt, manifest),
             ("PUT", "/v2/opub/idx/manifests/bad", {"Content-Type": INDEX},
              oci_index([(oci_manifest(b"never", [b"pushed"]), "amd64")])),
@@ -690,6 +689,13 @@ def corpus(fx):
              oci_manifest(config, [layer], manifest)),
             ("DELETE", f"/v2/opub/w/manifests/{who}-sig", {}, None),
             ("DELETE", "/v2/opub/w/manifests/no-such-tag", {}, None)])
+        # Bodies at and over the limit, only where the server reads them
+        # (a refusal before the body is read races the client's send).
+        if who in ("writer", "wtoken", "admin"):
+            seq(f"oci manifest sizes {who}", who, [
+                ("PUT", "/v2/opub/big/manifests/at", mt, b" " * (4 * 1024 * 1024)),
+                ("PUT", "/v2/opub/big/manifests/over", mt, b" " * (4 * 1024 * 1024 + 1)),
+                ("PUT", "/v2/opub/big/manifests/far", mt, b" " * (8 * 1024 * 1024))])
         mono_bad = b"a body that is not the digest"
         seq(f"oci uploads refused {who}", who, [
             ("POST", "/v2/opub/mono/blobs/uploads/?digest=notadigest", octet, mono_bad),
@@ -909,7 +915,9 @@ def run(root, binary, out_path, profdir=None):
     with open(out_path, "w") as f:
         json.dump(result, f, indent=1)
     errors = sum(1 for a in answers for x in a["steps"] if x.get("status", 0) >= 500)
-    say(f"{steps_sent} requests in {len(answers)} sequences, {errors} answered 5xx; "
+    closed = sum(1 for a in answers for x in a["steps"] if x.get("status", 1) == 0)
+    say(f"{steps_sent} requests in {len(answers)} sequences, {errors} answered 5xx, "
+        f"{closed} closed unanswered; "
         f"masked {mask.counts}; in {out_path}")
 
 
