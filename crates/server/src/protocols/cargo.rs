@@ -8,19 +8,29 @@
 
 use std::sync::Arc;
 
-use axum::body::Body;
-use axum::extract::Request;
-use axum::http::{HeaderValue, Method, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use http::{HeaderValue, Method, StatusCode, header};
 use pkgpod_cargo::{VersionMeta, index_file, version_path};
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Version};
+use pkgpod_proto::body::{self, Request, Response};
 use serde_json::{Value, json};
 
 use pkgpod_proto::{Caller, Role};
 
+/// A status, no body.
+fn bare(st: StatusCode) -> Response {
+    let mut r = Response::new(body::empty());
+    *r.status_mut() = st;
+    r
+}
+
 fn reply(st: StatusCode, v: Value) -> Response {
-    let mut r = (st, axum::Json(v)).into_response();
+    let mut r = bare(st);
+    *r.body_mut() = body::full(serde_json::to_vec(&v).expect("a JSON value"));
+    r.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
     r.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     r
@@ -128,7 +138,6 @@ pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
                 return not_found();
             };
             let file = format!("{name}-{vers}.crate");
-            let req = req.map(pkgpod_proto::body::boxed);
             app.serve_counted(
                 &a.repo.name,
                 "",
@@ -138,7 +147,6 @@ pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
                 req,
             )
             .await
-            .map(Body::new)
         }
         (["api", "v1", "crates", name, "owners"], true) => {
             // Owners are pkgpod's rights: who may write to the registry.
@@ -243,13 +251,13 @@ fn text(req: &Request, ctype: &'static str, body: String) -> Response {
         .and_then(|x| x.to_str().ok())
         .is_some_and(|x| pkgpod_proto::cache::inm_matches(x, &etag))
     {
-        return StatusCode::NOT_MODIFIED.into_response();
+        return bare(StatusCode::NOT_MODIFIED);
     }
     let len = body.len();
     let mut resp = Response::new(if req.method() == Method::HEAD {
-        Body::empty()
+        body::empty()
     } else {
-        Body::from(body)
+        body::full(body)
     });
     let h = resp.headers_mut();
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static(ctype));
@@ -262,7 +270,7 @@ fn text(req: &Request, ctype: &'static str, body: String) -> Response {
 }
 
 async fn publish(app: &Arc<dyn Host>, a: &Ask, req: Request) -> Response {
-    let body = match axum::body::to_bytes(req.into_body(), pkgpod_cargo::MAX_PUBLISH).await {
+    let body = match body::to_bytes(req.into_body(), pkgpod_cargo::MAX_PUBLISH).await {
         Ok(b) => b,
         Err(_) => {
             return err(
