@@ -730,7 +730,10 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
                 ),
             );
         }
-        return crate::protocols::go::read(app, &served.repo, version, &rel, req).await;
+        let req = req.map(pkgpod_proto::body::boxed);
+        return crate::protocols::go::read(app, &served.repo, version, &rel, req)
+            .await
+            .map(axum::body::Body::new);
     }
     // A dnf repository file per RPM group: <address><group>.repo.
     if served.repo.format == "rpm"

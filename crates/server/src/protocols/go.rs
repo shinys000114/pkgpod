@@ -8,24 +8,28 @@
 
 use std::sync::Arc;
 
-use axum::body::Body;
-use axum::extract::Request;
-use axum::http::{HeaderValue, Method, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use http::{HeaderValue, Method, StatusCode, header};
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Version};
+use pkgpod_proto::body::{self, Request, Response};
 use pkgpod_proto::host::Host;
 
 fn not_found() -> Response {
-    (StatusCode::NOT_FOUND, "not found\n").into_response()
+    let mut r = Response::new(body::full("not found\n"));
+    *r.status_mut() = StatusCode::NOT_FOUND;
+    r.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    r
 }
 
 fn text(req: &Request, ctype: &'static str, body: String) -> Response {
     let len = body.len();
     let mut r = Response::new(if req.method() == Method::HEAD {
-        Body::empty()
+        body::empty()
     } else {
-        Body::from(body)
+        body::full(body)
     });
     let h = r.headers_mut();
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static(ctype));
@@ -109,7 +113,6 @@ pub async fn read(
                 return not_found();
             };
             let name = format!("{ver}.{ext}");
-            let req = req.map(pkgpod_proto::body::boxed);
             let mut r = app
                 .serve_counted(
                     &repo.name,
@@ -119,8 +122,7 @@ pub async fn read(
                     &name,
                     req,
                 )
-                .await
-                .map(Body::new);
+                .await;
             if ext == "mod" {
                 r.headers_mut().insert(
                     header::CONTENT_TYPE,
