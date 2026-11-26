@@ -8,6 +8,8 @@ import calendar
 import gzip
 import hashlib
 import io
+import json
+import os
 import re
 import tarfile
 import time
@@ -503,7 +505,32 @@ def limits(c, who):
         ("GET", "/gempub/names", {}, None)])
 
 
+def seed_tokens(c):
+    """The seed's plaintext tokens (ident: token), from the file the
+    seed keeps them in, beside its fixtures: core.TOKENS is filled from
+    it only once the run starts, after the corpus is made."""
+    path = os.path.join(os.path.dirname(c.fx), "tokens.json")
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"gems: the seed's tokens ({path}): {e}")
+
+
 def writes_end(c):
+    # gem push sends a user's key alone too: a token of writer's that
+    # writes (gempub only), and one that only reads (gempriv).
+    tok = seed_tokens(c)
+    wt, rt = {"Authorization": tok["wtoken"]}, {"Authorization": tok["rtoken"]}
+    c.seq("gems push raw user token anon", "anon", [
+        ("POST", "/gempub" + API, dict(OCTET, **wt), gem("raw-utok", "1.0.0")),
+        ("GET", "/gempub/info/raw-utok", {}, None),
+        ("DELETE", "/gempub" + YANK, dict(FORM, **wt), b"gem_name=raw-utok&version=1.0.0"),
+        ("POST", "/gempriv" + API, dict(OCTET, **wt), gem("raw-utok", "1.0.0")),
+        ("POST", "/gempriv" + API, dict(OCTET, **rt), gem("raw-utok", "1.0.0")),
+        ("DELETE", "/gempriv" + YANK, dict(FORM, **rt), b"gem_name=hello-pk&version=1.0.0"),
+        ("GET", "/gempub/info/raw-utok", {}, None),
+        ("GET", "/gempub/names", {}, None)])
     # gem push sends its key alone, not as Basic or Bearer; a key that is
     # none; a write from another site's page.
     ra = {"Authorization": PTOKEN}
@@ -539,7 +566,7 @@ def after(c, who):
     add = c.add
     for rel in ("/", "/names", "/versions", "/info/w-writer", "/info/yank-me", "/info/hello-pk",
                 "/info/p-writer", "/info/o-writer", "/info/t-writer", "/info/u-writer",
-                "/info/raw-tok", "/specs.4.8.gz", "/latest_specs.4.8.gz",
+                "/info/raw-tok", "/info/raw-utok", "/specs.4.8.gz", "/latest_specs.4.8.gz",
                 "/prerelease_specs.4.8.gz", "/gems/", f"{Q}/", "/@first/versions"):
         add(f"after gems gempub{rel} {who}", who, "GET", f"/gempub{rel}")
     for repo in ("gempriv", "gemempty"):
