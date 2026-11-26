@@ -37,7 +37,9 @@ import tarfile
 import threading
 import time
 
-MGMT, SERVE, UP = 29090, 29091, 29099
+MGMT, SERVE, UP, UPB = 29090, 29091, 29099, 29098
+TOOL = hashlib.sha256(open(os.path.abspath(__file__), "rb").read()).hexdigest()[:16]
+INDEX = "application/vnd.oci.image.index.v1+json"
 ADMIN_PW = "replay admin password"
 USERS = {
     # name: (password, {repo: role})
@@ -110,6 +112,22 @@ def app_image(repo):
 
 
 UP_MANIFEST = oci_manifest(UP_CONFIG, [UP_LAYER])
+UP_CONFIG2 = b'{"architecture":"arm64","os":"linux"}'
+UP_MANIFEST2 = oci_manifest(UP_CONFIG2, [UP_LAYER])
+
+
+def oci_index(children):
+    """An image index of (manifest bytes, architecture)."""
+    return json.dumps({
+        "schemaVersion": 2,
+        "mediaType": INDEX,
+        "manifests": [{"mediaType": "application/vnd.oci.image.manifest.v1+json",
+                       "digest": blob_digest(m), "size": len(m),
+                       "platform": {"architecture": a, "os": "linux"}} for m, a in children],
+    }, separators=(",", ":"), sort_keys=True).encode()
+
+
+UP_INDEX = oci_index([(UP_MANIFEST, "amd64"), (UP_MANIFEST2, "arm64")])
 UP_FILES = {
     "/files/a.img": b"upstream file a\n",
     "/files/dir/b.img": b"upstream file b\n" * 100,
@@ -125,15 +143,15 @@ def upstream_answer(method, path):
     m = re.fullmatch(r"/v2/up/hello/manifests/([^/]+)", path)
     if m:
         ref = m.group(1)
-        if ref in ("1", blob_digest(UP_MANIFEST)):
-            return 200, {
-                "Content-Type": oci,
-                "Docker-Content-Digest": blob_digest(UP_MANIFEST),
-            }, UP_MANIFEST
+        for names, body, ct in ((("1", blob_digest(UP_MANIFEST)), UP_MANIFEST, oci),
+                                (("2-arm", blob_digest(UP_MANIFEST2)), UP_MANIFEST2, oci),
+                                (("multi", blob_digest(UP_INDEX)), UP_INDEX, INDEX)):
+            if ref in names:
+                return 200, {"Content-Type": ct, "Docker-Content-Digest": blob_digest(body)}, body
         return 404, {"Content-Type": "application/json"}, b'{"errors":[{"code":"MANIFEST_UNKNOWN"}]}'
     m = re.fullmatch(r"/v2/up/hello/blobs/(sha256:[0-9a-f]{64})", path)
     if m:
-        for b in (UP_LAYER, UP_CONFIG):
+        for b in (UP_LAYER, UP_CONFIG, UP_CONFIG2):
             if blob_digest(b) == m.group(1):
                 return 200, {
                     "Content-Type": "application/octet-stream",
@@ -154,8 +172,22 @@ class Upstream(http.server.BaseHTTPRequestHandler):
     log = []
 
     def handle_one(self, head_only):
-        st, hd, body = upstream_answer(self.command, self.path.split("?")[0])
-        Upstream.log.append([self.command, self.path])
+        path = self.path.split("?")[0]
+        auth = self.headers.get("Authorization", "")
+        bearer = getattr(self.server, "bearer", False)
+        Upstream.log.append([self.server.server_port, self.command, self.path,
+                             auth.split(" ")[0] if auth else "-"])
+        if bearer and path == "/token":
+            st, hd, body = 200, {"Content-Type": "application/json"}, \
+                b'{"token":"stub-token","expires_in":300}'
+        elif bearer and path.startswith("/v2") and auth != "Bearer stub-token":
+            st, hd, body = 401, {
+                "Content-Type": "application/json",
+                "WWW-Authenticate": f'Bearer realm="http://127.0.0.1:{UPB}/token",'
+                                    'service="stub",scope="repository:up/hello:pull"',
+            }, b'{"errors":[{"code":"UNAUTHORIZED"}]}'
+        else:
+            st, hd, body = upstream_answer(self.command, path)
         self.send_response(st)
         for k, v in hd.items():
             self.send_header(k, v)
@@ -174,12 +206,35 @@ class Upstream(http.server.BaseHTTPRequestHandler):
         pass
 
 
-def start_upstream():
-    Upstream.log = []
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", UP), Upstream)
-    t = threading.Thread(target=srv.serve_forever, daemon=True)
-    t.start()
+def start_stub(port, bearer):
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), Upstream)
+    srv.bearer = bearer
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
+
+
+class Stubs:
+    """The upstream stubs: open (UP) and asking for a Bearer token (UPB)."""
+
+    def __init__(self):
+        Upstream.log = []
+        self.up = {"open": start_stub(UP, False), "bearer": start_stub(UPB, True)}
+
+    def stop(self, name):
+        srv = self.up.pop(name)
+        srv.shutdown()
+        srv.server_close()
+
+    def start(self, name):
+        self.up[name] = start_stub(UPB if name == "bearer" else UP, name == "bearer")
+
+    def shutdown(self):
+        for name in list(self.up):
+            self.stop(name)
+
+
+def start_upstream():
+    return Stubs()
 
 
 # ---- running pkgpod -------------------------------------------------------
@@ -365,6 +420,17 @@ def seed(root, binary):
             st = oci_push(f"{repo}/app", "1", layer, config, "admin")
             if st[-1] != 201:
                 raise SystemExit(f"push to {repo}: {st}")
+        # A second platform of opub's app, and an index of both.
+        layer, _, m1 = app_image("opub")
+        config2 = b'{"os":"linux","architecture":"arm64","repo":"opub"}'
+        st = oci_push("opub/app", "two", layer, config2, "admin")
+        if st[-1] != 201:
+            raise SystemExit(f"push two: {st}")
+        idx = oci_index([(m1, "amd64"), (oci_manifest(config2, [layer]), "arm64")])
+        st, _, body = request("PUT", "/v2/opub/app/manifests/multi",
+                              dict(auth_header("admin"), **{"Content-Type": INDEX}), idx)
+        if st != 201:
+            raise SystemExit(f"index push: {st} {body[:200]}")
         # A referrer of opub's app:1, and a second tag.
         st = oci_push("opub/app", "sig", b"a signature", b'{"kind":"sig"}', "admin",
                       subject=app_image("opub")[2])
@@ -379,6 +445,10 @@ def seed(root, binary):
             raise SystemExit(f"push to oroot: {st}")
         p.cli("repo", "create", "oproxy", "-f", "oci", "-k", "proxy", "-s",
               f"upstream=http://127.0.0.1:{UP}/up", "-s", "public=true")
+        # One whose upstream asks for a token, asked again each time.
+        p.cli("repo", "create", "oproxy2", "-f", "oci", "-k", "proxy", "-s",
+              f"upstream=http://127.0.0.1:{UPB}/up", "-s", "public=true", "-s",
+              "metadata_minutes=0")
         p.cli("repo", "create", "ogroup", "-f", "oci", "-k", "group", "-s",
               "members=opub,opriv,oproxy", "-s", "public=false")
         # A files proxy of the stub.
@@ -400,7 +470,7 @@ def seed(root, binary):
     with open(os.path.join(s, "SEED.json"), "w") as f:
         json.dump({"binary": subprocess.run([p.bin, "--version"], capture_output=True,
                                             text=True).stdout.strip(),
-                   "made": int(time.time())}, f)
+                   "made": int(time.time()), "tool": TOOL}, f)
     say(f"seed in {s}")
 
 
@@ -472,7 +542,14 @@ def corpus(fx):
                 f"/v2/{repo}/app/blobs/{blob_digest(layer)}")
             add(f"oci {repo} blob range {who}", who, "GET",
                 f"/v2/{repo}/app/blobs/{blob_digest(layer)}", {"Range": "bytes=3-12"})
-        for repo in ("oproxy", "ogroup"):
+        for repo in ("oproxy", "oproxy2"):
+            for rel in (f"/hello/manifests/{blob_digest(UP_MANIFEST)}",
+                        f"/hello/blobs/{blob_digest(UP_CONFIG)}", "/hello/manifests/multi",
+                        f"/hello/manifests/{blob_digest(UP_MANIFEST2)}"):
+                add(f"oci {repo}{rel} {who}", who, "GET", f"/v2/{repo}{rel}", oci_accept)
+        for rel in ("/app/manifests/multi", "/app/manifests/two"):
+            add(f"oci opub{rel} {who}", who, "GET", f"/v2/opub{rel}", oci_accept)
+        for repo in ("oproxy", "oproxy2", "ogroup"):
             add(f"oci {repo}/hello {who}", who, "GET", f"/v2/{repo}/hello/manifests/1", oci_accept)
             add(f"oci {repo}/hello HEAD {who}", who, "HEAD", f"/v2/{repo}/hello/manifests/1",
                 oci_accept)
@@ -488,6 +565,13 @@ def corpus(fx):
         add(f"files proxy b range {who}", who, "GET", "/fproxy/dir/b.img", {"Range": "bytes=5-20"})
         add(f"files proxy nope {who}", who, "GET", "/fproxy/nope.img")
         add(f"host index {who}", who, "GET", "/")
+    # A proxy whose upstream is gone: what it kept, and what it did not.
+    out.append({"id": "stub bearer stops", "who": "anon", "steps": [("STUB", "stop bearer", {}, None)]})
+    for who in ("anon", "writer"):
+        for rel in ("/hello/manifests/1", f"/hello/blobs/{blob_digest(UP_LAYER)}",
+                    "/hello/manifests/2-arm", "/hello/manifests/multi"):
+            add(f"oci gone oproxy2{rel} {who}", who, "GET", f"/v2/oproxy2{rel}", oci_accept)
+    out.append({"id": "stub bearer starts", "who": "anon", "steps": [("STUB", "start bearer", {}, None)]})
     # Writes, by each identity.
     with open(os.path.join(fx, "later_2.0_amd64.deb"), "rb") as f:
         later = f.read()
@@ -537,6 +621,22 @@ def corpus(fx):
             ("GET", "{loc}", {}, None),
             ("DELETE", "{loc}", {}, None),
             ("GET", "{loc}", {}, None)])
+        seq(f"oci refused manifests {who}", who, [
+            ("PUT", "/v2/opub/bad/manifests/x", mt, b"not json"),
+            ("PUT", "/v2/opub/bad/manifests/y", mt,
+             oci_manifest(b"no such config", [b"no such layer"])),
+            ("PUT", f"/v2/opub/bad/manifests/{blob_digest(b'other')}", mt, manifest)])
+        seq(f"oci digest mismatch {who}", who, [
+            ("POST", "/v2/opub/mm/blobs/uploads/", {}, None),
+            ("PATCH", "{loc}", octet, b"some bytes"),
+            ("PUT", "{loc}?digest=" + blob_digest(b"other bytes"), {}, None)])
+        seq(f"oci chunk out of order {who}", who, [
+            ("POST", "/v2/opub/ooo/blobs/uploads/", {}, None),
+            ("PATCH", "{loc}", dict(octet, **{"Content-Range": "5-9"}), b"12345"),
+            ("PATCH", "{loc}", dict(octet, **{"Content-Range": "0-4"}), b"12345"),
+            ("PATCH", "{loc}", dict(octet, **{"Content-Range": "9-12"}), b"6789")])
+        seq(f"oci delete a child of an index {who}", who, [
+            ("DELETE", f"/v2/opub/app/manifests/{blob_digest(app_image('opub')[2])}", {}, None)])
         seq(f"oci deletes {who}", who, [
             ("DELETE", f"/v2/opub/w/manifests/{blob_digest(manifest)}", {}, None),
             ("DELETE", f"/v2/opub/app/blobs/{blob_digest(app_image('opub')[0])}", {}, None),
@@ -677,6 +777,11 @@ def run(root, binary, out_path):
             loc = None
             got = []
             for method, path, headers, body in entry["steps"]:
+                if method == "STUB":
+                    what, name = path.split()
+                    getattr(up, what)(name)
+                    got.append({"stub": path})
+                    continue
                 if "{loc}" in path:
                     if not loc:
                         got.append({"skipped": "no Location before"})
@@ -710,7 +815,8 @@ def run(root, binary, out_path):
         os.rename(s, live)
         os.rename(held, s)
     bv = subprocess.run([p.bin, "--version"], capture_output=True, text=True).stdout.strip()
-    result = {"binary": bv, "seed": seed_info, "requests": steps_sent, "answers": answers,
+    result = {"binary": bv, "tool": TOOL, "seed": seed_info, "requests": steps_sent,
+              "answers": answers,
               "upstream": Upstream.log, "state": state, "masked": mask.counts}
     with open(out_path, "w") as f:
         json.dump(result, f, indent=1)
@@ -721,6 +827,14 @@ def run(root, binary, out_path):
 
 def diff(a_path, b_path):
     a, b = json.load(open(a_path)), json.load(open(b_path))
+    # Only runs of the same tool on the same seed compare.
+    for k in ("tool", "seed"):
+        if a.get(k) != b.get(k) or a.get(k) is None:
+            print(f"not comparable: {k} {a.get(k)} against {b.get(k)}")
+            return 2
+    if a["seed"].get("tool") != TOOL:
+        print(f"the seed was made by tool {a['seed'].get('tool')}, this is {TOOL}: seed again")
+        return 2
     bad = 0
     if a["requests"] != b["requests"] or a["requests"] == 0:
         print(f"requests: {a['requests']} against {b['requests']}")
