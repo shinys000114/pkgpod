@@ -14,7 +14,7 @@ use pkgpod_engine::cache::CacheRow;
 use pkgpod_proto::body::{self, Body, Request, Response};
 use rusqlite::params;
 
-use super::{Caller, Fetch, Fetched, Host, State, Who};
+use super::{Caller, Fetch, Fetched, Host, Names, State, Who};
 use crate::App;
 use crate::serving::proxy;
 
@@ -54,9 +54,15 @@ pub fn who(app: &Arc<App>, caller: &crate::auth::Caller) -> Caller {
     })
 }
 
+impl Names for crate::routes::Table {
+    fn registry(&self, host: &str, name: &[String]) -> Option<(String, String)> {
+        crate::routes::Table::registry(self, host, name)
+    }
+}
+
 impl Host for App {
-    fn keep(&self, r: &RepoInfo, row: &CacheRow, began: Option<i64>) -> crate::Result<bool> {
-        proxy::keep(self, r, row, began)
+    fn keep(&self, r: &RepoInfo, row: &CacheRow, began: Option<i64>) -> Result<bool, String> {
+        proxy::keep(self, r, row, began).map_err(|e| e.to_string())
     }
 
     fn is_quiet(&self, repo: &str, path: &str) -> bool {
@@ -99,12 +105,12 @@ impl Host for App {
         store: Store,
         body: Body,
         limit: u64,
-    ) -> BoxFuture<'static, crate::Result<(Digest, u64)>> {
-        Box::pin(crate::serving::body_to_store(
-            store,
-            axum::body::Body::new(body),
-            limit,
-        ))
+    ) -> BoxFuture<'static, Result<(Digest, u64), String>> {
+        Box::pin(async move {
+            crate::serving::body_to_store(store, axum::body::Body::new(body), limit)
+                .await
+                .map_err(|e| e.to_string())
+        })
     }
 
     fn downloaded(&self, status: StatusCode, repo: &str, name: &str, version: &str) {
@@ -129,12 +135,8 @@ impl Host for App {
         &self.oci
     }
 
-    fn routes(&self) -> crate::Result<Arc<crate::routes::Table>> {
-        App::routes(self)
-    }
-
-    fn served(&self, repo: &str) -> crate::Result<crate::Served> {
-        App::served(self, repo)
+    fn repo(&self, name: &str) -> Option<RepoInfo> {
+        App::served(self, name).ok().map(|s| s.repo)
     }
 
     fn uploaded(&self, repo: &str, d: &Digest) -> bool {

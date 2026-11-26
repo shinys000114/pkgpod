@@ -170,12 +170,18 @@ pub trait Who: Send + Sync {
 /// The caller of a request.
 pub type Caller = Arc<dyn Who>;
 
+/// Which repository a registry's name is on a host, and the image in it
+/// (the rest of the name).
+pub trait Names: Send + Sync {
+    fn registry(&self, host: &str, name: &[String]) -> Option<(String, String)>;
+}
+
 /// What the registry's code asks of the server it runs in.
 pub trait Host: Send + Sync {
     /// Keeps a proxy's cache row, unless one was kept for its path
     /// after `began` or the proxy's upstream changed meanwhile; whether
     /// it was kept. Blocks.
-    fn keep(&self, r: &RepoInfo, row: &CacheRow, began: Option<i64>) -> crate::Result<bool>;
+    fn keep(&self, r: &RepoInfo, row: &CacheRow, began: Option<i64>) -> Result<bool, String>;
     /// Whether proxy `repo`'s upstream is quiet: it did not answer in
     /// time lately, and what is kept is served without asking it.
     fn is_quiet(&self, repo: &str, path: &str) -> bool;
@@ -206,7 +212,7 @@ pub trait Host: Send + Sync {
         store: pkgpod_base::store::Store,
         body: Body,
         limit: u64,
-    ) -> futures_util::future::BoxFuture<'static, crate::Result<(Digest, u64)>>;
+    ) -> futures_util::future::BoxFuture<'static, Result<(Digest, u64), String>>;
     /// `resp` answered a whole download of `name` `version` from `repo`
     /// (counted if it was served).
     fn downloaded(&self, status: StatusCode, repo: &str, name: &str, version: &str);
@@ -216,10 +222,8 @@ pub trait Host: Send + Sync {
     fn engine(&self) -> &pkgpod_engine::Engine;
     /// What the registry keeps in memory.
     fn state(&self) -> &State;
-    /// Where repositories are, by host and path.
-    fn routes(&self) -> crate::Result<Arc<crate::routes::Table>>;
-    /// A repository and its current version.
-    fn served(&self, repo: &str) -> crate::Result<crate::Served>;
+    /// A repository by its name.
+    fn repo(&self, name: &str) -> Option<RepoInfo>;
     /// Whether blob `d` was uploaded to `repo` (it may serve it before a
     /// manifest names it).
     fn uploaded(&self, repo: &str, d: &Digest) -> bool;
@@ -356,10 +360,10 @@ pub async fn handle(
     app: Arc<dyn Host>,
     caller: Caller,
     host: &str,
+    names: Arc<dyn Names>,
     rest: &[String],
     req: Request,
 ) -> Option<Response> {
-    let table = app.routes().ok()?;
     let method = req.method().clone();
     if rest.is_empty() {
         // The version check; docker logs in here.
@@ -379,7 +383,7 @@ pub async fn handle(
         ));
     };
     let name = name_segs.join("/");
-    let Some((repo, image)) = table.registry(host, &name_segs) else {
+    let Some((repo, image)) = names.registry(host, &name_segs) else {
         return Some(if caller.anonymous() {
             unauthorized()
         } else {
@@ -397,8 +401,7 @@ pub async fn handle(
             format!("{image:?} is not an image name"),
         ));
     }
-    let served = app.served(&repo).ok()?;
-    let r = served.repo;
+    let r = app.repo(&repo)?;
     let role = caller.role(&repo, r.setting_bool("public"));
     let writing = !matches!(method, Method::GET | Method::HEAD);
     let need = if writing { Role::Write } else { Role::Read };
@@ -431,12 +434,13 @@ pub async fn handle(
         if writing {
             return Some(read_only(&r.name));
         }
-        return Some(group(app, caller, host, r, name, image, target, req).await);
+        return Some(group(app, caller, host, names, r, name, image, target, req).await);
     }
     let cx = Ctx {
         app,
         caller,
         host: host.to_string(),
+        names,
         r,
         name,
         image,
@@ -503,6 +507,7 @@ struct Ctx {
     /// The host the request came to: a mount's `from` is a name of the
     /// same registry.
     host: String,
+    names: Arc<dyn Names>,
     r: RepoInfo,
     /// The name as the client gave it (Location headers).
     name: String,

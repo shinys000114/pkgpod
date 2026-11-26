@@ -132,12 +132,11 @@ pub(super) async fn start_upload(cx: &Ctx, req: Request) -> Response {
 }
 
 pub(super) async fn mount(cx: &Ctx, d: &Digest, from: &str) -> Option<Response> {
-    let table = cx.app.routes().ok()?;
     let segs: Vec<String> = from.split('/').map(String::from).collect();
     // `from` is a name on the same registry: the repository it names on
     // this host, as the request's own name is found (a registry at
     // another host's root does not hold it).
-    let src = table.registry(&cx.host, &segs).map(|x| x.0)?;
+    let src = cx.names.registry(&cx.host, &segs).map(|x| x.0)?;
     let src_r = cx.app.engine().repo(&src).ok()?;
     cx.caller.role(&src, src_r.setting_bool("public"))?;
     let (app, d2, src_r2) = (cx.app.clone(), *d, src_r.clone());

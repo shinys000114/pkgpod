@@ -406,6 +406,7 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
             app.clone(),
             crate::protocols::oci::who(&app, &caller),
             &host,
+            table.clone(),
             &rest,
             req.map(pkgpod_proto::body::boxed),
         )
