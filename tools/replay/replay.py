@@ -25,10 +25,14 @@ rules in RULES, each counted in the report.
                                         the runs reached, and those they did not
 
 Needs python3 (its standard library only) and dpkg-deb; nothing outside
-127.0.0.1. Ports 29090 (management), 29091 (serving), 29099 (upstream).
-The seed is made again after every change of the schema baseline (a
-build refuses data of another baseline). A format's serving code moves
-only once the corpus covers it.
+127.0.0.1. Ports from REPLAY_PORT_BASE (29090 if unset): the base
+(management), base+1 (serving), base+9 and base+8 (the upstream stubs,
+open and asking for a token). A seed is made at one base and holds it
+(the listener, the proxies' upstreams): a run at another is refused.
+Runs at other bases, each on its own ROOT, go on side by side. The seed
+is made again after every change of the schema baseline (a build
+refuses data of another baseline). A format's serving code moves only
+once the corpus covers it.
 """
 
 import base64
@@ -53,7 +57,17 @@ import threading
 import time
 import zipfile
 
-MGMT, SERVE, UP, UPB = 29090, 29091, 29099, 29098
+
+def port_base():
+    """REPLAY_PORT_BASE, 29090 if unset (see above)."""
+    v = os.environ.get("REPLAY_PORT_BASE", "29090")
+    if not re.fullmatch(r"[0-9]+", v) or not 1024 <= int(v) <= 65535 - 9:
+        raise SystemExit(f"REPLAY_PORT_BASE {v!r}: a port from 1024 to {65535 - 9}")
+    return int(v)
+
+
+PORT_BASE = port_base()
+MGMT, SERVE, UP, UPB = PORT_BASE, PORT_BASE + 1, PORT_BASE + 9, PORT_BASE + 8
 TOOL = hashlib.sha256(open(os.path.abspath(__file__), "rb").read()).hexdigest()[:16]
 INDEX = "application/vnd.oci.image.index.v1+json"
 ADMIN_PW = "replay admin password"
@@ -813,7 +827,7 @@ def seed(root, binary):
     with open(os.path.join(s, "SEED.json"), "w") as f:
         json.dump({"binary": subprocess.run([p.bin, "--version"], capture_output=True,
                                             text=True).stdout.strip(),
-                   "made": int(t) + 1, "tool": TOOL}, f)
+                   "made": int(t) + 1, "tool": TOOL, "port_base": PORT_BASE}, f)
     say(f"seed in {s}")
 
 
@@ -1955,6 +1969,14 @@ def built(binary):
 
 def run(root, binary, out_path, profdir=None):
     s = os.path.join(root, "seed")
+    # Before anything is copied or moved: a seed is run at its own ports.
+    seed_info = json.load(open(os.path.join(s, "SEED.json")))
+    if "port_base" not in seed_info:
+        raise SystemExit(f"the seed in {s} says no port base (an older tool's): seed again")
+    if seed_info["port_base"] != PORT_BASE:
+        raise SystemExit(f"the seed in {s} was made at port base {seed_info['port_base']}, "
+                         f"this run's is {PORT_BASE}: run with REPLAY_PORT_BASE="
+                         f"{seed_info['port_base']}, or seed again")
     # Answers are compared by the request's name: no two the same.
     entries = corpus(os.path.join(s, "fixtures"))
     names = set()
@@ -1966,7 +1988,6 @@ def run(root, binary, out_path, profdir=None):
     if os.path.exists(live):
         shutil.rmtree(live)
     shutil.copytree(s, live, symlinks=True)
-    seed_info = json.load(open(os.path.join(s, "SEED.json")))
     TOKENS.clear()
     TOKENS.update(json.load(open(os.path.join(s, "tokens.json"))))
     # The seed's paths are its own: the live copy takes its place.
