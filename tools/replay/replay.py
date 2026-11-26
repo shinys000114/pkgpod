@@ -1616,6 +1616,12 @@ def corpus(fx):
         for repo in ("opub", "opriv", "ogroup"):
             for rel in ("/w/tags/list", "/mono/tags/list", "/app/tags/list"):
                 add(f"after oci {repo}{rel} {who}", who, "GET", f"/v2/{repo}{rel}", oci_accept)
+        # npm search in pages, now that there are many packages: of all,
+        # and of a text several match.
+        for repo in ("npub", "npriv"):
+            for q in ("size=1", "size=1&from=1", "text=w-", "text=w-&size=2&from=1",
+                      "text=w-&size=2&from=4", "text=w-&from=99"):
+                add(f"after npm {repo} search {q} {who}", who, "GET", f"/{repo}/-/v1/search?{q}")
     # Requests made at random from a fixed seed, after the rest: some from
     # the formats' words, some the corpus's own a little changed.
     curated = list(out)
