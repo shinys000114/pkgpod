@@ -219,8 +219,15 @@ def broken(name):
     crc, = struct.unpack_from("<I", z, cj + 16)
     local, = struct.unpack_from("<I", z, cj + 42)
     nlen, elen = struct.unpack_from("<HH", z, local + 26)
+    # A local header's signature as the end record's comment, the last
+    # bytes of all.
+    tail = patched(z, eocd + 20, "<H", 4) + b"PK\x03\x04"
     return [
         patched(z, eocd + 16, "<I", len(z)),             # its directory cut off
+        patched(z, cj + 28, "<H", 0xffff),               # a name past the end
+        patched(z, cj + 20, "<I", 0x7fffffff),           # its data past the end
+        patched(tail, cj + 42, "<I", len(tail) - 4),     # a local header cut short
+
         patched(z, eocd + 16, "<I", 0),                  # not where it says
         patched(z, eocd + 10, "<H", 0xffff),             # zip64
         patched(z, cj + 8, "<H", flags | 1),             # encrypted
@@ -252,7 +259,11 @@ def writes(c, who):
             ("GET", f"/{repo}/packages.json", {}, None),
             ("GET", f"/{repo}/p2/{n}.json", {}, None),
             ("GET", f"/{repo}/files/{n}/1.0.0.zip", {}, None),
-            ("HEAD", f"/{repo}/files/{n}/1.0.0.zip", {}, None)])
+            ("HEAD", f"/{repo}/files/{n}/1.0.0.zip", {}, None),
+            # A second version of it.
+            ("PUT", f"/{repo}/upload?version=1.1.0", o,
+             composer_zip({"name": n, "description": f"again by {who}"})),
+            ("GET", f"/{repo}/p2/{n}.json", {}, None)])
     # Where the version comes from (the upload's, white space trimmed;
     # composer.json's when the upload gives none, or only white space),
     # which composer.json counts (the top one; else the one in a
@@ -285,6 +296,13 @@ def writes(c, who):
         + [("GET", "/phppub/packages.json", {}, None)]
         + [("GET", f"/phppub/p2/acme/{n}-{who}.json", {}, None) for n, _, _ in ups]
         + [("GET", f"/phppub/p2/acme/no-{who}.json", {}, None)])
+    # Stability words as composer spells them, each a version of its
+    # own.
+    v = f"acme/v-{who}"
+    seq(f"composer versions spelt {who}", who,
+        [("PUT", f"/phppub/v.zip?version={x}", o, composer_zip({"name": v, "description": x}))
+         for x in ("1.0.0-a1", "1.0.0-b2", "1.0.0-beta3", "1.0.0-pl1", "1.0.0-STABLE")]
+        + [("GET", f"/phppub/p2/{v}.json", {}, None)])
     # The seed's own zip again, at the version spelt otherwise: there
     # already, not another.
     seq(f"composer upload again {who}", who, [
@@ -337,6 +355,8 @@ def writes(c, who):
         ("?version=dev-main", composer_zip(named)),
         ("?version=1.0.0%2Bbuild5", composer_zip(named)),
         ("?version=1.0.0.0.0", composer_zip(named)),
+        ("?version=1.0.0-beta.x", composer_zip(named)),
+        ("?version=1.0.0-beta18446744073709551616", composer_zip(named)),
         ("", composer_zip(dict(named, version="1.0.0-dev"))),
         ("?foo=1", composer_zip(dict(named, version="1.0.0"))),
         ("?version=1.0.0&path=x", composer_zip(named)),
