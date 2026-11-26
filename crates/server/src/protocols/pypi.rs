@@ -12,11 +12,9 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use pkgpod_engine::tree::{Entry, Tree};
 use pkgpod_engine::{RepoInfo, Upload};
-use pkgpod_proto::host::Host as _;
+use pkgpod_proto::Caller;
+use pkgpod_proto::host::Host;
 use serde_json::json;
-
-use crate::App;
-use crate::auth::Caller;
 
 fn text(st: StatusCode, msg: impl Into<String>) -> Response {
     (st, msg.into()).into_response()
@@ -98,7 +96,7 @@ pub async fn index_page(
 /// twine's upload: a form with `:action=file_upload` and the file as
 /// `content`; the metadata fields are not trusted (the file's own are
 /// read), `sha256_digest` is checked when sent.
-pub async fn upload(app: Arc<App>, repo: RepoInfo, caller: Caller, req: Request) -> Response {
+pub async fn upload(app: Arc<dyn Host>, repo: RepoInfo, caller: Caller, req: Request) -> Response {
     let form = pkgpod_proto::form::Form::of(
         req.map(pkgpod_proto::body::boxed),
         crate::serving::MAX_UPLOAD,
@@ -164,16 +162,13 @@ pub async fn upload(app: Arc<App>, repo: RepoInfo, caller: Caller, req: Request)
             "sha256_digest does not match the file",
         );
     }
-    let (e, name, actor) = (
-        app.engine.clone(),
-        repo.name.clone(),
-        caller.name().to_string(),
-    );
-    let res = tokio::task::spawn_blocking(move || e.upload(&name, &up, &json!({}), &actor)).await;
+    let (app2, name, actor) = (app.clone(), repo.name.clone(), caller.name().to_string());
+    let res =
+        tokio::task::spawn_blocking(move || app2.engine().upload(&name, &up, &json!({}), &actor))
+            .await;
     match res {
         Ok(Ok(out)) => {
-            app.auth
-                .audit(caller.name(), "upload", &repo.name, &out.summary);
+            app.audit(caller.name(), "upload", &repo.name, &out.summary);
             text(StatusCode::OK, out.summary)
         }
         // twine --skip-existing looks for "already exists".

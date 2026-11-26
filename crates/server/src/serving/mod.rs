@@ -1017,7 +1017,8 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
                 deny(&caller)
             };
         }
-        return crate::protocols::pypi::upload(app, served.repo, caller, req).await;
+        let who = crate::protocols::who(&app, &caller);
+        return crate::protocols::pypi::upload(app, served.repo, who, req).await;
     }
     if method == Method::PUT {
         if role < Some(Role::Write) {
