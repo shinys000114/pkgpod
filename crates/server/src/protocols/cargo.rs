@@ -17,7 +17,7 @@ use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Version};
 use serde_json::{Value, json};
 
-use crate::auth::{Caller, Role};
+use pkgpod_proto::{Caller, Role};
 
 fn reply(st: StatusCode, v: Value) -> Response {
     let mut r = (st, axum::Json(v)).into_response();
@@ -66,7 +66,7 @@ pub struct Ask {
 
 pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
     if a.role.is_none() {
-        return if a.caller.user.is_none() {
+        return if a.caller.anonymous() {
             unauthorized()
         } else {
             not_found()
@@ -224,7 +224,7 @@ fn no_write(a: &Ask) -> Option<Response> {
     if a.role >= Some(Role::Write) {
         return None;
     }
-    Some(if a.caller.user.is_none() {
+    Some(if a.caller.anonymous() {
         unauthorized()
     } else {
         err(
@@ -373,7 +373,7 @@ impl Host for crate::App {
             .grants(Some(repo))
             .unwrap_or_default()
             .into_iter()
-            .filter(|g| g.role >= Role::Write)
+            .filter(|g| g.role >= crate::auth::Role::Write)
             .map(|g| g.subject)
             .collect()
     }

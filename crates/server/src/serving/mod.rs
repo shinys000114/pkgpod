@@ -969,8 +969,8 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
             labelled,
             rel,
             base: base_url,
-            caller,
-            role,
+            caller: crate::protocols::who(&app, &caller),
+            role: role.map(Into::into),
         };
         return crate::protocols::cargo::handle(app, ask, req).await;
     }
