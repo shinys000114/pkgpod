@@ -12,8 +12,7 @@ use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use pkgpod_engine::{RepoInfo, Upload};
 use pkgpod_proto::host::Host;
-
-use crate::auth::{Caller, Role};
+use pkgpod_proto::{Caller, Role};
 
 fn text(st: StatusCode, msg: impl Into<String>) -> Response {
     (
@@ -33,15 +32,15 @@ pub fn is_api(method: &Method, rel: &[String]) -> bool {
     )
 }
 
-pub async fn handle(
-    app: Arc<dyn Host>,
-    repo: RepoInfo,
-    caller: Caller,
-    role: Option<Role>,
-    req: Request,
-) -> Response {
-    if role < Some(Role::Write) {
-        if caller.user.is_none() {
+pub struct Ask {
+    pub repo: RepoInfo,
+    pub caller: Caller,
+    pub role: Option<Role>,
+}
+
+pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
+    if a.role < Some(Role::Write) {
+        if a.caller.anonymous() {
             let mut r = text(StatusCode::UNAUTHORIZED, "authentication required");
             r.headers_mut().insert(
                 header::WWW_AUTHENTICATE,
@@ -50,19 +49,19 @@ pub async fn handle(
             return r;
         }
         // Without a right: as if it were not there.
-        if role.is_none() {
+        if a.role.is_none() {
             return text(StatusCode::NOT_FOUND, "not found");
         }
         return text(
             StatusCode::FORBIDDEN,
-            format!("no write access to {}", repo.name),
+            format!("no write access to {}", a.repo.name),
         );
     }
-    let actor = caller.name().to_string();
+    let actor = a.caller.name().to_string();
     if req.method() == Method::POST {
         let (sha256, size) = match app
             .store_body(
-                repo.store(),
+                a.repo.store(),
                 pkgpod_proto::body::boxed(req.into_body()),
                 pkgpod_gems::MAX_GEM,
             )
@@ -76,7 +75,7 @@ pub async fn handle(
             size,
             filename: None,
         };
-        let (app2, name) = (app.clone(), repo.name.clone());
+        let (app2, name) = (app.clone(), a.repo.name.clone());
         let res = tokio::task::spawn_blocking(move || {
             app2.engine()
                 .upload(&name, &up, &serde_json::json!({}), &actor)
@@ -110,7 +109,7 @@ pub async fn handle(
     } else {
         format!("{version}-{platform}")
     };
-    let (app2, name) = (app.clone(), repo.name.clone());
+    let (app2, name) = (app.clone(), a.repo.name.clone());
     let (g, f) = (gem.clone(), full.clone());
     let res = tokio::task::spawn_blocking(move || {
         app2.engine()

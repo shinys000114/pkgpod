@@ -781,7 +781,12 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
             .await;
     }
     if served.repo.format == "gems" && crate::protocols::gems::is_api(&method, &rel) {
-        return crate::protocols::gems::handle(app, served.repo, caller, role, req).await;
+        let ask = crate::protocols::gems::Ask {
+            repo: served.repo,
+            caller: crate::protocols::who(&app, &caller),
+            role: role.map(Into::into),
+        };
+        return crate::protocols::gems::handle(app, ask, req).await;
     }
     if served.repo.format == "swift" {
         if role.is_none() && caller.user.is_some() {
