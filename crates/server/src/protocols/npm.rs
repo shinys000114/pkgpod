@@ -18,7 +18,6 @@ use pkgpod_engine::{RepoInfo, Version};
 use pkgpod_npm::{Packages, VersionMeta, tag_path, tarball_name, version_path};
 use serde_json::{Value, json};
 
-use crate::App;
 use pkgpod_proto::{Caller, Role};
 
 fn reply(st: StatusCode, v: Value) -> Response {
@@ -56,6 +55,24 @@ fn split_name(rel: &[String]) -> Option<(String, &[String])> {
     }
 }
 
+/// What npm's registry asks of the server it runs in, besides what
+/// every format does.
+pub trait Host: pkgpod_proto::host::Host {
+    /// The version `label` names in `repo`, if it is there.
+    fn labelled(&self, repo: &str, label: &str) -> Option<Version>;
+    /// Answers a request for tarball `name` of `repo`, stored at `file`
+    /// (`sha`), as stored files are served (ranges, validators), and
+    /// counts it.
+    fn serve_tarball<'a>(
+        &'a self,
+        repo: &'a str,
+        file: std::path::PathBuf,
+        sha: pkgpod_base::Digest,
+        name: &'a str,
+        req: Request,
+    ) -> futures_util::future::BoxFuture<'a, Response>;
+}
+
 pub struct Ask {
     pub repo: RepoInfo,
     pub current: Option<Version>,
@@ -66,7 +83,7 @@ pub struct Ask {
     pub role: Option<Role>,
 }
 
-pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
+pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
     let method = req.method().clone();
     let reading = method == Method::GET || method == Method::HEAD;
     // Reading first; what changes the repository asks for write itself.
@@ -92,7 +109,7 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
             ([l, label, rest @ ..], m)
                 if l == "label" && (*m == Method::GET || *m == Method::HEAD) =>
             {
-                let Ok(v) = app.labelled(&a.repo.name, label) else {
+                let Some(v) = app.labelled(&a.repo.name, label) else {
                     return not_found();
                 };
                 let base = format!("{}-/label/{label}/", a.base);
@@ -124,7 +141,7 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
                 let here = a
                     .current
                     .as_ref()
-                    .map(|v| pkgpod_npm::rev(&name, &packages(&app, v, &name)));
+                    .map(|v| pkgpod_npm::rev(&name, &packages(&*app, v, &name)));
                 if here.as_deref() != Some(*r) {
                     return err(
                         StatusCode::CONFLICT,
@@ -207,13 +224,17 @@ fn no_write(a: &Ask) -> Option<Response> {
 }
 
 /// The packages of the version (one package's subtree only).
-fn packages(app: &App, v: &Version, pkg: &str) -> Packages {
-    let leaves = app.engine.objects().walk(&v.root, pkg).unwrap_or_default();
+fn packages(app: &dyn Host, v: &Version, pkg: &str) -> Packages {
+    let leaves = app
+        .engine()
+        .objects()
+        .walk(&v.root, pkg)
+        .unwrap_or_default();
     Packages::of(&leaves)
 }
 
 async fn read(
-    app: &Arc<App>,
+    app: &Arc<dyn Host>,
     r: &RepoInfo,
     v: Option<Version>,
     rel: &[String],
@@ -233,7 +254,7 @@ async fn read(
         [] => {
             let (app2, name2, base2) = (app.clone(), name.clone(), base.to_string());
             let doc = tokio::task::spawn_blocking(move || {
-                pkgpod_npm::packument(&name2, &packages(&app2, &v, &name2), &base2)
+                pkgpod_npm::packument(&name2, &packages(&*app2, &v, &name2), &base2)
             })
             .await
             .ok()
@@ -247,7 +268,7 @@ async fn read(
                 .headers()
                 .get(header::IF_NONE_MATCH)
                 .and_then(|x| x.to_str().ok())
-                .is_some_and(|x| crate::serving::inm_matches(x, &etag))
+                .is_some_and(|x| pkgpod_proto::cache::inm_matches(x, &etag))
             {
                 return StatusCode::NOT_MODIFIED.into_response();
             }
@@ -281,24 +302,14 @@ async fn read(
                 return not_found();
             }
             let entry = app
-                .engine
+                .engine()
                 .objects()
                 .resolve(&v.root, &version_path(&name, ver));
             let Ok(Some(Entry::Blob { sha256, .. })) = entry else {
                 return not_found();
             };
-            crate::serving::serve_counted(
-                app,
-                &r.name,
-                "",
-                &r.store().path(&sha256),
-                &sha256,
-                file,
-                None,
-                false,
-                req,
-            )
-            .await
+            app.serve_tarball(&r.name, r.store().path(&sha256), sha256, file, req)
+                .await
         }
         _ => not_found(),
     }
@@ -306,8 +317,8 @@ async fn read(
 
 /// npm search: packages whose name, description or keywords hold every
 /// word asked, each with its latest version.
-async fn search(app: &Arc<App>, a: &Ask, query: &str) -> Response {
-    let q = crate::serving::query_params(query);
+async fn search(app: &Arc<dyn Host>, a: &Ask, query: &str) -> Response {
+    let q = pkgpod_proto::query::params(query);
     let s = |k: &str| q.get(k).and_then(Value::as_str).unwrap_or("").to_string();
     let words: Vec<String> = s("text")
         .to_lowercase()
@@ -321,7 +332,7 @@ async fn search(app: &Arc<App>, a: &Ask, query: &str) -> Response {
     };
     let app2 = app.clone();
     let found = tokio::task::spawn_blocking(move || {
-        let leaves = app2.engine.objects().walk(&v.root, "").unwrap_or_default();
+        let leaves = app2.engine().objects().walk(&v.root, "").unwrap_or_default();
         let p = Packages::of(&leaves);
         let mut out = Vec::new();
         for (name, versions) in &p.versions {
@@ -379,7 +390,7 @@ enum Change {
 
 /// A packument put back: each version's deprecation as it says; with
 /// `unpublish`, the versions it no longer has are removed.
-async fn update(app: &Arc<App>, a: &Ask, name: &str, doc: Value, unpublish: bool) -> Response {
+async fn update(app: &Arc<dyn Host>, a: &Ask, name: &str, doc: Value, unpublish: bool) -> Response {
     let Some(sent) = doc.get("versions").and_then(Value::as_object).cloned() else {
         return err(StatusCode::BAD_REQUEST, "no versions in the document");
     };
@@ -393,7 +404,7 @@ async fn update(app: &Arc<App>, a: &Ask, name: &str, doc: Value, unpublish: bool
         name.to_string(),
     );
     let res = tokio::task::spawn_blocking(move || {
-        let have = packages(&app2, &cur, &name2);
+        let have = packages(&*app2, &cur, &name2);
         let Some(versions) = have.versions.get(&name2) else {
             return Err(pkgpod_engine::Error::NotFound(format!("no {name2}")));
         };
@@ -423,15 +434,15 @@ async fn update(app: &Arc<App>, a: &Ask, name: &str, doc: Value, unpublish: bool
         if ops.is_empty() {
             return Ok(None);
         }
-        let f = app2.engine.format("npm")?.clone();
-        let out = app2.engine.change(&r, &actor, |cx, e| {
+        let f = app2.engine().format("npm")?.clone();
+        let out = app2.engine().change(&r, &actor, |cx, e| {
             let mut said = Vec::new();
             for (op, p) in &ops {
                 said.push(f.op(cx, op, p, e)?);
             }
             Ok(said.join("; "))
         })?;
-        app2.auth.audit(&actor, "npm", &r, &out.summary);
+        app2.audit(&actor, "npm", &r, &out.summary);
         Ok(Some(out.summary))
     })
     .await;
@@ -446,7 +457,7 @@ async fn update(app: &Arc<App>, a: &Ask, name: &str, doc: Value, unpublish: bool
 /// Unpublishes a version (`Some`) or the whole package; a version
 /// already gone is fine (npm deletes its tarball after putting the
 /// packument back without it).
-async fn remove(app: &Arc<App>, a: &Ask, name: &str, version: Option<String>) -> Response {
+async fn remove(app: &Arc<dyn Host>, a: &Ask, name: &str, version: Option<String>) -> Response {
     let (app2, r, actor, name2) = (
         app.clone(),
         a.repo.name.clone(),
@@ -454,14 +465,14 @@ async fn remove(app: &Arc<App>, a: &Ask, name: &str, version: Option<String>) ->
         name.to_string(),
     );
     let res = tokio::task::spawn_blocking(move || {
-        let f = app2.engine.format("npm")?.clone();
+        let f = app2.engine().format("npm")?.clone();
         let p = json!({"package": name2, "version": version.clone().unwrap_or_default()});
         match app2
-            .engine
+            .engine()
             .change(&r, &actor, |cx, e| f.op(cx, "unpublish", &p, e))
         {
             Ok(out) => {
-                app2.auth.audit(&actor, "unpublish", &r, &out.summary);
+                app2.audit(&actor, "unpublish", &r, &out.summary);
                 Ok(())
             }
             Err(pkgpod_engine::Error::NotFound(_)) if version.is_some() => Ok(()),
@@ -477,7 +488,7 @@ async fn remove(app: &Arc<App>, a: &Ask, name: &str, version: Option<String>) ->
     }
 }
 
-async fn publish(app: &Arc<App>, a: &Ask, name: &str, body: axum::body::Bytes) -> Response {
+async fn publish(app: &Arc<dyn Host>, a: &Ask, name: &str, body: axum::body::Bytes) -> Response {
     let (app2, r, actor, name2) = (
         app.clone(),
         a.repo.clone(),
@@ -498,7 +509,7 @@ async fn publish(app: &Arc<App>, a: &Ask, name: &str, body: axum::body::Bytes) -
             integrity: p.integrity.clone(),
             time: pkgpod_base::now(),
         };
-        let out = app2.engine.change(&r.name, &actor, |_, e| {
+        let out = app2.engine().change(&r.name, &actor, |_, e| {
             let at = version_path(&p.name, &p.version);
             if e.get(&at)?.is_some() {
                 return Err(pkgpod_engine::Error::Conflict(format!(
@@ -525,7 +536,7 @@ async fn publish(app: &Arc<App>, a: &Ask, name: &str, body: axum::body::Bytes) -
         });
         match out {
             Ok(o) => {
-                app2.auth.audit(&actor, "publish", &r.name, &o.summary);
+                app2.audit(&actor, "publish", &r.name, &o.summary);
                 Ok(o.summary)
             }
             Err(pkgpod_engine::Error::Conflict(m)) => Err((StatusCode::FORBIDDEN, m)),
@@ -545,7 +556,7 @@ async fn publish(app: &Arc<App>, a: &Ask, name: &str, body: axum::body::Bytes) -
 
 /// `/-/package/<name>/dist-tags[/<tag>]`: list, set (the body is the
 /// version as a JSON string), remove.
-async fn dist_tags(app: &Arc<App>, a: &Ask, rest: &[String], req: Request) -> Response {
+async fn dist_tags(app: &Arc<dyn Host>, a: &Ask, rest: &[String], req: Request) -> Response {
     let Some((name, tail)) = split_name(rest) else {
         return not_found();
     };
@@ -556,7 +567,7 @@ async fn dist_tags(app: &Arc<App>, a: &Ask, rest: &[String], req: Request) -> Re
                 return not_found();
             };
             let (app2, n2) = (app.clone(), name.clone());
-            let p = tokio::task::spawn_blocking(move || packages(&app2, &v, &n2))
+            let p = tokio::task::spawn_blocking(move || packages(&*app2, &v, &n2))
                 .await
                 .unwrap_or_default();
             match p.tags.get(&name) {
@@ -597,9 +608,9 @@ async fn dist_tags(app: &Arc<App>, a: &Ask, rest: &[String], req: Request) -> Re
                 a.caller.name().to_string(),
             );
             let res = tokio::task::spawn_blocking(move || {
-                let r = app2.engine.repo(&repo)?;
-                let f = app2.engine.format(&r.format)?.clone();
-                app2.engine
+                let r = app2.engine().repo(&repo)?;
+                let f = app2.engine().format(&r.format)?.clone();
+                app2.engine()
                     .change(&repo, &actor, |cx, e| f.op(cx, op, &params, e))
             })
             .await;
@@ -611,5 +622,24 @@ async fn dist_tags(app: &Arc<App>, a: &Ask, rest: &[String], req: Request) -> Re
             }
         }
         _ => not_found(),
+    }
+}
+
+impl Host for crate::App {
+    fn labelled(&self, repo: &str, label: &str) -> Option<Version> {
+        crate::App::labelled(self, repo, label).ok()
+    }
+
+    fn serve_tarball<'a>(
+        &'a self,
+        repo: &'a str,
+        file: std::path::PathBuf,
+        sha: pkgpod_base::Digest,
+        name: &'a str,
+        req: Request,
+    ) -> futures_util::future::BoxFuture<'a, Response> {
+        Box::pin(async move {
+            crate::serving::serve_counted(self, repo, "", &file, &sha, name, None, false, req).await
+        })
     }
 }
