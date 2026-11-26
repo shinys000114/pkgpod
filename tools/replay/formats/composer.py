@@ -9,10 +9,11 @@ import calendar
 import io
 import json
 import re
+import struct
 import time
 import zipfile
 
-from core import auth_header, request
+from core import IDENTS, auth_header, request
 
 NAME = "composer"
 # The paths of Composer's answers, which may hold the run's times (a
@@ -21,6 +22,10 @@ NAME = "composer"
 TIMES = r"/php(pub|priv|empty)(/|$)"
 
 OCTET = {"Content-Type": "application/octet-stream"}
+# The largest package taken in, and the largest composer.json (the
+# format's MAX_ZIP and MAX_JSON).
+MAX_ZIP = 512 << 20
+MAX_JSON = 1 << 20
 
 
 def zip_of(members, method=zipfile.ZIP_DEFLATED):
@@ -185,6 +190,196 @@ def reads(c, who):
                 {"Authorization": cred})
 
 
+def central(z, name):
+    """Where member `name`'s entry of zip `z`'s central directory is."""
+    eocd = z.rindex(b"PK\x05\x06")
+    count, _, at = struct.unpack_from("<HII", z, eocd + 10)
+    for _ in range(count):
+        nlen, elen, clen = struct.unpack_from("<HHH", z, at + 28)
+        if z[at + 46:at + 46 + nlen] == name.encode():
+            return at
+        at += 46 + nlen + elen + clen
+    raise SystemExit(f"no {name} in the zip")
+
+
+def patched(z, at, fmt, *values):
+    """`z` with `values` packed as `fmt` at `at`."""
+    b = bytearray(z)
+    struct.pack_into(fmt, b, at, *values)
+    return bytes(b)
+
+
+def broken(name):
+    """A zip of `name` 1.0.0 broken in each way the server's zip reader
+    tells apart."""
+    z = composer_zip({"name": name, "version": "1.0.0"})
+    eocd = z.rindex(b"PK\x05\x06")
+    cj = central(z, "composer.json")
+    flags, = struct.unpack_from("<H", z, cj + 8)
+    crc, = struct.unpack_from("<I", z, cj + 16)
+    local, = struct.unpack_from("<I", z, cj + 42)
+    nlen, elen = struct.unpack_from("<HH", z, local + 26)
+    return [
+        patched(z, eocd + 16, "<I", len(z)),             # its directory cut off
+        patched(z, eocd + 16, "<I", 0),                  # not where it says
+        patched(z, eocd + 10, "<H", 0xffff),             # zip64
+        patched(z, cj + 8, "<H", flags | 1),             # encrypted
+        z.replace(b"src/Hello.php", b"src/Hell\xff.php"),  # a name not UTF-8
+        patched(z, cj + 42, "<I", 1),                    # no local header
+        patched(z, cj + 10, "<H", 12),                   # bzip2
+        patched(z, cj + 16, "<I", crc ^ 1),              # its CRC
+        patched(z, local + 30 + nlen + elen, "<B", 0xff),  # not deflate
+    ]
+
+
+def padded(composer, size):
+    """`composer` as a composer.json of `size` bytes (white space after
+    it)."""
+    j = json.dumps(composer).encode()
+    return j + b" " * (size - len(j))
+
+
+def writes(c, who):
+    seq = c.seq
+    o = OCTET
+    # Composer: an upload to each hosted repository (to any path of it,
+    # its body a zip), read back.
+    for repo in ("phppub", "phppriv"):
+        n = f"acme/w-{who}"
+        seq(f"composer upload {repo} {who}", who, [
+            ("PUT", f"/{repo}/upload?version=1.0.0", o,
+             composer_zip({"name": n, "description": f"by {who}"})),
+            ("GET", f"/{repo}/packages.json", {}, None),
+            ("GET", f"/{repo}/p2/{n}.json", {}, None),
+            ("GET", f"/{repo}/files/{n}/1.0.0.zip", {}, None),
+            ("HEAD", f"/{repo}/files/{n}/1.0.0.zip", {}, None)])
+    # Where the version comes from (the upload's, white space trimmed;
+    # composer.json's when the upload gives none, or only white space),
+    # which composer.json counts (the top one; else the one in a
+    # directory, the first of two), a member stored, a file name given;
+    # an upload to the repository's address and to a label not there
+    # (both to the current version). Read back.
+    other = json.dumps({"name": f"acme/no-{who}"}).encode()
+    ups = [
+        ("sp", "/upload?version=%201.2.0%20", composer_zip({"name": f"acme/sp-{who}"})),
+        ("fn", "/upload?filename=x.zip&version=1.0.0", composer_zip({"name": f"acme/fn-{who}"})),
+        ("top", "/top.zip", composer_zip({"name": f"acme/top-{who}", "version": "v2.0"})),
+        ("qv", "/upload?version=",
+         composer_zip({"name": f"acme/qv-{who}", "version": " 3.0.0-RC1 "})),
+        ("bl", "/upload?version=%09", composer_zip({"name": f"acme/bl-{who}", "version": "4.0.0"})),
+        ("two", "/two.zip?version=1.0.0",
+         composer_zip({"name": f"acme/two-{who}"}, files={"pkg/composer.json": other})),
+        ("deep", "/deep.zip?version=1.0.0",
+         composer_zip({"name": f"acme/deep-{who}"}, top="deep/",
+                      files={"deep/sub/composer.json": other})),
+        ("dirs", "/dirs.zip?version=1.0.0",
+         zip_of({"b/composer.json": json.dumps({"name": f"acme/dirs-{who}"}).encode(),
+                 "a/composer.json": other})),
+        ("st", "/stored.zip?version=1.0.0",
+         composer_zip({"name": f"acme/st-{who}"}, method=zipfile.ZIP_STORED)),
+        ("addr", "?version=1.0.0", composer_zip({"name": f"acme/addr-{who}"})),
+        ("at", "/@nope/at.zip?version=1.0.0", composer_zip({"name": f"acme/at-{who}"})),
+    ]
+    seq(f"composer upload variants {who}", who,
+        [("PUT", f"/phppub{rel}", o, body) for _, rel, body in ups]
+        + [("GET", "/phppub/packages.json", {}, None)]
+        + [("GET", f"/phppub/p2/acme/{n}-{who}.json", {}, None) for n, _, _ in ups]
+        + [("GET", f"/phppub/p2/acme/no-{who}.json", {}, None)])
+    # The seed's own zip again, at the version spelt otherwise: there
+    # already, not another.
+    seq(f"composer upload again {who}", who, [
+        ("PUT", "/phppub/upload?version=v1.0.0", o, HELLO_1),
+        ("PUT", "/phppub/again.zip?version=1.0.0-stable", o, HELLO_1),
+        ("GET", "/phppub/p2/acme/hello.json", {}, None)])
+    # An upload to a label's address goes to the current version.
+    seq(f"composer upload to a label {who}", who, [
+        ("PUT", "/phppub/@first/l.zip?version=1.0.0", o, composer_zip({"name": f"acme/l-{who}"})),
+        ("GET", f"/phppub/@first/p2/acme/l-{who}.json", {}, None),
+        ("GET", f"/phppub/p2/acme/l-{who}.json", {}, None)])
+    # What no one may do: delete, post, write from another site's page
+    # or to a path that is not safe.
+    post = composer_zip({"name": f"acme/post-{who}"})
+    seq(f"composer refused methods {who}", who, [
+        ("DELETE", f"/phppub{ZIP}", {}, None),
+        ("DELETE", "/phppub/acme/hello/1.0.0.zip", {}, None),
+        ("POST", "/phppub/upload?version=1.0.0", o, post),
+        ("DELETE", f"/phppriv{ZIP}", {}, None),
+        ("POST", "/phppriv/upload?version=1.0.0", o, post),
+        ("PUT", "/phppub/o.zip?version=1.0.0", dict(o, Origin="http://elsewhere.example"),
+         composer_zip({"name": f"acme/o-{who}"})),
+        ("PUT", "/phppub/%2e%2e/o.zip?version=1.0.0", o, composer_zip({"name": f"acme/o-{who}"})),
+        ("GET", f"/phppub{ZIP}", {}, None),
+        ("GET", f"/phppub/p2/acme/post-{who}.json", {}, None),
+        ("GET", f"/phppub/p2/acme/o-{who}.json", {}, None)])
+    # What an upload refuses: no zip, no composer.json where it is
+    # looked for, one that is no JSON, of no name or a bad one, no
+    # version or a bad one, a parameter an upload does not take,
+    # another zip at a version there (however spelt), a composer.json
+    # over its limit, a zip broken in each way.
+    x = f"acme/x-{who}"
+    named = {"name": x}
+    hello = composer_zip({"name": "acme/hello", "description": f"another, by {who}"})
+    bad = [
+        ("", b"not a zip"),
+        ("", zip_of({"src/x.php": b"<?php\n"})),
+        ("", zip_of({"a/b/composer.json": json.dumps(dict(named, version="1.0.0")).encode()})),
+        ("", zip_of({"xcomposer.json": json.dumps(dict(named, version="1.0.0")).encode()})),
+        ("", composer_zip(b"not json")),
+        ("?version=1.0.0", composer_zip({"description": "no name"})),
+        ("?version=1.0.0", composer_zip({"name": "Acme/x"})),
+        ("?version=1.0.0", composer_zip({"name": "acme"})),
+        ("?version=1.0.0", composer_zip({"name": "acme/-x"})),
+        ("?version=1.0.0", composer_zip({"name": 42})),
+        ("", composer_zip(named)),
+        ("", composer_zip(dict(named, version=1))),
+        ("?version=%20", composer_zip(named)),
+        ("?version=1.x", composer_zip(named)),
+        ("?version=dev-main", composer_zip(named)),
+        ("?version=1.0.0%2Bbuild5", composer_zip(named)),
+        ("?version=1.0.0.0.0", composer_zip(named)),
+        ("", composer_zip(dict(named, version="1.0.0-dev"))),
+        ("?foo=1", composer_zip(dict(named, version="1.0.0"))),
+        ("?version=1.0.0&path=x", composer_zip(named)),
+        ("?version=v1.0.0", hello),
+        ("?version=1.0", hello),
+        ("?version=1.0.0", composer_zip(padded(named, MAX_JSON + 1))),
+    ] + [("", z) for z in broken(x)]
+    seq(f"composer uploads refused {who}", who,
+        [("PUT", f"/phppub/r.zip{q}", o, body) for q, body in bad]
+        + [("GET", "/phppub/p2/acme/hello.json", {}, None),
+           ("GET", f"/phppub/p2/{x}.json", {}, None)])
+
+
+def limits(c, who):
+    # A package over the format's limit, and a composer.json at its
+    # limit (one more byte is refused above), by one who may (the body
+    # is read).
+    if who == "writer":
+        c.add("composer upload over the limit writer", who, "PUT",
+              "/phppub/huge.zip?version=1.0.0", OCTET, b"\0" * (MAX_ZIP + 1))
+        c.seq("composer composer.json at its limit writer", who, [
+            ("PUT", "/phppub/big.zip?version=1.0.0", OCTET,
+             composer_zip(padded({"name": "acme/big"}, MAX_JSON))),
+            ("GET", "/phppub/p2/acme/big.json", {}, None)])
+
+
+def after(c, who):
+    # What Composer's writes left: each identity's package in phppub
+    # and phppriv, acme/hello after its zip was uploaded again, the
+    # label's version as it was.
+    for repo in ("phppub", "phppriv"):
+        for rel in ("/packages.json", "/p2/acme/hello.json", "/@first/packages.json",
+                    "/files/acme/w-writer/1.0.0.zip"):
+            c.add(f"after composer {repo}{rel} {who}", who, "GET", f"/{repo}{rel}")
+        for w in IDENTS:
+            c.add(f"after composer {repo}/p2/acme/w-{w}.json {who}", who, "GET",
+                  f"/{repo}/p2/acme/w-{w}.json")
+        c.add(f"after composer {repo} HEAD {who}", who, "HEAD",
+              f"/{repo}/files/acme/w-writer/1.0.0.zip")
+        c.add(f"after composer {repo} range {who}", who, "GET",
+              f"/{repo}/files/acme/w-admin/1.0.0.zip", {"Range": "bytes=0-9"})
+
+
 # A time in a p2 answer: the upload's, of the second.
 STAMP = re.compile(rb'"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)\+00:00"')
 
@@ -220,6 +415,9 @@ PARTS = [
     ("rtoken", 70, ["phppriv"]),
     ("publisher", 60, ["phppub"]),
     ("reads", 100, reads),
+    ("writes", 130, writes),
+    ("writes", 140, limits),
+    ("after", 50, after),
     # Composer keeps when each version was uploaded (served as its time
     # in p2/, "+00:00", kept in the tree too).
     ("rule", 140, ("composer times", "times (+00:00) at or after the seed in Composer answers "
