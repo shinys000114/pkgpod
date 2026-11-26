@@ -11,7 +11,8 @@ same PKGPOD_COMMIT. What still differs by time is masked by the named
 rules in RULES, each counted in the report.
 
     replay.py build [--cov] COMMIT OUT  a release build of COMMIT (git archive),
-                                        the commit in OUT.commit;
+                                        the commit and OUT's sha256 in
+                                        OUT.commit;
                                         --cov: instrumented for coverage
     replay.py seed ROOT BINARY          ROOT/seed: data made by BINARY
     replay.py run ROOT BINARY OUT.json [PROFDIR]
@@ -1940,15 +1941,16 @@ def kept(st, headers, body):
 
 def built(binary):
     """Which build `binary` is: its sha256, and the commit build() wrote
-    next to it (None if none is there)."""
+    next to it if it wrote it for these bytes (None if not: none is
+    there, or another binary was put in its place)."""
     with open(binary, "rb") as f:
         sha = hashlib.sha256(f.read()).hexdigest()
     try:
         with open(binary + ".commit") as f:
-            commit = f.read().strip()
-    except OSError:
-        commit = None
-    return {"path": binary, "sha256": sha, "commit": commit}
+            commit, of = f.read().split()
+    except (OSError, ValueError):
+        commit = of = None
+    return {"path": binary, "sha256": sha, "commit": commit if of == sha else None}
 
 
 def run(root, binary, out_path, profdir=None):
@@ -2139,8 +2141,12 @@ def build(commit, out, cov=False):
     subprocess.run(["cargo", "build", "--release", "--locked", "--offline", "-p", "pkgpod"],
                    cwd=work, env=env, check=True)
     shutil.copy(os.path.join(env["CARGO_TARGET_DIR"], "release", "pkgpod"), out)
+    # With the binary's sha256, so that a binary put there later is not
+    # taken for this commit's.
+    with open(out, "rb") as f:
+        sha = hashlib.sha256(f.read()).hexdigest()
     with open(out + ".commit", "w") as f:
-        f.write(rev + "\n")
+        f.write(f"{rev} {sha}\n")
     say(f"{out}: {commit} ({rev})")
 
 
