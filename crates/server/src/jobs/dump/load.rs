@@ -839,6 +839,75 @@ mod tests {
         assert!(e.to_string().contains("--storage inside=PATH"), "{e}");
     }
 
+    /// A dump the last build before the schema baseline made (the bridge
+    /// build, from data of every kind but keys) is taken in whole by
+    /// this one: kept in the repository, so that every edit of the
+    /// baseline still takes in what the old servers export.
+    #[test]
+    fn a_dump_of_the_build_before_the_baseline_is_taken_in() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/bridge-dump");
+        let made_by = json_file(&fixture.join("DUMP.json"))["made_by"].clone();
+        assert!(made_by.as_str().unwrap().contains("cfa57e1"), "{made_by}");
+        let d = tempfile::tempdir().unwrap();
+        let new = open(&d.path().join("new"));
+        let opt = ImportOptions {
+            storages: vec![("hdd".into(), d.path().join("hdd"))],
+            ..Default::default()
+        };
+        let rep = import(&new, &fixture, &opt, &mut |_| {}).unwrap();
+        assert!(rep.failed.is_empty(), "{:?}", rep.failed);
+        assert!(rep.problems.is_empty(), "{:?}", rep.problems);
+        assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
+        let names: Vec<&str> = rep.repos.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["cloud", "files", "py"]);
+        for r in &rep.repos {
+            if r.kind == "hosted" {
+                assert_eq!(r.same_root, Some(true), "{}", r.name);
+            }
+        }
+        let py = rep.repos.iter().find(|r| r.name == "py").unwrap();
+        // The wheel and its metadata file, which only the entry names.
+        assert_eq!((py.entries, py.linked + py.copied), (1, 2));
+        assert!(
+            rep.remake[0].starts_with("pkgpod trust add publish "),
+            "{:?}",
+            rep.remake
+        );
+        assert!(
+            rep.remake[1].starts_with("2 API token(s)"),
+            "{:?}",
+            rep.remake
+        );
+        // People and rights by name; a password that still logs in.
+        assert!(
+            new.auth
+                .login("alice", "fixture password 1", "api")
+                .is_some()
+        );
+        let grants = new.auth.grants(None).unwrap();
+        assert_eq!(grants.len(), 2, "{grants:?}");
+        assert_eq!(
+            crate::serving::stats::days_kept(&new),
+            30,
+            "settings taken in"
+        );
+        // When files came in, the label, the pin.
+        let lines = super::super::tests::lines(&fixture.join("repos/files/tree.jsonl"));
+        let rows = new.engine.catalog_rows("files").unwrap();
+        for l in lines.iter().filter(|l| l.contains_key("added")) {
+            let row = rows.iter().find(|r| r.path == l["p"]).unwrap();
+            assert_eq!(json!(row.added), l["added"], "{}", row.path);
+        }
+        assert!(new.engine.resolve("files", "stable").is_ok());
+        assert!(
+            new.engine
+                .cache_get("cloud", "b.img")
+                .unwrap()
+                .unwrap()
+                .pinned
+        );
+    }
+
     /// A repository whose blobs are nowhere is not taken in, and the rest
     /// are.
     #[test]

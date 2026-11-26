@@ -100,12 +100,14 @@ store.
 One SQLite file, one writer and a few readers (`pkgpod_base::db::Db`).
 Each component owns its tables and brings an ordered list of
 migration steps (`schema.rs` in the engine and in the server); the
-`schema` table records how many of each are applied. Steps are only
-appended: a test pins the hash of every step.
+`schema` table records how many of each are applied and a digest of
+them, so a database whose steps were others is refused rather than
+opened. Before the first release the list is one baseline, edited in
+place; the release freezes it, and later steps are only appended.
 
 - Engine: `storages`, `repos` (name, format, kind, storage, settings as
   JSON, current version), `versions`, `labels`, `objects` (tree
-  objects), `catalog`, `cache` (proxy caches), `format_notes`.
+  objects), `catalog`, `cache` (proxy caches).
 - Server: `users`, `teams`, `team_members`, `grants`, `tokens`,
   `sessions`, `listeners`, `keys`, `settings` (server-wide), `audit`,
   `jobs`, `oci_uploads`, `downloads`, `badge_tokens`.

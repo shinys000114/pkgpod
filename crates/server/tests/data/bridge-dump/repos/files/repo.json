@@ -1,0 +1,35 @@
+{
+  "name": "files",
+  "format": "files",
+  "kind": "hosted",
+  "storage": "hdd",
+  "settings": {
+    "description": "",
+    "urls": [],
+    "public": true,
+    "keep_versions": 50,
+    "keep_days": 30,
+    "overwrite": false,
+    "cleanup_dirs": [],
+    "cleanup_keep_last": 0,
+    "cleanup_older_days": 0,
+    "cleanup_max": 50
+  },
+  "created": 1795666098,
+  "versions": 3,
+  "current": {
+    "seq": 3,
+    "root": "2dff11e88507c96ed6f70293ade123ec5d4211bdb3343fd5e82e7d6081688894",
+    "created": 1795666099,
+    "actor": "admin",
+    "summary": "added docs/b.txt"
+  },
+  "labels": [
+    {
+      "name": "stable",
+      "note": "",
+      "created": 1795666099,
+      "actor": "admin"
+    }
+  ]
+}

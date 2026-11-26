@@ -1,0 +1,10 @@
+[
+  {
+    "name": "hdd",
+    "path": "/srv/pkgpod-old/hdd"
+  },
+  {
+    "name": "main",
+    "path": "/srv/pkgpod-old/data/storages/main"
+  }
+]

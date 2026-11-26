@@ -1,0 +1,29 @@
+{
+  "format": 1,
+  "made_by": "0.0.0 (cfa57e1)",
+  "made": 1795666099,
+  "data_dir": "/srv/pkgpod-old/data",
+  "source_schema": {
+    "engine": 5,
+    "server": 12
+  },
+  "options": {
+    "blobs": "copy",
+    "tokens": false,
+    "downloads": false,
+    "audit": false
+  },
+  "repos": [
+    "cloud",
+    "files",
+    "py"
+  ],
+  "counts": {
+    "tokens": 2,
+    "entries": 4,
+    "cache_rows": 2,
+    "blobs": 6,
+    "bytes": 821
+  },
+  "missing": []
+}

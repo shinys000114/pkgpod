@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! The engine's tables.
+//!
+//! Until the first release they are one baseline, edited in place (a
+//! database made by an earlier edit is refused by its digest). The
+//! release freezes it; steps after it are only appended.
 
 use pkgpod_base::db::Db;
 
-const STEPS: &[&str] = &[
-    "
+const STEPS: &[&str] = &["
 CREATE TABLE storages (
     name TEXT PRIMARY KEY,
     path TEXT NOT NULL
@@ -42,11 +45,14 @@ CREATE TABLE labels (
     PRIMARY KEY (repo, name)
 );
 CREATE INDEX labels_version ON labels(version);
+-- Tree objects; a directory of more than 512 entries is stored in parts.
 CREATE TABLE objects (
     id BLOB PRIMARY KEY,
     data BLOB NOT NULL,
     created INTEGER NOT NULL
 ) WITHOUT ROWID;
+-- What the current versions hold, by path: packages, files; `added` is
+-- when the row came in (cleanup rules go by it).
 CREATE TABLE catalog (
     repo INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
     path TEXT NOT NULL,
@@ -55,29 +61,13 @@ CREATE TABLE catalog (
     extra TEXT NOT NULL,
     sha256 BLOB,
     size INTEGER NOT NULL,
+    added INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (repo, path)
 ) WITHOUT ROWID;
 CREATE INDEX catalog_name ON catalog(name);
-",
-    "
--- Directory objects over 512 entries are stored in parts (shards); a
--- pkgpod that does not know them must not open this data.
-CREATE TABLE format_notes (note TEXT PRIMARY KEY) WITHOUT ROWID;
-INSERT INTO format_notes VALUES ('directories in parts');
-",
-    // Downloads are counted by the file served: its catalog row by hash.
-    "
+-- Downloads are counted by the file served: its catalog row by hash.
 CREATE INDEX catalog_sha ON catalog(repo, sha256);
-",
-    // When a catalog row came in (cleanup rules go by it); rows already
-    // there count from their repository's current version, which is no
-    // older than they are.
-    "
-ALTER TABLE catalog ADD COLUMN added INTEGER NOT NULL DEFAULT 0;
-UPDATE catalog SET added = COALESCE((SELECT v.created FROM repos r JOIN versions v ON v.id = r.current WHERE r.id = catalog.repo), 0);
-",
-    // A proxy repository's cache.
-    "
+-- A proxy repository's cache.
 CREATE TABLE cache (
     repo INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
     path TEXT NOT NULL,
@@ -94,8 +84,7 @@ CREATE TABLE cache (
     version TEXT NOT NULL,
     PRIMARY KEY (repo, path)
 ) WITHOUT ROWID;
-",
-];
+"];
 
 pub fn migrate(db: &Db) -> pkgpod_base::Result<()> {
     db.migrate("engine", STEPS)
@@ -103,21 +92,41 @@ pub fn migrate(db: &Db) -> pkgpod_base::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    /// Steps are only ever appended: data made by one release is opened
-    /// by the next. Changing a step fails here; a new step adds its hash.
+    use super::STEPS;
+
+    /// None until the first release; the release sets it to the
+    /// baseline's hash (the failing test prints it). From then on the
+    /// baseline is frozen.
+    const RELEASED_BASELINE: Option<&str> = None;
+    /// Hashes of the steps appended after the release, in order.
+    const APPENDED: &[&str] = &[];
+
+    fn h(s: &str) -> String {
+        pkgpod_base::Digest::of(s.as_bytes()).hex()[..16].to_string()
+    }
+
     #[test]
-    fn steps_are_only_ever_appended() {
-        let want: &[&str] = &[
-            "74f2eb1383deb982",
-            "df4988794dabd0b4",
-            "a45564131072578a",
-            "773df03be3316758",
-            "d234a8679beab376",
-        ];
-        let got: Vec<String> = super::STEPS
-            .iter()
-            .map(|s| pkgpod_base::Digest::of(s.as_bytes()).hex()[..16].to_string())
-            .collect();
-        assert_eq!(got, want, "steps of the engine's schema changed");
+    fn baseline_frozen_once_released_and_steps_appended() {
+        match RELEASED_BASELINE {
+            None => assert_eq!(STEPS.len(), 1, "before the release, edit the baseline"),
+            Some(b) => assert_eq!(h(STEPS[0]), b, "the released baseline changed"),
+        }
+        let got: Vec<String> = STEPS[1..].iter().map(|s| h(s)).collect();
+        assert_eq!(
+            got, APPENDED,
+            "steps after the release are only ever appended"
+        );
+    }
+
+    #[test]
+    fn a_release_freezes_the_baseline() {
+        // 0.0.x is a development build.
+        if !env!("CARGO_PKG_VERSION").starts_with("0.0.") {
+            assert!(
+                RELEASED_BASELINE.is_some(),
+                "set RELEASED_BASELINE (baseline {}) before tagging",
+                h(STEPS[0])
+            );
+        }
     }
 }

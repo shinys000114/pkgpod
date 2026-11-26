@@ -257,13 +257,12 @@ the dependencies, or in `deny.toml` with the reason.
 
 1. Push `master` and wait until every job of `ci.yml` (check, msrv,
    deny, e2e, debian) has passed on the exact commit to be tagged.
-2. Decide what the release promises. From it on, a released schema
-   step is never changed (`STEPS` in both `schema.rs`): keep the steps
-   made before it, or fold them into one first step while no data
-   written by earlier builds has to be kept (deployments of such builds
-   then start from a new database and import their repositories
-   again). And whether `/api/v1` is under the same promise as the data,
-   or may still change (the last line of `CHANGELOG.md`'s section).
+2. Decide what the release promises. From it on, the schema baseline
+   (`STEPS[0]` in both `schema.rs`) is frozen and later steps are only
+   appended: set `RELEASED_BASELINE` in both files to the hash the
+   test `a_release_freezes_the_baseline` prints. And whether `/api/v1`
+   is under the same promise as the data, or may still change (the
+   last line of `CHANGELOG.md`'s section).
 3. `CHANGELOG.md`: the section complete, named for the version and
    dated; the Status line of `README.md`.
 4. Notices: `NOTICE` names what is shipped as it came (htmx, with its
@@ -334,9 +333,16 @@ AGPL-3.0-only` (or the comment syntax of its language).
 
 **The database.** Each component (engine, server) has its own ordered
 list of migrations (`STEPS` in `crates/core/engine/src/schema.rs` and
-`crates/server/src/schema.rs`). A released step is never changed;
-new ones are appended. A database with more steps than the binary knows
-is refused.
+`crates/server/src/schema.rs`). Until the first release there is one,
+the baseline, edited in place: a database made by an earlier edit is
+refused by the digest `schema` keeps of its steps, and is moved with
+`pkgpod admin export` (run by the build that made it) and `pkgpod admin
+import`. The test `a_dump_of_the_build_before_the_baseline_is_taken_in`
+takes in a dump the last build before the baseline made
+(`crates/server/tests/data/bridge-dump`); every edit keeps it passing.
+After the release the baseline is frozen and steps are only appended.
+A database with more steps than the binary knows is refused, and so is
+one whose steps were others.
 
 ## Adding a format
 

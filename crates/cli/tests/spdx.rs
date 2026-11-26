@@ -23,6 +23,8 @@ fn exempt(p: &str) -> bool {
         || p == "LICENSE"
         || p == "NOTICE"
         || p == ".gitignore"
+        // A dump kept as written (JSON has no comments).
+        || p.starts_with("crates/server/tests/data/bridge-dump/")
 }
 
 #[test]

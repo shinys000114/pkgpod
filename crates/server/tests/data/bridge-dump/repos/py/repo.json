@@ -1,0 +1,23 @@
+{
+  "name": "py",
+  "format": "pypi",
+  "kind": "hosted",
+  "storage": "main",
+  "settings": {
+    "description": "",
+    "urls": [],
+    "public": true,
+    "keep_versions": 50,
+    "keep_days": 30
+  },
+  "created": 1795666099,
+  "versions": 2,
+  "current": {
+    "seq": 2,
+    "root": "c48b60f65607205a89ab03a7bbf9ef46c75e042836edc121db54b45cefa0a7f3",
+    "created": 1795666099,
+    "actor": "admin",
+    "summary": "added Foo.Bar_baz 1.0 (foo_bar_baz-1.0-py3-none-any.whl)"
+  },
+  "labels": []
+}

@@ -2,11 +2,15 @@
 
 //! The server's tables: people and rights, serving listeners, signing
 //! keys and server-wide settings.
+//!
+//! Until the first release they are one baseline, edited in place (a
+//! database made by an earlier edit is refused by its digest, and moved
+//! with `admin export` and `admin import`). The release freezes it; steps
+//! after it are only appended.
 
 use pkgpod_base::db::Db;
 
-const STEPS: &[&str] = &[
-    "
+const STEPS: &[&str] = &["
 CREATE TABLE users (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
@@ -25,6 +29,7 @@ CREATE TABLE team_members (
     user INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     PRIMARY KEY (team, user)
 );
+CREATE INDEX team_members_user ON team_members(user);
 CREATE TABLE grants (
     repo TEXT NOT NULL,
     user INTEGER REFERENCES users(id) ON DELETE CASCADE,
@@ -45,6 +50,7 @@ CREATE TABLE tokens (
     created INTEGER NOT NULL,
     used INTEGER
 );
+CREATE INDEX tokens_user ON tokens(user);
 CREATE TABLE sessions (
     hash BLOB PRIMARY KEY,
     user INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -52,6 +58,7 @@ CREATE TABLE sessions (
     created INTEGER NOT NULL,
     expires INTEGER NOT NULL
 ) WITHOUT ROWID;
+CREATE INDEX sessions_user ON sessions(user);
 CREATE TABLE listeners (
     name TEXT PRIMARY KEY,
     addr TEXT NOT NULL,
@@ -59,11 +66,11 @@ CREATE TABLE listeners (
     key TEXT NOT NULL DEFAULT '',
     enabled INTEGER NOT NULL DEFAULT 1
 );
+-- Keys are kept by pkgpod (rpgp, files in the data directory).
 CREATE TABLE keys (
     name TEXT PRIMARY KEY,
     fingerprint TEXT NOT NULL,
-    homedir TEXT NOT NULL DEFAULT '',
-    passphrase_file TEXT NOT NULL DEFAULT ''
+    uid TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE settings (
     name TEXT PRIMARY KEY,
@@ -77,8 +84,7 @@ CREATE TABLE audit (
     target TEXT NOT NULL,
     detail TEXT NOT NULL
 );
-",
-    "
+CREATE INDEX audit_target ON audit(target, id);
 CREATE TABLE jobs (
     id INTEGER PRIMARY KEY,
     repo TEXT NOT NULL,
@@ -92,33 +98,14 @@ CREATE TABLE jobs (
     report TEXT
 );
 CREATE INDEX jobs_repo ON jobs(repo, id);
-",
-    "
-ALTER TABLE listeners ADD COLUMN proto TEXT NOT NULL DEFAULT 'http';
-ALTER TABLE listeners ADD COLUMN passive TEXT NOT NULL DEFAULT '';
-",
-    "
+CREATE INDEX jobs_active ON jobs(state) WHERE state IN ('queued', 'running');
 CREATE TABLE oci_uploads (
     repo TEXT NOT NULL,
     digest TEXT NOT NULL,
     created INTEGER NOT NULL,
     PRIMARY KEY (repo, digest)
 ) WITHOUT ROWID;
-",
-    // Keys are kept by pkgpod (rpgp), not in gpg homes.
-    "
-ALTER TABLE keys DROP COLUMN homedir;
-ALTER TABLE keys DROP COLUMN passphrase_file;
-ALTER TABLE keys ADD COLUMN uid TEXT NOT NULL DEFAULT '';
-",
-    // FTP is not served any more: its listeners go.
-    "
-DELETE FROM listeners WHERE proto = 'ftp';
-ALTER TABLE listeners DROP COLUMN proto;
-ALTER TABLE listeners DROP COLUMN passive;
-",
-    // Downloads by repository, day (days since 1970), package and version.
-    "
+-- Downloads by repository, day (days since 1970), package and version.
 CREATE TABLE downloads (
     repo TEXT NOT NULL,
     day INTEGER NOT NULL,
@@ -128,35 +115,38 @@ CREATE TABLE downloads (
     PRIMARY KEY (repo, day, name, version)
 ) WITHOUT ROWID;
 CREATE INDEX downloads_day ON downloads(day);
-",
-    // A repository's badge token: lets its badges be shown, nothing else.
-    "
+-- A repository's badge token: lets its badges be shown, nothing else.
 CREATE TABLE badge_tokens (
     repo TEXT PRIMARY KEY,
     token TEXT NOT NULL,
     created INTEGER NOT NULL
 );
-",
-    // Trusted publishing: which CI identities (claims of an OIDC token)
-    // get a short-lived token of which user, for which repositories.
-    "
+-- Trusted publishing: which CI identities (claims of an OIDC token) get
+-- a short-lived token of which user, for which repositories; a rule
+-- without a user gives publisher tokens (its repositories only), checked
+-- against the rule each time they are used.
 CREATE TABLE trust_rules (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
     issuer TEXT NOT NULL,
     audience TEXT NOT NULL,
     claims TEXT NOT NULL,
-    user INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    user INTEGER REFERENCES users(id) ON DELETE CASCADE,
     repos TEXT NOT NULL,
     write INTEGER NOT NULL,
     minutes INTEGER NOT NULL,
     created INTEGER NOT NULL,
     used INTEGER
 );
-",
-    // Outgoing webhooks: what happens (new versions, labels, jobs) sent
-    // to other services, each delivery kept with its outcome.
-    "
+CREATE TABLE publish_tokens (
+    hash BLOB PRIMARY KEY,
+    rule INTEGER NOT NULL REFERENCES trust_rules(id) ON DELETE CASCADE,
+    expires INTEGER NOT NULL,
+    created INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX publish_tokens_rule ON publish_tokens(rule);
+-- Outgoing webhooks: what happens (new versions, labels, jobs) sent to
+-- other services, each delivery kept with its outcome.
 CREATE TABLE webhooks (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
@@ -183,10 +173,8 @@ CREATE TABLE webhook_deliveries (
 );
 CREATE INDEX webhook_deliveries_hook ON webhook_deliveries(hook, id);
 CREATE INDEX webhook_deliveries_due ON webhook_deliveries(state, next_try);
-",
-    // A host's front page (its root, when no repository has it): a title
-    // and Markdown above and below the list of its repositories.
-    "
+-- A host's front page (its root, when no repository has it): a title and
+-- Markdown above and below the list of its repositories.
 CREATE TABLE host_pages (
     host TEXT PRIMARY KEY,
     title TEXT NOT NULL DEFAULT '',
@@ -195,37 +183,7 @@ CREATE TABLE host_pages (
     updated INTEGER NOT NULL,
     actor TEXT NOT NULL
 );
-",
-    // Trust rules without a user give publisher tokens: their
-    // repositories only, written to (or read), never more. The rules are
-    // made again with `user` optional (ids kept); a publisher token is
-    // checked against its rule each time it is used.
-    "
-CREATE TABLE trust_rules_new (
-    id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
-    issuer TEXT NOT NULL,
-    audience TEXT NOT NULL,
-    claims TEXT NOT NULL,
-    user INTEGER REFERENCES users(id) ON DELETE CASCADE,
-    repos TEXT NOT NULL,
-    write INTEGER NOT NULL,
-    minutes INTEGER NOT NULL,
-    created INTEGER NOT NULL,
-    used INTEGER
-);
-INSERT INTO trust_rules_new (id, name, issuer, audience, claims, user, repos, write, minutes, created, used)
-    SELECT id, name, issuer, audience, claims, user, repos, write, minutes, created, used FROM trust_rules;
-DROP TABLE trust_rules;
-ALTER TABLE trust_rules_new RENAME TO trust_rules;
-CREATE TABLE publish_tokens (
-    hash BLOB PRIMARY KEY,
-    rule INTEGER NOT NULL REFERENCES trust_rules(id) ON DELETE CASCADE,
-    expires INTEGER NOT NULL,
-    created INTEGER NOT NULL
-) WITHOUT ROWID;
-",
-];
+"];
 
 pub fn migrate(db: &Db) -> pkgpod_base::Result<()> {
     db.migrate("server", STEPS)
@@ -233,28 +191,41 @@ pub fn migrate(db: &Db) -> pkgpod_base::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    /// Steps are only ever appended: data made by one release is opened
-    /// by the next. Changing a step fails here; a new step adds its hash.
+    use super::STEPS;
+
+    /// None until the first release; the release sets it to the
+    /// baseline's hash (the failing test prints it). From then on the
+    /// baseline is frozen.
+    const RELEASED_BASELINE: Option<&str> = None;
+    /// Hashes of the steps appended after the release, in order.
+    const APPENDED: &[&str] = &[];
+
+    fn h(s: &str) -> String {
+        pkgpod_base::Digest::of(s.as_bytes()).hex()[..16].to_string()
+    }
+
     #[test]
-    fn steps_are_only_ever_appended() {
-        let want: &[&str] = &[
-            "57e254758c1921f6",
-            "9d8e6322d6a6c85d",
-            "9dade28c454c505b",
-            "4f91e61340d6bc43",
-            "ea67331ae65ecf81",
-            "af0a60b7120d6678",
-            "ecf508f3a5114520",
-            "c4eb88395a908cdd",
-            "fcc2c4368702bf38",
-            "bc20a95501f079e1",
-            "6c9cf89a642c0e1a",
-            "9d3a1cc5bb2cf4ed",
-        ];
-        let got: Vec<String> = super::STEPS
-            .iter()
-            .map(|s| pkgpod_base::Digest::of(s.as_bytes()).hex()[..16].to_string())
-            .collect();
-        assert_eq!(got, want, "steps of the server's schema changed");
+    fn baseline_frozen_once_released_and_steps_appended() {
+        match RELEASED_BASELINE {
+            None => assert_eq!(STEPS.len(), 1, "before the release, edit the baseline"),
+            Some(b) => assert_eq!(h(STEPS[0]), b, "the released baseline changed"),
+        }
+        let got: Vec<String> = STEPS[1..].iter().map(|s| h(s)).collect();
+        assert_eq!(
+            got, APPENDED,
+            "steps after the release are only ever appended"
+        );
+    }
+
+    #[test]
+    fn a_release_freezes_the_baseline() {
+        // 0.0.x is a development build.
+        if !env!("CARGO_PKG_VERSION").starts_with("0.0.") {
+            assert!(
+                RELEASED_BASELINE.is_some(),
+                "set RELEASED_BASELINE (baseline {}) before tagging",
+                h(STEPS[0])
+            );
+        }
     }
 }

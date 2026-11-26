@@ -228,6 +228,8 @@ pub fn restore(from: &Path, data_dir: &Path, log: &mut dyn FnMut(&str)) -> Resul
             from.display()
         )));
     }
+    // One of another schema is refused before anything is copied.
+    pkgpod_base::db::check_file(&from.join("pkgpod.db"))?;
     if data_dir.exists()
         && std::fs::read_dir(data_dir)
             .map_err(|e| io(data_dir, e))?

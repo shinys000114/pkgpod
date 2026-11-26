@@ -731,7 +731,12 @@ pkgpod settings --downloads-days 730   # server admins
 
 The database is brought forward when the server starts. An older pkgpod
 refuses data a newer one has written ("it was made by a newer pkgpod"),
-so make a backup before upgrading to be able to go back. Upgrade when no
+so make a backup before upgrading to be able to go back. Data of a build
+with another schema (a development build before the first release) is
+refused too ("made by a pkgpod with another database schema"): move it
+with `pkgpod admin export`, run by the build that made it, and `pkgpod
+admin import` into a new data directory, as under [Portable
+dumps](#portable-dumps). Upgrade when no
 job runs (`pkgpod jobs`): a restart interrupts them.
 
 With the package, install the new one (`apt install

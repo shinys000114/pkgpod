@@ -4,7 +4,9 @@
 
 The first release. From it on, data one release writes is opened by the
 next (schema steps are only appended), and configuration keeps its
-meaning.
+meaning. Data of the development builds before it is refused (their
+schema was one baseline, edited in place); it moves with `pkgpod admin
+export`, run by the build that made it, and `pkgpod admin import`.
 
 Formats:
 

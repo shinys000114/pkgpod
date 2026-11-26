@@ -1,0 +1,19 @@
+{
+  "name": "cloud",
+  "format": "files",
+  "kind": "proxy",
+  "storage": "hdd",
+  "settings": {
+    "upstream": "http://127.0.0.1:28199/",
+    "description": "",
+    "urls": [],
+    "public": true,
+    "metadata_minutes": 30,
+    "max_mib": 0,
+    "exclude": []
+  },
+  "created": 1795666099,
+  "versions": 0,
+  "current": null,
+  "labels": []
+}

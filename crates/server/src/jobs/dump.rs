@@ -306,7 +306,6 @@ pub const CARRIED: &[&str] = &[
 ];
 pub const LEFT_OUT: &[&str] = &[
     "schema",
-    "format_notes",
     "sessions",
     "jobs",
     "oci_uploads",

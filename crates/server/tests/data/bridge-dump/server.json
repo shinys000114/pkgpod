@@ -1,0 +1,117 @@
+{
+  "users": [
+    {
+      "name": "admin",
+      "password": "$argon2id$v=19$m=19456,t=2,p=1$hiyK4sjvVBjMuNvKbLVTmA$000M4d0ojP03tOZJtZG9MMPifDpSwr82RDKL0zJRF+M",
+      "admin": 1,
+      "disabled": 0,
+      "created": 1795666097
+    },
+    {
+      "name": "alice",
+      "password": "$argon2id$v=19$m=19456,t=2,p=1$FuBiu2YWo9E1Vx4DrFfx+A$orT9cRHnetE9bHh/YmHKeG2gfs6QfUwE1c7mbiuBkVw",
+      "admin": 0,
+      "disabled": 0,
+      "created": 1795666099
+    }
+  ],
+  "teams": [
+    {
+      "name": "dev",
+      "created": 1795666099
+    }
+  ],
+  "team_members": [
+    {
+      "team": "dev",
+      "user": "alice"
+    }
+  ],
+  "grants": [
+    {
+      "repo": "files",
+      "user": null,
+      "team": "dev",
+      "role": "write"
+    },
+    {
+      "repo": "py",
+      "user": "alice",
+      "team": null,
+      "role": "read"
+    }
+  ],
+  "trust_rules": [
+    {
+      "name": "publish",
+      "issuer": "https://token.actions.githubusercontent.com",
+      "audience": "pkgpod",
+      "claims": "{\"ref\":\"refs/heads/main\",\"repository\":\"example/project\",\"workflow_ref\":\"example/project/.github/workflows/publish.yml@*\"}",
+      "user": null,
+      "repos": "[\"files\"]",
+      "write": 1,
+      "minutes": 15,
+      "created": 1795666099,
+      "used": null
+    }
+  ],
+  "webhooks": [
+    {
+      "name": "hook",
+      "url": "https://hooks.example.invalid/in",
+      "kind": "json",
+      "secret": "fixture-secret",
+      "events": "[\"version\"]",
+      "repos": "[]",
+      "active": 1,
+      "created": 1795666099
+    }
+  ],
+  "host_pages": [
+    {
+      "host": "pkgs.example.invalid",
+      "title": "Packages",
+      "header": "# Hello\n",
+      "footer": "",
+      "updated": 1795666099,
+      "actor": "admin"
+    }
+  ],
+  "settings": [
+    {
+      "name": "console_url",
+      "value": "https://pkgs.example.invalid"
+    },
+    {
+      "name": "downloads_days",
+      "value": "30"
+    },
+    {
+      "name": "downloads_since",
+      "value": "20783"
+    },
+    {
+      "name": "jobs_days",
+      "value": "7"
+    },
+    {
+      "name": "listeners_initialized",
+      "value": "1"
+    },
+    {
+      "name": "webhooks.cursor",
+      "value": "{\"version\":2,\"label\":0,\"job_time\":0,\"job_ids\":[]}"
+    }
+  ],
+  "listeners": [
+    {
+      "name": "default",
+      "addr": "127.0.0.1:28191",
+      "cert": "",
+      "key": "",
+      "enabled": 1
+    }
+  ],
+  "badge_tokens": [],
+  "keys": []
+}
