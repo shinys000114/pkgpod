@@ -195,19 +195,20 @@ pub trait Host: pkgpod_proto::host::Host {
         sha: Digest,
         req: Request,
     ) -> futures_util::future::BoxFuture<'static, Response>;
-    /// `resp` answered a whole download of `name` `version` from `repo`
-    /// (counted if it was served).
+    /// A whole download of `name` `version` from `repo` was answered
+    /// with `status` (counted if it was served).
     fn downloaded(&self, status: StatusCode, repo: &str, name: &str, version: &str);
     /// What the registry keeps in memory.
     fn state(&self) -> &State;
     /// A repository by its name.
     fn repo(&self, name: &str) -> Option<RepoInfo>;
     /// Whether blob `d` was uploaded to `repo` (it may serve it before a
-    /// manifest names it).
+    /// manifest names it). Blocks.
     fn uploaded(&self, repo: &str, d: &Digest) -> bool;
-    /// Records that blob `d` was uploaded to `repo`.
+    /// Records that blob `d` was uploaded to `repo`. Blocks.
     fn record_upload(&self, repo: &str, d: &Digest);
     /// Drops what was recorded uploaded to `repo` (it is deleted).
+    /// Blocks.
     fn forget_uploads(&self, repo: &str);
 }
 
@@ -317,7 +318,8 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
     tokio::task::spawn_blocking(f).await.ok()
 }
 
-/// Handles `/v2/<rest>`, which [`claims`] said is the registry's.
+/// Handles `/v2/<rest>`, which the server's `claims` said is the
+/// registry's.
 pub async fn handle(
     app: Arc<dyn Host>,
     caller: Caller,

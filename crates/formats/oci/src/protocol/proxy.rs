@@ -166,7 +166,8 @@ pub(super) async fn proxy(
         );
     }
     let up = (upstream, image.to_string());
-    // A blocking client: made (and ever dropped) off the async threads.
+    // A blocking client: made off the async threads, then kept by the
+    // upstream (it goes with the registry's State).
     let (app2, name) = (app.clone(), r.name.clone());
     let reg = blocking(move || app2.state().upstream.ready(&name)).await;
     match reg {
