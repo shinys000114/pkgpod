@@ -17,7 +17,6 @@ use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Version};
 use serde_json::{Value, json};
 
-use crate::App;
 use crate::auth::{Caller, Role};
 
 fn reply(st: StatusCode, v: Value) -> Response {
@@ -44,6 +43,14 @@ fn unauthorized() -> Response {
     r
 }
 
+/// What cargo's registry asks of the server it runs in, besides what
+/// every format does.
+pub trait Host: pkgpod_proto::host::Host {
+    /// Who may write to `repo` (its grants of write and above, in their
+    /// order), named as grants name them: cargo's owners.
+    fn writers(&self, repo: &str) -> Vec<String>;
+}
+
 pub struct Ask {
     pub repo: RepoInfo,
     /// The version read: the current one, or a label's.
@@ -57,7 +64,7 @@ pub struct Ask {
     pub role: Option<Role>,
 }
 
-pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
+pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
     if a.role.is_none() {
         return if a.caller.user.is_none() {
             unauthorized()
@@ -97,7 +104,7 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
             };
             let (app2, name2) = (app.clone(), name.to_string());
             let lines = tokio::task::spawn_blocking(move || {
-                let leaves = app2.engine.objects().walk(&v.root, &name2).ok()?;
+                let leaves = app2.engine().objects().walk(&v.root, &name2).ok()?;
                 let vs = pkgpod_cargo::versions(&leaves);
                 (!vs.is_empty()).then(|| pkgpod_cargo::index_lines(&vs))
             })
@@ -114,25 +121,24 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
                 return not_found();
             };
             let entry = app
-                .engine
+                .engine()
                 .objects()
                 .resolve(&v.root, &version_path(name, vers));
             let Ok(Some(Entry::Blob { sha256, .. })) = entry else {
                 return not_found();
             };
             let file = format!("{name}-{vers}.crate");
-            crate::serving::serve_counted(
-                &app,
+            let req = req.map(pkgpod_proto::body::boxed);
+            app.serve_counted(
                 &a.repo.name,
                 "",
-                &a.repo.store().path(&sha256),
-                &sha256,
+                a.repo.store().path(&sha256),
+                sha256,
                 &file,
-                None,
-                false,
                 req,
             )
             .await
+            .map(Body::new)
         }
         (["api", "v1", "crates", name, "owners"], true) => {
             // Owners are pkgpod's rights: who may write to the registry.
@@ -141,7 +147,7 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
             };
             let lower = name.to_ascii_lowercase();
             if !matches!(
-                app.engine.objects().resolve(&v.root, &lower),
+                app.engine().objects().resolve(&v.root, &lower),
                 Ok(Some(Entry::Dir { .. }))
             ) {
                 return not_found();
@@ -153,12 +159,11 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
                     [json!({"id": 1, "login": "pkgpod", "name": "those who may write here"})];
                 return reply(StatusCode::OK, json!({ "users": users }));
             }
-            let grants = app.auth.grants(Some(&a.repo.name)).unwrap_or_default();
-            let users: Vec<Value> = grants
-                .iter()
-                .filter(|g| g.role >= Role::Write)
+            let users: Vec<Value> = app
+                .writers(&a.repo.name)
+                .into_iter()
                 .enumerate()
-                .map(|(i, g)| json!({"id": i + 1, "login": g.subject, "name": null}))
+                .map(|(i, w)| json!({"id": i + 1, "login": w, "name": null}))
                 .collect();
             reply(StatusCode::OK, json!({"users": users}))
         }
@@ -189,11 +194,11 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
             );
             let (name, vers, yank) = (name.to_string(), vers.to_string(), *op == "yank");
             let res = tokio::task::spawn_blocking(move || {
-                app2.engine
+                app2.engine()
                     .change(&r, &actor, |_, e| {
                         pkgpod_cargo::Cargo::yank(e, &name, &vers, yank)
                     })
-                    .inspect(|o| app2.auth.audit(&actor, "yank", &r, &o.summary))
+                    .inspect(|o| app2.audit(&actor, "yank", &r, &o.summary))
             })
             .await;
             match res {
@@ -236,7 +241,7 @@ fn text(req: &Request, ctype: &'static str, body: String) -> Response {
         .headers()
         .get(header::IF_NONE_MATCH)
         .and_then(|x| x.to_str().ok())
-        .is_some_and(|x| crate::serving::inm_matches(x, &etag))
+        .is_some_and(|x| pkgpod_proto::cache::inm_matches(x, &etag))
     {
         return StatusCode::NOT_MODIFIED.into_response();
     }
@@ -256,7 +261,7 @@ fn text(req: &Request, ctype: &'static str, body: String) -> Response {
     resp
 }
 
-async fn publish(app: &Arc<App>, a: &Ask, req: Request) -> Response {
+async fn publish(app: &Arc<dyn Host>, a: &Ask, req: Request) -> Response {
     let body = match axum::body::to_bytes(req.into_body(), pkgpod_cargo::MAX_PUBLISH).await {
         Ok(b) => b,
         Err(_) => {
@@ -278,11 +283,11 @@ async fn publish(app: &Arc<App>, a: &Ask, req: Request) -> Response {
             .put_bytes(&body[p.krate.clone()])
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         drop(body);
-        match app2.engine.change(&r.name, &actor, |_, e| {
+        match app2.engine().change(&r.name, &actor, |_, e| {
             pkgpod_cargo::Cargo::add(e, &p, sha, size)
         }) {
             Ok(o) => {
-                app2.auth.audit(&actor, "publish", &r.name, &o.summary);
+                app2.audit(&actor, "publish", &r.name, &o.summary);
                 Ok(o.summary)
             }
             Err(pkgpod_engine::Error::Conflict(m)) => Err((StatusCode::CONFLICT, m)),
@@ -301,12 +306,13 @@ async fn publish(app: &Arc<App>, a: &Ask, req: Request) -> Response {
 }
 
 /// `cargo search`: crates whose name holds the words asked.
-async fn search(app: &Arc<App>, a: &Ask, query: String) -> Response {
+async fn search(app: &Arc<dyn Host>, a: &Ask, query: String) -> Response {
     let mut q = String::new();
     let mut per_page = 10usize;
     for (k, v) in query.split('&').filter_map(|p| p.split_once('=')) {
-        let v = String::from_utf8_lossy(&crate::serving::percent_decode(&v.replace('+', " ")))
-            .to_string();
+        let v =
+            String::from_utf8_lossy(&pkgpod_base::percent::percent_decode(&v.replace('+', " ")))
+                .to_string();
         match k {
             "q" => q = v.to_ascii_lowercase(),
             "per_page" => per_page = v.parse().unwrap_or(10).clamp(1, 100),
@@ -318,7 +324,11 @@ async fn search(app: &Arc<App>, a: &Ask, query: String) -> Response {
     };
     let app2 = app.clone();
     let found = tokio::task::spawn_blocking(move || {
-        let leaves = app2.engine.objects().walk(&v.root, "").unwrap_or_default();
+        let leaves = app2
+            .engine()
+            .objects()
+            .walk(&v.root, "")
+            .unwrap_or_default();
         let mut by: std::collections::BTreeMap<String, Vec<(String, Entry)>> = Default::default();
         for (p, e) in leaves {
             if let Some((c, _)) = p.split_once('/') {
@@ -355,4 +365,16 @@ async fn search(app: &Arc<App>, a: &Ask, query: String) -> Response {
         StatusCode::OK,
         json!({"crates": crates, "meta": {"total": total}}),
     )
+}
+
+impl Host for crate::App {
+    fn writers(&self, repo: &str) -> Vec<String> {
+        self.auth
+            .grants(Some(repo))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|g| g.role >= Role::Write)
+            .map(|g| g.subject)
+            .collect()
+    }
 }
