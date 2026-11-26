@@ -558,11 +558,13 @@ def writes_end(c):
     # letters: the full index takes a name's newest release (1.0 is
     # 1.0.0, older than 1.0.0.1), the version badge its latest of all (a
     # letter is older than a number and than nothing; 1.0a1 is 1.0.a.1;
-    # 1.0- ends in an empty segment).
+    # 1.0- ends in an empty segment; 1-a is 1.a, and is listed first, so
+    # the badge's sort weighs a number after it against its letter).
     o = "/gempub"
     c.seq("gems version order writer", "writer", [
         ("POST", o + API, OCTET, gem("order-pk", v))
-        for v in ("1.0", "1.0.0", "1.0.1", "1.0.0.1", "1.0.0.a", "1.0.0.b", "1.0a1", "1.0-")] + [
+        for v in ("1.0", "1.0.0", "1.0.1", "1.0.0.1", "1.0.0.a", "1.0.0.b", "1.0a1", "1.0-",
+                  "1-a")] + [
         ("POST", o + API, OCTET, gem("order-pk", "1.0.0", "x86_64-linux")),
         ("GET", f"{o}/info/order-pk", {}, None),
         ("GET", f"{o}/specs.4.8.gz", {}, None),
