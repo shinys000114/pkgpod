@@ -1540,11 +1540,17 @@ def corpus(fx):
             ("PUT", f"/v2/w/manifests/{who}", dict(rh, **mt), rm),
             ("GET", f"/v2/w/manifests/{who}", dict(rh, **oci_accept), None),
             ("GET", "/v2/w/tags/list", rh, None)])
+        # The mount is within oroot, which holds a blob for all its names
+        # (one a manifest of it lists or one uploaded to it, and this one
+        # is both since the seed): it changes nothing a read or the end
+        # state can show, and only its own answer says what it did. The
+        # HEAD after it is 200 whoever asks.
         root_layer = blob_digest(app_image("oroot")[0])
         seq(f"oci root mount {who}", who, [
             ("POST", f"/v2/m-{who}/blobs/uploads/?mount={root_layer}&from=app", rh, None),
             ("HEAD", f"/v2/m-{who}/blobs/{root_layer}", rh, None),
-            # Not a name of that registry: an upload is started instead,
+            # From a name there that does not hold the blob (at that host
+            # opub/app is a name of oroot's): an upload is started instead,
             # and cancelled.
             ("POST", f"/v2/m-{who}/blobs/uploads/?mount={blob_digest(app_image('opub')[0])}"
                      "&from=opub/app", rh, None),
