@@ -408,6 +408,12 @@ def writes(c, who):
                 ("GET", "{loc}", {}, None),
                 ("GET", f"/dartpub/api/packages/{k}", {}, None),
                 ("GET", f"/dartpub/packages/{k}/versions/1.0.0.tar.gz", {}, None)])
+        # A pubspec of every kind of value, as the seed's hello_pk 1.1.0,
+        # read by the build that runs (the old one read the seed's).
+        seq(f"pub every kind of value {who}", who, [
+            ("POST", f"/dartpub{UP}") + pub_form(pub_archive(f"y_{who}", "1.0.0", KINDS)),
+            ("GET", "{loc}", {}, None),
+            ("GET", f"/dartpub/api/packages/y_{who}", {}, None)])
 
 
 def limits(c, who):
