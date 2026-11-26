@@ -1101,6 +1101,7 @@ def corpus(fx):
                 ("PUT", f"/{repo}/w.zip", octet, go_zip(f"example.com/w{who}", "v1.0.0")),
                 ("GET", f"{m}/@v/list", {}, None),
                 ("GET", f"{m}/@v/v1.0.0.info", {}, None),
+                ("GET", f"{m}/@v/v1.0.0.mod", {}, None),
                 ("GET", f"{m}/@latest", {}, None)])
         x = f"example.com/x{who}"
         seq(f"go uploads refused {who}", who, [
