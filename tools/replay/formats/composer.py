@@ -17,8 +17,9 @@ from core import IDENTS, auth_header, request
 
 NAME = "composer"
 # The paths of Composer's answers, which may hold the run's times (a
-# version's upload time, in p2/). phproot, at a host's root, is only
-# read: its paths are not these.
+# version's upload time, in p2/). phproot, at a host's root, is asked
+# at the host's own paths, not these: of what the writes put there,
+# only its list and the zips are read, which hold no times.
 TIMES = r"/php(pub|priv|empty)(/|$)"
 
 OCTET = {"Content-Type": "application/octet-stream"}
@@ -310,6 +311,17 @@ def writes(c, who):
             ("PUT", f"/{repo}/upload?version=1.1.0", o,
              composer_zip({"name": n, "description": f"again by {who}"})),
             ("GET", f"/{repo}/p2/{n}.json", {}, None)])
+    # An upload to the repository at a host's root (admin's only: no
+    # grant names phproot), read back by its list and the zip. Not by
+    # p2: its path is the host's, not one of TIMES, so the upload's time
+    # in it would not be masked.
+    root = {"Host": "php.localhost"}
+    r = f"acme/root-{who}"
+    seq(f"composer upload at a host's root {who}", who, [
+        ("PUT", "/upload?version=1.0.0", dict(o, **root), composer_zip({"name": r})),
+        ("GET", "/packages.json", root, None),
+        ("GET", f"/files/{r}/1.0.0.zip", root, None),
+        ("HEAD", f"/files/{r}/1.0.0.zip", root, None)])
     # Where the version comes from (the upload's, white space trimmed;
     # composer.json's when the upload gives none, or only white space),
     # which composer.json counts (the top one; else the one in a
@@ -447,6 +459,8 @@ def after(c, who):
               f"/{repo}/files/acme/w-writer/1.0.0.zip")
         c.add(f"after composer {repo} range {who}", who, "GET",
               f"/{repo}/files/acme/w-admin/1.0.0.zip", {"Range": "bytes=0-9"})
+    c.add(f"after composer root packages.json {who}", who, "GET", "/packages.json",
+          {"Host": "php.localhost"})
 
 
 # A time in a p2 answer: the upload's, of the second.
