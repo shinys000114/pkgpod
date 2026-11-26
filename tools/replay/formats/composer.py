@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Composer: hosted public and private (a package of several versions,
 one taken from its composer.json, one stored rather than deflated, a
-vendor with a dot, a label), one with nothing in it, one at a host's
-root. Composer repositories are hosted only: no proxy, no group, no
-stub."""
+vendor with a dot, a label, one whose composer.json holds values of
+each JSON kind), one with nothing in it, one at a host's root. Composer
+repositories are hosted only: no proxy, no group, no stub."""
 
 import calendar
 import io
@@ -50,6 +50,50 @@ def composer_zip(composer, top="", files=None, method=zipfile.ZIP_DEFLATED):
     return zip_of(members, method)
 
 
+# A composer.json of values of each JSON kind, as bytes (json.dumps
+# would spell them its own way): text of one to four bytes a character,
+# raw and escaped (a surrogate pair, control characters, "\/"), keys
+# not ASCII, numbers at and past the ends of i64 and u64, floats spelt
+# in several ways, true, false, null, empty and nested arrays and
+# objects, a key twice. p2 gives them back as the server writes them
+# (`dist`, `version_normalized`, `name` and `time` replaced where they
+# are, `repositories` taken out and the last key moved to its place);
+# the catalog keeps the first 80 characters of the description, which
+# is longer.
+VALUES = r'''{
+    "dist": {"type": "tar", "url": "elsewhere"},
+    "version_normalized": "9.9.9.9",
+    "name": "NAME",
+    "description": "DESC",
+    "keywords": ["ünï", "", "日本", "\u0000"],
+    "repositories": [],
+    "extra": {
+        "é": "ü", "ключ": {"日本": "😀"},
+        "int": 42, "neg": -7, "zero": 0, "negzero": -0,
+        "i64max": 9223372036854775807, "i64min": -9223372036854775808,
+        "pasti64min": -9223372036854775809,
+        "u64max": 18446744073709551615, "pastu64": 18446744073709551616,
+        "half": 1.5, "one": 1.0, "exp": 1e3, "Exp": 1E+3, "small": 2.5e-7,
+        "negzerof": -0.0, "tenth": 0.1, "max": 1.7976931348623157e308, "tiny": 5e-324,
+        "pi": 3.14159265358979323846264338327950288,
+        "t": true, "f": false, "n": null,
+        "obj": {}, "arr": [], "nest": [[null, [true, {"a": [1.25, -2]}]]],
+        "dup": 1, "dup": 2
+    },
+    "time": "2000-01-01",
+    "license": ["MIT", "GPL-2.0-or-later"],
+    "z": null
+}
+'''
+DESC = (r'héllo, wörld: 世界 😀 é \"quoted\" \\ \/ \t\n\u0001\u001f\u007f   '
+        r'😀, said at some length, so that it runs past eighty characters: ä')
+
+
+def values_of(name):
+    """VALUES as package `name`'s composer.json."""
+    return VALUES.replace("NAME", name).replace("DESC", DESC).encode()
+
+
 HELLO = {"name": "acme/hello", "description": "says hello", "license": "MIT",
          "autoload": {"psr-4": {"Acme\\Hello\\": "src/"}}}
 # acme/hello 1.0.0 as the seed uploads it.
@@ -59,7 +103,7 @@ HELLO_1 = composer_zip(HELLO, top="hello-1.0.0/")
 # with repositories, which p2 leaves out, and a time p2 replaces);
 # versions whose normalized strings sort apart from their order; a
 # second package of the vendor (its name starts with the first's), one
-# of a vendor with a dot.
+# of a vendor with a dot; last, acme/values, of VALUES.
 SEED = [
     ("/upload?version=2.0.0-beta.1",
      composer_zip(dict(HELLO, description="a beta"), top="hello-2.0.0-beta.1/")),
@@ -76,14 +120,15 @@ SEED = [
     ("/upload?version=1.0",
      composer_zip({"name": "other.vendor/pkg_x", "require": {"acme/hello": "^1.0"}},
                   top="pkg_x/")),
+    ("/upload?version=0.2.0", composer_zip(values_of("acme/values"))),
 ]
 ROOTED = composer_zip({"name": "acme/rooted", "description": "at a host's root"})
 
 
 def seed(p, fx):
     # Composer: hosted public and private (acme/hello of five versions,
-    # a label after the first, acme/hello-world, other.vendor/pkg_x),
-    # one with nothing in it, one at php.localhost's root.
+    # a label after the first, acme/hello-world, other.vendor/pkg_x,
+    # acme/values), one with nothing in it, one at php.localhost's root.
     up = dict(auth_header("admin"), **OCTET)
 
     def put(path, body, host=None):
@@ -111,7 +156,8 @@ ZIP = "/files/acme/hello/1.0.0.zip"
 # these (the tree's own paths among them); a label's, a version's by
 # number, a label not there.
 PATHS = ("", "/", "/packages.json", "/p2/acme/hello.json", "/p2/acme/hello~dev.json",
-         "/p2/acme/hello-world.json", "/p2/other.vendor/pkg_x.json", "/p2/acme/nope.json",
+         "/p2/acme/hello-world.json", "/p2/other.vendor/pkg_x.json", "/p2/acme/values.json",
+         "/files/acme/values/0.2.0.zip", "/p2/acme/nope.json",
          "/p2/acme/nope~dev.json", "/p2/Acme/hello.json", "/p2/acme/hello", "/p2/acme/hel.json",
          "/p2/acme/~dev.json", "/p2/acme/.json", "/p2/acme/-x.json", "/p2/acme",
          "/p2/acme/hello.json/x", "/p2/acme%2fhello.json", "/p2/acme/hello~dev~dev.json",
@@ -267,9 +313,10 @@ def writes(c, who):
     # Where the version comes from (the upload's, white space trimmed;
     # composer.json's when the upload gives none, or only white space),
     # which composer.json counts (the top one; else the one in a
-    # directory, the first of two), a member stored, a file name given;
-    # an upload to the repository's address and to a label not there
-    # (both to the current version). Read back.
+    # directory, the first of two), a member stored, a file name given,
+    # a composer.json of VALUES; an upload to the repository's address
+    # and to a label not there (both to the current version). Read
+    # back.
     other = json.dumps({"name": f"acme/no-{who}"}).encode()
     ups = [
         ("sp", "/upload?version=%201.2.0%20", composer_zip({"name": f"acme/sp-{who}"})),
@@ -290,6 +337,7 @@ def writes(c, who):
          composer_zip({"name": f"acme/st-{who}"}, method=zipfile.ZIP_STORED)),
         ("addr", "?version=1.0.0", composer_zip({"name": f"acme/addr-{who}"})),
         ("at", "/@nope/at.zip?version=1.0.0", composer_zip({"name": f"acme/at-{who}"})),
+        ("tv", "/tv.zip?version=1.0.0", composer_zip(values_of(f"acme/tv-{who}"))),
     ]
     seq(f"composer upload variants {who}", who,
         [("PUT", f"/phppub{rel}", o, body) for _, rel, body in ups]
