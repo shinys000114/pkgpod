@@ -79,7 +79,13 @@ fn why(e: multer::Error) -> FormError {
 }
 
 /// A request's form.
-pub struct Form(multer::Multipart<'static>);
+pub struct Form {
+    parts: multer::Multipart<'static>,
+    /// Found unreadable, and so it stays: multer does not keep its
+    /// errors, and asked again would read on from where it stopped (a
+    /// part's headers searched for in what follows, held whole).
+    unreadable: bool,
+}
 
 /// A part of a form, borrowing it: the form gives its next part only
 /// once this one is let go of.
@@ -109,7 +115,10 @@ impl Form {
             framing.feed(&chunk)?;
             Ok(chunk)
         });
-        Ok(Form(multer::Multipart::new(data, boundary)))
+        Ok(Form {
+            parts: multer::Multipart::new(data, boundary),
+            unreadable: false,
+        })
     }
 
     /// The next part, if there is one (what is left of the one before
@@ -134,9 +143,20 @@ impl Form {
     /// ```
     ///
     /// A part's body ([`Field::into_body`]) does not borrow the form: while
-    /// it is held, the next part is [`FormError::Held`].
+    /// it is held, the next part is [`FormError::Held`]. Once the form is
+    /// found unreadable, it is so to every later call.
     pub async fn next_field(&mut self) -> Result<Option<Field<'_>>, FormError> {
-        let part = self.0.next_field().await.map_err(why)?;
+        if self.unreadable {
+            return Err(FormError::Unreadable);
+        }
+        let part = match self.parts.next_field().await {
+            Ok(part) => part,
+            Err(e) => {
+                let e = why(e);
+                self.unreadable = e == FormError::Unreadable;
+                return Err(e);
+            }
+        };
         Ok(part.map(|part| Field {
             part,
             form: PhantomData,
@@ -758,6 +778,30 @@ mod tests {
             assert_eq!(f.next_field().await.err(), Some(FormError::Unreadable));
             let n = pulled.load(Ordering::Relaxed);
             assert!(n <= head.len() + MAX_HEAD + CHUNK, "{n} of {len} read");
+        }
+    }
+
+    /// A form found unreadable is so when asked again, without reading
+    /// on: multer, asked again, would look for a part's headers in what
+    /// follows, and hold it all.
+    #[tokio::test]
+    async fn an_unreadable_form_stays_so() {
+        let heads: [&[u8]; 2] = [
+            // Headers multer cannot read, then no blank line.
+            b"--b\r\nnot a header\r\n\r\n",
+            // A delimiter followed by neither "--" nor a line end; then
+            // a line end and no blank line.
+            b"--bxx\r\nX-A: ",
+        ];
+        for head in heads {
+            let pulled = Arc::new(AtomicUsize::new(0));
+            let body = long(head, b'a', 1 << 30, pulled.clone());
+            let mut f = Form::of(post("b", body), 4 << 20).unwrap();
+            for _ in 0..3 {
+                assert_eq!(f.next_field().await.err(), Some(FormError::Unreadable));
+            }
+            let n = pulled.load(Ordering::Relaxed);
+            assert!(n <= head.len() + CHUNK, "{n} read after {head:?}");
         }
     }
 
