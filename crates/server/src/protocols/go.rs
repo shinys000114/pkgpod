@@ -14,8 +14,7 @@ use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Version};
-
-use crate::App;
+use pkgpod_proto::host::Host;
 
 fn not_found() -> Response {
     (StatusCode::NOT_FOUND, "not found\n").into_response()
@@ -37,7 +36,7 @@ fn text(req: &Request, ctype: &'static str, body: String) -> Response {
 
 /// Answers a read of `rel` (below the repository, after any label).
 pub async fn read(
-    app: &Arc<App>,
+    app: Arc<dyn Host>,
     repo: &RepoInfo,
     version: Option<Version>,
     rel: &[String],
@@ -57,7 +56,11 @@ pub async fn read(
     }
     let (app2, root, dir) = (app.clone(), v.root, format!("{module}/@v"));
     let versions = tokio::task::spawn_blocking(move || {
-        let leaves = app2.engine.objects().walk(&root, &dir).unwrap_or_default();
+        let leaves = app2
+            .engine()
+            .objects()
+            .walk(&root, &dir)
+            .unwrap_or_default();
         pkgpod_go::versions(&leaves)
     })
     .await
@@ -100,23 +103,24 @@ pub async fn read(
         },
         "mod" | "zip" => {
             let path = format!("{module}/@v/{esc}.{ext}");
-            let Ok(Some(Entry::Blob { sha256, .. })) = app.engine.objects().resolve(&v.root, &path)
+            let Ok(Some(Entry::Blob { sha256, .. })) =
+                app.engine().objects().resolve(&v.root, &path)
             else {
                 return not_found();
             };
             let name = format!("{ver}.{ext}");
-            let mut r = crate::serving::serve_counted(
-                app,
-                &repo.name,
-                &path,
-                &repo.store().path(&sha256),
-                &sha256,
-                &name,
-                None,
-                false,
-                req,
-            )
-            .await;
+            let req = req.map(pkgpod_proto::body::boxed);
+            let mut r = app
+                .serve_counted(
+                    &repo.name,
+                    &path,
+                    repo.store().path(&sha256),
+                    sha256,
+                    &name,
+                    req,
+                )
+                .await
+                .map(Body::new);
             if ext == "mod" {
                 r.headers_mut().insert(
                     header::CONTENT_TYPE,

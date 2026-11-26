@@ -730,7 +730,7 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
                 ),
             );
         }
-        return crate::protocols::go::read(&app, &served.repo, version, &rel, req).await;
+        return crate::protocols::go::read(app, &served.repo, version, &rel, req).await;
     }
     // A dnf repository file per RPM group: <address><group>.repo.
     if served.repo.format == "rpm"
