@@ -26,15 +26,20 @@ AR = "/packages/hello_pk/versions"
 CT = {"Content-Type": "multipart/form-data; boundary=replay-form"}
 
 
-def tgz(files):
-    """A .tar.gz of `files` (name: bytes), the same bytes each time."""
+def tarball(files):
+    """A tar of `files` (name: bytes), the same bytes each time."""
     raw = io.BytesIO()
     with tarfile.open(fileobj=raw, mode="w", format=tarfile.USTAR_FORMAT) as t:
         for fn, data in files.items():
             info = tarfile.TarInfo(fn)
             info.size, info.mtime, info.mode = len(data), 1790000000, 0o644
             t.addfile(info, io.BytesIO(data))
-    return gzip.compress(raw.getvalue(), mtime=0)
+    return raw.getvalue()
+
+
+def tgz(files):
+    """A .tar.gz of `files` (name: bytes), the same bytes each time."""
+    return gzip.compress(tarball(files), mtime=0)
 
 
 def pub_archive(name, version, extra="", pubspec=None, top="pubspec.yaml"):
@@ -386,6 +391,23 @@ def writes(c, who):
                 ("POST", f"/dartpub{UP}", te, chunked(pieces)),
                 ("GET", "{loc}", {}, None),
                 ("GET", f"/dartpub/api/packages/c{i}_{who}", {}, None)])
+        # Archives cut past their pubspec.yaml (first, as dart pub puts
+        # it): the gzip stream cut in the file after it; a whole gzip of
+        # a tar cut in that file's data. Publishing reads no entry past
+        # the pubspec, so each is published as it came and served so.
+        rnd = random.Random(20261128)
+        big = "".join(rnd.choice("abcdefghijklmnopqrstuvwxyz ") for _ in range(30000)).encode()
+        k1, k2 = f"k1_{who}", f"k2_{who}"
+        gz = tgz({"pubspec.yaml": f"name: {k1}\nversion: 1.0.0\n".encode(), "lib/big.dart": big})
+        raw = tarball({"pubspec.yaml": f"name: {k2}\nversion: 1.0.0\n".encode(),
+                       "lib/big.dart": big})
+        for k, name, data in ((k1, "gzip cut", gz[:len(gz) // 2]),
+                              (k2, "tar cut", gzip.compress(raw[:3 * 512 + 100], mtime=0))):
+            seq(f"pub archive cut past its pubspec {name} {who}", who, [
+                ("POST", f"/dartpub{UP}") + pub_form(data),
+                ("GET", "{loc}", {}, None),
+                ("GET", f"/dartpub/api/packages/{k}", {}, None),
+                ("GET", f"/dartpub/packages/{k}/versions/1.0.0.tar.gz", {}, None)])
 
 
 def limits(c, who):
