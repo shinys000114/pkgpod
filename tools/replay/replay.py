@@ -58,7 +58,8 @@ USERS = {
     "reader": (
         "replay reader password",
         {"fpriv": "read", "dpriv": "read", "opriv": "read", "ogroup": "read", "npriv": "read",
-         "ngroup": "read", "ppriv": "read", "pgroup": "read", "cpriv": "read", "cgroup": "read"},
+         "ngroup": "read", "ppriv": "read", "pgroup": "read", "cpriv": "read", "cgroup": "read",
+         "gpriv": "read", "ggroup": "read"},
     ),
     "writer": (
         "replay writer password",
@@ -80,6 +81,9 @@ USERS = {
             "cpub": "write",
             "cpriv": "write",
             "cgroup": "read",
+            "gpub": "write",
+            "gpriv": "write",
+            "ggroup": "read",
         },
     ),
 }
@@ -272,6 +276,33 @@ def cargo_index_file(name):
     return {1: f"1/{n}", 2: f"2/{n}", 3: f"3/{n[0]}/{n}"}.get(len(n), f"{n[:2]}/{n[2:4]}/{n}")
 
 
+def go_zip(module, version, files=None):
+    """A module zip of `module` `version` (its go.mod and a file, or
+    `files`), the same bytes each time."""
+    pre = f"{module}@{version}/"
+    if files is None:
+        files = {pre + "go.mod": f"module {module}\n\ngo 1.21\n".encode(),
+                 pre + "hello.go": b"package hello\n"}
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for fn, data in files.items():
+            info = zipfile.ZipInfo(fn, date_time=(2026, 1, 1, 0, 0, 0))
+            info.create_system = 3
+            z.writestr(info, data)
+    return buf.getvalue()
+
+
+UP_GO_ZIP = go_zip("example.org/up", "v1.0.0")
+UP_GO_INFO = b'{"Version":"v1.0.0","Time":"2026-01-01T00:00:00Z"}'
+UP_GO = {
+    "/goproxy/example.org/up/@v/list": (b"v1.0.0\n", "text/plain"),
+    "/goproxy/example.org/up/@v/v1.0.0.info": (UP_GO_INFO, "application/json"),
+    "/goproxy/example.org/up/@latest": (UP_GO_INFO, "application/json"),
+    "/goproxy/example.org/up/@v/v1.0.0.mod": (b"module example.org/up\n", "text/plain"),
+    "/goproxy/example.org/up/@v/v1.0.0.zip": (UP_GO_ZIP, "application/zip"),
+}
+
+
 UP_CRATE = krate("up-pkg", "1.0.0")
 UP_CARGO_CONFIG = json.dumps({"dl": f"http://127.0.0.1:{UP}/cargo/api/v1/crates",
                               "api": f"http://127.0.0.1:{UP}/cargo"}).encode()
@@ -318,6 +349,9 @@ def upstream_answer(method, path):
         return 200, {"Content-Type": "application/json"}, UP_NPM_DOC
     if path == "/npm/up-pkg/-/up-pkg-1.0.0.tgz":
         return 200, {"Content-Type": "application/octet-stream"}, UP_NPM_TGZ
+    if path in UP_GO:
+        body, ct = UP_GO[path]
+        return 200, {"Content-Type": ct}, body
     if path == "/cargo/index/config.json":
         return 200, {"Content-Type": "application/json"}, UP_CARGO_CONFIG
     if path == "/cargo/index/" + cargo_index_file("up-pkg"):
@@ -709,6 +743,24 @@ def seed(root, binary):
               f"upstream=http://127.0.0.1:{UP}/cargo/index/", "-s", "public=true")
         p.cli("repo", "create", "cgroup", "-f", "cargo", "-k", "group", "-s",
               "members=cpub,cpriv,cproxy", "-s", "public=false")
+        # Go: hosted public and private (a module with two versions and a
+        # pseudo-version, one whose path has an upper-case letter, a
+        # label), a proxy of the stub's GOPROXY, a group.
+        for repo, public in (("gpub", "true"), ("gpriv", "false")):
+            p.cli("repo", "create", repo, "-f", "go", "-s", f"public={public}")
+            for i, (m, v) in enumerate((("example.com/hello", "v1.0.0"),
+                                        ("example.com/hello", "v1.1.0"),
+                                        ("example.com/hello", "v0.0.0-20260101000000-abcdef123456"),
+                                        ("example.com/Upper", "v1.0.0"))):
+                st, _, out = request("PUT", f"/{repo}/m.zip", aa, go_zip(m, v))
+                if st != 201:
+                    raise SystemExit(f"go upload {m}@{v}: {st} {out[:200]}")
+                if i == 0:
+                    p.cli("label", repo, "first")
+        p.cli("repo", "create", "gproxy", "-f", "go", "-k", "proxy", "-s",
+              f"upstream=http://127.0.0.1:{UP}/goproxy/", "-s", "public=true")
+        p.cli("repo", "create", "ggroup", "-f", "go", "-k", "group", "-s",
+              "members=gpub,gpriv,gproxy", "-s", "public=false")
         # A files proxy of the stub.
         p.cli("repo", "create", "fproxy", "-f", "files", "-k", "proxy", "-s",
               f"upstream=http://127.0.0.1:{UP}/files/", "-s", "public=true")
@@ -719,7 +771,7 @@ def seed(root, binary):
         w = Pkgpod(binary, s)
         w.env["XDG_CONFIG_HOME"] = os.path.join(s, "cli-writer")
         w.cli("login", "-u", "writer", "--password-stdin", stdin=USERS["writer"][0] + "\n")
-        tok = w.cli("token", "create", "replay", "--repos", "opub,opriv,fpub,npub,ppub,cpub", "--write")
+        tok = w.cli("token", "create", "replay", "--repos", "opub,opriv,fpub,npub,ppub,cpub,gpub", "--write")
         with open(os.path.join(s, "tokens.json"), "w") as f:
             json.dump({"wtoken": tok.strip().splitlines()[-1]}, f)
     finally:
@@ -921,6 +973,32 @@ def corpus(fx):
                         f"/index/{cargo_index_file('nope-pkg')}", f"/index/{hp}", dl,
                         "/api/v1/crates?q=hello", "/", "/@x/index/config.json"):
                 add(f"cargo {repo}{rel} {who}", who, "GET", f"/{repo}{rel}")
+        h = "/example.com/hello/@v"
+        pseudo = "v0.0.0-20260101000000-abcdef123456"
+        for repo in ("gpub", "gpriv"):
+            for rel in ("/", f"{h}/list", f"{h}/v1.0.0.info", f"{h}/v1.0.0.mod", f"{h}/v1.0.0.zip",
+                        f"{h}/v9.9.9.info", f"{h}/v9.9.9.zip", "/example.com/hello/@latest",
+                        "/example.com/!upper/@v/list", "/example.com/!upper/@latest",
+                        "/example.com/!upper/@v/v1.0.0.mod", "/example.com/Upper/@v/list",
+                        f"{h}/{pseudo}.info", "/example.com/nope/@v/list", f"{h}/v1.0.0",
+                        f"{h}/v1.0.0.exe", f"{h}/!v1.0.0.info", f"{h}/V1.0.0.info", f"{h}/nodot",
+                        "/@v/list", f"{h}/",
+                        "/example.com/hello", "/@first/example.com/hello/@v/list",
+                        "/@first/example.com/hello/@latest", f"/@first{h}/v1.1.0.info", "/@first/",
+                        "/@nope/example.com/hello/@v/list"):
+                add(f"go {repo}{rel} {who}", who, "GET", f"/{repo}{rel}")
+            add(f"go {repo} HEAD {who}", who, "HEAD", f"/{repo}{h}/v1.0.0.mod")
+            add(f"go {repo} HEAD list {who}", who, "HEAD", f"/{repo}{h}/list")
+            add(f"go {repo} range {who}", who, "GET", f"/{repo}{h}/v1.0.0.zip", {"Range": "bytes=0-9"})
+            add(f"go {repo} inm {who}", who, "GET", f"/{repo}{h}/v1.0.0.mod",
+                {"If-None-Match": "{go %s%s/v1.0.0.mod %s.etag}" % (repo, h, who)})
+        u = "/example.org/up/@v"
+        for repo in ("gproxy", "ggroup"):
+            for rel in (f"{u}/list", f"{u}/v1.0.0.info", f"{u}/v1.0.0.mod", f"{u}/v1.0.0.zip",
+                        "/example.org/up/@latest", f"{u}/v9.9.9.info", "/example.org/nope/@v/list",
+                        f"{h}/list", f"{h}/v1.0.0.zip", "/example.com/hello/@latest", "/",
+                        "/@x/example.com/hello/@v/list"):
+                add(f"go {repo}{rel} {who}", who, "GET", f"/{repo}{rel}")
         add(f"host index {who}", who, "GET", "/")
     # A proxy whose upstream is gone: what it kept, and what it did not.
     out.append({"id": "stub bearer stops", "who": "anon", "steps": [("STUB", "stop bearer", {}, None)]})
@@ -1016,6 +1094,33 @@ def corpus(fx):
              wheel(f"p-{who}", "1.0")[1]),
             ("GET", "/ppub/simple/hello-world/", {}, None)]
         seq(f"pypi uploads refused {who}", who, steps)
+        # Go: an upload to each kind, read back; what an upload refuses.
+        for repo in ("gpub", "gpriv", "gproxy", "ggroup"):
+            m = f"/{repo}/example.com/w{who}"
+            seq(f"go upload {repo} {who}", who, [
+                ("PUT", f"/{repo}/w.zip", octet, go_zip(f"example.com/w{who}", "v1.0.0")),
+                ("GET", f"{m}/@v/list", {}, None),
+                ("GET", f"{m}/@v/v1.0.0.info", {}, None),
+                ("GET", f"{m}/@latest", {}, None)])
+        x = f"example.com/x{who}"
+        seq(f"go uploads refused {who}", who, [
+            ("PUT", "/gpub/r.zip", octet, b"not a zip"),
+            ("PUT", "/gpub/r.zip", octet, go_zip(x, "v1.0.0", {})),
+            ("PUT", "/gpub/r.zip", octet, go_zip(x, "v1.0.0", {"no-version/go.mod": b"module x\n"})),
+            ("PUT", "/gpub/r.zip", octet, go_zip("Example.com/x", "v1.0.0")),
+            ("PUT", "/gpub/r.zip", octet, go_zip(x, "1.0")),
+            ("PUT", "/gpub/r.zip", octet, go_zip(x, "v1.0.0", {
+                f"{x}@v1.0.0/go.mod": f"module {x}\n".encode(), "elsewhere/a.go": b""})),
+            ("PUT", "/gpub/r.zip", octet, go_zip(x, "v1.0.0", {
+                f"{x}@v1.0.0/go.mod": f"module {x}\n".encode(), f"{x}@v1.0.0/../a.go": b""})),
+            ("PUT", "/gpub/r.zip", octet, go_zip(x, "v1.0.0", {
+                f"{x}@v1.0.0/go.mod": b"module example.com/other\n"})),
+            ("PUT", "/gpub/r.zip", octet, go_zip(x, "v2.0.0")),
+            ("PUT", "/gpub/r.zip", octet, go_zip("example.com/hello", "v1.0.0")),
+            ("PUT", "/gpub/@first/r.zip", octet, go_zip(f"example.com/l{who}", "v1.0.0")),
+            ("DELETE", f"/gpub{h}/v1.0.0.zip", {}, None),
+            ("POST", "/gpub/r.zip", octet, go_zip(f"example.com/p{who}", "v1.0.0")),
+            ("GET", f"/gpub{h}/list", {}, None)])
         # cargo: a publish to each kind; what publishing refuses; yank and
         # unyank; owners, which are pkgpod's rights.
         for repo in ("cpub", "cpriv", "cproxy", "cgroup"):
@@ -1195,6 +1300,10 @@ RULES = [
     ("npm times", "timestamps at or after the seed in npm answers (same length; a "
                   "search's of any length, with its content-length), the etag of an "
                   "answer they were in, the root of an npm version made in the run"),
+    # Go keeps when each module version was uploaded (served as its
+    # .info's Time, kept in the tree too).
+    ("go times", "Times at or after the seed in Go answers (same length), the etag of "
+                 "an answer they were in, the root of a Go version made in the run"),
     # cargo keeps when each version was published (pubtime in its index
     # entry, in the tree too).
     ("cargo times", "pubtimes at or after the seed in cargo answers (same length), the "
@@ -1256,6 +1365,11 @@ class Masker:
                 search = "/-/v1/search" in path
                 hd = [[k, "*" if k == "etag" or (search and k == "content-length") else v]
                       for k, v in hd]
+        if re.match(r"/g(pub|priv|proxy|group)(/|$)", path):
+            body, hit = self.run_times(path, body)
+            if hit:
+                self.counts["go times"] += 1
+                hd = [[k, "*" if k == "etag" else v] for k, v in hd]
         if re.match(r"/c(pub|priv|proxy|group)(/|$)", path):
             body, hit = self.run_times(path, body)
             if hit:
@@ -1305,7 +1419,7 @@ def end_state(data, seed_time, counts):
         if r[4] >= seed_time:
             r[4] = "*"
             counts["version times"] += 1
-            if r[7] in ("npm", "cargo"):
+            if r[7] in ("npm", "cargo", "go"):
                 r[2] = "*"
                 counts[f"{r[7]} times"] += 1
     out["versions"] = v
