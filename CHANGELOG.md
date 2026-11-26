@@ -346,6 +346,12 @@ Operations:
 - `pkgpod admin backup <dir>` and `pkgpod admin restore <dir>`: the
   database, signing keys, job logs and content stores (mirrors' trees
   with `--mirrors`), while the server runs.
+- `pkgpod admin export <dir>`: a portable dump, rows by name rather
+  than by id (users, rights, pages, settings, listeners, keys, each
+  repository's settings and current tree, proxies' caches), for data
+  that has to cross a change of the database schema. Its blobs stay in
+  the stores or are hard-linked or copied in (`--blobs`); blobs it
+  names that are missing are listed, and it exits 1.
 - `pkgpod serve` holds a lock on `<data_dir>/pkgpod.lock` (its pid in
   it): a second server on the same data directory is refused. At start
   it removes what a stopped or killed server left half done (import

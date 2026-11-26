@@ -7,6 +7,7 @@
 pub mod backup;
 pub mod cleanup;
 pub(crate) mod cron;
+pub mod dump;
 pub mod import;
 pub(crate) mod mirror_pkgs;
 pub mod promote;

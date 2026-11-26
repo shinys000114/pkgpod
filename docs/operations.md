@@ -417,6 +417,40 @@ A restore hard-links store files (and mirrors' trees) where it can, as a
 backup does; the database and the keys are always copied, so what the
 restored server writes never reaches the backup.
 
+### Portable dumps
+
+A backup only goes back into a pkgpod with the same database schema. To
+carry the data across a schema change, write a dump:
+
+```sh
+sudo -u pkgpod pkgpod admin export /srv/backups/dump-$(date +%F)
+```
+
+It is safe while the server runs (it reads one copy of the database,
+taken first) and goes into a directory that is not there or is empty
+(mode 0700, its files 0600). Rows are written by name, not by id:
+
+- `server.json`: users with their password hashes, teams and members,
+  grants, trust rules, webhooks with their secrets, host pages,
+  settings, listeners, badge tokens, keys; API tokens with `--tokens`;
+- `keys/` and `rsa/`: the signing keys' files;
+- `storages.json`, and per repository `repos/<name>/repo.json` (its
+  settings, current version, the labels on it), `tree.jsonl` (each
+  entry of its current tree, with when it came in, which cleanup rules
+  go by) and, for a proxy, `cache.jsonl`;
+- with `--downloads` and `--audit`, the download counts and the audit
+  log; `DUMP.json`, written last, says what the dump holds.
+
+Left out on purpose: sessions, jobs and their logs, versions before the
+current one and labels on them (listed as warnings), uploads under way,
+webhook deliveries. A mirror's received tree stays in its storage.
+
+`--blobs none` (the default) writes no blob: they stay in the stores.
+`--blobs link` hard-links them in (refused across filesystems, never a
+silent copy) and `--blobs copy` copies them. Either way every blob the
+dump names is checked to be in its storage, whole; the missing ones are
+listed in `DUMP.json` and the export exits 1.
+
 ## Garbage collection and checks
 
 Every day (the first time an hour after the server starts) the server

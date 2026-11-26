@@ -49,7 +49,7 @@ pub(crate) enum Cmd {
     /// Run the server.
     Serve(ServerArgs),
     /// Server commands that work on the database directly (no server
-    /// needed): set a password, back up.
+    /// needed): set a password, back up, export.
     Admin {
         #[command(flatten)]
         server: ServerArgs,
@@ -430,6 +430,29 @@ enum AdminCmd {
     /// Restore a backup into the configured data directory, which must
     /// be empty (the server not running on it).
     Restore { from: PathBuf },
+    /// Write a portable dump of the data into an empty directory: what
+    /// a pkgpod with another database schema can import (a backup only
+    /// restores into the same schema). Users, rights, pages, settings,
+    /// keys, each repository's settings and current tree, proxies'
+    /// caches; not sessions, jobs, older versions. Safe while the server
+    /// runs; exits 1 if blobs it names are missing (still written).
+    Export {
+        /// A new or empty directory (mode 0700).
+        to: PathBuf,
+        /// The blobs named: none (found in the stores at import), link
+        /// (hard links, same filesystem only) or copy.
+        #[arg(long, default_value = "none", value_parser = ["none", "link", "copy"])]
+        blobs: String,
+        /// API tokens (their hashes) too.
+        #[arg(long)]
+        tokens: bool,
+        /// Download counts too.
+        #[arg(long)]
+        downloads: bool,
+        /// The audit log too (kept with the dump, not imported).
+        #[arg(long)]
+        audit: bool,
+    },
     /// Check that every version can be read whole and every blob it
     /// names is in the store (with --deep, with its sha256); exits 1 on
     /// problems. Safe while the server runs.
@@ -572,6 +595,13 @@ fn admin(a: &ServerArgs, cmd: AdminCmd) -> Result<(), client::CliError> {
         println!("restored into {}", cfg.data_dir.display());
         return Ok(());
     }
+    if matches!(cmd, AdminCmd::Export { .. }) && !cfg.db_path().is_file() {
+        // Opening would make a new, empty data directory to export.
+        return Err(client::CliError::other(format!(
+            "no pkgpod data in {}",
+            cfg.data_dir.display()
+        )));
+    }
     let app = pkgpod_server::App::open(cfg).map_err(err)?;
     match cmd {
         AdminCmd::Password {
@@ -600,6 +630,39 @@ fn admin(a: &ServerArgs, cmd: AdminCmd) -> Result<(), client::CliError> {
             println!("backed up into {}", to.display());
         }
         AdminCmd::Restore { .. } => unreachable!("handled above"),
+        AdminCmd::Export {
+            to,
+            blobs,
+            tokens,
+            downloads,
+            audit,
+        } => {
+            use pkgpod_server::jobs::dump;
+            let opt = dump::ExportOptions {
+                blobs: dump::Blobs::parse(&blobs).map_err(err)?,
+                tokens,
+                downloads,
+                audit,
+            };
+            let rep = dump::export(&app, &to, opt, &mut |m| println!("{m}")).map_err(err)?;
+            println!(
+                "{} blob(s) named, {} bytes; {} linked, {} copied into the dump",
+                rep.blobs, rep.bytes, rep.linked, rep.copied
+            );
+            for w in &rep.warnings {
+                println!("warning: {w}");
+            }
+            for m in &rep.missing {
+                println!("missing: {} {} {}: {}", m.repo, m.path, m.sha256, m.problem);
+            }
+            println!("exported into {}", to.display());
+            if !rep.missing.is_empty() {
+                return Err(client::CliError::other(format!(
+                    "{} blob(s) the dump names are missing (listed in DUMP.json)",
+                    rep.missing.len()
+                )));
+            }
+        }
         AdminCmd::Check { deep } => {
             let rep = app
                 .engine
