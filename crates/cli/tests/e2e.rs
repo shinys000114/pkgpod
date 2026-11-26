@@ -14714,6 +14714,80 @@ fn oci_registry_protocol() {
     assert!(found.to_string().contains("multi"), "{found}");
 }
 
+/// A mount's `from` is a name of the registry the request came to: a
+/// registry at some host's root does not take every name.
+#[test]
+fn oci_mounts_name_a_repository_of_the_same_registry() {
+    let s = Server::start();
+    for (name, extra) in [
+        ("img", None),
+        ("other", None),
+        ("rooted", Some("urls=http://reg.test/")),
+    ] {
+        let mut args = vec!["repo", "create", name, "-f", "oci"];
+        if let Some(e) = extra {
+            args.extend(["-s", e]);
+        }
+        s.cli(&args).unwrap();
+    }
+    let tok = s
+        .cli(&[
+            "token",
+            "create",
+            "ci",
+            "--repos",
+            "img,other,rooted",
+            "--write",
+        ])
+        .unwrap()
+        .trim()
+        .to_string();
+    let reg = Reg {
+        c: reqwest::blocking::Client::new(),
+        base: s.url(""),
+        tok: Some(&tok),
+        host: None,
+    };
+    let layer = reg.blob("img/app", b"a layer to mount");
+    let mount = |reg: &Reg, into: &str, from: &str| {
+        reg.req(
+            reqwest::Method::POST,
+            &format!("/v2/{into}/blobs/uploads/?mount={layer}&from={from}"),
+        )
+        .send()
+        .unwrap()
+        .status()
+        .as_u16()
+    };
+    assert_eq!(mount(&reg, "other/x", "img/app"), 201);
+    assert_eq!(
+        reg.req(reqwest::Method::HEAD, &format!("/v2/other/x/blobs/{layer}"))
+            .send()
+            .unwrap()
+            .status()
+            .as_u16(),
+        200
+    );
+    // On the rooted registry's host, its own names: img/app there is
+    // rooted's (which has no such blob), so no mount.
+    let rooted = Reg {
+        c: reqwest::blocking::Client::new(),
+        base: s.url(""),
+        tok: Some(&tok),
+        host: Some("reg.test"),
+    };
+    assert_eq!(mount(&rooted, "y", "img/app"), 202);
+    let own = rooted.blob("app", b"a layer of rooted's");
+    let r = rooted
+        .req(
+            reqwest::Method::POST,
+            &format!("/v2/z/blobs/uploads/?mount={own}&from=app"),
+        )
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 201);
+}
+
 #[test]
 fn oci_upload_sessions_referrers_and_index_children() {
     let s = Server::start();

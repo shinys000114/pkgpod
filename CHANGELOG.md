@@ -48,7 +48,9 @@ Formats:
   imports of chosen images from other registries. A manifest an index
   lists is not deleted (409 `MANIFEST_INVALID`, naming the index), and
   an upload session is cancelled only through its own repository (404
-  `BLOB_UPLOAD_UNKNOWN` otherwise).
+  `BLOB_UPLOAD_UNKNOWN` otherwise). A mount's `from` names a repository
+  of the registry the request came to (a registry at some host's root
+  no longer takes every name).
 - **PyPI**: a simple index (PEP 503, 691, 592, 658/714) for pip; twine's
   upload; yanking.
 - **npm**: a registry for publish and install, dist-tags, deprecation

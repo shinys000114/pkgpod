@@ -306,11 +306,12 @@ pub async fn handle(
         if writing {
             return Some(read_only(&r.name));
         }
-        return Some(group(app, caller, r, name, image, target, req).await);
+        return Some(group(app, caller, host, r, name, image, target, req).await);
     }
     let cx = Ctx {
         app,
         caller,
+        host: host.to_string(),
         r,
         name,
         image,
@@ -368,9 +369,11 @@ async fn answer(cx: Ctx, target: Target, req: Request) -> Response {
 
 /// A group of registries: the first member that has the image answers
 /// alone (a proxy has it if its upstream does).
+#[allow(clippy::too_many_arguments)]
 async fn group(
     app: Arc<App>,
     caller: Caller,
+    host: &str,
     g: RepoInfo,
     name: String,
     image: String,
@@ -416,6 +419,7 @@ async fn group(
             let cx = Ctx {
                 app: app.clone(),
                 caller: caller.clone(),
+                host: host.to_string(),
                 r: m,
                 name: name.clone(),
                 image: image.clone(),
@@ -865,6 +869,9 @@ async fn proxy(
 struct Ctx {
     app: Arc<App>,
     caller: Caller,
+    /// The host the request came to: a mount's `from` is a name of the
+    /// same registry.
+    host: String,
     r: RepoInfo,
     /// The name as the client gave it (Location headers).
     name: String,
@@ -1306,16 +1313,10 @@ async fn start_upload(cx: &Ctx, req: Request) -> Response {
 async fn mount(cx: &Ctx, d: &Digest, from: &str) -> Option<Response> {
     let table = cx.app.routes().ok()?;
     let segs: Vec<String> = from.split('/').map(String::from).collect();
-    // `from` is a name on the same registry; without a host here, its
-    // first segment or a host-root repository of any host.
-    let src = table
-        .routes
-        .iter()
-        .filter(|r| table.oci.contains(&r.repo))
-        .filter(|r| segs.len() > r.prefix.len() && segs[..r.prefix.len()] == r.prefix[..])
-        .max_by_key(|r| r.prefix.len())
-        .map(|r| r.repo.clone())
-        .or_else(|| table.registry("", &segs).map(|x| x.0))?;
+    // `from` is a name on the same registry: the repository it names on
+    // this host, as the request's own name is found (a registry at
+    // another host's root does not hold it).
+    let src = table.registry(&cx.host, &segs).map(|x| x.0)?;
     let src_r = cx.app.engine.repo(&src).ok()?;
     cx.app
         .auth
