@@ -193,7 +193,9 @@ def refusals(who):
         ("not a tar", gzip.compress(b"x" * 1024, mtime=0)),
         ("cut gzip", hello[:len(hello) // 2]),
         ("cut in the pubspec", long[:len(long) * 2 // 3]),
-        ("tar cut in the pubspec", gzip.compress(raw[:512 + 10], mtime=0)),
+        # A tar entry cut short (the gzip whole) reads as the bytes it
+        # has, with no error: a pubspec "name: e_.." of no version.
+        ("tar cut in the pubspec read short", gzip.compress(raw[:512 + 10], mtime=0)),
         ("bad header", gzip.compress(raw[:100] + b"Z" + raw[101:], mtime=0)),
         ("no pubspec", tgz({"README.md": b"# x\n"})),
         ("pubspec below the top", tgz({"pkg/pubspec.yaml": f"name: {n}\nversion: 1.0.0\n"
