@@ -1019,8 +1019,11 @@ def corpus(fx):
         # cargo: a publish to each kind; what publishing refuses; yank and
         # unyank; owners, which are pkgpod's rights.
         for repo in ("cpub", "cpriv", "cproxy", "cgroup"):
-            add(f"cargo publish {repo} {who}", who, "PUT", f"/{repo}/api/v1/crates/new", {},
-                cargo_publish(f"w-{who}", "1.0.0"))
+            # What a publish wrote, read back.
+            seq(f"cargo publish {repo} {who}", who, [
+                ("PUT", f"/{repo}/api/v1/crates/new", {}, cargo_publish(f"w-{who}", "1.0.0")),
+                ("GET", f"/{repo}/index/{cargo_index_file(f'w-{who}')}", {}, None),
+                ("GET", f"/{repo}/api/v1/crates/w-{who}/1.0.0/download", {}, None)])
         new = "/cpub/api/v1/crates/new"
         seq(f"cargo publishes refused {who}", who, [
             ("PUT", new, {}, b"abc"),
