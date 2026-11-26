@@ -81,7 +81,7 @@ ROOTED = composer_zip({"name": "acme/rooted", "description": "at a host's root"}
 
 
 def seed(p, fx):
-    # Composer: hosted public and private (acme/hello of six versions,
+    # Composer: hosted public and private (acme/hello of five versions,
     # a label after the first, acme/hello-world, other.vendor/pkg_x),
     # one with nothing in it, one at php.localhost's root.
     up = dict(auth_header("admin"), **OCTET)
