@@ -2595,6 +2595,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pkgpod-proto"
+version = "0.0.0"
+dependencies = [
+ "pkgpod-engine",
+]
+
+[[package]]
 name = "pkgpod-pub"
 version = "0.0.0"
 dependencies = [

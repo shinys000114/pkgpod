@@ -1,0 +1,12 @@
+[package]
+name = "pkgpod-proto"
+description = "pkgpod platform: what a format's protocol is held to (rights, caching)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+pkgpod-engine.workspace = true
