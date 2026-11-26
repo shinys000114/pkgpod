@@ -209,7 +209,9 @@ impl App {
             jobs: jobs::Jobs::default(),
             plans: Mutex::new(HashMap::new()),
             conan_staged: conan::Staged::default(),
-            oci: Default::default(),
+            oci: crate::protocols::oci::State::new(Box::new(
+                crate::protocols::oci::Registries::default(),
+            )),
             resigner: resign::Resigner::default(),
             stats: stats::Stats::default(),
             oidc: oidc::Verifier::default(),

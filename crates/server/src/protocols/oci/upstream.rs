@@ -14,7 +14,7 @@ use super::Upstream;
 
 /// Upstream registry clients, by proxy (their Bearer tokens kept).
 #[derive(Default)]
-pub(super) struct Registries {
+pub(crate) struct Registries {
     clients: Mutex<HashMap<String, Arc<Registry>>>,
 }
 

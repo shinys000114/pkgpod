@@ -2589,9 +2589,14 @@ dependencies = [
 name = "pkgpod-oci"
 version = "0.0.0"
 dependencies = [
+ "futures-util",
+ "http",
+ "http-body-util",
  "pkgpod-base",
  "pkgpod-engine",
+ "pkgpod-proto",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

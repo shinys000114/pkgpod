@@ -17,6 +17,8 @@
 //! is valid only if every tag names a manifest of its image and every
 //! index's children are there; that is checked when it is published.
 
+pub mod protocol;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use pkgpod_base::Digest;

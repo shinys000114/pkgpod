@@ -90,9 +90,9 @@ pub(super) async fn referrers(cx: &Ctx, d: &str, q: &str) -> Response {
     .unwrap_or_default();
     let mut resp = json_reply(
         StatusCode::OK,
-        json!({"schemaVersion": 2, "mediaType": pkgpod_oci::OCI_INDEX, "manifests": list}),
+        json!({"schemaVersion": 2, "mediaType": crate::OCI_INDEX, "manifests": list}),
     );
-    set(&mut resp, "Content-Type", pkgpod_oci::OCI_INDEX);
+    set(&mut resp, "Content-Type", crate::OCI_INDEX);
     if query(q).contains_key("artifactType") {
         set(&mut resp, "OCI-Filters-Applied", "artifactType");
     }

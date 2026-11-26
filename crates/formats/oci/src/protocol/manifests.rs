@@ -37,7 +37,7 @@ pub(super) fn check_ref(re: &str) -> Result<(), Response> {
             .map(|_| ())
             .map_err(|e| oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", e.to_string()))
     } else {
-        pkgpod_oci::check_tag(re)
+        crate::check_tag(re)
             .map_err(|e| oci_err(StatusCode::BAD_REQUEST, "TAG_INVALID", e.to_string()))
     }
 }
@@ -107,7 +107,7 @@ pub(super) fn tag_of(app: &dyn Host, r: &RepoInfo, image: &str, d: &Digest) -> O
     let v = app.engine().current(r).ok()??;
     let objs = app.engine().objects();
     let Entry::Dir { id } = objs
-        .resolve(&v.root, &format!("{image}/{}", pkgpod_oci::TAGS))
+        .resolve(&v.root, &format!("{image}/{}", crate::TAGS))
         .ok()??
     else {
         return None;
@@ -126,8 +126,8 @@ pub(super) async fn put_manifest(cx: &Ctx, re: &str, req: Request) -> Response {
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .map(String::from);
-    let body = match body::to_bytes(req.into_body(), pkgpod_oci::MAX_MANIFEST + 1).await {
-        Ok(b) if b.len() <= pkgpod_oci::MAX_MANIFEST => b,
+    let body = match body::to_bytes(req.into_body(), crate::MAX_MANIFEST + 1).await {
+        Ok(b) if b.len() <= crate::MAX_MANIFEST => b,
         _ => {
             return oci_err(
                 StatusCode::PAYLOAD_TOO_LARGE,
@@ -136,7 +136,7 @@ pub(super) async fn put_manifest(cx: &Ctx, re: &str, req: Request) -> Response {
             );
         }
     };
-    let parsed = match pkgpod_oci::parse_manifest(&body, ct.as_deref()) {
+    let parsed = match crate::parse_manifest(&body, ct.as_deref()) {
         Ok(p) => p,
         Err(e) => return oci_err(StatusCode::BAD_REQUEST, "MANIFEST_INVALID", e.to_string()),
     };
@@ -154,7 +154,7 @@ pub(super) async fn put_manifest(cx: &Ctx, re: &str, req: Request) -> Response {
             Err(e) => return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", e.to_string()),
         }
     } else {
-        if let Err(e) = pkgpod_oci::check_tag(re) {
+        if let Err(e) = crate::check_tag(re) {
             return oci_err(StatusCode::BAD_REQUEST, "TAG_INVALID", e.to_string());
         }
         Some(re.to_string())
@@ -256,7 +256,7 @@ pub(super) async fn put_manifest(cx: &Ctx, re: &str, req: Request) -> Response {
 pub(super) fn parsed_subject(r: &RepoInfo, digest: &str) -> Option<String> {
     let d = parse_digest(digest).ok()?;
     let body = r.store().read(&d).ok()?;
-    let p = pkgpod_oci::parse_manifest(&body, None).ok()?;
+    let p = crate::parse_manifest(&body, None).ok()?;
     p.subject.map(|s| format!("sha256:{}", s.hex()))
 }
 
@@ -280,7 +280,7 @@ pub(super) async fn delete_manifest(cx: &Ctx, re: &str) -> Response {
                     return Err(pkgpod_engine::Error::NotFound(format!("{image}@{re2}")));
                 }
                 // Tags naming it go with it.
-                for (t, entry) in e.list(&format!("{image}/{}", pkgpod_oci::TAGS))? {
+                for (t, entry) in e.list(&format!("{image}/{}", crate::TAGS))? {
                     if matches!(entry, Some(Entry::Ref { target }) if target == path) {
                         e.remove(&tag_path(&image, &t))?;
                     }

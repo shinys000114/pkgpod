@@ -78,11 +78,10 @@ pub fn pin_closure(app: &dyn Host, repo: &str, paths: &[String]) -> Vec<String> 
 
 /// What a proxy's fetch of a manifest brings: its row, kept, or why not
 /// (`None`: the upstream not there, or not in time).
-pub(super) type Fetched =
-    Result<pkgpod_engine::cache::CacheRow, Option<(StatusCode, &'static str)>>;
+pub type Fetched = Result<pkgpod_engine::cache::CacheRow, Option<(StatusCode, &'static str)>>;
 
 /// A manifest's fetch, as the requests for it wait for it.
-pub(super) type Fetch =
+pub type Fetch =
     futures_util::future::Shared<futures_util::future::BoxFuture<'static, Option<Fetched>>>;
 
 /// The fetch of `path` for proxy `repo` that runs now, or else `fetch`,
