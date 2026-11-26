@@ -6,6 +6,7 @@
 //! form that cannot be read, is told in the words clients were given
 //! before (axum's).
 
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -28,6 +29,10 @@ pub const MAX_FIELD: usize = 64 << 10;
 pub enum FormError {
     NotAForm,
     Unreadable,
+    /// The next part was asked for while the body of the one before
+    /// ([`Field::into_body`]) was still held: a format's mistake, not
+    /// its client's.
+    Held,
 }
 
 impl std::fmt::Display for FormError {
@@ -35,17 +40,30 @@ impl std::fmt::Display for FormError {
         f.write_str(match self {
             FormError::NotAForm => NOT_A_FORM,
             FormError::Unreadable => UNREADABLE,
+            FormError::Held => "the form's part before is still being read",
         })
     }
 }
 
 impl std::error::Error for FormError {}
 
+/// Why multer did not read on.
+fn why(e: multer::Error) -> FormError {
+    match e {
+        multer::Error::LockFailure => FormError::Held,
+        _ => FormError::Unreadable,
+    }
+}
+
 /// A request's form.
 pub struct Form(multer::Multipart<'static>);
 
-/// A part of a form.
-pub struct Field(multer::Field<'static>);
+/// A part of a form, borrowing it: the form gives its next part only
+/// once this one is let go of.
+pub struct Field<'a> {
+    part: multer::Field<'static>,
+    form: PhantomData<&'a mut Form>,
+}
 
 impl Form {
     /// The form `req` carries, read up to `limit` bytes in all.
@@ -68,23 +86,45 @@ impl Form {
         Ok(Form(multer::Multipart::new(data, boundary)))
     }
 
-    /// The next part, if there is one; the one before is let go of
-    /// first (dropped), else the form is unreadable.
-    pub async fn next_field(&mut self) -> Result<Option<Field>, FormError> {
-        match self.0.next_field().await {
-            Ok(f) => Ok(f.map(Field)),
-            Err(_) => Err(FormError::Unreadable),
-        }
+    /// The next part, if there is one (what is left of the one before
+    /// is skipped). A part borrows its form, so the one before is let
+    /// go of first; asking for the next while holding it does not
+    /// compile:
+    ///
+    /// ```compile_fail,E0499
+    /// # async fn f(form: &mut pkgpod_proto::form::Form) {
+    /// let a = form.next_field().await.unwrap().unwrap();
+    /// let b = form.next_field().await;
+    /// drop(a);
+    /// # }
+    /// ```
+    ///
+    /// ```
+    /// # async fn f(form: &mut pkgpod_proto::form::Form) {
+    /// let a = form.next_field().await.unwrap().unwrap();
+    /// drop(a);
+    /// let b = form.next_field().await;
+    /// # }
+    /// ```
+    ///
+    /// A part's body ([`Field::into_body`]) does not borrow the form: while
+    /// it is held, the next part is [`FormError::Held`].
+    pub async fn next_field(&mut self) -> Result<Option<Field<'_>>, FormError> {
+        let part = self.0.next_field().await.map_err(why)?;
+        Ok(part.map(|part| Field {
+            part,
+            form: PhantomData,
+        }))
     }
 }
 
-impl Field {
+impl Field<'_> {
     pub fn name(&self) -> Option<&str> {
-        self.0.name()
+        self.part.name()
     }
 
     pub fn file_name(&self) -> Option<&str> {
-        self.0.file_name()
+        self.part.file_name()
     }
 
     /// The part read whole, refused above `max` bytes (a part is
@@ -93,7 +133,7 @@ impl Field {
         let name = self.name().unwrap_or("").to_string();
         let mut out = Vec::new();
         while let Some(chunk) = self
-            .0
+            .part
             .chunk()
             .await
             .map_err(|_| format!("reading the upload: {}", FormError::Unreadable))?
@@ -109,22 +149,24 @@ impl Field {
     }
 }
 
-impl Field {
+impl Field<'_> {
     /// The part's bytes as a body (to be stored); a form that cannot be
-    /// read ends it in an error.
+    /// read ends it in an error. The body is let go of (read to its end,
+    /// or dropped) before the form's next part is asked for.
     pub fn into_body(self) -> crate::body::Body {
-        let frames = self.map(|c| c.map(http_body::Frame::data).map_err(BoxError::from));
+        let part = self.part.map(|c| c.map_err(why));
+        let frames = part.map(|c| c.map(http_body::Frame::data).map_err(BoxError::from));
         crate::body::boxed(http_body_util::StreamBody::new(frames))
     }
 }
 
-impl Stream for Field {
+impl Stream for Field<'_> {
     type Item = Result<Bytes, FormError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.0)
+        Pin::new(&mut self.part)
             .poll_next(cx)
-            .map(|c| c.map(|c| c.map_err(|_| FormError::Unreadable)))
+            .map(|c| c.map(|c| c.map_err(why)))
     }
 }
 
@@ -154,7 +196,8 @@ mod tests {
             got.extend_from_slice(&c.unwrap());
         }
         assert_eq!(got, b"0123456789");
-        // A part is let go of before the next is asked for.
+        // A part is let go of before the next is asked for (holding it
+        // does not compile).
         drop(file);
         assert!(f.next_field().await.unwrap().is_none());
 
@@ -187,5 +230,23 @@ mod tests {
             }
         }
         assert_eq!(err.map(|e| e.to_string()).as_deref(), Some(UNREADABLE));
+    }
+
+    #[tokio::test]
+    async fn a_part_s_body_held_holds_back_the_next() {
+        let body = b"--b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nxy\r\n--b\r\nContent-Disposition: form-data; name=\"c\"\r\n\r\nz\r\n--b--\r\n";
+        let mut f = Form::of(req(Some("multipart/form-data; boundary=b"), body), 1 << 20).unwrap();
+        let held = f.next_field().await.unwrap().unwrap().into_body();
+        assert_eq!(f.next_field().await.err(), Some(FormError::Held));
+        assert_eq!(
+            FormError::Held.to_string(),
+            "the form's part before is still being read"
+        );
+        // Let go of, the form goes on.
+        assert_eq!(crate::body::to_bytes(held, 10).await.unwrap(), "xy");
+        let c = f.next_field().await.unwrap().unwrap();
+        assert_eq!(c.name(), Some("c"));
+        assert_eq!(c.capped(1).await.unwrap(), b"z");
+        assert!(f.next_field().await.unwrap().is_none());
     }
 }
