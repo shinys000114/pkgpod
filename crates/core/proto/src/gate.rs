@@ -131,15 +131,19 @@ mod tests {
         Option<&'static str>,
     );
 
-    /// The answers the request corpus records today (files, Debian and
-    /// OCI repositories, tools/replay), held to the rule: equal but for
-    /// the rows the rule changes on purpose, each named.
+    /// The answers the request corpus records today (files, Debian, OCI
+    /// and npm repositories, tools/replay), held to the rule: equal but
+    /// for the rows the rule changes on purpose, each named.
     #[test]
     fn the_rule_gives_what_is_answered_today_but_for_the_named_rows() {
         use Kind::*;
         let r = Some(Role::Read);
         let w = Some(Role::Write);
         let a = Some(Role::Admin);
+        let login = Need {
+            login: true,
+            ..Need::READ
+        };
         let cases: &[Case] = &[
             (
                 "private read, anonymous",
@@ -321,6 +325,46 @@ mod tests {
                 Group,
                 false,
                 404,
+                None,
+            ),
+            (
+                "npm whoami, anonymous",
+                r,
+                true,
+                login,
+                Hosted,
+                false,
+                401,
+                None,
+            ),
+            (
+                "npm whoami, no grant",
+                r,
+                false,
+                login,
+                Hosted,
+                false,
+                200,
+                None,
+            ),
+            (
+                "npm public publish, no grant",
+                r,
+                false,
+                Need::WRITE,
+                Hosted,
+                false,
+                403,
+                None,
+            ),
+            (
+                "npm private publish, reader",
+                r,
+                false,
+                Need::WRITE,
+                Hosted,
+                false,
+                403,
                 None,
             ),
         ];

@@ -18,7 +18,7 @@ use pkgpod_engine::{RepoInfo, Version};
 use pkgpod_proto::body::{self, Request, Response};
 use serde_json::{Value, json};
 
-use pkgpod_proto::{Caller, Role};
+use pkgpod_proto::{Caller, Gate, Need, Refusal, Role};
 
 /// A status, no body.
 fn bare(st: StatusCode) -> Response {
@@ -99,12 +99,8 @@ pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
     let method = req.method().clone();
     let reading = method == Method::GET || method == Method::HEAD;
     // Reading first; what changes the repository asks for write itself.
-    if a.role.is_none() {
-        return if a.caller.anonymous() {
-            unauthorized()
-        } else {
-            not_found()
-        };
+    if let Some(r) = gate(&a, Need::READ) {
+        return r;
     }
     let rel = a.rel.as_slice();
     // The registry's own endpoints.
@@ -112,10 +108,13 @@ pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
         return match (&rel[1..], &method) {
             ([p], _) if p == "ping" => reply(StatusCode::OK, json!({})),
             ([w], _) if w == "whoami" => {
-                if a.caller.anonymous() {
-                    unauthorized()
-                } else {
-                    reply(StatusCode::OK, json!({"username": a.caller.name()}))
+                let login = Need {
+                    login: true,
+                    ..Need::READ
+                };
+                match gate(&a, login) {
+                    Some(r) => r,
+                    None => reply(StatusCode::OK, json!({"username": a.caller.name()})),
                 }
             }
             ([l, label, rest @ ..], m)
@@ -172,7 +171,7 @@ pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
             _ => None,
         };
         if let Some(change) = change {
-            if let Some(r) = no_write(&a) {
+            if let Some(r) = gate(&a, Need::WRITE) {
                 return r;
             }
             return match change {
@@ -215,18 +214,30 @@ pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
     not_found()
 }
 
-/// The answer to a change by a caller who may not write, if so.
-fn no_write(a: &Ask) -> Option<Response> {
-    if a.role >= Some(Role::Write) {
-        return None;
-    }
-    Some(if a.caller.anonymous() {
-        unauthorized()
-    } else {
-        err(
+/// The answer to a request that needs `need` by a caller the rights
+/// rule refuses, if so.
+fn gate(a: &Ask, need: Need) -> Option<Response> {
+    let g = Gate {
+        role: a.role,
+        anonymous: a.caller.anonymous(),
+        need,
+        kind: a.repo.kind,
+        // A write under /-/label/ is not offered (404) rather than
+        // refused as a label's.
+        labelled: false,
+    };
+    let refused = pkgpod_proto::decide(&g).err()?;
+    Some(match refused {
+        Refusal::Unauthenticated => unauthorized(),
+        Refusal::Hidden => not_found(),
+        Refusal::Forbidden => err(
             StatusCode::FORBIDDEN,
             format!("no write access to {}", a.repo.name),
-        )
+        ),
+        Refusal::ReadThrough | Refusal::LabelReadOnly => err(
+            StatusCode::METHOD_NOT_ALLOWED,
+            format!("{} is read only", a.repo.name),
+        ),
     })
 }
 
@@ -583,7 +594,7 @@ async fn dist_tags(app: &Arc<dyn Host>, a: &Ask, rest: &[String], req: Request) 
             }
         }
         ([d, tag], m) if d == "dist-tags" && (*m == Method::PUT || *m == Method::DELETE) => {
-            if let Some(r) = no_write(a) {
+            if let Some(r) = gate(a, Need::WRITE) {
                 return r;
             }
             let version = if *m == Method::PUT {
