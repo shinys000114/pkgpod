@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! The server as every format's protocol sees it: the App as their
-//! common [`Host`], a request's caller as their [`Who`].
+//! common [`Host`] (its engine, its audit, its stored files served and
+//! counted), a request's caller as their [`Who`].
 
 use std::sync::Arc;
 
+use pkgpod_proto::body::{self, Request, Response};
 use pkgpod_proto::host::{Caller, Host, Who};
 
 use crate::App;
@@ -58,5 +60,22 @@ impl Host for App {
 
     fn engine(&self) -> &pkgpod_engine::Engine {
         &self.engine
+    }
+
+    fn serve_counted<'a>(
+        &'a self,
+        repo: &'a str,
+        path: &'a str,
+        file: std::path::PathBuf,
+        sha: pkgpod_base::Digest,
+        name: &'a str,
+        req: Request,
+    ) -> futures_util::future::BoxFuture<'a, Response> {
+        Box::pin(async move {
+            let req = req.map(axum::body::Body::new);
+            crate::serving::serve_counted(self, repo, path, &file, &sha, name, None, false, req)
+                .await
+                .map(body::boxed)
+        })
     }
 }

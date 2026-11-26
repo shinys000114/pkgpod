@@ -72,17 +72,6 @@ fn split_name(rel: &[String]) -> Option<(String, &[String])> {
 pub trait Host: pkgpod_proto::host::Host {
     /// The version `label` names in `repo`, if it is there.
     fn labelled(&self, repo: &str, label: &str) -> Option<Version>;
-    /// Answers a request for tarball `name` of `repo`, stored at `file`
-    /// (`sha`), as stored files are served (ranges, validators), and
-    /// counts it.
-    fn serve_tarball<'a>(
-        &'a self,
-        repo: &'a str,
-        file: std::path::PathBuf,
-        sha: pkgpod_base::Digest,
-        name: &'a str,
-        req: Request,
-    ) -> futures_util::future::BoxFuture<'a, Response>;
 }
 
 pub struct Ask {
@@ -326,7 +315,7 @@ async fn read(
             let Ok(Some(Entry::Blob { sha256, .. })) = entry else {
                 return not_found();
             };
-            app.serve_tarball(&r.name, r.store().path(&sha256), sha256, file, req)
+            app.serve_counted(&r.name, "", r.store().path(&sha256), sha256, file, req)
                 .await
         }
         _ => not_found(),

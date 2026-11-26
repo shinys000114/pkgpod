@@ -2568,7 +2568,6 @@ version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
- "futures-util",
  "http",
  "pkgpod-base",
  "pkgpod-engine",
