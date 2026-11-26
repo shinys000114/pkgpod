@@ -6,6 +6,7 @@
 
 pub mod db;
 pub mod digest;
+pub mod percent;
 pub mod store;
 pub mod yaml;
 pub mod zip;
