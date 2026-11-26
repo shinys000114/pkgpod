@@ -39,7 +39,7 @@ use pkgpod_engine::{Kind, RepoInfo};
 use pkgpod_proto::body::{self, Body, Request, Response};
 use serde_json::{Value, json};
 
-use pkgpod_proto::Role;
+use pkgpod_proto::{Gate, Need, Refusal, Role};
 
 mod group;
 mod lists;
@@ -388,25 +388,32 @@ pub async fn handle(
         ));
     }
     let r = app.repo(&repo)?;
-    let role = caller.role(&repo, r.setting_bool("public"));
-    let writing = !matches!(method, Method::GET | Method::HEAD);
-    let need = if writing { Role::Write } else { Role::Read };
-    if role < Some(need) {
-        // Docker sends its credentials only after a 401.
-        return Some(if caller.anonymous() {
-            unauthorized()
-        } else if role.is_some() {
-            oci_err(
+    let need = need(&method);
+    let writing = need.writes;
+    let gate = Gate {
+        role: caller.role(&repo, r.setting_bool("public")),
+        anonymous: caller.anonymous(),
+        need,
+        // A write to a proxy or a group is answered after the rights, as
+        // it was (R6): as to a hosted repository here.
+        kind: Kind::Hosted,
+        labelled: false,
+    };
+    if let Err(refused) = pkgpod_proto::decide(&gate) {
+        return Some(match refused {
+            // Docker sends its credentials only after a 401.
+            Refusal::Unauthenticated => unauthorized(),
+            Refusal::Forbidden => oci_err(
                 StatusCode::FORBIDDEN,
                 "DENIED",
                 format!("no write access to {repo}"),
-            )
-        } else {
-            oci_err(
+            ),
+            Refusal::Hidden => oci_err(
                 StatusCode::NOT_FOUND,
                 "NAME_UNKNOWN",
                 format!("no repository holds {name}"),
-            )
+            ),
+            Refusal::ReadThrough | Refusal::LabelReadOnly => read_only(&r.name),
         });
     }
     if r.kind == Kind::Proxy {
@@ -432,6 +439,15 @@ pub async fn handle(
         image,
     };
     Some(answer(cx, target, req).await)
+}
+
+/// What a request needs: a GET or HEAD reads, anything else writes.
+fn need(method: &Method) -> Need {
+    if matches!(*method, Method::GET | Method::HEAD) {
+        Need::READ
+    } else {
+        Need::WRITE
+    }
 }
 
 fn read_only(repo: &str) -> Response {
