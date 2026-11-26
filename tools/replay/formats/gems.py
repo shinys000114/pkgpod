@@ -25,6 +25,8 @@ FORM = {"Content-Type": "application/x-www-form-urlencoded"}
 DATE = "2026-01-01 00:00:00.000000000 Z"
 # The largest gem pushed (pkgpod_gems::MAX_GEM).
 MAX_GEM = 512 << 20
+# How much of a gem's metadata is read, unpacked (pkgpod_gems's MAX_META).
+MAX_META = 4 << 20
 
 
 def tar(members):
@@ -345,6 +347,10 @@ def refused(c, who):
         gem(x, "1.0.0", meta=base.replace(top, "version: !ruby/object:Gem::Version\n"
                                                "  version: '1.0.0 '\n")),
     ]
+    # Metadata past what is read of it is cut there, not refused: a
+    # gemspec after that much of a comment is not seen.
+    m = f"m-{who}"
+    bodies.append(gem(m, "1.0.0", meta="# " + "x" * MAX_META + "\n" + gemspec(m, "1.0.0")))
     steps = [("POST", "/gempub" + API, OCTET, b) for b in bodies]
     o = f"o-{who}"
     ok = gem(o, "1.0.0")
@@ -360,6 +366,7 @@ def refused(c, who):
          b"5\r\nhello\r\nzz\r\n\r\n"),
         ("GET", f"/gempub/info/{o}", {}, None),
         ("GET", f"/gempub/info/r-{who}", {}, None),
+        ("GET", f"/gempub/info/{m}", {}, None),
         ("GET", "/gempub/names", {}, None)]
     c.seq(f"gems pushes refused {who}", who, steps)
     y = "/gempub" + YANK
