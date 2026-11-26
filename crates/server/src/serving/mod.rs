@@ -1973,11 +1973,8 @@ where
         .map_err(Error::from)
 }
 
-/// Uploads are limited to this size.
-pub const MAX_UPLOAD: u64 = 8 << 30;
-
-/// The text fields of upload forms are read up to this size.
-pub const MAX_FIELD: usize = 64 << 10;
+pub use pkgpod_proto::body::MAX_UPLOAD;
+pub use pkgpod_proto::form::MAX_FIELD;
 
 /// A form field read whole, refused above `max` bytes (a field is
 /// otherwise bounded only by the body's limit, gigabytes).

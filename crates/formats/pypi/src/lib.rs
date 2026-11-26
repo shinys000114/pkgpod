@@ -23,6 +23,7 @@
 //! labels) serves working indexes.
 
 pub mod dist;
+pub mod protocol;
 
 use std::collections::BTreeMap;
 

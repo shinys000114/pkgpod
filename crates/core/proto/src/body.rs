@@ -9,6 +9,9 @@ use http_body_util::{BodyExt, Empty, Full};
 
 /// An error of a body: whatever its source's is.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Uploads are limited to this size.
+pub const MAX_UPLOAD: u64 = 8 << 30;
 /// A body.
 pub type Body = UnsyncBoxBody<Bytes, BoxError>;
 pub type Request = http::Request<Body>;

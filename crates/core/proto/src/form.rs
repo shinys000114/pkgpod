@@ -20,6 +20,9 @@ pub const NOT_A_FORM: &str = "Invalid `boundary` for `multipart/form-data` reque
 /// Said of a form that cannot be read (cut short, malformed, too large).
 pub const UNREADABLE: &str = "Error parsing `multipart/form-data` request";
 
+/// The text fields of upload forms are read up to this size.
+pub const MAX_FIELD: usize = 64 << 10;
+
 /// Why a form is not read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormError {

@@ -2638,10 +2638,13 @@ name = "pkgpod-pypi"
 version = "0.0.0"
 dependencies = [
  "flate2",
+ "http",
  "pkgpod-base",
  "pkgpod-engine",
+ "pkgpod-proto",
  "serde_json",
  "tar",
+ "tokio",
 ]
 
 [[package]]
