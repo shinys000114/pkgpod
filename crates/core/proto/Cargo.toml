@@ -9,7 +9,9 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+pkgpod-base.workspace = true
 pkgpod-engine.workspace = true
+serde_json.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
 http.workspace = true

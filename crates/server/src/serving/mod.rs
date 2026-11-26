@@ -525,18 +525,7 @@ pub(crate) fn private(r: &mut Response) {
     h.append(header::VARY, HeaderValue::from_static("Authorization"));
 }
 
-/// Whether an If-None-Match value names `etag` (quoted), compared
-/// weakly as RFC 9110 has it for If-None-Match: a cache in front that
-/// compresses an answer marks its ETag weak (`W/"..."`) and asks with
-/// that.
-pub(crate) fn inm_matches(inm: &str, etag: &str) -> bool {
-    fn weak(t: &str) -> &str {
-        t.strip_prefix("W/").unwrap_or(t)
-    }
-    inm.split(',')
-        .map(str::trim)
-        .any(|t| t == "*" || weak(t) == weak(etag))
-}
+pub(crate) use pkgpod_proto::cache::inm_matches;
 
 /// Takes a leading `@<label>` segment off `rel` (and onto `base_url`):
 /// the version to answer from, and whether a label named it; `None` for
@@ -1929,17 +1918,7 @@ fn fs_entries(
     v
 }
 
-/// The query string as JSON params (`a=1&b=x,y` -> {"a":"1","b":"x,y"}).
-pub fn query_params(q: &str) -> Value {
-    let mut m = serde_json::Map::new();
-    for kv in q.split('&').filter(|s| !s.is_empty()) {
-        let (k, v) = kv.split_once('=').unwrap_or((kv, "true"));
-        let dec =
-            |s: &str| String::from_utf8_lossy(&percent_decode(&s.replace('+', " "))).into_owned();
-        m.insert(dec(k), Value::String(dec(v)));
-    }
-    Value::Object(m)
-}
+pub use pkgpod_proto::query::params as query_params;
 
 /// Writes a request body into a repository's store.
 pub async fn body_to_store(

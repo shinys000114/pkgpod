@@ -2608,7 +2608,9 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "pkgpod-base",
  "pkgpod-engine",
+ "serde_json",
 ]
 
 [[package]]

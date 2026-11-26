@@ -57,6 +57,19 @@ pub fn cache_control(c: Class, status: u16, lost: bool) -> &'static str {
     }
 }
 
+/// Whether an If-None-Match value names `etag` (quoted), compared
+/// weakly as RFC 9110 has it for If-None-Match: a cache in front that
+/// compresses an answer marks its ETag weak (`W/"..."`) and asks with
+/// that.
+pub fn inm_matches(inm: &str, etag: &str) -> bool {
+    fn weak(t: &str) -> &str {
+        t.strip_prefix("W/").unwrap_or(t)
+    }
+    inm.split(',')
+        .map(str::trim)
+        .any(|t| t == "*" || weak(t) == weak(etag))
+}
+
 /// Whether an answer may be shared by caches between clients.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Shared {
