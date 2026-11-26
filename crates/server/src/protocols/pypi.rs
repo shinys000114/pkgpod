@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{FromRequest, Multipart, Request};
+use axum::extract::Request;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use pkgpod_engine::tree::{Entry, Tree};
@@ -98,7 +98,11 @@ pub async fn index_page(
 /// `content`; the metadata fields are not trusted (the file's own are
 /// read), `sha256_digest` is checked when sent.
 pub async fn upload(app: Arc<App>, repo: RepoInfo, caller: Caller, req: Request) -> Response {
-    let mut m = match Multipart::from_request(req, &()).await {
+    let form = pkgpod_proto::form::Form::of(
+        req.map(pkgpod_proto::body::boxed),
+        crate::serving::MAX_UPLOAD,
+    );
+    let mut m = match form {
         Ok(m) => m,
         Err(e) => return text(StatusCode::BAD_REQUEST, format!("not a form upload: {e}")),
     };
@@ -110,17 +114,14 @@ pub async fn upload(app: Arc<App>, repo: RepoInfo, caller: Caller, req: Request)
             Err(e) => return text(StatusCode::BAD_REQUEST, e.to_string()),
         };
         match field.name().unwrap_or("") {
-            ":action" => match crate::serving::field_capped(field, crate::serving::MAX_FIELD).await
-            {
+            ":action" => match field.capped(crate::serving::MAX_FIELD).await {
                 Ok(b) => action = String::from_utf8_lossy(&b).into_owned(),
-                Err(e) => return text(StatusCode::BAD_REQUEST, e.to_string()),
+                Err(e) => return text(StatusCode::BAD_REQUEST, e),
             },
-            "sha256_digest" => {
-                match crate::serving::field_capped(field, crate::serving::MAX_FIELD).await {
-                    Ok(b) => sha_sent = Some(String::from_utf8_lossy(&b).trim().to_lowercase()),
-                    Err(e) => return text(StatusCode::BAD_REQUEST, e.to_string()),
-                }
-            }
+            "sha256_digest" => match field.capped(crate::serving::MAX_FIELD).await {
+                Ok(b) => sha_sent = Some(String::from_utf8_lossy(&b).trim().to_lowercase()),
+                Err(e) => return text(StatusCode::BAD_REQUEST, e),
+            },
             "content" => {
                 let filename = field.file_name().map(String::from);
                 match crate::serving::stream_to_store(
