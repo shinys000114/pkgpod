@@ -2493,11 +2493,14 @@ dependencies = [
 name = "pkgpod-go"
 version = "0.0.0"
 dependencies = [
+ "http",
  "jiff",
  "pkgpod-base",
  "pkgpod-engine",
+ "pkgpod-proto",
  "semver",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
