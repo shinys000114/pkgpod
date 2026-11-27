@@ -4,12 +4,13 @@ named with a dot: noarch, x86_64 and source ones, one with an epoch,
 one that requires another and has every kind of dependency, one whose
 text needs escaping, one replaced, one whose header is odd, one taken
 for a source package; a label after the first, another later), one
-unsigned, one with nothing in it, one at rpm.localhost's /dnf/. Each
-is served as the server's generic tree: the packages under
-<group>/Packages/, the repodata the format makes per version and group
-(repomd.xml, its signature, the three indexes it names), key.asc, and
-the dnf repository file of a group (<group>.repo). RPM repositories
-are hosted (or mirrors, which are jobs): no proxy, no stub.
+unsigned, one with nothing in it, one at rpm.localhost's /dnf/, one
+at rpmtop.localhost's root. Each is served as the server's generic
+tree: the packages under <group>/Packages/, the repodata the format
+makes per version and group (repomd.xml, its signature, the three
+indexes it names), key.asc, and the dnf repository file of a group
+(<group>.repo). RPM repositories are hosted (or mirrors, which are
+jobs): no proxy, no stub.
 
 The writes go to groups no read before them names (main, the default,
 one per identity, w-<who>, and the writer's by-hash), read back in
@@ -357,11 +358,13 @@ EL9 = [file_name("hello", "1.0"), file_name("hello", "1.1"),
 FC43 = [file_name("hello", "1.0"), file_name("odd", "1.0"), file_name("lone", "1.0", arch="src")]
 REPODATA = "rpm-repodata.json"
 ROUTE_HOST = "rpm.localhost"
+TOP_HOST = "rpmtop.localhost"
 
 
 def seed(p, fx):
     # RPM: hosted public and private, signed (see SEED), one unsigned,
-    # one with nothing in it, one at rpm.localhost's /dnf/.
+    # one with nothing in it, one at rpm.localhost's /dnf/, one at
+    # rpmtop.localhost's root (made last: the others keep their ids).
     aa = auth_header("admin")
 
     def put(path, body, extra=None):
@@ -393,6 +396,9 @@ def seed(p, fx):
     p.cli("repo", "create", "rroute", "-f", "rpm", "-s", "public=true", "-s",
           f"urls=http://{ROUTE_HOST}/dnf/")
     put("/dnf/upload?group=el9", HELLO_1, {"Host": ROUTE_HOST})
+    p.cli("repo", "create", "rtop", "-f", "rpm", "-s", "public=true", "-s",
+          f"urls=http://{TOP_HOST}/")
+    put("/upload?group=el9", HELLO_1, {"Host": TOP_HOST})
     # The repodata's file names (of the seed's times), for the reads.
     names = {}
     for repo, base, host in (("rpub", "/rpub", None), ("rpriv", "/rpriv", None),
@@ -518,6 +524,11 @@ def reads(c, who):
         add(f"rpm route {host or 'default'}{rel}{' https' if h else ''} {who}", who, "GET", rel, hd)
     for f in sorted(names["rroute"]["el9"].values()):
         add(f"rpm route el9 {f} {who}", who, "GET", f"/dnf/el9/repodata/{f}", {"Host": ROUTE_HOST})
+    # At rpmtop.localhost's root: its listing there (no row up, as at no
+    # other address), a group's address without the slash, the
+    # repository file (its baseurl at the root), repomd.xml.
+    for rel in ("/", "/?sort=size", "/el9", "/el9.repo", MD):
+        add(f"rpm top {rel} {who}", who, "GET", rel, {"Host": TOP_HOST})
 
 
 def writes(c, who):
