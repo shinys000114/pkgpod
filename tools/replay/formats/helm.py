@@ -391,8 +391,9 @@ def writes(c, who):
          helm_form([("chart", "c.tgz", mine("fx"))])[1]),
         # Forms: none of its parts the chart (none at all, another, one
         # mis-cased, one of no name), no form, a part cut short, a chart
-        # that is none; what follows the chart is not read (another
-        # part, one broken, a second chart); a preamble.
+        # that is none; a part before the chart (small, and one of a
+        # MiB, read in many chunks); what follows the chart is not read
+        # (another part, one broken, a second chart); a preamble.
         helm_form([]),
         helm_form([("prov", "c.tgz.prov", b"x")]),
         helm_form([("Chart", "c.tgz", helm_chart(x, "0.1.0"))]),
@@ -404,6 +405,7 @@ def writes(c, who):
         (form, one[:-40]),
         helm_form([("chart", "c.tgz", b"not gzip")]),
         helm_form([("prov", "c.tgz.prov", b"x"), ("chart", "c.tgz", mine("p"))]),
+        helm_form([("prov", "c.tgz.prov", b"p" * big), ("chart", "c.tgz", mine("bp"))]),
         helm_form([("chart", "c.tgz", mine("m"))],
                   tail=f"--{BOUNDARY}\r\nnot a header\r\n\r\nx".encode()),
         helm_form([("chart", "c.tgz", mine("t1")), ("chart", "c.tgz", mine("t2"))]),
@@ -413,7 +415,7 @@ def writes(c, who):
         [("POST", api, o, body) for body in raw]
         + [("POST", api, hd, body) for hd, body in forms]
         + [("GET", f"{api}/{n}-{who}", {}, None)
-           for n in ("x", "cut", "fx", "p", "m", "t1", "t2", "pre")]
+           for n in ("x", "cut", "fx", "p", "bp", "m", "t1", "t2", "pre")]
         + [("GET", f"{api}/web", {}, None)])
     # What the API takes from no one: other methods, other paths, a
     # label's (not the API), a write from another site's page.
