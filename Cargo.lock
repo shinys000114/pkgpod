@@ -2469,13 +2469,19 @@ dependencies = [
 name = "pkgpod-galaxy"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "flate2",
+ "futures-util",
+ "http",
+ "http-body-util",
  "jiff",
  "pkgpod-base",
  "pkgpod-engine",
+ "pkgpod-proto",
  "semver",
  "serde_json",
  "tar",
+ "tokio",
 ]
 
 [[package]]
@@ -2690,7 +2696,6 @@ dependencies = [
  "futures-util",
  "glob",
  "http",
- "http-body-util",
  "httpdate",
  "hyper-util",
  "jiff",
