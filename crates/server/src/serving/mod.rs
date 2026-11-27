@@ -1611,7 +1611,11 @@ async fn put(
     }
     let mut params = query_params(req.uri().query().unwrap_or(""));
     let filename = rel.last().cloned();
-    if repo.format == "files" || repo.format == "maven" {
+    if app
+        .registry
+        .row(&repo.format)
+        .is_some_and(|r| r.tree.put_path)
+    {
         // The URL is where the file goes.
         let path = rel.join("/");
         if let Some(q) = params.get("path").and_then(Value::as_str)

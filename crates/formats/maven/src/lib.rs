@@ -38,9 +38,11 @@ use sha1::Digest as _;
 
 pub struct Maven;
 
-/// What the server serves of a Maven tree beside its files.
+/// What the server serves of a Maven tree beside its files: an upload
+/// by PUT goes where its URL says, as Maven deploys.
 pub const TREE: TreeRules = TreeRules {
     cache: CACHE,
+    put_path: true,
     ..TreeRules::DEFAULT
 };
 

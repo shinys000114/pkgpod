@@ -14,9 +14,17 @@ use pkgpod_engine::format::OpSpec;
 use pkgpod_engine::settings::Field;
 use pkgpod_engine::tree::{Edit, Entry};
 use pkgpod_engine::{Cx, Error, FormHints, Format, Item, Kind, Result, Upload};
+use pkgpod_proto::tree::TreeRules;
 use serde_json::{Value, json};
 
 pub struct Files;
+
+/// What the server serves of a files tree beside its files: an upload
+/// by PUT goes where its URL says.
+pub const TREE: TreeRules = TreeRules {
+    put_path: true,
+    ..TreeRules::DEFAULT
+};
 
 /// The latest modification time a file may have, unix seconds: the end
 /// of the year 9999, the last an HTTP date (its Last-Modified) can say.

@@ -2470,6 +2470,7 @@ version = "0.0.0"
 dependencies = [
  "pkgpod-base",
  "pkgpod-engine",
+ "pkgpod-proto",
  "serde_json",
 ]
 

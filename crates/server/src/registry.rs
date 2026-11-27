@@ -103,7 +103,7 @@ impl Registry {
         Registry {
             rows: vec![
                 Row::of(pkgpod_deb::Deb).tree(pkgpod_deb::TREE),
-                Row::of(pkgpod_files::Files),
+                Row::of(pkgpod_files::Files).tree(pkgpod_files::TREE),
                 Row::of(pkgpod_oci::Oci)
                     .protocol(&p::oci::Serving)
                     .unlisted()
@@ -367,6 +367,7 @@ mod tests {
             ids(|r| r.tree.content_named.is_some()),
             set(&["deb", "rpm"])
         );
+        assert_eq!(ids(|r| r.tree.put_path), set(&["files", "maven"]));
         // A format crate that says what its trees are has it in its row,
         // the others the default.
         for (name, dir) in crates() {
