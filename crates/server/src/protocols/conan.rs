@@ -21,7 +21,6 @@ use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Version};
 use serde_json::{Value, json};
 
-use crate::App;
 use crate::auth::{Caller, Role};
 
 /// Files put before their revision's manifest: by repository and
@@ -72,6 +71,14 @@ fn reply(v: Value) -> Response {
     r
 }
 
+/// What a Conan remote asks of the server it runs in, besides what
+/// every format does.
+pub trait Host: pkgpod_proto::host::Host {
+    /// The files put before their revision's manifest, one for the
+    /// server: whoever puts the manifest brings them in.
+    fn staged(&self) -> &Staged;
+}
+
 pub struct Ask {
     pub repo: RepoInfo,
     pub version: Option<Version>,
@@ -85,8 +92,8 @@ pub struct Ask {
 
 /// Revisions under `dir` that are complete (a manifest), newest first:
 /// (revision, time).
-fn revisions(app: &App, root: &Digest, dir: &str) -> Vec<(String, i64)> {
-    let objects = app.engine.objects();
+fn revisions(app: &dyn Host, root: &Digest, dir: &str) -> Vec<(String, i64)> {
+    let objects = app.engine().objects();
     let Ok(Some(t)) = objects.dir(root, dir) else {
         return Vec::new();
     };
@@ -107,8 +114,8 @@ fn revisions(app: &App, root: &Digest, dir: &str) -> Vec<(String, i64)> {
 }
 
 /// The files of a revision directory (not its packages).
-fn files(app: &App, root: &Digest, dir: &str) -> Option<BTreeMap<String, Entry>> {
-    let t = app.engine.objects().dir(root, dir).ok()??;
+fn files(app: &dyn Host, root: &Digest, dir: &str) -> Option<BTreeMap<String, Entry>> {
+    let t = app.engine().objects().dir(root, dir).ok()??;
     Some(
         t.iter()
             .filter(|(_, e)| matches!(e, Entry::Blob { .. }))
@@ -118,9 +125,9 @@ fn files(app: &App, root: &Digest, dir: &str) -> Option<BTreeMap<String, Entry>>
 }
 
 /// Every complete recipe reference, `name/version[@user/channel]`.
-fn references(app: &App, root: &Digest) -> Vec<String> {
+fn references(app: &dyn Host, root: &Digest) -> Vec<String> {
     let mut out = Vec::new();
-    let objects = app.engine.objects();
+    let objects = app.engine().objects();
     for (path, _) in objects.walk(root, "").unwrap_or_default() {
         let p: Vec<&str> = path.split('/').collect();
         if p.len() == 6 && p[5] == pkgpod_conan::MANIFEST {
@@ -159,7 +166,7 @@ fn glob(pattern: &str, name: &str) -> bool {
     true
 }
 
-pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
+pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
     let method = req.method().clone();
     let r: Vec<&str> = a.rel.iter().map(String::as_str).collect();
     if a.role.is_none() {
@@ -225,14 +232,14 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
     let root = v.root;
     match (&method, r.as_slice()) {
         (&Method::GET, ["v2", "conans", "search"]) => {
-            let q = crate::serving::query_params(req.uri().query().unwrap_or(""));
+            let q = pkgpod_proto::query::params(req.uri().query().unwrap_or(""));
             let pattern = q
                 .get("q")
                 .and_then(Value::as_str)
                 .unwrap_or("*")
                 .to_string();
             let app2 = app.clone();
-            let refs = tokio::task::spawn_blocking(move || references(&app2, &root))
+            let refs = tokio::task::spawn_blocking(move || references(&*app2, &root))
                 .await
                 .unwrap_or_default();
             let hits: Vec<String> = refs
@@ -260,9 +267,12 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
     }
 }
 
+/// An answer made off the async threads, of the Host.
+type Blocking = Box<dyn FnOnce(&dyn Host) -> Response + Send>;
+
 #[allow(clippy::too_many_arguments)]
 async fn recipe(
-    app: &Arc<App>,
+    app: &Arc<dyn Host>,
     a: &Ask,
     method: &Method,
     root: Digest,
@@ -272,15 +282,15 @@ async fn recipe(
     req: Request,
 ) -> Response {
     let app2 = app.clone();
-    let blocking = |f: Box<dyn FnOnce(&App) -> Response + Send>| {
+    let blocking = |f: Blocking| {
         let app2 = app2.clone();
         async move {
-            tokio::task::spawn_blocking(move || f(&app2))
+            tokio::task::spawn_blocking(move || f(&*app2))
                 .await
                 .unwrap_or_else(|e| text(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
         }
     };
-    let list = |dir: String, what: String| -> Box<dyn FnOnce(&App) -> Response + Send> {
+    let list = |dir: String, what: String| -> Blocking {
         Box::new(move |app| {
             let revs = revisions(app, &root, &dir);
             if revs.is_empty() {
@@ -292,13 +302,13 @@ async fn recipe(
             }))
         })
     };
-    let latest = |dir: String, what: String| -> Box<dyn FnOnce(&App) -> Response + Send> {
+    let latest = |dir: String, what: String| -> Blocking {
         Box::new(move |app| match revisions(app, &root, &dir).first() {
             Some((r, t)) => reply(json!({"revision": r, "time": pkgpod_conan::time(*t)})),
             None => text(StatusCode::NOT_FOUND, format!("{what} not found")),
         })
     };
-    let file_list = |dir: String, what: String| -> Box<dyn FnOnce(&App) -> Response + Send> {
+    let file_list = |dir: String, what: String| -> Blocking {
         Box::new(move |app| match files(app, &root, &dir) {
             Some(f) if f.contains_key(pkgpod_conan::MANIFEST) => reply(json!({
                 "files": f.keys().map(|k| (k.clone(), json!({}))).collect::<serde_json::Map<String, Value>>(),
@@ -333,7 +343,7 @@ async fn recipe(
                     let pdir = format!("{rdir}/packages");
                     let store = a.repo.store();
                     blocking(Box::new(move |app| {
-                        let objects = app.engine.objects();
+                        let objects = app.engine().objects();
                         let Ok(Some(t)) = objects.dir(&root, &pdir) else {
                             return reply(json!({}));
                         };
@@ -409,7 +419,7 @@ async fn recipe(
 /// A file of a revision: fetched, or put (staged; the manifest commits
 /// the revision).
 async fn file_op(
-    app: &Arc<App>,
+    app: &Arc<dyn Host>,
     a: &Ask,
     method: &Method,
     root: Digest,
@@ -429,7 +439,7 @@ async fn file_op(
             format!("{dir}/{}", pkgpod_conan::MANIFEST),
         );
         let found = tokio::task::spawn_blocking(move || {
-            let o = app2.engine.objects();
+            let o = app2.engine().objects();
             match (o.resolve(&root, &m), o.resolve(&root, &p)) {
                 (Ok(Some(_)), Ok(Some(Entry::Blob { sha256, .. }))) => Some(sha256),
                 _ => None,
@@ -440,18 +450,17 @@ async fn file_op(
         .flatten();
         return match found {
             Some(sha) => {
-                crate::serving::serve_counted(
-                    app,
+                let req = req.map(pkgpod_proto::body::boxed);
+                app.serve_counted(
                     &a.repo.name,
                     &path,
-                    &a.repo.store().path(&sha),
-                    &sha,
+                    a.repo.store().path(&sha),
+                    sha,
                     file,
-                    None,
-                    false,
                     req,
                 )
                 .await
+                .map(Body::new)
             }
             None => text(StatusCode::NOT_FOUND, format!("{path} not found")),
         };
@@ -459,24 +468,22 @@ async fn file_op(
     if *method != Method::PUT {
         return text(StatusCode::METHOD_NOT_ALLOWED, "not allowed");
     }
-    let (sha, size) = match crate::serving::stream_to_store(
-        a.repo.store(),
-        req.into_body().into_data_stream(),
-        pkgpod_conan::MAX_FILE,
-    )
-    .await
+    let body = pkgpod_proto::body::boxed(req.into_body());
+    let (sha, size) = match app
+        .store_body(a.repo.store(), body, pkgpod_conan::MAX_FILE)
+        .await
     {
         Ok(x) => x,
-        Err(e) => return text(StatusCode::BAD_REQUEST, e.to_string()),
+        Err(e) => return text(StatusCode::BAD_REQUEST, e),
     };
     if file != pkgpod_conan::MANIFEST {
-        app.conan_staged.put(&a.repo.name, dir, file, sha, size);
+        app.staged().put(&a.repo.name, dir, file, sha, size);
         return text(StatusCode::CREATED, "");
     }
     // The manifest: the revision, in one version, with its recipe or
     // package info (a manifest alone, say after a restart lost the
     // files before it, is refused).
-    let mut staged = app.conan_staged.take(&a.repo.name, dir);
+    let mut staged = app.staged().take(&a.repo.name, dir);
     let main = if dir.contains("/packages/") {
         "conaninfo.txt"
     } else {
@@ -486,7 +493,9 @@ async fn file_op(
     let have_main = staged.contains_key(main)
         || tokio::task::spawn_blocking(move || {
             matches!(
-                app3.engine.objects().resolve(&root, &format!("{d3}/{m3}")),
+                app3.engine()
+                    .objects()
+                    .resolve(&root, &format!("{d3}/{m3}")),
                 Ok(Some(Entry::Blob { .. }))
             )
         })
@@ -508,7 +517,7 @@ async fn file_op(
         dir.to_string(),
     );
     let res = tokio::task::spawn_blocking(move || {
-        app2.engine
+        app2.engine()
             .change(&repo, &actor, |_cx, e| {
                 let mut put = 0;
                 for (name, (d, n)) in &staged {
@@ -532,7 +541,7 @@ async fn file_op(
                 }
                 Ok(format!("uploaded {dir2} ({put} files)"))
             })
-            .inspect(|o| app2.auth.audit(&actor, "upload", &repo, &o.summary))
+            .inspect(|o| app2.audit(&actor, "upload", &repo, &o.summary))
     })
     .await;
     match res {
@@ -544,7 +553,7 @@ async fn file_op(
 }
 
 /// Removes a revision (or a package, or all packages), as a version.
-async fn remove(app: &Arc<App>, a: &Ask, dir: &str, what: &str) -> Response {
+async fn remove(app: &Arc<dyn Host>, a: &Ask, dir: &str, what: &str) -> Response {
     let (app2, repo, actor, dir2, what2) = (
         app.clone(),
         a.repo.name.clone(),
@@ -553,14 +562,14 @@ async fn remove(app: &Arc<App>, a: &Ask, dir: &str, what: &str) -> Response {
         what.to_string(),
     );
     let res = tokio::task::spawn_blocking(move || {
-        app2.engine
+        app2.engine()
             .change(&repo, &actor, |_cx, e| {
                 if !e.remove(&dir2)? {
                     return Err(pkgpod_engine::Error::NotFound(format!("{what2} not found")));
                 }
                 Ok(format!("removed {what2}"))
             })
-            .inspect(|o| app2.auth.audit(&actor, "remove", &repo, &o.summary))
+            .inspect(|o| app2.audit(&actor, "remove", &repo, &o.summary))
     })
     .await;
     match res {
@@ -572,6 +581,12 @@ async fn remove(app: &Arc<App>, a: &Ask, dir: &str, what: &str) -> Response {
         Ok(Err(pkgpod_engine::Error::NotFound(m))) => text(StatusCode::NOT_FOUND, m),
         Ok(Err(e)) => text(StatusCode::BAD_REQUEST, e.to_string()),
         Err(e) => text(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+impl Host for crate::App {
+    fn staged(&self) -> &Staged {
+        &self.conan_staged
     }
 }
 
