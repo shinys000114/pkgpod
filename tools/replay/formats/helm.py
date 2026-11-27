@@ -12,7 +12,7 @@ import io
 import re
 import tarfile
 
-from core import auth_header, request, times
+from core import IDENTS, auth_header, request, times
 
 NAME = "helm"
 # The paths of Helm's answers, which may hold the run's times (a
@@ -37,8 +37,10 @@ def tgz(members):
 
 
 def chart_yaml(name, version, extra=""):
-    return (f"apiVersion: v2\nname: {name}\nversion: {version}\n"
-            f"description: {name} chart\n{extra}").encode()
+    """A Chart.yaml of `name` `version`, then `extra` (text or bytes)."""
+    head = (f"apiVersion: v2\nname: {name}\nversion: {version}\n"
+            f"description: {name} chart\n").encode()
+    return head + (extra if isinstance(extra, bytes) else extra.encode())
 
 
 def helm_chart(name, version, yaml=None, replicas=1, top=None):
@@ -214,6 +216,224 @@ def reads(c, who):
                 {"Authorization": cred})
 
 
+def writes(c, who):
+    seq = c.seq
+    o = OCTET
+    # Helm: a push to each hosted repository (raw, as a form's "chart"
+    # with a file name and without), read back; the same bytes again,
+    # other bytes of a version (refused unless forced: by any value of
+    # force, not by what only looks like it), more versions; deletes, of
+    # a version by its name as pushed, and of the last of a chart.
+    for repo in ("hpub", "hpriv"):
+        api = f"/{repo}/api/charts"
+        w, f, g, v = (f"{x}-{who}" for x in ("w", "f", "g", "v"))
+        w1 = helm_chart(w, "0.1.0")
+        fh, fb = helm_form([("chart", f"{f}-0.1.0.tgz", helm_chart(f, "0.1.0"))])
+        gh, gb = helm_form([("chart", None, helm_chart(g, "0.1.0"))])
+        seq(f"helm push {repo} {who}", who, [
+            ("POST", api, o, w1),
+            ("GET", f"{api}/{w}", {}, None),
+            ("GET", f"{api}/{w}/0.1.0", {}, None),
+            ("GET", f"/{repo}/charts/{w}-0.1.0.tgz", {}, None),
+            ("GET", f"/{repo}/index.yaml", {}, None),
+            ("POST", api, fh, fb),
+            ("GET", f"{api}/{f}/0.1.0", {}, None),
+            ("POST", f"{api}/", gh, gb),
+            ("GET", f"{api}/{g}", {}, None),
+            ("POST", api, o, w1),
+            ("POST", api, o, helm_chart(w, "0.1.0", replicas=2)),
+            ("POST", f"{api}?forced", o, helm_chart(w, "0.1.0", replicas=2)),
+            ("POST", f"{api}?Force", o, helm_chart(w, "0.1.0", replicas=2)),
+            ("POST", f"{api}?%66orce", o, helm_chart(w, "0.1.0", replicas=2)),
+            ("GET", f"{api}/{w}/0.1.0", {}, None),
+            ("POST", f"{api}?force", o, helm_chart(w, "0.1.0", replicas=2)),
+            ("GET", f"{api}/{w}/0.1.0", {}, None),
+            ("POST", f"{api}?force=false", o, helm_chart(w, "0.1.0", replicas=3)),
+            ("POST", f"{api}?x=1&force", o, w1),
+            ("GET", f"{api}/{w}/0.1.0", {}, None),
+            ("POST", api, o, helm_chart(w, "0.10.0")),
+            ("POST", api, o, helm_chart(w, "0.2.0")),
+            ("GET", f"{api}/{w}", {}, None),
+            ("GET", f"/{repo}/index.yaml", {}, None),
+            ("POST", api, o, helm_chart(v, "v1.0.0")),
+            ("DELETE", f"{api}/{v}/1.0.0", {}, None),
+            ("DELETE", f"{api}/{v}/v1.0.0", {}, None),
+            ("GET", f"{api}/{v}", {}, None),
+            ("DELETE", f"{api}/{w}/0.1.0", {}, None),
+            ("DELETE", f"{api}/{w}/0.1.0", {}, None),
+            ("GET", f"{api}/{w}", {}, None),
+            ("DELETE", f"{api}/{w}/0.2.0", {}, None),
+            ("DELETE", f"{api}/{w}/0.10.0", {}, None),
+            ("GET", f"{api}/{w}", {}, None),
+            ("GET", f"/{repo}/charts/{w}-0.1.0.tgz", {}, None),
+            ("GET", f"/{repo}/index.yaml", {}, None),
+            ("HEAD", f"/{repo}/index.yaml", {}, None)])
+        # A chart put to the tree (the server's upload, not the API's):
+        # other bytes refused unless replaced; a parameter it does not
+        # take; to a label's address (the current version's). Read back
+        # by the API.
+        t = f"t-{who}"
+        seq(f"helm tree put {repo} {who}", who, [
+            ("PUT", f"/{repo}/{t}.tgz", o, helm_chart(t, "0.1.0")),
+            ("PUT", f"/{repo}/{t}.tgz", o, helm_chart(t, "0.1.0", replicas=2)),
+            ("PUT", f"/{repo}/{t}.tgz?replace=true", o, helm_chart(t, "0.1.0", replicas=2)),
+            ("PUT", f"/{repo}/{t}.tgz?replace=yes", o, helm_chart(t, "0.1.0", replicas=3)),
+            ("PUT", f"/{repo}/{t}.tgz?replace=false", o, helm_chart(t, "0.1.0", replicas=4)),
+            ("PUT", f"/{repo}/{t}.tgz?foo=1", o, helm_chart(t, "0.2.0")),
+            ("PUT", f"/{repo}/{t}.tgz", o, b"not gzip"),
+            ("PUT", f"/{repo}/@first/{t}.tgz", o, helm_chart(t, "0.3.0")),
+            ("GET", f"/{repo}/api/charts/{t}", {}, None),
+            ("GET", f"/{repo}/@first/api/charts/{t}", {}, None),
+            ("GET", f"/{repo}/charts/{t}-0.3.0.tgz", {}, None)])
+    # What a push refuses, each the input that reaches it; what is
+    # taken though it might not be. Raw: no gzip, no tar, no
+    # <name>/Chart.yaml (none, at the top, too deep, under ./), a
+    # directory not its name, names and versions that are none, a
+    # Chart.yaml that is no mapping, no YAML, not UTF-8, aliases past
+    # its limit, one past its limit (cut: in a comment, taken; in a
+    # string, refused); the seed's version with other bytes, and with its
+    # own; a Content-Type not a form's (none, mis-cased, not ASCII).
+    x = f"x-{who}"
+    api = "/hpub/api/charts"
+
+    def yaml(text, top=x):
+        return tgz({f"{top}/Chart.yaml": text})
+
+    def mine(n):
+        return helm_chart(f"{n}-{who}", "0.1.0")
+
+    aliases = f"x: &x {'y' * 1000}\ny: [{','.join(['*x'] * 1100)}]\n"
+    big = 1 << 20
+    raw = [
+        b"not gzip",
+        b"",
+        gzip.compress(b"not a tar", mtime=0),
+        tgz({f"{x}/values.yaml": b"a: 1\n"}),
+        tgz({"Chart.yaml": chart_yaml(x, "0.1.0")}),
+        tgz({f"{x}/sub/Chart.yaml": chart_yaml(x, "0.1.0")}),
+        tgz({f"./{x}/Chart.yaml": chart_yaml(x, "0.1.0")}),
+        helm_chart(x, "0.1.0", top="other"),
+        helm_chart("Bad", "0.1.0"),
+        helm_chart("-x", "0.1.0"),
+        helm_chart("y" * 129, "0.1.0"),
+        yaml(b"version: 0.1.0\n"),
+        yaml(f"name: {x}\n".encode()),
+        helm_chart(x, "x"),
+        helm_chart(x, "1.0"),
+        helm_chart(x, "1"),
+        helm_chart(x, '"1.0.0+"'),
+        yaml(b"- a\n"),
+        yaml(b""),
+        yaml(b"just text\n"),
+        yaml(b"name: [\n"),
+        yaml(b"name:\n\t- x\n"),
+        yaml(chart_yaml(x, "0.1.0", "home: \xff\n".encode("latin-1"))),
+        yaml(chart_yaml(x, "0.1.0", aliases)),
+        yaml(chart_yaml(f"cut-{who}", "0.1.0", "# " + "c" * big + "\n"), top=f"cut-{who}"),
+        yaml(chart_yaml(x, "0.1.0", 'home: "' + "h" * big + '"\n')),
+        helm_chart("web", "0.1.0", web_yaml("0.1.0"), replicas=2),
+        WEB_1,
+    ]
+    form = {"Content-Type": f"multipart/form-data; boundary={BOUNDARY}"}
+    _, one = helm_form([("chart", "c.tgz", helm_chart(x, "0.1.0"))])
+    forms = [
+        # The form switch is a prefix, of a header that is text.
+        ({}, b"not gzip"),
+        ({"Content-Type": f"Multipart/Form-Data; boundary={BOUNDARY}"}, one),
+        ({"Content-Type": "multipart/form-data; boundary=\xe9"}, one),
+        ({"Content-Type": "multipart/form-data"}, one),
+        ({"Content-Type": "multipart/form-data; boundary="}, one),
+        ({"Content-Type": f"multipart/form-datax; boundary={BOUNDARY}"},
+         helm_form([("chart", "c.tgz", mine("fx"))])[1]),
+        # Forms: none of its parts the chart (none at all, another, one
+        # mis-cased, one of no name), no form, a part cut short, a chart
+        # that is none; what follows the chart is not read (another
+        # part, one broken, a second chart); a preamble.
+        helm_form([]),
+        helm_form([("prov", "c.tgz.prov", b"x")]),
+        helm_form([("Chart", "c.tgz", helm_chart(x, "0.1.0"))]),
+        (form, f"--{BOUNDARY}\r\nContent-Type: application/gzip\r\n\r\nx\r\n"
+               f"--{BOUNDARY}--\r\n".encode()),
+        (form, f"--{BOUNDARY}\r\nnot a header\r\n\r\nx\r\n--{BOUNDARY}--\r\n".encode()),
+        (form, b""),
+        (form, b"not a form"),
+        (form, one[:-40]),
+        helm_form([("chart", "c.tgz", b"not gzip")]),
+        helm_form([("prov", "c.tgz.prov", b"x"), ("chart", "c.tgz", mine("p"))]),
+        helm_form([("chart", "c.tgz", mine("m"))],
+                  tail=f"--{BOUNDARY}\r\nnot a header\r\n\r\nx".encode()),
+        helm_form([("chart", "c.tgz", mine("t1")), ("chart", "c.tgz", mine("t2"))]),
+        (form, b"a preamble\r\n" + helm_form([("chart", "c.tgz", mine("pre"))])[1]),
+    ]
+    seq(f"helm pushes refused {who}", who,
+        [("POST", api, o, body) for body in raw]
+        + [("POST", api, hd, body) for hd, body in forms]
+        + [("GET", f"{api}/{n}-{who}", {}, None)
+           for n in ("x", "cut", "fx", "p", "m", "t1", "t2", "pre")]
+        + [("GET", f"{api}/web", {}, None)])
+    # What the API takes from no one: other methods, other paths, a
+    # label's (not the API), a write from another site's page.
+    seq(f"helm refused methods {who}", who, [
+        ("PUT", api, o, helm_chart(x, "0.1.0")),
+        ("PUT", f"{api}/web", o, helm_chart(x, "0.1.0")),
+        ("POST", f"{api}/web", o, helm_chart(x, "0.1.0")),
+        ("DELETE", api, {}, None),
+        ("DELETE", f"{api}/web", {}, None),
+        ("DELETE", f"{api}/web/9.9.9", {}, None),
+        ("DELETE", f"{api}/nope/1.0.0", {}, None),
+        ("DELETE", f"{api}/web/0.1.0/x", {}, None),
+        ("DELETE", "/hpub/@first/api/charts/web/0.1.0", {}, None),
+        ("POST", "/hpub/@first/api/charts", o, helm_chart(x, "0.1.0")),
+        ("DELETE", "/hpub/charts/web-0.1.0.tgz", {}, None),
+        ("POST", "/hpub/charts/web-0.1.0.tgz", o, helm_chart(x, "0.1.0")),
+        ("POST", api, dict(o, Origin="http://elsewhere.example"), helm_chart(f"o-{who}", "0.1.0")),
+        ("DELETE", f"{api}/web/0.1.0", {"Origin": "http://elsewhere.example"}, None),
+        ("POST", "/hpub/%2e%2e/api/charts", o, helm_chart(f"o-{who}", "0.1.0")),
+        ("GET", f"{api}/web", {}, None),
+        ("GET", f"{api}/o-{who}", {}, None)])
+    # A repository with nothing in it: a push that is none, a delete of
+    # what is not there.
+    seq(f"helm hempty writes {who}", who, [
+        ("POST", "/hempty/api/charts", o, b"not gzip"),
+        ("DELETE", "/hempty/api/charts/web/1.0.0", {}, None),
+        ("GET", "/hempty/api/charts", {}, None),
+        ("GET", "/hempty/index.yaml", {}, None)])
+
+
+# The largest chart the API and the format take in.
+MAX_CHART = 256 << 20
+
+
+def limits(c, who):
+    # A chart one byte over the limit: raw and as a form's part (the
+    # API's), and put to the tree (the format's); by one who may (the
+    # body is read).
+    if who == "writer":
+        big = b"\0" * (MAX_CHART + 1)
+        c.add("helm push over the limit writer", who, "POST", "/hpub/api/charts", OCTET, big)
+        hd, body = helm_form([("chart", "big.tgz", big)])
+        c.add("helm form push over the limit writer", who, "POST", "/hpub/api/charts", hd, body)
+        c.add("helm tree put over the limit writer", who, "PUT", "/hpub/big.tgz", OCTET, big)
+
+
+def after(c, who):
+    # What Helm's writes left: index.yaml and the API's list in each
+    # hosted repository (whole, HEAD, a range), each identity's
+    # charts, the label's version as it was.
+    for repo in ("hpub", "hpriv"):
+        for rel in ("/index.yaml", "/api/charts", "/", "/charts/", "/@first/index.yaml"):
+            c.add(f"after helm {repo}{rel} {who}", who, "GET", f"/{repo}{rel}")
+        c.add(f"after helm {repo} HEAD /index.yaml {who}", who, "HEAD", f"/{repo}/index.yaml")
+        c.add(f"after helm {repo} range /index.yaml {who}", who, "GET", f"/{repo}/index.yaml",
+              {"Range": "bytes=0-9"})
+        c.add(f"after helm {repo} HEAD /api/charts {who}", who, "HEAD", f"/{repo}/api/charts")
+        for w in IDENTS:
+            c.add(f"after helm {repo}/api/charts/f-{w} {who}", who, "GET",
+                  f"/{repo}/api/charts/f-{w}")
+            c.add(f"after helm {repo}/charts/t-{w}-0.1.0.tgz {who}", who, "GET",
+                  f"/{repo}/charts/t-{w}-0.1.0.tgz")
+
+
 def mask(masker):
     def answer(path, hd, body, after_writes, etag):
         if re.match(TIMES, path):
@@ -230,6 +450,9 @@ PARTS = [
     ("rtoken", 80, ["hpriv"]),
     ("publisher", 70, ["hpub"]),
     ("reads", 110, reads),
+    ("writes", 150, writes),
+    ("writes", 160, limits),
+    ("after", 60, after),
     # Helm keeps when each version was pushed (the API's created,
     # index.yaml's created and generated; in the tree too).
     ("rule", 150, ("helm times", "times at or after the seed in Helm answers (same length), the "
