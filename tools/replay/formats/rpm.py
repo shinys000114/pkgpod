@@ -9,8 +9,15 @@ is served as the server's generic tree: the packages under
 <group>/Packages/, the repodata the format makes per version and group
 (repomd.xml, its signature, the three indexes it names), key.asc, and
 the dnf repository file of a group (<group>.repo). RPM repositories
-are hosted (or mirrors, which are jobs): no proxy, no stub."""
+are hosted (or mirrors, which are jobs): no proxy, no stub.
 
+The writes go to groups no read before them names (main, the default,
+and one per identity, w-<who>), read back in sequences only, and no
+fuzz word names them: what the format makes for them holds the run's
+time (see the rules below), and a listing of their repodata/ is in an
+order of the hashes of that time."""
+
+import base64
 import gzip
 import hashlib
 import json
@@ -21,6 +28,9 @@ import struct
 from core import auth_header, request
 
 NAME = "rpm"
+# The paths of the groups the run writes, whose repodata holds its
+# time (see above).
+TIMES = r"/r(pub|priv|nosign)/(main|w-[a-z]+)/"
 
 # The time the packages say they were built, their files' times.
 BUILT = 1790000000
@@ -504,6 +514,230 @@ def reads(c, who):
         add(f"rpm route el9 {f} {who}", who, "GET", f"/dnf/el9/repodata/{f}", {"Host": ROUTE_HOST})
 
 
+def writes(c, who):
+    seq = c.seq
+    for repo in ("rpub", "rpriv"):
+        b = f"/{repo}"
+        w = f"w-{who}"
+        rich, rich_2 = tool(w, "1.0", epoch=1), tool(w, "1.0", epoch=1, readme="again")
+        rich_f = file_name(w, "1.0", arch="x86_64")
+        # A package to a group of its own (new: its repodata made, signed,
+        # the others' kept), read back; the same bytes again; other bytes
+        # of one name, version, release and arch (refused, refused with
+        # replace given as false, taken with replace given alone); a
+        # value of replace that is none; a source package; to a label's
+        # address (the current version's); one whose header is past
+        # what is read first; one of an odd header, to the group named
+        # with spaces around it; one that names no source.
+        seq(f"rpm put {repo} {who}", who, [
+            ("PUT", f"{b}/upload?group={w}", {}, rich),
+            ("GET", f"{b}/{w}/repodata/repomd.xml", {}, None),
+            ("HEAD", f"{b}/{w}/repodata/repomd.xml", {}, None),
+            ("GET", f"{b}/{w}/repodata/repomd.xml",
+             {"If-None-Match": "{rpm put %s %s.etag}" % (repo, who)}, None),
+            ("GET", f"{b}/{w}/repodata/repomd.xml.asc", {}, None),
+            ("GET", f"{b}/{w}/Packages/", {}, None),
+            ("GET", f"{b}/{w}/", {}, None),
+            ("GET", f"{b}/{w}.repo", {}, None),
+            ("GET", f"{b}/", {}, None),
+            ("PUT", f"{b}/upload?group={w}", {}, rich),
+            ("PUT", f"{b}/upload?group={w}", {}, rich_2),
+            ("PUT", f"{b}/upload?group={w}&replace=false", {}, rich_2),
+            ("PUT", f"{b}/upload?group={w}&replace=maybe", {}, rich_2),
+            ("PUT", f"{b}/upload?group={w}&replace", {}, rich_2),
+            ("GET", f"{b}/{w}/Packages/{rich_f}", {}, None),
+            ("PUT", f"{b}/{w}/x.src.rpm?group={w}", {}, source(w, "1.0")),
+            ("PUT", f"{b}/@first/upload?group={w}", {}, package(f"l-{who}", "1.0")),
+            ("PUT", f"{b}/upload?group={w}", {},
+             package(f"b-{who}", "1.0", description="a big header " * 25000)),
+            ("PUT", f"{b}/upload?group=%20{w}+", {}, odd(f"o-{who}")),
+            ("PUT", f"{b}/upload?group={w}", {}, lone(f"n-{who}")),
+            ("GET", f"{b}/{w}/Packages/", {}, None),
+            ("GET", f"{b}/{w}/repodata/repomd.xml", {}, None),
+            ("GET", f"{b}/@first/{w}/Packages/", {}, None)])
+        # No group: main, whatever the address (a group's, the
+        # repository's own), a group given empty; read back.
+        d = f"d-{who}"
+        seq(f"rpm put default group {repo} {who}", who, [
+            ("PUT", f"{b}/el9/{file_name(d, '1.0')}", {}, package(d, "1.0")),
+            ("GET", f"{b}/main/Packages/", {}, None),
+            ("GET", f"{b}/el9/Packages/{file_name(d, '1.0')}", {}, None),
+            ("PUT", f"{b}?group=", {}, package(f"e-{who}", "1.0")),
+            ("PUT", b, {}, package(f"f-{who}", "1.0", arch="x86_64")),
+            ("GET", f"{b}/main/Packages/", {}, None),
+            ("GET", f"{b}/main/repodata/repomd.xml", {}, None),
+            ("GET", f"{b}/main/repodata/repomd.xml.asc", {}, None),
+            ("GET", f"{b}/main.repo", {}, None),
+            ("GET", f"{b}/el9/Packages/", {}, None)])
+        # What an upload refuses, each the input that reaches it: no rpm
+        # (nothing, other bytes), cut short (the lead only, inside the
+        # signature header, inside the header), a header too large (by
+        # its entries, by its store), a tag outside its header, no
+        # header after the signature; a name, version, release or arch
+        # that cannot be a file name (a name not a string: none); a
+        # group that is none, a parameter it does not take; from
+        # another site's page. Then what the tree takes from no one:
+        # other methods. Nothing changed.
+        x = f"x-{who}"
+        good = package(x, "1.0")
+        n, size = struct.unpack(">II", good[104:112])
+        hdr_at = 112 + 16 * n + size
+        hdr_at += -hdr_at % 8
+        lead = good[:96]
+        bad = [
+            b"", b"not an rpm", good[:96], good[:120], good[:hdr_at + 40],
+            lead + b"\x8e\xad\xe8\x01\0\0\0\0" + struct.pack(">II", 70000, 0),
+            lead + b"\x8e\xad\xe8\x01\0\0\0\0" + struct.pack(">II", 1, (256 << 20) + 1),
+            lead + b"\x8e\xad\xe8\x01\0\0\0\0" + struct.pack(">II", 1, 4)
+            + struct.pack(">IIII", NAME_T, STRING, 5, 1) + b"abc\0",
+            good[:hdr_at] + b"no header here" + good[hdr_at + 14:],
+            package("a/b", "1.0"), package(".hidden", "1.0"), package(x, "1:0"),
+            package(x, "1.0", ""), package(x, "1.0", arch="x86/64"),
+            package(x, "1.0", tweak=lambda es: [(t, INT32, [1]) if t == NAME_T else (t, ty, v)
+                                                for t, ty, v in es]),
+        ]
+        params = ["El9", ".hidden", "a+b", "a~b", "a^b", "a%2Fb", "x" * 256]
+        steps = [("PUT", f"{b}/upload?group={w}", {}, body) for body in bad]
+        steps += [("PUT", f"{b}/upload?group={g}", {}, good) for g in params]
+        steps += [("PUT", f"{b}/upload?group={w}&dists=stable", {}, good),
+                  ("PUT", f"{b}/upload?group={w}", {"Origin": "http://elsewhere.example"}, good),
+                  ("POST", f"{b}/upload?group={w}", {}, good),
+                  ("POST", f"{b}/el9/Packages/", {}, good),
+                  ("DELETE", f"{b}{PKG}", {}, None),
+                  ("DELETE", f"{b}/el9/", {}, None),
+                  ("PATCH", f"{b}{PKG}", {}, b"x"),
+                  ("OPTIONS", f"{b}{PKG}", {}, None),
+                  ("POST", f"{b}/el9.repo", {}, b"x"),
+                  ("GET", f"{b}/el9/Packages/", {}, None),
+                  ("GET", f"{b}/{w}/Packages/", {}, None)]
+        seq(f"rpm puts refused {repo} {who}", who, steps)
+    # Unsigned: repodata without a signature, no key.
+    w = f"w-{who}"
+    seq(f"rpm put rnosign {who}", who, [
+        ("PUT", f"/rnosign/upload?group={w}", {}, package(w, "1.0")),
+        ("GET", f"/rnosign/{w}/repodata/repomd.xml", {}, None),
+        ("GET", f"/rnosign/{w}/repodata/repomd.xml.asc", {}, None),
+        ("GET", f"/rnosign/{w}/Packages/", {}, None),
+        ("GET", "/rnosign/key.asc", {}, None),
+        ("GET", f"/rnosign/{w}.repo", {}, None)])
+    # A repository with nothing in it, which no one but admin may write.
+    c.add(f"rpm put rempty {who}", who, "PUT", "/rempty/upload?group=el9", {}, b"not an rpm")
+
+
+# The most of a package read for its headers: one whose headers would
+# need more is refused once that much is read.
+HEADER_READ = 256 << 20
+
+
+def limits(c, who):
+    # A package whose header is past what is read of it, by one who may
+    # (its body is read). The format's own limit (4 GiB) and the tree's
+    # (8 GiB) are past what a run sends.
+    if who == "writer":
+        lead = package("big", "1.0")[:96]
+        sig = header([(SIG_SIZE, INT32, [0])])
+        sig += b"\0" * (-len(sig) % 8)
+        start = b"\x8e\xad\xe8\x01\0\0\0\0" + struct.pack(">II", 1, HEADER_READ) + struct.pack(
+            ">IIII", NAME_T, STRING, 0, 1)
+        body = lead + sig + start
+        body += b"\0" * (HEADER_READ + 1 - len(body))
+        c.add("rpm put past the header read writer", who, "PUT", "/rpub/upload?group=w-writer",
+              {}, body)
+
+
+def after(c, who):
+    # What the writes left, in sequences (see the module's docstring):
+    # each signed repository's tree, the default group, each identity's.
+    for repo in ("rpub", "rpriv"):
+        b = f"/{repo}"
+        steps = [("GET", f"{b}{rel}", {}, None) for rel in (
+            "/", "/main/", "/main/Packages/", "/main/repodata/repomd.xml",
+            "/main/repodata/repomd.xml.asc", "/main.repo", MD, "/el9/Packages/",
+            "/@first/el9/repodata/repomd.xml")]
+        for w in ("writer", "wtoken", "wbearer", "admin", "ptoken"):
+            steps += [("GET", f"{b}/w-{w}/Packages/", {}, None),
+                      ("GET", f"{b}/w-{w}/repodata/repomd.xml", {}, None)]
+        c.seq(f"after rpm {repo} {who}", who, steps)
+    c.seq(f"after rpm rnosign {who}", who, [
+        ("GET", "/rnosign/", {}, None), ("GET", "/rnosign/w-writer/repodata/repomd.xml", {}, None),
+        ("GET", "/rnosign/w-admin/Packages/", {}, None)])
+
+
+# A repomd.xml's times, and its primary index's entry.
+REPOMD_TIME = re.compile(rb"(<(?:revision|timestamp)>)(\d+)(</)")
+PRIMARY = re.compile(rb'<data type="primary">.*?</data>', re.S)
+PRIMARY_DERIVED = re.compile(
+    rb'(<checksum type="sha256">|<open-checksum type="sha256">|href="repodata/|<size>)'
+    rb'([0-9a-f]+)')
+ARMOR = re.compile(rb"-----BEGIN PGP SIGNATURE-----\r?\n(.*?)-----END PGP SIGNATURE-----", re.S)
+
+
+def signed_at(body):
+    """When an armored OpenPGP signature (v4) says it was made: its
+    hashed creation time subpacket; None if it says none."""
+    m = ARMOR.search(body)
+    if not m:
+        return None
+    lines = [x.strip() for x in m.group(1).split(b"\n")]
+    b64 = b"".join(x for x in lines if x and b":" not in x and not x.startswith(b"="))
+    try:
+        data = base64.b64decode(b64)
+        tag = data[0]
+        if tag & 0x40:
+            n = data[1]
+            at = 2 if n < 192 else 3 if n < 224 else 6
+        else:
+            at = 1 + {0: 1, 1: 2, 2: 4}[tag & 3]
+        pkt = data[at:]
+        if pkt[0] != 4:
+            return None
+        sub = pkt[6:6 + int.from_bytes(pkt[4:6], "big")]
+        i = 0
+        while i < len(sub):
+            n = sub[i]
+            if n < 192:
+                i += 1
+            elif n < 255:
+                n, i = ((n - 192) << 8) + sub[i + 1] + 192, i + 2
+            else:
+                n, i = int.from_bytes(sub[i + 1:i + 5], "big"), i + 5
+            if sub[i] & 0x7f == 2:
+                return int.from_bytes(sub[i + 1:i + 5], "big")
+            i += n
+    except (ValueError, IndexError, KeyError):
+        return None
+    return None
+
+
+def mask(masker):
+    def answer(path, hd, body, after_writes, etag):
+        if not re.match(TIMES, path):
+            return hd, body
+        hit = False
+        rev = re.search(rb"<revision>(\d+)</revision>", body) if b"<repomd" in body[:300] else None
+        if after_writes and rev and int(rev.group(1)) >= masker.seed_time:
+            hit = True
+            masker.counts["rpm repodata of the run"] += 1
+
+            def run_time(m):
+                if int(m.group(2)) < masker.seed_time:
+                    return m.group(0)
+                return m.group(1) + b"X" * len(m.group(2)) + m.group(3)
+            body = REPOMD_TIME.sub(run_time, body)
+            body = PRIMARY.sub(lambda m: PRIMARY_DERIVED.sub(
+                lambda d: d.group(1) + b"X" * len(d.group(2)), m.group(0)), body)
+            hd = [[k, "*" if k == "etag" else v] for k, v in hd]
+        elif after_writes and (signed_at(body) or 0) >= masker.seed_time:
+            hit = True
+            masker.counts["rpm signatures of the run"] += 1
+            body = b"<a signature of the run>"
+            hd = [[k, "*" if k in ("etag", "content-length") else v] for k, v in hd]
+        # Whole answers' etags noted, so that a HEAD or a 304 of one is
+        # not asked again whole (see core.Masker.part).
+        return masker.part(hd, body, hit, after_writes, etag)
+    return answer
+
+
 PARTS = [
     ("seed", 120, seed),
     ("grants", 110, {"reader": {"rpriv": "read"},
@@ -512,4 +746,29 @@ PARTS = [
     ("rtoken", 100, ["rpriv"]),
     ("publisher", 90, ["rpub"]),
     ("reads", 130, reads),
+    ("writes", 210, writes),
+    ("writes", 220, limits),
+    ("after", 80, after),
+    # A group written in the run has its repodata made then: repomd.xml's
+    # revision and timestamps are the version's time, and primary.xml
+    # holds each package's upload time (filelists.xml and other.xml hold
+    # none: their entries stay). The primary's size is of its gzipped
+    # bytes, which the run's times change by a few: masked to the same
+    # length, alike while its digits are as many (the sizes the corpus
+    # reads are 600 to 3600, none within 90 of a power of ten).
+    ("rule", 190, ("rpm repodata of the run", "in a repomd.xml of an RPM group written in the "
+                                              "run (its revision at or after the seed): the "
+                                              "revision and timestamps (same length); the "
+                                              "primary entry's checksum, open-checksum, location "
+                                              "and size, of a primary.xml holding the run's "
+                                              "upload times (same length); the etag")),
+    # ... and its repomd.xml signed then: an Ed25519 signature of that
+    # second, whose numbers' leading zero bytes are left out (its length
+    # is of its value too).
+    ("rule", 200, ("rpm signatures of the run", "the body, content-length and etag of an RPM "
+                                                "group's repomd.xml.asc whose signature was made "
+                                                "at or after the seed")),
+    ("rule", 210, ("rpm times", "the root of an RPM version made in the run (its packages' "
+                                "repodata parts hold their upload time)")),
+    ("mask", 110, mask),
 ]
