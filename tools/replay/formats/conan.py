@@ -406,6 +406,21 @@ def writes(c, who):
            ("GET", f"{ref}/revisions", {}, None),
            ("GET", f"{rdir}/files", {}, None),
            ("GET", f"/kpub/v2/conans/search?q=r-{who}*", {}, None)])
+    # A package of a recipe revision that is not there: taken, though
+    # the revision is not (it has no manifest); its package is found.
+    ref = f"/kpub/v2/conans/o-{who}/1.0/_/_"
+    rdir = f"{ref}/revisions/{md5(f'orphan {who}')}"
+    pdir = f"{rdir}/packages/{P1}/revisions/{md5(f'orphan package {who}')}"
+    seq(f"conan package of no recipe {who}", who,
+        [("PUT", f"{pdir}/files/{n}", {}, d)
+         for n, d in package(INFO_WIN, f"o-{who} package").items()]
+        + [("GET", f"{ref}/revisions", {}, None),
+           ("GET", f"{ref}/latest", {}, None),
+           ("GET", f"{rdir}/files", {}, None),
+           ("GET", f"{rdir}/search", {}, None),
+           ("GET", f"{rdir}/packages/{P1}/latest", {}, None),
+           ("GET", f"{pdir}/files/conaninfo.txt", {}, None),
+           ("GET", f"/kpub/v2/conans/search?q=o-{who}*", {}, None)])
     # What uploading refuses, each with the input that reaches it: a
     # manifest alone (a recipe's, a package's: its conaninfo.txt not
     # put); a file of other bytes than the one there (and the manifest
