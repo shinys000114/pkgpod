@@ -447,6 +447,16 @@ def mask(masker):
     return answer
 
 
+FUZZ = (["hpub", "hpriv", "hempty"],
+        ["api", "charts", "web", "0.1.0", "0.2.0", "0.10.0", "index.yaml", "web-0.1.0.tgz",
+         "num", "1.0.0", "vchart", "v1.0.0", "keyed", "tree", "@first", "@1", "upload.tgz",
+         "nope", "x"])
+# Not FUZZ_WRITABLE: a push keeps its time where the rules mask it (the
+# "helm times" rule, and the core's), but a fuzzed delete or forced push
+# would drop the downloads of what it removed that the server had not
+# written yet (see writes), so the end state's downloads would depend
+# on when it wrote them, which no rule masks.
+
 PARTS = [
     ("seed", 100, seed),
     ("grants", 90, {"reader": {"hpriv": "read"},
@@ -464,4 +474,6 @@ PARTS = [
                                  "etag of an answer they were in, the root of a Helm version "
                                  "made in the run")),
     ("mask", 90, mask),
+    ("fuzz sample", 100, helm_chart("fz", "1.0.0")),
+    ("fuzz sample", 110, helm_form([("chart", "fz-1.0.0.tgz", helm_chart("fz", "1.0.0"))])[1]),
 ]
