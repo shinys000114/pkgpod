@@ -686,11 +686,12 @@ def mask(masker):
             return [[k, "*" if k in ("etag", "content-length") else v] for k, v in hd], plain
         if etag not in run:
             return hd, body
-        # A HEAD, a 304 or a range of one: what it says of the whole.
+        # A HEAD, a 304 or a range of one: what it says of the whole (a
+        # range's length is the one asked).
         masker.counts["apk index parts of the run"] += 1
         out = []
         for k, v in hd:
-            if k in ("etag", "content-length"):
+            if k == "etag" or (k == "content-length" and "content-range" not in h):
                 v = "*"
             elif k == "content-range":
                 v = re.sub(r"/\d+$", lambda m: "/" + "X" * (len(m.group(0)) - 1), v)
@@ -731,9 +732,9 @@ PARTS = [
     # had): its length, and the bytes of a range, are of that second.
     ("rule", 240, ("apk index parts of the run", "after writes, of an apk APKINDEX.tar.gz with no "
                                                  "body or a range, whose etag a whole index of "
-                                                 "the run had: the etag, the content-length, the "
-                                                 "content-range's total and the bytes (same "
-                                                 "length)")),
+                                                 "the run had: the etag; the content-length of "
+                                                 "one with no body; a range's content-range "
+                                                 "total and bytes (same length)")),
     ("mask", 120, mask),
     ("fuzz sample", 160, HELLO_10),
 ]
