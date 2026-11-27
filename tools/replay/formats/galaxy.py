@@ -12,11 +12,12 @@ import gzip
 import hashlib
 import io
 import json
+import os
 import random
 import re
 import tarfile
 
-from core import IDENTS, auth_header, request, times
+from core import IDENTS, PTOKEN, auth_header, request, times
 
 NAME = "galaxy"
 REPOS = ("galpub", "galpriv", "galempty")
@@ -313,6 +314,18 @@ def reads(c, who):
     for rel in ("/", "/api/", "/api/v3/", f"{C}/", f"{v}/", f"{v}/1.0.0/", DL,
                 "/api/v3/imports/collections/x/", "/@first/", "/nope"):
         add(f"galaxy galempty{rel} {who}", who, "GET", f"/galempty{rel}")
+
+
+def seed_tokens(c):
+    """The seed's plaintext tokens (ident: token), from the file the
+    seed keeps them in, beside its fixtures: core.TOKENS is filled from
+    it only once the run starts, after the corpus is made."""
+    path = os.path.join(os.path.dirname(c.fx), "tokens.json")
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"galaxy: the seed's tokens ({path}): {e}")
 
 
 def variants(who):
@@ -630,6 +643,47 @@ def limits(c, who):
           *publish(big))
 
 
+def writes_end(c):
+    # ansible-galaxy sends its token as "Token <token>": a token of
+    # writer's that writes (galpub only), one that only reads (galpriv),
+    # the trusted publisher's, one that is none.
+    tok = seed_tokens(c)
+    wt = {"Authorization": f"Token {tok['wtoken']}"}
+    rt = {"Authorization": f"Token {tok['rtoken']}"}
+    pt = {"Authorization": f"Token {PTOKEN}"}
+    nt = {"Authorization": "Token pkgpod_nope"}
+    hd, body = publish(artifact("team", "token_w", "1.0.0"))
+    hp, bp = publish(artifact("team", "token_p", "1.0.0"))
+    up = UPLOAD
+    c.seq("galaxy token scheme anon", "anon", [
+        ("GET", f"/galpub{C}/", wt, None),
+        ("GET", "/galpriv/api/", wt, None),
+        ("GET", "/galpriv/api/", rt, None),
+        ("GET", "/galpriv/api/", pt, None),
+        ("GET", "/galpub/api/", nt, None),
+        ("GET", "/galpub/api/", {"Authorization": "Token "}, None),
+        ("POST", f"/galpub{up}", dict(hd, **wt), body),
+        ("GET", "{json:task}", {}, None),
+        ("POST", f"/galpriv{up}", dict(hd, **wt), body),
+        ("POST", f"/galpriv{up}", dict(hd, **rt), body),
+        ("POST", f"/galpub{up}", dict(hd, **rt), body),
+        ("POST", f"/galpub{up}", dict(hp, **pt), bp),
+        ("POST", f"/galpub{up}", dict(hd, **nt), body),
+        ("GET", "/galpub/api/v3/collections/team/token_w/versions/", {}, None),
+        ("GET", "/galpub/api/v3/collections/team/token_p/versions/", {}, None)])
+    # A write from another site's page; credentials that are none.
+    hx, bx = publish(artifact("team", "cross", "1.0.0"))
+    c.seq("galaxy cross-site writer", "writer", [
+        ("POST", f"/galpub{up}", dict(hx, Origin="http://elsewhere.example"), bx),
+        ("POST", f"/galpub{up}", dict(hx, **{"Sec-Fetch-Site": "cross-site"}), bx),
+        ("GET", "/galpub/api/v3/collections/team/cross/versions/", {}, None)])
+    wrong = {"Authorization": "Basic " + base64.b64encode(b"writer:wrong").decode()}
+    c.seq("galaxy bad credentials anon", "anon", [
+        ("GET", "/galpub/api/", wrong, None),
+        ("POST", f"/galpub{up}", dict(hx, **wrong), bx),
+        ("GET", "/galpub/api/v3/collections/team/cross/versions/", {}, None)])
+
+
 def after(c, who):
     add = c.add
     # What the writes left: the seed's collection after uploads of it,
@@ -691,6 +745,7 @@ PARTS = [
     ("reads", 120, reads),
     ("writes", 170, writes),
     ("writes", 180, limits),
+    ("writes end", 30, writes_end),
     ("after", 70, after),
     # Galaxy keeps when each version was uploaded (its tree's metadata,
     # and so its root), and says it as each version's created_at and
