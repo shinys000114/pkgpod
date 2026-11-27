@@ -522,6 +522,20 @@ def group_after(c, who):
             c.add(f"after oci group {g}{rel} {who}", who, "GET", f"/v2/{g}{rel}", OCI_ACCEPT)
 
 
+def group_kept_reads(c, who):
+    # A proxy member's image through a group (ogup's hello, kept since
+    # it was first asked): its manifest by HEAD and with an earlier
+    # answer's ETag (if it gave one), its layer by a range.
+    v = "/v2/ogall/hello"
+    c.add(f"oci group ogall proxy manifest HEAD {who}", who, "HEAD", f"{v}/manifests/1",
+          OCI_ACCEPT)
+    c.add(f"oci group ogall proxy manifest inm {who}", who, "GET", f"{v}/manifests/1",
+          dict(OCI_ACCEPT, **{"If-None-Match": "{oci group ogall/hello/manifests/1 %s.etag}"
+                                               % who}))
+    c.add(f"oci group ogall proxy layer range {who}", who, "GET",
+          f"{v}/blobs/{blob_digest(UP_LAYER)}", {"Range": "bytes=3-12"})
+
+
 def mask(masker):
     # Upload ids as they appear, and the number each is given.
     uploads = {}
@@ -573,6 +587,7 @@ PARTS = [
     ("reads", 210, group_reads),
     ("writes", 310, group_writes),
     ("after", 160, group_after),
+    ("reads", 220, group_kept_reads),
     # OCI upload ids are random: numbered in the order they appear (in
     # location and docker-upload-uuid; where a body names one of them).
     ("rule", 30, ("oci upload ids", "upload ids in location, docker-upload-uuid and bodies")),

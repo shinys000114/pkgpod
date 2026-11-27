@@ -834,6 +834,22 @@ def group_after(c, who):
             c.add(f"after maven group {g}{rel} {who}", who, "GET", b + rel)
 
 
+def group_kept_reads(c, who):
+    # A proxy member's file through a group (mvngup's hello 7.0.0 jar,
+    # kept since it was first asked): by HEAD, a range, an earlier ETag.
+    j = f"/mvngall/{HELLO}/7.0.0/hello-7.0.0.jar"
+    c.add(f"maven group mvngall proxy jar HEAD {who}", who, "HEAD", j)
+    c.add(f"maven group mvngall proxy jar range {who}", who, "GET", j, {"Range": "bytes=0-9"})
+    c.add(f"maven group mvngall proxy jar inm {who}", who, "GET", j,
+          {"If-None-Match": "{maven group mvngall/%s/7.0.0/hello-7.0.0.jar %s.etag}"
+                            % (HELLO, who)})
+    # An artifact of no group (one directory): a proxy member is not
+    # asked of it.
+    for g in ("mvngroup", "mvngall"):
+        for rel in ("/hello/1.0/hello-1.0.jar", "/x/maven-metadata.xml"):
+            c.add(f"maven group {g}{rel} {who}", who, "GET", f"/{g}{rel}")
+
+
 # ---- masks ----------------------------------------------------------------
 
 LAST = re.compile(rb"<lastUpdated>(\d{14})</lastUpdated>")
@@ -949,6 +965,7 @@ PARTS = [
     ("reads", 200, group_reads),
     ("writes", 300, group_writes),
     ("after", 150, group_after),
+    ("reads", 220, group_kept_reads),
     # An artifact's maven-metadata.xml says when its last file came
     # (lastUpdated, to the second, UTC), and the tree keeps when each
     # file came: of a write of the run, the run's time.

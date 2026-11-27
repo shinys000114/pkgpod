@@ -228,6 +228,14 @@ def group_after(c, who):
             c.add(f"after files group {g}{rel} {who}", who, "GET", f"/{g}{rel}")
 
 
+def group_kept_reads(c, who):
+    # A proxy member's file through a group (fgup's a.txt, kept since
+    # it was first asked): by a range, and since its upstream's time.
+    for name, h in (("range", {"Range": "bytes=0-3"}),
+                    ("ims upstream", {"If-Modified-Since": "Mon, 02 Nov 2026 10:00:00 GMT"})):
+        c.add(f"files group fgall proxy file {name} {who}", who, "GET", "/fgall/a.txt", h)
+
+
 FUZZ = (["fpub", "fpriv", "fproxy", "fgroup", "fgall", "fgmix", "fgfail", "fgnone"],
         ["a.txt", "dir", "b.txt", "big.bin", "v2", "x.txt", "@stable", "latest", "w",
          "a.img", "c.txt", "missing", "dir_b.txt", "only", "s.txt", "up.txt"])
@@ -253,4 +261,5 @@ PARTS = [
     ("reads", 160, group_reads),
     ("writes", 250, group_writes),
     ("after", 100, group_after),
+    ("reads", 220, group_kept_reads),
 ]

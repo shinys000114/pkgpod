@@ -308,6 +308,16 @@ def group_after(c, who):
             c.add(f"after cargo group {g}{rel} {who}", who, "GET", f"/{g}{rel}")
 
 
+def group_kept_reads(c, who):
+    # A proxy member's crate through a group (cgup's hello_pod 7.0.0,
+    # kept since it was first asked): by HEAD, a range, an earlier ETag.
+    d = "/cgall/api/v1/crates/hello_pod/7.0.0/download"
+    c.add(f"cargo group cgall proxy download HEAD {who}", who, "HEAD", d)
+    c.add(f"cargo group cgall proxy download range {who}", who, "GET", d, {"Range": "bytes=0-9"})
+    c.add(f"cargo group cgall proxy download inm {who}", who, "GET", d,
+          {"If-None-Match": "{cargo group cgall%s %s.etag}" % (d[len("/cgall"):], who)})
+
+
 def mask(masker):
     def answer(path, hd, body, after_writes, etag):
         if re.match(TIMES, path):
@@ -340,6 +350,7 @@ PARTS = [
     ("reads", 180, group_reads),
     ("writes", 280, group_writes),
     ("after", 130, group_after),
+    ("reads", 220, group_kept_reads),
     # cargo keeps when each version was published (pubtime in its index
     # entry, in the tree too).
     ("rule", 60, ("cargo times", "pubtimes at or after the seed in cargo answers (same length), "

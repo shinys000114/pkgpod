@@ -331,6 +331,16 @@ def group_after(c, who):
             c.add(f"after npm group {g}{rel} {who}", who, "GET", f"/{g}{rel}")
 
 
+def group_kept_reads(c, who):
+    # A proxy member's tarball through a group (ngup's hello 7.0.0, kept
+    # since it was first asked): by HEAD, a range, an earlier ETag.
+    t = "/ngall/hello/-/hello-7.0.0.tgz"
+    c.add(f"npm group ngall proxy tarball HEAD {who}", who, "HEAD", t)
+    c.add(f"npm group ngall proxy tarball range {who}", who, "GET", t, {"Range": "bytes=0-9"})
+    c.add(f"npm group ngall proxy tarball inm {who}", who, "GET", t,
+          {"If-None-Match": "{npm group ngall/hello/-/hello-7.0.0.tgz %s.etag}" % who})
+
+
 def mask(masker):
     def answer(path, hd, body, after_writes, etag):
         if re.match(TIMES, path):
@@ -380,6 +390,7 @@ PARTS = [
     ("stub", 90, group_stub),
     ("writes", 260, group_writes),
     ("after", 110, group_after),
+    ("reads", 220, group_kept_reads),
     # npm keeps when each version was published (its packument's time,
     # in the tree too) and a search says when it was made.
     ("rule", 40, ("npm times", "timestamps at or after the seed in npm answers (same length; a "

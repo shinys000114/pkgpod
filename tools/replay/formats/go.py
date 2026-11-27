@@ -265,6 +265,20 @@ def group_after(c, who):
             c.add(f"after go group {g}{rel} {who}", who, "GET", f"/{g}{rel}")
 
 
+def group_kept_reads(c, who):
+    # A proxy member's module through a group (ggup's hello v1.7.0): its
+    # mod whole, by HEAD and with that answer's ETag; its zip by HEAD and
+    # a range (kept since it was first asked).
+    m = f"/ggall{H}/v1.7.0.mod"
+    z = f"/ggall{H}/v1.7.0.zip"
+    c.add(f"go group ggall proxy mod {who}", who, "GET", m)
+    c.add(f"go group ggall proxy mod HEAD {who}", who, "HEAD", m)
+    c.add(f"go group ggall proxy mod inm {who}", who, "GET", m,
+          {"If-None-Match": "{go group ggall proxy mod %s.etag}" % who})
+    c.add(f"go group ggall proxy zip HEAD {who}", who, "HEAD", z)
+    c.add(f"go group ggall proxy zip range {who}", who, "GET", z, {"Range": "bytes=0-9"})
+
+
 def mask(masker):
     def answer(path, hd, body, after_writes, etag):
         if re.match(TIMES, path):
@@ -296,6 +310,7 @@ PARTS = [
     ("reads", 190, group_reads),
     ("writes", 290, group_writes),
     ("after", 140, group_after),
+    ("reads", 220, group_kept_reads),
     # Go keeps when each module version was uploaded (served as its
     # .info's Time, kept in the tree too).
     ("rule", 50, ("go times", "Times at or after the seed in Go answers (same length), the etag "

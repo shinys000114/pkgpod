@@ -337,6 +337,29 @@ def group_after(c, who):
             c.add(f"after pypi group {g}{rel} {who}", who, "GET", f"/{g}{rel}")
 
 
+def seed_bad_group(p, fx):
+    # A proxy whose upstream is empty (taken: it then answers every name
+    # with 502, asking nothing), first in a group.
+    p.cli("repo", "create", "pnone", "-f", "pypi", "-k", "proxy", "-s", "upstream=", "-s",
+          "public=true")
+    p.cli("repo", "create", "pgbad", "-f", "pypi", "-k", "group", "-s", "members=pnone,ppub",
+          "-s", "public=true")
+
+
+def group_kept_reads(c, who):
+    # A proxy member's file through a group (pgup's wheel, kept since it
+    # was first asked): by HEAD, a range, an earlier ETag.
+    w = f"/pgall/files/hello-world/{UP_PY_G_WHEEL[0]}"
+    c.add(f"pypi group pgall proxy file HEAD {who}", who, "HEAD", w)
+    c.add(f"pypi group pgall proxy file range {who}", who, "GET", w, {"Range": "bytes=0-9"})
+    c.add(f"pypi group pgall proxy file inm {who}", who, "GET", w,
+          {"If-None-Match": "{pypi group pgall/files/hello-world/%s %s.etag}"
+                            % (UP_PY_G_WHEEL[0], who)})
+    # The group whose first member's upstream is no address.
+    for rel in ("/", "/simple/", "/simple/hello-world/", f"/files/hello-world/{W10}"):
+        c.add(f"pypi group pgbad{rel} {who}", who, "GET", f"/pgbad{rel}")
+
+
 FUZZ = (["ppub", "ppriv", "pproxy", "pgroup", "pgall", "pgmix", "pgfail"],
         ["simple", "files", "hello-world", "Hello_World", "legacy", "index.json",
          "other-pkg", "up-pkg", "hello_world-1.0-py3-none-any.whl",
@@ -362,6 +385,8 @@ PARTS = [
     ("reads", 170, group_reads),
     ("writes", 270, group_writes),
     ("after", 120, group_after),
+    ("seed", 210, seed_bad_group),
+    ("reads", 220, group_kept_reads),
     ("fuzz sample", 40, wheel("fz", "1.0")[1]),
     ("fuzz sample", 50, py_upload(*wheel("fz", "1.0"))[1]),
 ]
