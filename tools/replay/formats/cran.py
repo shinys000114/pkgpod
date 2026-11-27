@@ -4,7 +4,8 @@
 it, then a label; hellopk 1.1 by the CLI; toolpk 0.1-2 and libpk 2.0
 in one upload by the CLI, then a second label; hellopk 1.10 put to the
 address it is served at; hellopk 1.9, older by R's order though put
-last), and one with nothing in it. CRAN repositories are hosted only:
+last), one with nothing in it, and one at cran.localhost's root, as a
+team's own CRAN would be. CRAN repositories are hosted only:
 no proxy, no stub (and no group: the format has none).
 
 The server serves a repository as it serves any tree (serving/mod.rs:
@@ -128,11 +129,13 @@ SEED = [("put", "/upload", [("hellopk_1.0.tar.gz", HELLO_10)]),
         ("put", "/src/contrib/hellopk_1.10.tar.gz", [("hellopk_1.10.tar.gz", HELLO_110)]),
         ("put", "/upload", [("hellopk_1.9.tar.gz", HELLO_19)])]
 LABELS = {0: "first", 2: "second"}
+ROOTED = rpkg("rootedpk", "1.0")
+ROOT = {"Host": "cran.localhost"}
 
 
 def seed(p, fx):
     # CRAN: hosted public and private (SEED, its labels), one with
-    # nothing in it.
+    # nothing in it, one at cran.localhost's root.
     aa = auth_header("admin")
     for repo, public in (("cranpub", "true"), ("cranpriv", "false")):
         p.cli("repo", "create", repo, "-f", "cran", "-s", f"public={public}")
@@ -153,6 +156,11 @@ def seed(p, fx):
             if i in LABELS:
                 p.cli("label", repo, LABELS[i])
     p.cli("repo", "create", "cranempty", "-f", "cran", "-s", "public=true")
+    p.cli("repo", "create", "cranroot", "-f", "cran", "-s", "public=true", "-s",
+          "urls=http://cran.localhost/")
+    st, _, out = request("PUT", "/upload", dict(aa, Host="cran.localhost"), ROOTED)
+    if st != 201:
+        raise SystemExit(f"cran upload to cranroot: {st} {out[:200]}")
 
 
 C = "/src/contrib"
@@ -256,6 +264,14 @@ def reads(c, who):
             add(f"cran {repo} {name} {rel} {who}", who, "GET", f"/{repo}{rel}", h)
         add(f"cran {repo} HEAD inm {PK} {who}", who, "HEAD", f"/{repo}{PK}",
             {"If-None-Match": pk})
+    # One at a host's root: its listing is the host's (no ../), and R's
+    # doubled slash is the path's first; its own name is no path there,
+    # nor does the default host serve it.
+    for rel in ("/", "/src", "/src/", C, f"{C}/", PK, PKGZ, f"/{PK}", f"/{C}/PACKAGES.rds",
+                f"{C}/rootedpk_1.0.tar.gz", f"/@1{PK}", "/@1/", "/@nope/", f"/cranroot{PK}"):
+        add(f"cran root {rel} {who}", who, "GET", rel, ROOT)
+    add(f"cran root HEAD {PK} {who}", who, "HEAD", PK, ROOT)
+    add(f"cran root elsewhere {who}", who, "GET", f"/cranroot{PK}")
     # A repository with nothing in it yet.
     for rel in EMPTY:
         add(f"cran cranempty{rel} {who}", who, "GET", f"/cranempty{rel}")
@@ -399,7 +415,7 @@ def taken(who):
     crlf = description(c, "1.0").replace(b"\n", b"\r\n")
     last = [m for m in members(c, "1.0", crlf) if not m[0].endswith("/DESCRIPTION")]
     o = f"o{who}"
-    odd = (b"continued before any field\n"
+    odd = (b" continued before any field\nno colon before any field\n"
            b"Package:   " + o.encode() + b"  \nVersion:1.0\nTitle : Odd\n"
            b"Imports: utils,\n\tstats,\n    methods\nDepends:\nSuggests: a\nSuggests: b\n"
            b"no colon on this line\nLicense: MIT\nNeedsCompilation: no\n")
@@ -506,6 +522,13 @@ def writes(c, who):
         ("GET", f"/cranpub{C}/{e}_1.00.tar.gz", {}, None),
         ("GET", f"/cranpub{C}/{f}_1.1.tar.gz", {}, None),
         ("GET", f"/cranpub{C}/{g}_1.5.tar.gz", {}, None)])
+    # An upload to the repository at a host's root (admin's only: no
+    # grant names cranroot), read back.
+    seq(f"cran upload at a host's root {who}", who, [
+        ("PUT", "/upload", ROOT, rpkg(f"h{who}", "1.0")),
+        ("GET", PK, ROOT, None),
+        ("GET", f"{C}/h{who}_1.0.tar.gz", ROOT, None),
+        ("GET", f"{C}/", ROOT, None)])
     # A repository the writer only reads (admin writes it).
     seq(f"cran upload cranempty {who}", who, [
         ("PUT", "/cranempty/upload", {}, rpkg(f"n{who}", "1.0")),
@@ -558,6 +581,7 @@ def after(c, who):
               {"If-None-Match": "{cran cranpub%s %s.etag}" % (PK, who)})
     for rel in (f"{C}/", PK):
         c.add(f"after cran cranempty{rel} {who}", who, "GET", f"/cranempty{rel}")
+        c.add(f"after cran root {rel} {who}", who, "GET", rel, ROOT)
 
 
 FUZZ = (["cranpub", "cranpriv", "cranempty"],
