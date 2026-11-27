@@ -17,7 +17,6 @@ use pkgpod_engine::{RepoInfo, Upload, Version};
 use pkgpod_nuget::{Kept, versions};
 use serde_json::{Value, json};
 
-use crate::App;
 use crate::auth::{Caller, Role};
 
 fn reply(st: StatusCode, v: Value) -> Response {
@@ -49,6 +48,17 @@ fn unauthorized() -> Response {
     r
 }
 
+/// What a NuGet feed asks of the server it runs in, besides what every
+/// format does.
+pub trait Host: pkgpod_proto::host::Host {
+    /// The caller whose token `key` is (nuget push and delete send it in
+    /// X-NuGet-ApiKey); a key refused is counted as a failed login.
+    /// Blocks.
+    fn key(&self, key: &str) -> Option<Caller>;
+    /// `c`'s role on `repo` (a public one is read by anyone).
+    fn role(&self, c: &Caller, repo: &str, public: bool) -> Option<Role>;
+}
+
 pub struct Ask {
     pub repo: RepoInfo,
     pub version: Option<Version>,
@@ -60,7 +70,7 @@ pub struct Ask {
     pub role: Option<Role>,
 }
 
-pub async fn handle(app: Arc<App>, mut a: Ask, req: Request) -> Response {
+pub async fn handle(app: Arc<dyn Host>, mut a: Ask, req: Request) -> Response {
     // nuget push and delete send the key in X-NuGet-ApiKey.
     let key = req
         .headers()
@@ -70,13 +80,11 @@ pub async fn handle(app: Arc<App>, mut a: Ask, req: Request) -> Response {
     if let Some(k) = key {
         // A refusal is counted in the audit log: off the async threads.
         let app2 = app.clone();
-        let c = tokio::task::spawn_blocking(move || app2.auth.token_at(&k, "serving")).await;
+        let c = tokio::task::spawn_blocking(move || app2.key(&k)).await;
         let Ok(Some(c)) = c else {
             return text(StatusCode::FORBIDDEN, "the API key is not valid");
         };
-        a.role = app
-            .auth
-            .role(&c, &a.repo.name, a.repo.setting_bool("public"));
+        a.role = app.role(&c, &a.repo.name, a.repo.setting_bool("public"));
         a.caller = c;
     }
     if a.role.is_none() {
@@ -122,33 +130,24 @@ pub async fn handle(app: Arc<App>, mut a: Ask, req: Request) -> Response {
             };
             let stem = format!("{}.{}", id.to_ascii_lowercase(), ver.to_ascii_lowercase());
             if *file == format!("{stem}.nupkg") {
-                crate::serving::serve_counted(
-                    &app,
+                let req = req.map(pkgpod_proto::body::boxed);
+                app.serve_counted(
                     &a.repo.name,
                     "",
-                    &a.repo.store().path(&k.sha256),
-                    &k.sha256,
+                    a.repo.store().path(&k.sha256),
+                    k.sha256,
                     file,
-                    None,
-                    false,
                     req,
                 )
                 .await
+                .map(axum::body::Body::new)
             } else if *file == format!("{stem}.nuspec") {
                 match k.nuspec() {
                     Some(d) => {
-                        crate::serving::serve_counted(
-                            &app,
-                            &a.repo.name,
-                            "",
-                            &a.repo.store().path(&d),
-                            &d,
-                            file,
-                            None,
-                            false,
-                            req,
-                        )
-                        .await
+                        let req = req.map(pkgpod_proto::body::boxed);
+                        app.serve_counted(&a.repo.name, "", a.repo.store().path(&d), d, file, req)
+                            .await
+                            .map(axum::body::Body::new)
                     }
                     None => not_found(),
                 }
@@ -174,11 +173,11 @@ pub async fn handle(app: Arc<App>, mut a: Ask, req: Request) -> Response {
             );
             let (id, ver) = (id.to_string(), ver.to_string());
             let res = tokio::task::spawn_blocking(move || {
-                app2.engine
+                app2.engine()
                     .change(&name, &actor, |_, e| {
                         pkgpod_nuget::Nuget::list(e, &id, &ver, false)
                     })
-                    .inspect(|o| app2.auth.audit(&actor, "unlist", &name, &o.summary))
+                    .inspect(|o| app2.audit(&actor, "unlist", &name, &o.summary))
             })
             .await;
             match res {
@@ -235,7 +234,7 @@ fn service_index(base: &str) -> Value {
 }
 
 /// The versions of package `id` in the version asked, oldest first.
-async fn kept(app: &Arc<App>, a: &Ask, id: &str) -> Vec<Kept> {
+async fn kept(app: &Arc<dyn Host>, a: &Ask, id: &str) -> Vec<Kept> {
     let Some(v) = a.version.clone() else {
         return Vec::new();
     };
@@ -245,7 +244,7 @@ async fn kept(app: &Arc<App>, a: &Ask, id: &str) -> Vec<Kept> {
     let (app2, lower) = (app.clone(), id.to_ascii_lowercase());
     tokio::task::spawn_blocking(move || {
         let leaves = app2
-            .engine
+            .engine()
             .objects()
             .walk(&v.root, &lower)
             .unwrap_or_default();
@@ -305,8 +304,8 @@ fn registration(base: &str, id: &str, vs: &[Kept]) -> Value {
     })
 }
 
-async fn search(app: &Arc<App>, a: &Ask, query: &str) -> Response {
-    let p = crate::serving::query_params(query);
+async fn search(app: &Arc<dyn Host>, a: &Ask, query: &str) -> Response {
+    let p = pkgpod_proto::query::params(query);
     let s = |k: &str| p.get(k).and_then(Value::as_str).unwrap_or("").to_string();
     let q = s("q").to_ascii_lowercase();
     let skip: usize = s("skip").parse().unwrap_or(0);
@@ -318,7 +317,10 @@ async fn search(app: &Arc<App>, a: &Ask, query: &str) -> Response {
     let app2 = app.clone();
     let mut by: BTreeMap<String, Vec<(String, Entry)>> = BTreeMap::new();
     let leaves = tokio::task::spawn_blocking(move || {
-        app2.engine.objects().walk(&v.root, "").unwrap_or_default()
+        app2.engine()
+            .objects()
+            .walk(&v.root, "")
+            .unwrap_or_default()
     })
     .await
     .unwrap_or_default();
@@ -364,7 +366,7 @@ async fn search(app: &Arc<App>, a: &Ask, query: &str) -> Response {
     reply(StatusCode::OK, json!({"totalHits": total, "data": data}))
 }
 
-async fn push(app: &Arc<App>, a: &Ask, req: Request, symbols: bool) -> Response {
+async fn push(app: &Arc<dyn Host>, a: &Ask, req: Request, symbols: bool) -> Response {
     let mut m = match Multipart::from_request(req, &()).await {
         Ok(m) => m,
         Err(e) => {
@@ -396,9 +398,9 @@ async fn push(app: &Arc<App>, a: &Ask, req: Request, symbols: bool) -> Response 
         a.caller.name().to_string(),
     );
     let res = tokio::task::spawn_blocking(move || {
-        app2.engine
+        app2.engine()
             .upload(&name, &up, &json!({"symbols": symbols}), &actor)
-            .inspect(|o| app2.auth.audit(&actor, "push", &name, &o.summary))
+            .inspect(|o| app2.audit(&actor, "push", &name, &o.summary))
     })
     .await;
     match res {
@@ -407,5 +409,15 @@ async fn push(app: &Arc<App>, a: &Ask, req: Request, symbols: bool) -> Response 
         Ok(Err(pkgpod_engine::Error::Conflict(m))) => text(StatusCode::CONFLICT, m),
         Ok(Err(e)) => text(StatusCode::BAD_REQUEST, e.to_string()),
         Err(e) => text(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+impl Host for crate::App {
+    fn key(&self, key: &str) -> Option<Caller> {
+        self.auth.token_at(key, "serving")
+    }
+
+    fn role(&self, c: &Caller, repo: &str, public: bool) -> Option<Role> {
+        self.auth.role(c, repo, public)
     }
 }
