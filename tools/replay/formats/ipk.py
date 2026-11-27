@@ -38,6 +38,9 @@ MAX_PKG = 2 << 30
 MAX_CONTROL = 1 << 20
 MAX_TAR = 2 * MAX_PKG
 MAX_CONTROL_TAR = 64 << 20
+# The most of an ar name table (GNU's) or of a long name (BSD's) Yocto's
+# reader takes (pkgpod-deb's MAX_AR_NAMES).
+MAX_AR_NAMES = 1 << 20
 
 REPOS = ("ipkpub", "ipkpriv")
 
@@ -184,12 +187,13 @@ def zstd_raw(data):
     return out
 
 
-def yocto_names(ctl, names):
+def yocto_names(ctl, names, size=None):
     """Yocto's ipk of control `ctl`, its members named as `names` says:
     "slash" (GNU ar's short names, ending in /), "gnu" (each in a //
-    table, after the symbol table GNU ar puts first; a member named by
-    its offset) or "bsd" (#1/<length>, the name first in the member,
-    NUL-padded to an even length)."""
+    table, `size` long if given, after the symbol table GNU ar puts
+    first; a member named by its offset) or "bsd" (#1/<length>, the
+    name first in the member, NUL-padded to an even length, and
+    control.tar.gz's to `size` if given)."""
     parts = [(b"debian-binary", b"2.0\n"),
              (b"control.tar.gz", gzip.compress(tar([("./control", ctl)]), mtime=0)),
              (b"data.tar.gz", data_tgz("hello"))]
@@ -197,10 +201,12 @@ def yocto_names(ctl, names):
         return ar_raw([(n.decode() + "/", b"", d) for n, d in parts])
     if names == "gnu":
         table = b"".join(n + b"/\n" for n, _ in parts)
+        table += b"\n" * ((size or 0) - len(table))
         at = [sum(len(n) + 2 for n, _ in parts[:i]) for i in range(len(parts))]
         return ar_raw([("/", b"", bytes(4)), ("//", b"", table)]
                       + [(f"/{a}", b"", d) for a, (_, d) in zip(at, parts)])
-    named = [n + bytes(len(n) % 2) for n, _ in parts]
+    named = [n.ljust(size if size and n == b"control.tar.gz" else len(n) + len(n) % 2, b"\0")
+             for n, _ in parts]
     return ar_raw([(f"#1/{len(n)}", n, d) for n, (_, d) in zip(named, parts)])
 
 
@@ -612,8 +618,12 @@ def limits(c, who):
     # refused), a control.tar.gz past its limit with the control file
     # first and last, one inflated past its limit before it; OpenWrt's
     # tar inflated to its limit, control.tar.gz's last block there and
-    # its header there; by one who may (the body is read); in
-    # sequences, of which no mutant is sent.
+    # its header there; control.tar.gz inflated to its limit before the
+    # control file, of each kind (its last block there, its header
+    # there), and Yocto's past it within the member before; ar's name
+    # table (GNU's) and a long name (BSD's) at their limit and a byte
+    # past it; by one who may (the body is read); in sequences, of
+    # which no mutant is sent.
     if who != "writer":
         return
     up = "/ipkpub/upload?feed=main"
@@ -654,6 +664,35 @@ def limits(c, who):
     c.seq("ipk tar at and past its limit writer", who, [
         ("PUT", big, {}, tar_to("bigtar-at", False)),
         ("PUT", big, {}, tar_to("bigtar-past", True)),
+        ("GET", "/ipkpub/big/Packages", {}, None)])
+
+    def ctl_to(name, n):
+        # A control.tar.gz of n zeros (a member), then the control file.
+        return gzip_zeros(header("./zeros", n), n,
+                          member("./control", control(name, "1.0", "all")) + bytes(1024))
+
+    def yocto_ctl(ctlgz):
+        return yocto(None, members=[("debian-binary", b"2.0\n"), ("control.tar.gz", ctlgz),
+                                    ("data.tar.gz", data)])
+
+    def openwrt_ctl(ctlgz):
+        return openwrt(None, members=[("./debian-binary", b"2.0\n"), ("./data.tar.gz", data),
+                                      ("./control.tar.gz", ctlgz)])
+    at, hdr, past = MAX_CONTROL_TAR - 1536, MAX_CONTROL_TAR - 512, MAX_CONTROL_TAR + 4096
+    c.seq("ipk control.tar at and past its limit writer", who, [
+        ("PUT", big, {}, yocto_ctl(ctl_to("yctl-at", at))),
+        ("PUT", big, {}, yocto_ctl(ctl_to("yctl-hdr", hdr))),
+        ("PUT", big, {}, yocto_ctl(ctl_to("yctl-past", past))),
+        ("PUT", big, {}, openwrt_ctl(ctl_to("ctl-at", at))),
+        ("PUT", big, {}, openwrt_ctl(ctl_to("ctl-hdr", hdr))),
+        ("GET", "/ipkpub/big/Packages", {}, None)])
+    c.seq("ipk ar names at and past their limit writer", who, [
+        ("PUT", big, {}, yocto_names(control("gnu-at", "1.0", "all"), "gnu", MAX_AR_NAMES)),
+        ("PUT", big, {}, yocto_names(control("gnu-past", "1.0", "all"), "gnu",
+                                     MAX_AR_NAMES + 1)),
+        ("PUT", big, {}, yocto_names(control("bsd-at", "1.0", "all"), "bsd", MAX_AR_NAMES)),
+        ("PUT", big, {}, yocto_names(control("bsd-past", "1.0", "all"), "bsd",
+                                     MAX_AR_NAMES + 1)),
         ("GET", "/ipkpub/big/Packages", {}, None)])
 
 
