@@ -509,8 +509,14 @@ def after(c, who):
               {"Range": "bytes=0-9"})
         c.add(f"after conda {repo} inm {RD} {who}", who, "GET", f"/{repo}{RD}",
               {"If-None-Match": "{conda condapub%s %s.etag}" % (RD, who)})
+    # A path under by-hash that a label's version (or one by number) does
+    # not have: the server looks for it in the channel's versions of the
+    # last day, the newest first, and the newest has it (made in the
+    # run, and nothing is removed from a channel).
     for rel in ("/by-hash/", "/by-hash/repodata.json", "/repodata/", "/repodata/repodata.json",
-                "/by-hash/nothing"):
+                "/by-hash/nothing", "/@first/by-hash/repodata.json",
+                "/@first/by-hash/b-writer-pk-1.0-0.conda", "/@1/by-hash/repodata.json",
+                "/@first/by-hash/nothing"):
         c.add(f"after conda condapub{rel} {who}", who, "GET", f"/condapub{rel}")
     c.add(f"after conda condaempty{RD} {who}", who, "GET", f"/condaempty{RD}")
 
