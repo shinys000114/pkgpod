@@ -28,7 +28,12 @@ CT = {"Content-Type": f"multipart/form-data; boundary={B}"}
 UPLOAD = "/api/v3/artifacts/collections/"
 C = "/api/v3/collections/team/hello"
 DL = "/download/team-hello-1.0.0.tar.gz"
-# The most of a sha256 part read (galaxy.rs).
+# The largest artifact taken in (pkgpod_galaxy::MAX_ARTIFACT), the most
+# of a file part sent in base64 (galaxy.rs's MAX_SENT), the most of a
+# MANIFEST.json read (pkgpod_galaxy's MAX_MANIFEST) and of a sha256 part.
+MAX_ARTIFACT = 512 << 20
+MAX_SENT = MAX_ARTIFACT // 2 * 3
+MAX_MANIFEST = 4 << 20
 MAX_SHA = 128
 
 
@@ -148,6 +153,33 @@ def chunked(pieces):
     last (sent as it is: http.client chunks nothing itself where the
     request says Transfer-Encoding)."""
     return b"".join(b"%x\r\n" % len(p) + p + b"\r\n" for p in pieces) + b"0\r\n\r\n"
+
+
+class Run:
+    """A body of `head`, `n` bytes `byte`, then `tail`, read as
+    http.client sends a file: the run made as it is read, not held (the
+    corpus keeps its bodies for the whole run). It is read once: a
+    request whose body it is has more than one step, so that the fuzz
+    does not take it."""
+
+    def __init__(self, head, byte, n, tail):
+        self.head, self.byte, self.left, self.tail = head, byte, n, tail
+        self.size = len(head) + n + len(tail)
+
+    def read(self, k=-1):
+        if k is None or k < 0:
+            k = self.size
+        out, self.head = self.head[:k], self.head[k:]
+        k -= len(out)
+        if k > 0 and self.left:
+            m = min(k, self.left)
+            out += self.byte * m
+            self.left -= m
+            k -= m
+        if k > 0 and self.tail:
+            t, self.tail = self.tail[:k], self.tail[k:]
+            out += t
+        return out
 
 
 # A collection of every kind of value its metadata echoes.
@@ -577,6 +609,27 @@ def spoilt(c, who):
                                                   back(f"c{i}_{who}")])
 
 
+def limits(c, who):
+    # Over the format's limits, by one who may (the bodies are read): a
+    # file part over the largest artifact; one in base64 over what is
+    # read of it, of white space (dropped: nothing is decoded of it, so
+    # the decoded limit is not reached first); a MANIFEST.json past what
+    # is read of it (unpacked; packed it is small).
+    if who != "writer":
+        return
+    tail = b"\r\n" + close()
+    for name, byte, n, cte in (("file", b"\0", MAX_ARTIFACT + 1, None),
+                               ("base64 file", b" ", MAX_SENT + 1, "base64")):
+        h = head("file", "big.tar.gz", "application/octet-stream", cte)
+        body = Run(h, byte, n, tail)
+        c.seq(f"galaxy {name} over the limit {who}", who, [
+            ("POST", f"/galpub{UPLOAD}", dict(CT, **{"Content-Length": str(body.size)}), body),
+            ("GET", f"/galpub{C}/versions/", {}, None)])
+    big = artifact("team", "big", "1.0.0", description="x" * (MAX_MANIFEST + 10))
+    c.add(f"galaxy manifest over the limit {who}", who, "POST", f"/galpub{UPLOAD}",
+          *publish(big))
+
+
 def after(c, who):
     add = c.add
     # What the writes left: the seed's collection after uploads of it,
@@ -637,6 +690,7 @@ PARTS = [
     ("publisher", 80, ["galpub"]),
     ("reads", 120, reads),
     ("writes", 170, writes),
+    ("writes", 180, limits),
     ("after", 70, after),
     # Galaxy keeps when each version was uploaded (its tree's metadata,
     # and so its root), and says it as each version's created_at and
