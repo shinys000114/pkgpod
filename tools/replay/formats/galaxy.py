@@ -237,12 +237,15 @@ def reads(c, who):
     for repo in ("galpub", "galpriv"):
         # The API (its roots, a collection, its versions and each
         # version, downloads, import tasks), a label's, what is not there,
-        # what is in the tree but not served.
+        # what is in the tree but not served; versions with the query
+        # ansible-galaxy pages them by, and others with one.
         for rel in ("", "/", "/api", "/api/", "/api/v3", "/api/v3/", "/api/v3/collections/",
                     "/api/v2/", "/api/v1/", f"{C}/", C, f"{v}/", v, f"{v}/1.0.0/",
                     f"{v}/1.1.0/", f"{v}/1.10.0/", f"{v}/2.0.0-beta.1/", f"{v}/0.9.0/",
                     f"{v}/9.9.9/", f"{v}/1.0/", f"{v}/01.0.0/", f"{v}/v1.0.0/", f"{v}/1.0.0",
-                    f"{v}/1.0.0/x/", "/api/v3/collections/team/other/",
+                    f"{v}/1.0.0/x/", f"{v}/?limit=100", f"{v}/?limit=100&offset=0",
+                    f"{v}/?page_size=100", f"{C}/?x=1", f"{v}/1.0.0/?x=1", f"{DL}?x=1",
+                    "/api/v3/collections/team/other/",
                     "/api/v3/collections/team/other/versions/",
                     "/api/v3/collections/team/other/versions/0.1.0/",
                     "/api/v3/collections/acme/tools/", "/api/v3/collections/acme/tools/versions/",
@@ -269,7 +272,8 @@ def reads(c, who):
                     "/api/v3/imports/collections/x/y/", "/api/v3/imports/", UPLOAD,
                     "/api/v3/artifacts/collections", "/nope",
                     "/@first", "/@first/", "/@first/api/", "/@first/api/v3/", f"/@first{C}/",
-                    f"/@first{v}/", f"/@first{v}/1.0.0/", f"/@first{v}/1.1.0/", f"/@first{DL}",
+                    f"/@first{v}/", f"/@first{v}/?limit=100", f"/@first{v}/1.0.0/",
+                    f"/@first{v}/1.1.0/", f"/@first{DL}",
                     "/@first/download/team-hello-1.1.0.tar.gz",
                     "/@first/api/v3/imports/collections/x/",
                     "/@first/api/v3/collections/team/other/", "/@nope/", "/@nope/api/",
