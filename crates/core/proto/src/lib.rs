@@ -8,7 +8,8 @@
 //! yet); the bodies its requests and replies carry ([`body`]) and the
 //! replies every format gives ([`reply`]), how its query and its upload
 //! forms are read ([`query`], [`form`]); what it asks of the server and
-//! of its caller ([`host`]).
+//! of its caller ([`host`]); what it says of the files of its
+//! repositories' trees, which the server serves ([`tree`]).
 
 pub mod body;
 pub mod cache;
@@ -17,6 +18,7 @@ pub mod gate;
 pub mod host;
 pub mod query;
 pub mod reply;
+pub mod tree;
 
 pub use gate::{Gate, Need, Refusal, Role, decide};
 pub use host::{Caller, Who};
