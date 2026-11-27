@@ -3,7 +3,7 @@
 a label after the first; the first with a binary package, the second
 with two, one of them in two package revisions; hello/1.0@team/stable;
 other/2.0), one with nothing in it, one at a host's root, and ktrust,
-the one the trust rule writes. Conan repositories are
+the one the trust rule writes (see FUZZ). Conan repositories are
 hosted only: no proxy, no group, no stub."""
 
 import calendar
@@ -305,8 +305,7 @@ def reads(c, who):
                 f"{RV1}/files", f"{RV1}/files/conanfile.py", f"{RV1}/search", f"{PK1}/latest",
                 "/@first/v1/ping"):
         add(f"conan kempty{rel} {who}", who, "GET", f"/kempty{rel}")
-    # The trust rule's repository, asked in sequences only: no
-    # mutant is made of one.
+    # The trust rule's repository, asked in sequences only (see FUZZ).
     c.seq(f"conan ktrust {who}", who,
           [("GET", f"/ktrust{rel}", {}, None)
            for rel in ("/", "/v1/ping", "/v2/users/authenticate", "/v2/users/check_credentials",
@@ -608,6 +607,26 @@ def mask(masker):
         return masker.part(hd, body, hit, after_writes, etag)
     return answer
 
+
+FUZZ = (["kpub", "kpriv", "kempty"],
+        ["v1", "ping", "v2", "users", "authenticate", "check_credentials", "conans", "search",
+         "hello", "1.0", "_", "team", "stable", "other", "revisions", "latest", "files",
+         "packages", "conanfile.py", MANIFEST, "conaninfo.txt", "conan_package.tgz", "@first",
+         R1, R2, P1, Q1, Q2, "x", "v2/conans/hello/1.0/_/_"])
+# Not FUZZ_WRITABLE: an upload keeps its time where the rules mask it
+# (the "conan times" rule, and the core's), but revisions are listed by
+# the second they were put in, then by id: two put by the fuzz in one
+# second in one run and in two in another would be listed otherwise; and
+# a fuzzed removal would drop the downloads of what it removed that the
+# server had not written yet (see writes). The fuzz holds back the Conan
+# writes of writer, wtoken, wbearer and admin, not those of the trust
+# rule's token (ptoken), so that rule writes ktrust alone, which the fuzz
+# never asks: its requests are made of FUZZ's repositories, its mutants
+# of the corpus's single requests, and ktrust is asked only in sequences
+# of more than one step, and no segment of a single request starts with
+# its name (a mutant cuts one short). Every other caller's write is
+# refused before its body is read, so no fuzz sample is Conan's. No Conan
+# write of the fuzz is taken.
 
 PARTS = [
     ("seed", 110, seed),
