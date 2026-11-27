@@ -11,6 +11,7 @@ import io
 import json
 import os
 import re
+import struct
 import zipfile
 
 from core import IDENTS, PTOKEN, SERVE, auth_header, request, times
@@ -29,6 +30,13 @@ G = "/team/greeting"
 ZIP = f"{G}/1.0.0.zip"
 MANIFEST = f"{G}/1.0.0/Package.swift"
 IDS = "/identifiers?url=https://git.example.invalid/team/Greeting"
+# The largest archive taken in, its manifests' largest, a form's text
+# field's largest and a form's (pkgpod_swift's MAX_ARCHIVE and
+# MAX_MANIFEST, pkgpod_proto's MAX_FIELD and MAX_UPLOAD).
+MAX_ARCHIVE = 512 << 20
+MAX_MANIFEST = 1 << 20
+MAX_FIELD = 64 << 10
+MAX_UPLOAD = 8 << 30
 
 
 def zipped(members, deflate=False):
@@ -101,6 +109,55 @@ def form(archive, metadata=None, before=(), after=(), tail=CLOSE):
         body += metadata_part(metadata)
     body += b"".join(after) + tail
     return dict(CT, **ACCEPT), body
+
+
+def eocd(count, cd_size, cd_at):
+    """A zip's end record alone."""
+    return b"PK\x05\x06" + struct.pack("<HHHHIIH", 0, 0, count, count, cd_size, cd_at, 0)
+
+
+def poke(data, at, raw):
+    """`data` with the bytes at `at` of its first central directory
+    entry (Package.swift's, first in the archives refused) replaced by
+    `raw`."""
+    cd = data.index(b"PK\x01\x02") + at
+    return data[:cd] + raw + data[cd + len(raw):]
+
+
+class Padded:
+    """A body of `head`, `n` zero bytes and `tail`, read as http.client
+    sends a file: not held in memory (the corpus keeps its bodies for the
+    whole run). It is read once: a request whose body it is has more
+    than one step, so that the fuzz does not take it."""
+
+    def __init__(self, head, n, tail):
+        self.head, self.left, self.tail = head, n, tail
+
+    def __len__(self):
+        return len(self.head) + self.left + len(self.tail)
+
+    def read(self, k=-1):
+        out = b""
+        if k is None or k < 0:
+            k = len(self)
+        if self.head:
+            out, self.head = self.head[:k], self.head[k:]
+            k -= len(out)
+        z = min(k, self.left)
+        self.left -= z
+        out += bytes(z)
+        k -= z
+        if k > 0 and self.tail:
+            t, self.tail = self.tail[:k], self.tail[k:]
+            out += t
+        return out
+
+
+def chunked(pieces):
+    """A body of HTTP/1.1 chunks, one for each of `pieces`, then the
+    last (sent as it is: http.client chunks nothing itself where the
+    request says Transfer-Encoding)."""
+    return b"".join(b"%x\r\n" % len(p) + p + b"\r\n" for p in pieces) + b"0\r\n\r\n"
 
 
 def seed_tokens(c):
@@ -278,6 +335,10 @@ def w_meta(who):
     return {"repositoryURLs": [f"https://git.example.invalid/w/{who}"]}
 
 
+# An archive no write takes (its form or its path is refused).
+PKG = source("Pkg", "1.0.0")
+
+
 def pkg(salt, version="1.0.0", **kw):
     """An archive of Pkg of its own bytes: what a write takes is in no
     other release of its registry. (A Swift archive's download is
@@ -285,6 +346,63 @@ def pkg(salt, version="1.0.0", **kw):
     are written, every few seconds: of two releases of the same bytes,
     one or the other by when that is.)"""
     return source("Pkg", version, salt=salt, **kw)
+
+
+# After a part: a delimiter not followed by CRLF or --.
+BROKEN = f"--{B}X".encode()
+SIG = part("source-archive-signature", b"x", "application/octet-stream")
+MSIG = part("metadata-signature", b"x", "application/octet-stream")
+
+
+def refusals(who):
+    """What publishing refuses past the form (name, path, archive): a
+    zip that is none or broken, no Package.swift, scopes, names and
+    versions that are none, a release that is there."""
+    n = f"e-{who}"
+    at = f"/swpub/{n}/Pkg/1.0.0"
+    good = zipped([("Pkg/Package.swift", manifest("Pkg")), ("Pkg/Sources/Pkg/Pkg.swift", b"x\n")])
+    size = len(manifest("Pkg"))
+    return [
+        ("not a zip", at, b"not a zip"),
+        ("an empty archive", at, b""),
+        ("no members", at, eocd(0, 0, 0)),
+        ("zip64", at, eocd(0xffff, 0, 0)),
+        ("a broken central directory", at, b"x" * 46 + eocd(1, 46, 0)),
+        ("a central directory cut short", at, b"PK\x01\x02" + eocd(1, 4, 0)),
+        ("a name past the end", at, poke(good, 28, struct.pack("<H", 0xfff0))),
+        ("a name not utf-8", at, poke(good, 46, b"\xff")),
+        ("encrypted", at, poke(good, 8, struct.pack("<H", 1))),
+        ("no local header", at, poke(good, 42, struct.pack("<I", 1))),
+        ("data past the end", at, poke(good, 20, struct.pack("<I", 1 << 24))),
+        ("a wrong crc", at, poke(good, 16, struct.pack("<I", 0))),
+        ("a wrong size", at, poke(good, 24, struct.pack("<I", size + 1))),
+        ("a size past the manifest's limit", at,
+         poke(good, 24, struct.pack("<I", MAX_MANIFEST + 1))),
+        ("method 12", at, poke(good, 10, struct.pack("<H", 12))),
+        ("deflate of garbage", at, poke(good, 10, struct.pack("<H", 8))),
+        ("no Package.swift", at, zipped([("Pkg/Sources/Pkg/Pkg.swift", b"x\n")])),
+        ("Package.swift too deep", at, zipped([("a/b/Package.swift", manifest("Pkg"))])),
+        ("an alternate only", at, zipped([("Pkg/Package@swift-5.8.swift", manifest("Pkg"))])),
+        ("Package.swift not utf-8", at, zipped([("Pkg/Package.swift", b"\xff\xfe")])),
+        ("a scope of a dash", "/swpub/-bad/Pkg/1.0.0", PKG),
+        ("a scope with an underscore", "/swpub/a_b/Pkg/1.0.0", PKG),
+        ("a scope of 40", f"/swpub/{'a' * 40}/Pkg/1.0.0", PKG),
+        ("a scope with a dot", "/swpub/a.b/Pkg/1.0.0", PKG),
+        ("a scope of spaces", "/swpub/%20%20/Pkg/1.0.0", PKG),
+        ("a scope not ascii", "/swpub/caf%C3%A9/Pkg/1.0.0", PKG),
+        ("a name with a dot", f"/swpub/{n}/a.b/1.0.0", PKG),
+        ("a name of 101", f"/swpub/{n}/{'a' * 101}/1.0.0", PKG),
+        ("a name of an underscore first", f"/swpub/{n}/_x/1.0.0", PKG),
+        ("version x", f"/swpub/{n}/Pkg/x", PKG),
+        ("version 1.0", f"/swpub/{n}/Pkg/1.0", PKG),
+        ("version v1.0.0", f"/swpub/{n}/Pkg/v1.0.0", PKG),
+        ("version 01.0.0", f"/swpub/{n}/Pkg/01.0.0", PKG),
+        ("version with an empty pre-release", f"/swpub/{n}/Pkg/1.0.0-", PKG),
+        ("version of a zip", f"/swpub/{n}/Pkg/1.0.0.zip", PKG),
+        ("version of a json", f"/swpub/{n}/Pkg/1.0.0.json", PKG),
+        ("a release that is there", "/swpub/team/Greeting/1.0.0", PKG),
+        ("a release that is there in another case", "/swpub/TEAM/greeting/1.0.0", PKG),
+    ]
 
 
 def writes(c, who):
@@ -346,9 +464,58 @@ def writes(c, who):
                                 ("PATCH", G, {}, None),
                                 ("OPTIONS", "/", {}, None)):
             add(f"swift {m} {repo}{rel} {who}", who, m, f"/{repo}{rel}", h, body)
-    # The seed's own bytes again (taken: nothing changes), read back
-    # (and so no single request: the fuzz would publish them at other
-    # paths).
+    # Forms refused, each alone: before a part is read, in one, or
+    # after one (by its name, or reading on).
+    at = f"/swpub/r-{who}/Pkg/1.0.0"
+    ap = archive_part(PKG)
+    _, whole = form(PKG, {"description": "refused"})
+    k = whole.index(b"\r\n\r\n") + 4
+    for name, h, body in (
+            ("text plain", {"Content-Type": "text/plain"}, b"not a form"),
+            ("no content-type", {}, b"x"),
+            ("no boundary", {"Content-Type": "multipart/form-data"}, whole),
+            ("an empty boundary", {"Content-Type": "multipart/form-data; boundary="}, whole),
+            ("mixed", {"Content-Type": f"multipart/mixed; boundary={B}"}, whole),
+            ("another boundary", {"Content-Type": "multipart/form-data; boundary=other"}, whole),
+            ("the closing only", CT, CLOSE),
+            ("empty", CT, b""),
+            ("garbage", CT, b"garbage"),
+            ("a header that is not one", CT,
+             f"--{B}\r\nnot a header\r\n\r\nx\r\n".encode() + CLOSE),
+            ("no blank line", CT,
+             f'--{B}\r\nContent-Disposition: form-data; name="source-archive"'.encode()),
+            ("cut at the archive", CT, whole[:k]),
+            ("cut in the archive", CT, whole[:k + 20]),
+            ("cut in the metadata", CT, ap + metadata_part(b'{"description": "cut"}')[:-10]),
+            ("no closing", CT, whole[:-len(CLOSE)]),
+            ("lf only", CT, whole.replace(b"\r\n", b"\n")),
+            ("metadata not json", CT, form(PKG, b"not json")[1]),
+            ("metadata a number out of range", CT, form(PKG, b'{"n": 1e400}')[1]),
+            ("metadata of spaces", CT, form(PKG, b"   ")[1]),
+            ("metadata with more after it", CT, form(PKG, b"{} x")[1]),
+            ("metadata not utf-8", CT, form(PKG, b'{"a": "\xff"}')[1]),
+            ("metadata nested too deep", CT, form(PKG, b"[" * 200 + b"]" * 200)[1]),
+            ("metadata a lone surrogate", CT, form(PKG, b'{"a": "\\ud800"}')[1]),
+            ("a signature first", CT, SIG + ap + CLOSE),
+            ("a signature after the archive", CT, ap + SIG + CLOSE),
+            ("a metadata signature last", CT, ap + metadata_part({}) + MSIG + CLOSE),
+            ("metadata only", CT, metadata_part({"description": "x"}) + CLOSE),
+            ("a part with no name", CT, part(None, PKG) + CLOSE),
+            ("the archive otherwise named", CT, part("Source-Archive", PKG) + CLOSE),
+            ("broken after the archive", CT, ap + BROKEN),
+            ("broken after the metadata", CT, ap + metadata_part({}) + BROKEN),
+            ("broken after a signature", CT, SIG + BROKEN),
+            ("broken after bad metadata", CT, ap + metadata_part(b"not json") + BROKEN),
+            ("a bad part after the archive", CT,
+             ap + f"--{B}\r\nnot a header\r\n\r\nx\r\n".encode() + CLOSE),
+            ("one dash after the archive", CT, ap + f"--{B}-".encode()),
+            ("ending at a delimiter", CT, ap + f"--{B}".encode())):
+        add(f"swift form refused {name} {who}", who, "PUT", at, h, body)
+    # Archives refused past the form, each alone; the seed's own bytes
+    # again (taken: nothing changes), read back (and so no single
+    # request: the fuzz would publish them at other paths).
+    for name, path, data in refusals(who):
+        add(f"swift refused {name} {who}", who, "PUT", path, *form(data))
     seq(f"swift the seed's release again {who}", who, [
         ("PUT", "/swpub/team/Greeting/1.0.0") + form(GREETING_100, GREETING_META),
         ("GET", f"/swpub{G}/1.0.0", {}, None)])
@@ -404,7 +571,7 @@ def writes_writer(c, who):
     # What only a writer reaches: what the seed published, by the build
     # that runs (the old one took the seed's), read back; publishing as
     # a client behind a proxy and on another host says so; forms from
-    # other sites.
+    # other sites; forms in chunks.
     if who != "writer":
         return
     seq = c.seq
@@ -452,6 +619,73 @@ def writes_writer(c, who):
         ("GET", f"/swpub/o1-{who}/pkg", {}, None),
         ("PUT", f"/swpub/o1-{who}/Pkg/1.0.0", dict(CT, Origin=f"http://127.0.0.1:{SERVE}"), body),
         ("GET", f"/swpub/o1-{who}/pkg", {}, None)])
+    # Forms sent in chunks (no Content-Length): whole, in small ones; cut
+    # in the archive; spoilt after the archive, the byte after its
+    # delimiter in the delimiter's chunk, then in one of its own; a
+    # signature, then spoilt. Each is read back (and so is no single
+    # request: the fuzz cuts those, and a cut chunked body would be
+    # waited on).
+    te = dict(CT, **{"Transfer-Encoding": "chunked"})
+    _, whole = form(pkg("c1"), w_meta(who))
+    cut = whole[:whole.index(b"\r\n\r\n") + 24]
+    ap = archive_part(PKG)
+    for i, (name, pieces) in enumerate((
+            ("whole", [whole[j:j + 64] for j in range(0, len(whole), 64)]),
+            ("cut in the archive", [cut[j:j + 64] for j in range(0, len(cut), 64)]),
+            ("spoilt after the archive", [ap + BROKEN]),
+            ("spoilt after the archive a chunk later", [ap + f"--{B}".encode(), b"X"]),
+            ("a signature then spoilt", [SIG + BROKEN]),
+            ("bad metadata then spoilt a chunk later",
+             [ap + metadata_part(b"not json") + f"--{B}".encode(), b"X"])), 1):
+        seq(f"swift chunked {name} {who}", who, [
+            ("PUT", f"/swpub/c{i}-{who}/Pkg/1.0.0", te, chunked(pieces)),
+            ("GET", f"/swpub/c{i}-{who}/pkg", {}, None)])
+
+
+def limits(c, who):
+    # The archive over its limit, by one who may (its body is read); the
+    # metadata at and over its own; a manifest at and over its own
+    # (deflated: small to send); the whole form over its own, the archive
+    # in it whole and a part after it of no name it takes.
+    if who != "writer":
+        return
+    seq = c.seq
+    head = part("source-archive", b"", "application/zip",
+                ("Content-Transfer-Encoding: binary",))[:-2]
+    tail = b"\r\n" + CLOSE
+    n = MAX_ARCHIVE + 1
+    seq(f"swift archive over the limit {who}", who, [
+        ("PUT", f"/swpub/big-{who}/Pkg/1.0.0",
+         dict(CT, **{"Content-Length": str(len(head) + n + len(tail))}), Padded(head, n, tail)),
+        ("GET", f"/swpub/big-{who}/pkg", {}, None)])
+    steps = []
+    for name, size in (("at", MAX_FIELD), ("over", MAX_FIELD + 1)):
+        pre = b'{"description": "'
+        meta = pre + b"x" * (size - len(pre) - 2) + b'"}'
+        assert len(meta) == size, (len(meta), size)
+        steps += [("PUT", f"/swpub/meta-{name}-{who}/Pkg/1.0.0") + form(pkg(name), meta),
+                  ("GET", f"/swpub/meta-{name}-{who}/pkg/1.0.0", {}, None)]
+    seq(f"swift metadata at and over the limit {who}", who, steps)
+    steps = []
+    for name, size in (("at", MAX_MANIFEST), ("over", MAX_MANIFEST + 1)):
+        text = manifest("Pkg")
+        text += b"/" * (size - len(text))
+        assert len(text) == size
+        steps += [("PUT", f"/swpub/man-{name}-{who}/Pkg/1.0.0") + form(zipped(
+                      [("Pkg/Package.swift", text)], deflate=True)),
+                  ("HEAD", f"/swpub/man-{name}-{who}/pkg/1.0.0/Package.swift", {}, None)]
+    seq(f"swift manifest at and over the limit {who}", who, steps)
+    # Its limit is passed in that part, before the closing delimiter:
+    # the form is refused however its bytes come (its limit passed by
+    # its last byte, the closing delimiter could be read whole first).
+    head = archive_part(pkg("huge")) + part("pad", b"")[:-2]
+    n = MAX_UPLOAD + 1 - len(head)
+    seq(f"swift form over the limit {who}", who, [
+        ("PUT", f"/swpub/huge-{who}/Pkg/1.0.0",
+         dict(CT, **{"Content-Length": str(len(head) + n + len(tail))}), Padded(head, n, tail)),
+        ("GET", f"/swpub/huge-{who}/pkg", {}, None)])
+
+
 def writes_end(c):
     # Tokens as clients send them: writer's that writes swpub as Token
     # (as an Authorization other clients send), writer's that only reads
@@ -528,6 +762,7 @@ PARTS = [
     ("reads", 120, reads),
     ("writes", 180, writes),
     ("writes", 190, writes_writer),
+    ("writes", 200, limits),
     ("writes end", 30, writes_end),
     ("after", 70, after),
     # Swift keeps when each release was published (its metadata's
