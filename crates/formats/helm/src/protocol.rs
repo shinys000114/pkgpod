@@ -60,7 +60,8 @@ fn version_doc(meta: &Value, sha: &pkgpod_base::Digest, file: &str) -> Value {
 /// A request of the API, as the server found it.
 pub struct Ask {
     pub repo: RepoInfo,
-    /// The repository's current version (none before its first chart).
+    /// The repository's current version (a hosted repository has one
+    /// from its creation, empty before its first chart).
     pub current: Option<Version>,
     /// The path below the repository, `api/charts` first.
     pub rel: Vec<String>,
