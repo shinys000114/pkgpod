@@ -77,7 +77,8 @@ def web_yaml(version):
 # Numbers where helm reads text (kept text as written), and fields it
 # does not (kept as they are).
 NUM_YAML = chart_yaml("num", "1.0.0", (
-    "appVersion: 1.10\nkubeVersion: 1e3\nkeywords: [web, 2]\nsources: [3, https://example.invalid]\n"
+    "appVersion: 1.10\nkubeVersion: 1e3\nkeywords: [web, 2]\n"
+    "sources: [3, https://example.invalid]\n"
     "maintainers:\n  - name: 7\n    email: x@example.invalid\n"
     "annotations:\n  build: 42\n  ok: true\n"
     "dependencies:\n  - name: db\n    version: 1.0\n    repository: https://example.invalid/c\n"
@@ -85,8 +86,8 @@ NUM_YAML = chart_yaml("num", "1.0.0", (
     "deprecated: false\ntype: application\nhome: 8\n"))
 # Keys the server writes (digest, urls, created) before name and
 # version: written over where they are; text not ASCII.
-KEYED_YAML = (b"digest: mine\nurls: [x]\ncreated: then\napiVersion: v2\nname: keyed\n"
-              b"version: 0.1.0\ndescription: \"h\xc3\xa9llo, w\xc3\xb6rld: \xe4\xb8\x96\xe7\x95\x8c\"\n")
+KEYED_YAML = ("digest: mine\nurls: [x]\ncreated: then\napiVersion: v2\nname: keyed\n"
+              'version: 0.1.0\ndescription: "h\u00e9llo, w\u00f6rld: \u4e16\u754c"\n').encode()
 
 
 def values_yaml(name):
@@ -118,7 +119,7 @@ SEED = [
 WEB_1 = helm_chart("web", "0.1.0", web_yaml("0.1.0"))
 
 
-def push(repo, how, chart, who="admin"):
+def push(repo, how, chart):
     """The request (method, path, headers, body) that pushes `chart` to
     `repo` as `how` (see SEED)."""
     if how == "form":
@@ -191,7 +192,8 @@ def reads(c, who):
             add(f"helm {repo} HEAD {rel} {who}", who, "HEAD", f"/{repo}{rel}")
         # A chart's validators and ranges.
         etag = "{helm %s%s %s.etag}" % (repo, TGZ, who)
-        for name, h in (("range", {"Range": "bytes=0-9"}), ("range from 10", {"Range": "bytes=10-"}),
+        for name, h in (("range", {"Range": "bytes=0-9"}),
+                        ("range from 10", {"Range": "bytes=10-"}),
                         ("range past the end", {"Range": "bytes=999999-"}),
                         ("ranges", {"Range": "bytes=0-1,4-5"}),
                         ("inm", {"If-None-Match": etag}), ("inm any", {"If-None-Match": "*"}),
@@ -207,7 +209,8 @@ def reads(c, who):
         ietag = "{helm %s/index.yaml %s.etag}" % (repo, who)
         for name, rel, h in (("inm", "/index.yaml", {"If-None-Match": ietag}),
                              ("range", "/index.yaml", {"Range": "bytes=0-9"}),
-                             ("if-range", "/index.yaml", {"Range": "bytes=0-9", "If-Range": ietag}),
+                             ("if-range", "/index.yaml",
+                              {"Range": "bytes=0-9", "If-Range": ietag}),
                              ("inm", "/@first/index.yaml", {"If-None-Match": ietag}),
                              ("inm any", "/api/charts", {"If-None-Match": "*"}),
                              ("range", "/api/charts", {"Range": "bytes=0-9"}),
