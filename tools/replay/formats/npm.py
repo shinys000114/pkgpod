@@ -203,6 +203,13 @@ def after(c, who):
         add(f"after npm npub{rel} {who}", who, "GET", f"/npub{rel}")
 
 
+def group_reads(c, who):
+    # The group's search by HEAD, at its address with the slash and with
+    # a query (see "npm group search length").
+    for rel in ("/-/v1/search/", "/-/v1/search?text=hello"):
+        c.add(f"npm ngroup HEAD {rel} {who}", who, "HEAD", f"/ngroup{rel}")
+
+
 def mask(masker):
     def answer(path, hd, body, after_writes, etag):
         if re.match(TIMES, path):
@@ -211,9 +218,10 @@ def mask(masker):
         # A group's search says when it was asked, with as many digits
         # of the nanoseconds as that time needs, so its length is the
         # clock's; a HEAD of it has no body for "npm times" to find the
-        # time in. Its 401s and 404s are not "private" alone.
+        # time in. Its address with the slash is a search too. Its 401s
+        # and 404s are text/plain, with no Cache-Control.
         h = dict(hd)
-        if (re.match(r"/ngroup/-/v1/search(\?|$)", path) and not body
+        if (re.match(r"/ngroup/-/v1/search(/|\?|$)", path) and not body
                 and h.get("content-type") == "application/json"
                 and h.get("cache-control") == "private"):
             masker.counts["npm group search length"] += 1
@@ -237,6 +245,7 @@ PARTS = [
     ("publisher", 20, ["npub"]),
     ("stub", 20, stub),
     ("reads", 50, reads),
+    ("reads", 150, group_reads),
     ("writes", 40, writes),
     ("writes", 80, limits),
     ("writes", 110, unpublish),
