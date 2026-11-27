@@ -223,7 +223,12 @@ def writes(c, who):
     # with a file name and without), read back; the same bytes again,
     # other bytes of a version (refused unless forced: by any value of
     # force, not by what only looks like it), more versions; deletes, of
-    # a version by its name as pushed, and of the last of a chart.
+    # a version by its name as pushed, and of the last of a chart. A
+    # chart forced or deleted later is read back by the API (its digest),
+    # not downloaded: the server names the downloads it counted when it
+    # writes them, every few seconds, by the catalog as it is then, so a
+    # download of what is gone by then is not counted, and the end
+    # state's downloads would depend on when that was.
     for repo in ("hpub", "hpriv"):
         api = f"/{repo}/api/charts"
         w, f, g, v = (f"{x}-{who}" for x in ("w", "f", "g", "v"))
@@ -234,10 +239,10 @@ def writes(c, who):
             ("POST", api, o, w1),
             ("GET", f"{api}/{w}", {}, None),
             ("GET", f"{api}/{w}/0.1.0", {}, None),
-            ("GET", f"/{repo}/charts/{w}-0.1.0.tgz", {}, None),
             ("GET", f"/{repo}/index.yaml", {}, None),
             ("POST", api, fh, fb),
             ("GET", f"{api}/{f}/0.1.0", {}, None),
+            ("GET", f"/{repo}/charts/{f}-0.1.0.tgz", {}, None),
             ("POST", f"{api}/", gh, gb),
             ("GET", f"{api}/{g}", {}, None),
             ("POST", api, o, w1),
