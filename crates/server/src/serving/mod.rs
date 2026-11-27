@@ -624,29 +624,6 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
         };
         return protocol.serve(app, at, req).await;
     }
-    if served.repo.format == "oci" {
-        // Images go by /v2/; the stored tree is not for browsing.
-        if role.is_none() {
-            return deny(&caller);
-        }
-        let at = if base.is_empty() {
-            host.clone()
-        } else {
-            format!("{host}/{}", base.join("/"))
-        };
-        let st = if rel.is_empty() {
-            StatusCode::OK
-        } else {
-            StatusCode::NOT_FOUND
-        };
-        return client_note(
-            st,
-            format!(
-                "{}: a container image registry.\n\n  docker pull {at}/<image>:<tag>\n  docker push {at}/<image>:<tag>\n\nIts images are listed in pkgpod's console.\n",
-                served.repo.name
-            ),
-        );
-    }
     // Without a right, refused whatever the method (a logged-in caller
     // as if it were not there), before what the method may do is told.
     if role.is_none() {

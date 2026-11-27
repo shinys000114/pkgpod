@@ -62,7 +62,7 @@ impl Registry {
             rows: vec![
                 Row::of(pkgpod_deb::Deb),
                 Row::of(pkgpod_files::Files),
-                Row::of(pkgpod_oci::Oci),
+                Row::of(pkgpod_oci::Oci).protocol(&p::oci::Serving),
                 Row::of(pkgpod_pypi::Pypi),
                 Row::of(pkgpod_npm::Npm).protocol(&p::npm::Serving),
                 Row::of(pkgpod_cargo::Cargo).protocol(&p::cargo::Serving),

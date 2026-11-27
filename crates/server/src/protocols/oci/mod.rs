@@ -8,6 +8,16 @@
 mod host;
 mod upstream;
 
+use std::sync::Arc;
+
+use axum::extract::Request;
+use axum::http::{Method, StatusCode};
+use axum::response::Response;
+use futures_util::future::BoxFuture;
+
+use crate::App;
+use crate::serving::{At, client_note, deny};
+
 pub use pkgpod_oci::protocol::{
     Fetch, Fetched, Host, Names, State, Upstream, forget, handle, pin_closure,
 };
@@ -37,6 +47,55 @@ pub fn claims(table: &crate::routes::Table, host: &str, rest: &[String]) -> bool
 pub fn claimed(table: &crate::routes::Table, host: &str, rest: &[String]) -> Option<String> {
     let (name, _) = pkgpod_oci::protocol::parse_target(rest)?;
     table.registry(host, &name).map(|(repo, _)| repo)
+}
+
+/// An OCI repository's address, as a browser sees it (images go by
+/// /v2/): every request there is its.
+pub(crate) struct Serving;
+
+impl crate::registry::Serve for Serving {
+    fn claims(&self, _: &Method, _: &[String]) -> bool {
+        true
+    }
+
+    fn serve(&self, app: Arc<App>, at: At, req: Request) -> BoxFuture<'static, Response> {
+        Box::pin(Serving::answer(app, at, req))
+    }
+}
+
+impl Serving {
+    async fn answer(_app: Arc<App>, at: At, _req: Request) -> Response {
+        let At {
+            served,
+            role,
+            caller,
+            rel,
+            base,
+            host,
+            ..
+        } = at;
+        // Images go by /v2/; the stored tree is not for browsing.
+        if role.is_none() {
+            return deny(&caller);
+        }
+        let at = if base.is_empty() {
+            host.clone()
+        } else {
+            format!("{host}/{}", base.join("/"))
+        };
+        let st = if rel.is_empty() {
+            StatusCode::OK
+        } else {
+            StatusCode::NOT_FOUND
+        };
+        client_note(
+            st,
+            format!(
+                "{}: a container image registry.\n\n  docker pull {at}/<image>:<tag>\n  docker push {at}/<image>:<tag>\n\nIts images are listed in pkgpod's console.\n",
+                served.repo.name
+            ),
+        )
+    }
 }
 
 #[cfg(test)]
