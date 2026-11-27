@@ -569,6 +569,40 @@ def writes(c, who):
         ("DELETE", f"{pf}/packages/{P1}/revisions/{lone}", {}, None),
         ("DELETE", f"{pf}/packages", {}, None),
         ("GET", f"{pf}/files", {}, None)])
+    # The other way round: a file named "packages" put to a revision that
+    # has packages. Its files are brought in in the order of their names,
+    # the manifest first: with a manifest of other bytes than the one
+    # there it is refused, and the file with it; with the same (one that
+    # listed the file from the first), the file is put where the packages
+    # were, and they are gone. Read back by the lists only (see the
+    # removals), and the file itself.
+    pp = f"/kpub/v2/conans/pp-{who}/1.0/_/_"
+    rdir = f"{pp}/revisions/{md5(f'packages over packages {who}')}"
+    q = md5(f"package under packages {who}")
+    r = recipe(f"pp-{who}", "1.0", f"packages over packages by {who}", sources=False)
+    pfile = f"a file named packages by {who}\n".encode()
+    del r[MANIFEST]
+    m = manifest(dict(r, packages=pfile))
+    seq(f"conan a file named packages over packages {who}", who,
+        [("PUT", f"{rdir}/files/{n}", {}, d) for n, d in r.items()]
+        + [("PUT", f"{rdir}/files/{MANIFEST}", {}, m)]
+        + [("PUT", f"{rdir}/packages/{pid}/revisions/{q}/files/{n}", {}, d)
+           for pid, info in ((P1, INFO_A), (P2, INFO_WIN))
+           for n, d in package(info, f"pp-{who} {pid[:2]}").items()]
+        + [("GET", f"{rdir}/search", {}, None),
+           ("PUT", f"{rdir}/files/packages", {}, pfile),
+           ("PUT", f"{rdir}/files/{MANIFEST}", {}, manifest(dict(r, packages=b"other"))),
+           ("GET", f"{rdir}/files", {}, None),
+           ("GET", f"{rdir}/search", {}, None),
+           ("PUT", f"{rdir}/files/packages", {}, pfile),
+           ("PUT", f"{rdir}/files/{MANIFEST}", {}, m),
+           ("GET", f"{rdir}/files", {}, None),
+           ("GET", f"{rdir}/files/packages", {}, None),
+           ("GET", f"{rdir}/search", {}, None),
+           ("GET", f"{rdir}/packages/{P1}/latest", {}, None),
+           ("GET", f"{rdir}/packages/{P2}/revisions", {}, None),
+           ("GET", f"{rdir}/packages/{P1}/revisions/{q}/files", {}, None),
+           ("GET", f"{pp}/revisions", {}, None)])
     # A repository with nothing in it, and the one at a host's root: a
     # manifest alone (refused for what it is, or for who sends it);
     # removals of what is not there (refused for that, or for who asks);
