@@ -455,8 +455,9 @@ def writes(c, who):
         # What an upload refuses, each the input that reaches it: no apk
         # (nothing, other bytes, an apk v3, a gzip of no tar, a tar of
         # a bad header), a signature part alone, a control part without
-        # .PKGINFO (an empty tar too), cut short, a control part past
-        # what is unpacked of one; a name, version or architecture that
+        # .PKGINFO (an empty tar too), cut short (inside its gzip, its
+        # data, a tar entry's data), a control part past what is
+        # unpacked of one; a name, version or architecture that
         # cannot be a file's (or none), data that is not its datahash's;
         # a branch or repository that is none, a parameter it does not
         # take; from another site's page. Then what the tree takes from
@@ -470,6 +471,7 @@ def writes(c, who):
             gz(tar([("README", b"x", 0o644, tarfile.REGTYPE, None)], end=False))
             + data_part([("x", b"x", 0o644)]),
             gz(bytes(1024)), good[:40], good[:-30], gz(bytes(MAX_CONTROL + 1)),
+            gz(tar([(".PKGINFO", b"x" * 600, 0o644, tarfile.REGTYPE, None)], end=False)[:612]),
             package("a/b", "1.0-r0", "x86_64"), package(".hidden", "1.0-r0", "x86_64"),
             package("", "1.0-r0", "x86_64"), package(x, "r1.0", "x86_64"),
             package(x, "1.0/r0", "x86_64"), package(x, "", "x86_64"),
