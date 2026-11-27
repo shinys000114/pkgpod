@@ -5,12 +5,13 @@ xz; several versions of a name, compared as dpkg does: ~, 1.9 and 1.10,
 an epoch, two that compare equal; several architectures in one feed,
 feeds named by architecture; controls with a long Description, none,
 and fields the index makes itself; feeds the content-named rules know,
-by-hash and repodata; a label; a package removed), one with nothing in
-it. ipk has no protocol module of its own: its repositories are the
-server's tree, read by path, written by PUT anywhere in it (the feed
-from ?feed=); the format makes each feed's Packages, Packages.gz and
-Packages.sig (usign, with the server's key: the seed makes it, so each
-run signs with the same) and the key's key.pub."""
+by-hash and repodata; two labels; a package removed after the second),
+one with nothing in it. ipk has no protocol module of its own: its
+repositories are the server's tree, read by path, written by PUT
+anywhere in it (the feed from ?feed=); the format makes each feed's
+Packages, Packages.gz and Packages.sig (usign, with the server's key:
+the seed makes it, so each run signs with the same) and the key's
+key.pub."""
 
 import gzip
 import hashlib
@@ -144,7 +145,8 @@ def tree():
     """What the seed puts in each hosted repository, in order: (how,
     feed, file name, bytes), how "api" (pkgpod upload, by the management
     API), "put" (PUT to <repo>/upload?feed=, as curl -T does), "label"
-    (a label of what is there) or "rm" (pkgpod rm of feed/file)."""
+    (a label of what is there, its name in the feed's place) or "rm"
+    (pkgpod rm of feed/file)."""
     out = []
 
     def api(feed, body, file):
@@ -190,8 +192,10 @@ def tree():
     for name in ("hello", "SUMS", "a.db.b", "a.files.b"):
         api("repodata", openwrt(control(f"{HEX}-{name}", "1.0", "all")),
             f"{HEX}-{name}_1.0_all.ipk")
-    # A package removed, as the API removes one.
+    # A package removed, as the API removes one, after a label of all
+    # of it: the label keeps it.
     api("main", openwrt(control("gone", "1.0", "all")), "gone_1.0_all.ipk")
+    out.append(("label", "stable", None, None))
     out.append(("rm", "main", "gone_1.0_all.ipk", None))
     return out
 
@@ -238,7 +242,9 @@ INDEXES = ("Packages", "Packages.gz", "Packages.sig")
 # query, unsafe; under by-hash, not there (looked for in the versions of
 # the day before); a label's (its version, what came after it, a label
 # not there, a version by number: the first, empty, and the next ones,
-# with and without a v; an escaped @, an empty label).
+# with and without a v; an escaped @, an empty label); the second
+# label's (all the seed put, the package removed after it; a file of a
+# content-named feed by it).
 TREE_READS = (
     ["", "/", "/?sort=size&order=desc", "/?sort=time", "/main", "/main/", "/main/?sort=size",
      "/main/?sort=time&order=desc", "/x86_64/", "/aarch64_generic", "/aarch64_generic/",
@@ -263,7 +269,12 @@ TREE_READS = (
        "/@first/main/hello_1.1-1_all.ipk", "/@first/x86_64/Packages", "/@1/", "/@1/main/",
        "/@2/main/Packages", "/@v2/main/Packages", "/@3/main/Packages", "/@999/main/Packages",
        "/@0/", "/@nope/main/Packages", "/@nope/",
-       "/%40first/main/Packages", "/@/main/Packages", "/@first/@first/main/Packages"])
+       "/%40first/main/Packages", "/@/main/Packages", "/@first/@first/main/Packages"]
+    + ["/@stable/", "/@stable/main/", "/@stable/main/Packages", "/@stable/main/Packages.gz",
+       "/@stable/main/Packages.sig", "/@stable/aarch64_generic/Packages", "/@stable/key.pub",
+       "/@stable/main/gone_1.0_all.ipk", "/@stable/by-hash/byhash_1.0_all.ipk",
+       f"/@stable/repodata/{HEX}-a.db.b_1.0_all.ipk",
+       f"/@stable/repodata/{HEX}-hello_1.0_all.ipk"])
 
 
 def reads(c, who):
@@ -525,10 +536,11 @@ def writes_end(c):
 
 def after(c, who):
     # What ipk's writes left in each repository: the listings, each
-    # feed's index, the key, the label's index (unchanged).
+    # feed's index, the key, the labels' indexes (unchanged).
     for repo in REPOS + ("ipkempty",):
         b = f"/{repo}"
         for rel in (["/", "/main/", "/x86_64/", "/key.pub", "/@first/main/Packages",
+                     "/@stable/main/Packages", "/@stable/main/w-writer_1.0-1_all.ipk",
                      "/true/Packages", "/big/Packages", "/big/"]
                     + [f"/main/{ix}" for ix in INDEXES] + ["/x86_64/Packages"]
                     + [f"/f-{w}/Packages" for w in ("writer", "wtoken", "wbearer", "admin",
