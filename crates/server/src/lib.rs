@@ -10,6 +10,7 @@ pub mod config;
 pub mod jobs;
 pub mod ops;
 pub mod protocols;
+pub mod registry;
 pub mod routes;
 pub mod schema;
 pub mod serving;
@@ -110,6 +111,8 @@ pub struct App {
     pub cfg: Config,
     pub db: Arc<Db>,
     pub engine: Arc<Engine>,
+    /// The formats compiled in, and what the server asks of each.
+    pub registry: &'static registry::Registry,
     pub auth: Auth,
     pub keys: Arc<Keys>,
     pub listeners: listeners::Running,
@@ -136,33 +139,9 @@ struct Cache {
     labels: HashMap<(String, String), Version>,
 }
 
-/// Formats compiled into this server.
+/// Formats compiled into this server: the registry's.
 pub fn formats() -> Vec<Arc<dyn pkgpod_engine::Format>> {
-    vec![
-        Arc::new(pkgpod_deb::Deb),
-        Arc::new(pkgpod_files::Files),
-        Arc::new(pkgpod_oci::Oci),
-        Arc::new(pkgpod_pypi::Pypi),
-        Arc::new(pkgpod_npm::Npm),
-        Arc::new(pkgpod_cargo::Cargo),
-        Arc::new(pkgpod_go::Go),
-        Arc::new(pkgpod_apk::Apk),
-        Arc::new(pkgpod_rpm::Rpm),
-        Arc::new(pkgpod_helm::Helm),
-        Arc::new(pkgpod_maven::Maven),
-        Arc::new(pkgpod_gems::Gems),
-        Arc::new(pkgpod_arch::Arch),
-        Arc::new(pkgpod_nuget::Nuget),
-        Arc::new(pkgpod_composer::Composer),
-        Arc::new(pkgpod_conda::Conda),
-        Arc::new(pkgpod_cran::Cran),
-        Arc::new(pkgpod_pub::Pub),
-        Arc::new(pkgpod_ipk::Ipk),
-        Arc::new(pkgpod_terraform::Terraform),
-        Arc::new(pkgpod_galaxy::Galaxy),
-        Arc::new(pkgpod_conan::Conan),
-        Arc::new(pkgpod_swift::Swift),
-    ]
+    registry::get().formats()
 }
 
 impl App {
@@ -203,6 +182,7 @@ impl App {
             cfg,
             db,
             engine,
+            registry: registry::get(),
             auth,
             keys,
             listeners: listeners::Running::default(),
