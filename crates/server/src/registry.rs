@@ -10,7 +10,8 @@ use axum::extract::Request;
 use axum::http::Method;
 use axum::response::Response;
 use futures_util::future::BoxFuture;
-use pkgpod_engine::Format;
+use pkgpod_engine::tree::Tree;
+use pkgpod_engine::{Format, RepoInfo};
 use pkgpod_proto::tree::TreeRules;
 
 use crate::App;
@@ -24,6 +25,23 @@ pub(crate) trait Serve: Send + Sync {
     fn claims(&self, method: &Method, rel: &[String]) -> bool;
     /// Answers a request it claims.
     fn serve(&self, app: Arc<App>, at: At, req: Request) -> BoxFuture<'static, Response>;
+}
+
+/// What a format answers itself in its repositories' trees, in place of
+/// the tree serving's answer: its own pages on paths of the tree.
+pub(crate) trait TreeHooks: Send + Sync {
+    /// An answer to a path of the version asked for, before it is looked
+    /// up in the tree (a redirect to the path's right spelling, say).
+    fn redirect(&self, rel: &[String], raw_path: &str) -> Option<Response>;
+    /// A directory's page in place of its listing (`head`: without a
+    /// body), if the format has one for it.
+    fn dir_page<'a>(
+        &'a self,
+        repo: &'a RepoInfo,
+        t: &'a Tree,
+        accept: Option<String>,
+        head: bool,
+    ) -> BoxFuture<'a, Option<Response>>;
 }
 
 /// What a format answers at a host's root, outside its repositories'
@@ -52,6 +70,8 @@ pub struct Row {
     /// What it says of its trees' files, which the tree serving asks
     /// (its Cache-Control rows, …).
     pub tree: TreeRules,
+    /// What it answers itself in its trees, if anything.
+    pub(crate) tree_hooks: Option<&'static dyn TreeHooks>,
 }
 
 impl Row {
@@ -62,11 +82,19 @@ impl Row {
             browsable: true,
             claim: None,
             tree: TreeRules::DEFAULT,
+            tree_hooks: None,
         }
     }
 
     fn tree(self, tree: TreeRules) -> Row {
         Row { tree, ..self }
+    }
+
+    fn hooks(self, hooks: &'static dyn TreeHooks) -> Row {
+        Row {
+            tree_hooks: Some(hooks),
+            ..self
+        }
     }
 
     fn protocol(self, serving: &'static dyn Serve) -> Row {
@@ -108,7 +136,7 @@ impl Registry {
                     .protocol(&p::oci::Serving)
                     .unlisted()
                     .host(HostClaim::V2),
-                Row::of(pkgpod_pypi::Pypi),
+                Row::of(pkgpod_pypi::Pypi).hooks(&p::pypi::Hooks),
                 Row::of(pkgpod_npm::Npm)
                     .protocol(&p::npm::Serving)
                     .unlisted(),
@@ -170,6 +198,11 @@ impl Registry {
     /// the tree.
     pub(crate) fn serving(&self, id: &str) -> Option<&'static dyn Serve> {
         self.row(id).and_then(|r| r.serving)
+    }
+
+    /// What `id`'s format answers itself in its trees, if anything.
+    pub(crate) fn tree_hooks(&self, id: &str) -> Option<&'static dyn TreeHooks> {
+        self.row(id).and_then(|r| r.tree_hooks)
     }
 
     /// Whether repositories of `id` are trees to browse (a format not
@@ -303,6 +336,7 @@ mod tests {
         assert!(r.browsable("nope"));
         assert!(!r.proxy("nope") && !r.groups("nope"));
         assert!(r.claim("nope").is_none() && r.serving("nope").is_none());
+        assert!(r.tree_hooks("nope").is_none());
     }
 
     #[test]
@@ -334,8 +368,10 @@ mod tests {
             ])
         );
         // A format crate with a client protocol has a serving entry,
-        // but pypi, whose upload and index pages are the tree serving's;
-        // rpm has one without: the dnf repository file is the server's.
+        // but pypi, whose upload is the tree serving's and its index
+        // pages the tree's hooks; rpm has one without: the dnf
+        // repository file is the server's.
+        assert_eq!(ids(|r| r.tree_hooks.is_some()), set(&["pypi"]));
         for (name, dir) in crates() {
             let protocol =
                 dir.join("src/protocol.rs").is_file() || dir.join("src/protocol").is_dir();

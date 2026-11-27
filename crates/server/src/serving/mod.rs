@@ -696,10 +696,11 @@ async fn get(
             None => return status(StatusCode::NOT_FOUND),
         },
     };
-    if s.repo.format == "pypi"
-        && let Some(r) = crate::protocols::pypi::redirect(&rel, raw_path)
+    let hooks = app.registry.tree_hooks(&s.repo.format);
+    if let Some(h) = hooks
+        && let Some(r) = h.redirect(&rel, raw_path)
     {
-        return r.map(axum::body::Body::new);
+        return r;
     }
     let rel_s = rel.join("/");
     let followed = if s.repo.format == "files" {
@@ -751,15 +752,14 @@ async fn get(
                 Ok(t) => t,
                 Err(e) => return Error::from(e).into_response(),
             };
-            if s.repo.format == "pypi" {
+            if let Some(h) = hooks {
                 let accept = req
                     .headers()
                     .get(header::ACCEPT)
                     .and_then(|v| v.to_str().ok())
                     .map(String::from);
-                if let Some(r) = crate::protocols::pypi::index_page(&s.repo, &t, accept, head).await
-                {
-                    return r.map(axum::body::Body::new);
+                if let Some(r) = h.dir_page(&s.repo, &t, accept, head).await {
+                    return r;
                 }
             }
             let entries = t
