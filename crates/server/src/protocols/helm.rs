@@ -9,17 +9,18 @@
 
 use std::sync::Arc;
 
-use axum::extract::{FromRequest, Multipart, Request};
-use axum::http::{Method, StatusCode};
-use axum::response::{IntoResponse, Response};
+use http::{Method, StatusCode, header};
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Upload, Version};
+use pkgpod_helm::MAX_CHART;
+use pkgpod_proto::body::{Request, Response};
+use pkgpod_proto::form::Form;
 use pkgpod_proto::host::Host;
 use pkgpod_proto::{Caller, Role};
 use serde_json::{Map, Value, json};
 
 fn reply(st: StatusCode, v: Value) -> Response {
-    (st, axum::Json(v)).into_response()
+    pkgpod_proto::reply::json(st, &v)
 }
 
 fn error(st: StatusCode, m: impl Into<String>) -> Response {
@@ -167,11 +168,11 @@ async fn push(app: &Arc<dyn Host>, repo: &RepoInfo, caller: &Caller, req: Reques
     });
     let multipart = req
         .headers()
-        .get(axum::http::header::CONTENT_TYPE)
+        .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|c| c.starts_with("multipart/form-data"));
     let stored = if multipart {
-        let mut m = match Multipart::from_request(req, &()).await {
+        let mut m = match Form::of(req, pkgpod_proto::body::MAX_UPLOAD) {
             Ok(m) => m,
             Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
         };
@@ -179,11 +180,7 @@ async fn push(app: &Arc<dyn Host>, repo: &RepoInfo, caller: &Caller, req: Reques
         loop {
             match m.next_field().await {
                 Ok(Some(f)) if f.name() == Some("chart") => {
-                    found = Some(
-                        crate::serving::stream_to_store(repo.store(), f, pkgpod_helm::MAX_CHART)
-                            .await
-                            .map_err(|e| e.to_string()),
-                    );
+                    found = Some(app.store_body(repo.store(), f.into_body(), MAX_CHART).await);
                     break;
                 }
                 Ok(Some(_)) => continue,
@@ -201,8 +198,7 @@ async fn push(app: &Arc<dyn Host>, repo: &RepoInfo, caller: &Caller, req: Reques
             }
         }
     } else {
-        let body = pkgpod_proto::body::boxed(req.into_body());
-        app.store_body(repo.store(), body, pkgpod_helm::MAX_CHART)
+        app.store_body(repo.store(), req.into_body(), MAX_CHART)
             .await
     };
     let (sha256, size) = match stored {

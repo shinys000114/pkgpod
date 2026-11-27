@@ -40,8 +40,8 @@ use crate::{App, Error};
 pub fn router(app: Arc<App>) -> Router {
     Router::new()
         .fallback(handle)
-        // Forms read with axum's Multipart (helm, Galaxy) as large as
-        // PUT uploads; PyPI's, pub's, NuGet's and Swift's are held to
+        // Forms read with axum's Multipart (Galaxy) as large as PUT
+        // uploads; PyPI's, pub's, NuGet's, Swift's and helm's are held to
         // their limit by pkgpod_proto::form.
         .layer(axum::extract::DefaultBodyLimit::max(MAX_UPLOAD as usize))
         .with_state(app)
@@ -780,7 +780,9 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
             caller: crate::protocols::who(&app, &caller),
             role: role.map(Into::into),
         };
-        return crate::protocols::helm::handle(app, ask, req).await;
+        return crate::protocols::helm::handle(app, ask, req.map(pkgpod_proto::body::boxed))
+            .await
+            .map(axum::body::Body::new);
     }
     if served.repo.format == "gems" && crate::protocols::gems::is_api(&method, &rel) {
         let ask = crate::protocols::gems::Ask {
