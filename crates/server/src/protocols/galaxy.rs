@@ -16,9 +16,9 @@ use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Upload, Version};
+use pkgpod_proto::host::Host;
 use serde_json::{Value, json};
 
-use crate::App;
 use crate::auth::{Caller, Role};
 
 fn reply(st: StatusCode, v: Value) -> Response {
@@ -56,7 +56,7 @@ pub struct Ask {
 
 /// The versions of `ns.name`: (version, sha256, size, metadata).
 async fn versions(
-    app: &Arc<App>,
+    app: &Arc<dyn Host>,
     v: &Option<Version>,
     ns: &str,
     name: &str,
@@ -71,7 +71,7 @@ async fn versions(
     }
     let (app2, prefix) = (app.clone(), format!("{ns}/{name}"));
     let mut out = tokio::task::spawn_blocking(move || {
-        app2.engine
+        app2.engine()
             .objects()
             .walk(&v.root, &prefix)
             .unwrap_or_default()
@@ -91,7 +91,7 @@ async fn versions(
     out
 }
 
-pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
+pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
     if a.role.is_none() {
         let mut r = error(StatusCode::UNAUTHORIZED, "authentication required");
         if a.caller.user.is_none() {
@@ -213,23 +213,22 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
                 return error(StatusCode::NOT_FOUND, "not found");
             };
             match app
-                .engine
+                .engine()
                 .objects()
                 .resolve(&v.root, &format!("{ns}/{name}/{file}"))
             {
                 Ok(Some(Entry::Blob { sha256, .. })) => {
-                    crate::serving::serve_counted(
-                        &app,
+                    let req = req.map(pkgpod_proto::body::boxed);
+                    app.serve_counted(
                         &a.repo.name,
                         "",
-                        &a.repo.store().path(&sha256),
-                        &sha256,
+                        a.repo.store().path(&sha256),
+                        sha256,
                         file,
-                        None,
-                        false,
                         req,
                     )
                     .await
+                    .map(axum::body::Body::new)
                 }
                 _ => error(StatusCode::NOT_FOUND, "not found"),
             }
@@ -329,7 +328,7 @@ async fn base64_to_store(
     crate::serving::stream_to_store(store, decoded, pkgpod_galaxy::MAX_ARTIFACT).await
 }
 
-async fn upload(app: &Arc<App>, a: &Ask, req: Request) -> Response {
+async fn upload(app: &Arc<dyn Host>, a: &Ask, req: Request) -> Response {
     let mut m = match Multipart::from_request(req, &()).await {
         Ok(m) => m,
         Err(e) => return error(StatusCode::BAD_REQUEST, format!("not an upload: {e}")),
@@ -413,9 +412,9 @@ async fn upload(app: &Arc<App>, a: &Ask, req: Request) -> Response {
         a.caller.name().to_string(),
     );
     let res = tokio::task::spawn_blocking(move || {
-        app2.engine
+        app2.engine()
             .upload(&name, &up, &json!({}), &actor)
-            .inspect(|o| app2.auth.audit(&actor, "publish", &name, &o.summary))
+            .inspect(|o| app2.audit(&actor, "publish", &name, &o.summary))
     })
     .await;
     match res {
