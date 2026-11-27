@@ -216,7 +216,7 @@ impl App {
         if let Some(t) = &self.cache().routes {
             return Ok(t.clone());
         }
-        let t = Arc::new(routes::Table::build(&self.engine.repos()?));
+        let t = Arc::new(routes::Table::build(self.registry, &self.engine.repos()?));
         self.cache().routes = Some(t.clone());
         Ok(t)
     }

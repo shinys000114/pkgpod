@@ -204,26 +204,6 @@ password=<token>
     s
 }
 
-/// Formats whose repositories are trees to browse. npm, OCI, cargo, Go
-/// and NuGet repositories answer their clients' API only, as public registries do:
-/// they are left out of listings, and their address says how to use them.
-pub(crate) fn browsable(format: &str) -> bool {
-    !matches!(
-        format,
-        "npm"
-            | "oci"
-            | "cargo"
-            | "go"
-            | "nuget"
-            | "composer"
-            | "pub"
-            | "terraform"
-            | "galaxy"
-            | "conan"
-            | "swift"
-    )
-}
-
 /// A registry's address seen from a browser: how its clients use it.
 pub(crate) fn client_note(st: StatusCode, text: String) -> Response {
     (

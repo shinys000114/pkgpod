@@ -11,6 +11,8 @@ use std::collections::BTreeSet;
 
 use pkgpod_engine::RepoInfo;
 
+use crate::registry::{HostClaim, Registry};
+
 /// One address of a repository.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Route {
@@ -154,14 +156,17 @@ fn strip_port(h: &str) -> &str {
 }
 
 impl Table {
-    pub fn build(repos: &[RepoInfo]) -> Table {
+    pub fn build(registry: &Registry, repos: &[RepoInfo]) -> Table {
         let mut t = Table::default();
         for r in repos {
-            if r.format == "oci" {
-                t.oci.insert(r.name.clone());
-            }
-            if r.format == "terraform" {
-                t.terraform.insert(r.name.clone());
+            match registry.claim(&r.format) {
+                Some(HostClaim::V2) => {
+                    t.oci.insert(r.name.clone());
+                }
+                Some(HostClaim::TerraformDiscovery) => {
+                    t.terraform.insert(r.name.clone());
+                }
+                None => {}
             }
             let urls = r.setting_list("urls");
             if urls.is_empty() {

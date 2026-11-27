@@ -322,7 +322,7 @@ fn rows(app: &App, caller: &Caller, host: &str, list: &[(String, String)]) -> Ve
         out.push(Row {
             name: repo.clone(),
             // A tree to look into, or a registry its clients use.
-            href: if crate::serving::browsable(&r.format) {
+            href: if app.registry.browsable(&r.format) {
                 format!("{}/", crate::serving::percent_encode(seg))
             } else {
                 String::new()

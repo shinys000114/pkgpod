@@ -29,8 +29,10 @@ use crate::serving::proxy::Has;
 use crate::serving::{At, ListEntry};
 use crate::{App, Served};
 
-/// Formats whose groups are served.
-pub const FORMATS: &[&str] = &["files", "npm", "pypi", "maven", "go", "cargo", "oci"];
+/// Formats whose groups are served, in the order a refusal names them:
+/// which they are is the registry's (`Format::groups`), and a test holds
+/// the two the same.
+pub const LISTED: &[&str] = &["files", "npm", "pypi", "maven", "go", "cargo", "oci"];
 
 /// What a request through a group asks for.
 #[derive(Debug, PartialEq)]
@@ -471,10 +473,10 @@ pub fn check_members(
             .collect(),
         _ => return Ok(()),
     };
-    if !FORMATS.contains(&format) {
+    if !app.registry.groups(format) {
         return Err(crate::Error::Invalid(format!(
             "{format} repositories have no groups (yet): {}",
-            FORMATS.join(", ")
+            LISTED.join(", ")
         )));
     }
     for m in &list {

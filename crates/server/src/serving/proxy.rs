@@ -32,8 +32,10 @@ use serde_json::{Value, json};
 use crate::serving::{At, percent_encode, status};
 use crate::{App, Error, Result, Served};
 
-/// Formats whose proxies are served.
-pub const FORMATS: &[&str] = &["go", "maven", "npm", "pypi", "cargo", "oci", "files"];
+/// Formats whose proxies are served, in the order a refusal names them:
+/// which they are is the registry's (`Format::proxy`), and a test holds
+/// the two the same.
+pub const LISTED: &[&str] = &["go", "maven", "npm", "pypi", "cargo", "oci", "files"];
 
 /// Largest file fetched.
 pub const MAX_FILE: u64 = 4 << 30;
@@ -740,10 +742,10 @@ impl Upstream {
 
 /// Checks a proxy's settings as they are set.
 pub fn check_settings(format: &str, settings: &Value) -> Result<()> {
-    if !FORMATS.contains(&format) {
+    if !crate::registry::get().proxy(format) {
         return Err(Error::Invalid(format!(
             "{format} repositories have no proxies (yet): {}",
-            FORMATS.join(", ")
+            LISTED.join(", ")
         )));
     }
     if let Some(u) = settings.get("upstream").and_then(Value::as_str) {
