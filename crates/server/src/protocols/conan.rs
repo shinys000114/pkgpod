@@ -12,13 +12,11 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
-use axum::body::Body;
-use axum::extract::Request;
-use axum::http::{HeaderValue, Method, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use http::{HeaderValue, Method, StatusCode, header};
 use pkgpod_base::Digest;
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Version};
+use pkgpod_proto::body::{Request, Response};
 use pkgpod_proto::{Caller, Role};
 use serde_json::{Value, json};
 
@@ -53,20 +51,16 @@ impl Staged {
 }
 
 fn text(st: StatusCode, m: impl Into<String>) -> Response {
-    let mut r = (st, m.into()).into_response();
+    let mut r = pkgpod_proto::reply::text(st, m);
     r.headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
     r
 }
 
 fn reply(v: Value) -> Response {
-    let mut r = (StatusCode::OK, serde_json::to_string(&v).expect("json")).into_response();
-    let h = r.headers_mut();
-    h.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    let mut r = pkgpod_proto::reply::json(StatusCode::OK, &v);
+    r.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     r
 }
 
@@ -185,7 +179,7 @@ pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
     // Pinging and logging in come before the rest.
     match (&method, r.as_slice()) {
         (&Method::GET, ["v1", "ping"]) => {
-            let mut resp = StatusCode::OK.into_response();
+            let mut resp = pkgpod_proto::reply::status(StatusCode::OK);
             resp.headers_mut().insert(
                 "X-Conan-Server-Capabilities",
                 HeaderValue::from_static("revisions"),
@@ -450,7 +444,6 @@ async fn file_op(
         .flatten();
         return match found {
             Some(sha) => {
-                let req = req.map(pkgpod_proto::body::boxed);
                 app.serve_counted(
                     &a.repo.name,
                     &path,
@@ -460,7 +453,6 @@ async fn file_op(
                     req,
                 )
                 .await
-                .map(Body::new)
             }
             None => text(StatusCode::NOT_FOUND, format!("{path} not found")),
         };
@@ -468,9 +460,8 @@ async fn file_op(
     if *method != Method::PUT {
         return text(StatusCode::METHOD_NOT_ALLOWED, "not allowed");
     }
-    let body = pkgpod_proto::body::boxed(req.into_body());
     let (sha, size) = match app
-        .store_body(a.repo.store(), body, pkgpod_conan::MAX_FILE)
+        .store_body(a.repo.store(), req.into_body(), pkgpod_conan::MAX_FILE)
         .await
     {
         Ok(x) => x,
@@ -573,11 +564,7 @@ async fn remove(app: &Arc<dyn Host>, a: &Ask, dir: &str, what: &str) -> Response
     })
     .await;
     match res {
-        Ok(Ok(_)) => {
-            let mut r = StatusCode::OK.into_response();
-            *r.body_mut() = Body::empty();
-            r
-        }
+        Ok(Ok(_)) => pkgpod_proto::reply::status(StatusCode::OK),
         Ok(Err(pkgpod_engine::Error::NotFound(m))) => text(StatusCode::NOT_FOUND, m),
         Ok(Err(e)) => text(StatusCode::BAD_REQUEST, e.to_string()),
         Err(e) => text(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
