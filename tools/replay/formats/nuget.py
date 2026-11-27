@@ -344,7 +344,7 @@ def reads_end(c):
             ("anon", "wtoken", f"/nupub{NUPKG}"), ("anon", "wtoken", "/nupub/@first/index.json"),
             ("anon", "wtoken", "/nupub/query?q=hello"), ("reader", "wtoken", "/nupriv/index.json"),
             ("anon", "rtoken", "/nupriv/index.json"), ("anon", "rtoken", f"/nupriv{NUPKG}"),
-            ("anon", "rtoken", "/nupriv/@first/index.json"),
+            ("anon", "rtoken", "/nupriv/@first/index.json"), ("anon", "rtoken", "/nupriv/"),
             ("anon", "rtoken", "/nupub/index.json"),
             ("reader", "rtoken", "/nupriv/@first/index.json"),
             ("noone", "rtoken", "/nupriv/@first/index.json"),
