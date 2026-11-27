@@ -24,22 +24,43 @@ each package, and key.asc at the top.
 
 The seed's versions are all dated before the seed, and a package's
 signature is kept from version to version while the package and the
-key stay: nothing read before the writes holds a time of the run."""
+key stay: nothing read before the writes holds a time of the run.
+Every version made after them does: each version's databases are its
+own, dated by it (their entries' tar headers) and signed then, with
+those of every pacman repository and architecture of the repository,
+written or not; a package put in the run is signed then too, and its
+signature is in the databases. The rules below mask those times, and
+no more: what holds them is told by its content (a gzipped tar of
+entries dated at or after the seed, a signature made then), and a
+part of an answer (a HEAD, a 304, a range) by the etag of a whole one
+(see the rules)."""
 
+import base64
+import bz2
 import gzip
 import hashlib
+import html
 import io
 import lzma
 import os
+import re
 import struct
 import tarfile
+import urllib.parse
+import zlib
 
-from core import auth_header, request
+from core import IDENTS, SERVE, auth_header, request
 
 NAME = "arch"
 REPOS = ("archpub", "archpriv")
 # The times inside packages (their files', .PKGINFO's builddate).
 TIME = 1790000000
+# The largest body put takes (pkgpod_proto::body::MAX_UPLOAD), the
+# largest package the format takes in (pkgpod_arch::MAX_PKG) and the
+# most of a .PKGINFO it reads.
+MAX_UPLOAD = 8 << 30
+MAX_PKG = 2 << 30
+MAX_PKGINFO = 1 << 20
 
 
 def zst(data, step=128 << 10):
@@ -57,7 +78,8 @@ def zst(data, step=128 << 10):
 
 def tar(members):
     """A tar of `members` (name, bytes; None for a directory, a str for a
-    symbolic link to it), owned by root, the same bytes each time."""
+    symbolic link to it, a 1-tuple of a name for a hard link to that),
+    owned by root, the same bytes each time."""
     raw = io.BytesIO()
     with tarfile.open(fileobj=raw, mode="w", format=tarfile.USTAR_FORMAT) as t:
         for name, data in members:
@@ -68,6 +90,9 @@ def tar(members):
                 t.addfile(info)
             elif isinstance(data, str):
                 info.type, info.linkname, info.mode = tarfile.SYMTYPE, data, 0o777
+                t.addfile(info)
+            elif isinstance(data, tuple):
+                info.type, info.linkname, info.mode = tarfile.LNKTYPE, data[0], 0o755
                 t.addfile(info)
             else:
                 info.size = len(data)
@@ -357,6 +382,541 @@ def reads(c, who):
         add(f"arch {m} {who}", who, m, "/archpub/archpub/x86_64/archpub.db")
 
 
+class Zeros:
+    """`n` zero bytes, sent a MiB at a time (http.client sends an
+    iterable as it comes, with the Content-Length given): a body past a
+    limit, not held whole (its length keeps the fuzz's mutants off it)."""
+
+    def __init__(self, n):
+        self.n = n
+
+    def __len__(self):
+        return self.n
+
+    def __iter__(self):
+        piece = bytes(1 << 20)
+        left = self.n
+        while left > 0:
+            yield piece if left >= len(piece) else piece[:left]
+            left -= len(piece)
+
+
+def chunked(pieces):
+    """A body of HTTP/1.1 chunks, one for each of `pieces`, then the last
+    (sent as it is: http.client chunks nothing itself where the request
+    says Transfer-Encoding)."""
+    return b"".join(b"%x\r\n" % len(p) + p + b"\r\n" for p in pieces) + b"0\r\n\r\n"
+
+
+# A name of 64 hex digits, as rpm's repodata files are named: a package
+# of that name for an architecture named repodata, in a pacman
+# repository named so too, is named by its content to the server.
+HEX = hashlib.sha256(b"replay").hexdigest()
+HEXREPO = f"{HEX}-r"
+
+
+def mine(who):
+    """What `who` puts in each signed repository, if it may (repo
+    "pub", "priv" or both; pacman repository, None for the one of the
+    repository's name; architecture; file name): one package replaced,
+    one in extra, one put to the address it is served at; and in the
+    public one, the packages its uploads take though they might not,
+    and those whose paths the server's rules name."""
+    out = [("both", None, "x86_64", file_name(f"w-{who}", "1.0-1")),
+           ("both", "extra", "x86_64", file_name(f"w-{who}", "1.1-1", how="xz")),
+           ("both", None, "x86_64", file_name(f"w-{who}", "1.2-1", how="gz"))]
+    for v, how in (("1.0-1", "zst"), ("1.1-1", "xz"), ("1.2-1", "gz"), ("1:1.3-1", "zst")):
+        out.append(("pub", None, "x86_64", file_name(f"t-{who}", v, how=how)))
+    out += [("pub", None, "i686", file_name(f"i-{who}", "1.0-1", "i686")),
+            ("pub", "by-hash", "x86_64", file_name(f"b-{who}", "1.0-1", "any")),
+            ("pub", "by-hash", "aarch64", file_name(f"b-{who}", "1.0-1", "any")),
+            ("pub", HEXREPO, "repodata", file_name(f"{HEX}-{who}", "1.0-1", "repodata")),
+            ("pub", HEXREPO, "repodata", file_name(f"{HEX}-SUMS-{who}", "1.0-1", "repodata"))]
+    return out
+
+
+def writes(c, who):
+    seq, add = c.seq, c.add
+    # Arch: an upload to each signed repository (as a client puts one),
+    # read back; the same bytes again (taken, no new version), other
+    # bytes of the same package (refused), then with replace in each
+    # way it is said, and refused in one it is not; a package of
+    # another kind to another pacman repository; one put to the address
+    # it is served at; to the repository's address with and without its
+    # slash, to a label's, to one not there, with the parameters put
+    # takes and ones it does not (the same bytes: no new package).
+    for repo in REPOS:
+        n = f"w-{who}"
+        up = f"/{repo}/upload"
+        d = f"/{repo}/{repo}/x86_64"
+        w1, w2 = package(n, "1.0-1"), package(n, "1.0-1", salt=" again")
+        f1 = file_name(n, "1.0-1")
+        f2, f3 = file_name(n, "1.1-1", how="xz"), file_name(n, "1.2-1", how="gz")
+        seq(f"arch upload {repo} {who}", who, [
+            ("PUT", up, {}, w1),
+            ("GET", f"{d}/{repo}.db", {}, None),
+            ("GET", f"{d}/{repo}.files", {}, None),
+            ("GET", f"{d}/{f1}", {}, None),
+            ("GET", f"{d}/{f1}.sig", {}, None),
+            ("PUT", up, {}, w1),
+            ("PUT", up, {}, w2),
+            ("PUT", up + "?replace=false", {}, w2),
+            ("PUT", up + "?replace=maybe", {}, w2),
+            ("PUT", up + "?replace", {}, w2),
+            ("PUT", up + "?replace=true", {}, w2),
+            ("PUT", up + "?replace=1", {}, w1),
+            ("PUT", up + "?replace=yes", {}, w2),
+            ("PUT", up + "?replace=on", {}, w1),
+            ("GET", f"{d}/{f1}", {}, None),
+            ("GET", f"{d}/{f1}.sig", {}, None),
+            ("PUT", up + "?repository=extra", {}, package(n, "1.1-1", how="xz")),
+            ("PUT", f"{d}/{f3}", {}, package(n, "1.2-1", how="gz")),
+            ("PUT", f"/{repo}/", {}, w1),
+            ("PUT", f"/{repo}", {}, w1),
+            ("PUT", f"/{repo}/@first/upload", {}, w1),
+            ("PUT", f"/{repo}/@nope/upload", {}, w1),
+            ("PUT", f"{up}?filename={f1}", {}, w1),
+            ("PUT", f"{up}?repository=", {}, w1),
+            ("PUT", f"{up}?repository={repo}&replace=no", {}, w1),
+            ("PUT", f"{up}?repository=Extra", {}, w1),
+            ("PUT", f"{up}?repository=..", {}, w1),
+            ("PUT", f"{up}?repository=a%2Fb", {}, w1),
+            ("PUT", f"{up}?nope=1", {}, w1),
+            ("PUT", f"{up}?path=x", {}, w1),
+            ("GET", f"{d}/{repo}.db", {}, None),
+            ("GET", f"{d}/{repo}.files.tar.gz", {}, None),
+            ("GET", f"{d}/{repo}.db.sig", {}, None),
+            ("GET", f"/{repo}/extra/x86_64/extra.db", {}, None),
+            ("GET", f"/{repo}/extra/x86_64/{f2}", {}, None),
+            ("GET", f"/{repo}/extra/x86_64/{f2}.sig", {}, None),
+            ("GET", f"{d}/{f3}", {}, None),
+            ("GET", f"{d}/{f3}.sig", {}, None),
+            ("GET", f"/{repo}/@first/{repo}/x86_64/{repo}.db", {}, None)])
+    # What an upload refuses, one request each; what it takes though it
+    # might not, read back.
+    for name, body in refusals(who):
+        add(f"arch upload refused {name} {who}", who, "PUT", "/archpub/upload", {}, body)
+    steps = []
+    for name, query, body in taken(who):
+        steps.append(("PUT", "/archpub/upload" + query, {}, body))
+    for _, pr, arch, f in mine(who)[3:]:
+        d = f"/archpub/{pr or 'archpub'}/{arch}"
+        steps += [("GET", f"{d}/{f}", {}, None), ("GET", f"{d}/{f}.sig", {}, None)]
+    seq(f"arch uploads taken {who}", who, steps + [
+        ("GET", "/archpub/archpub/x86_64/archpub.db", {}, None),
+        ("GET", "/archpub/archpub/x86_64/archpub.files", {}, None),
+        ("GET", "/archpub/archpub/i686/archpub.db", {}, None),
+        ("GET", "/archpub/by-hash/x86_64/by-hash.db", {}, None),
+        ("GET", f"/archpub/{HEXREPO}/repodata/{HEXREPO}.db", {}, None),
+        ("GET", f"/archpub/{HEXREPO}/repodata/{HEXREPO}.files.tar.gz.sig", {}, None)])
+    # The unsigned repository: a package, read back (no signature).
+    nw = file_name(f"nw-{who}", "1.0-1")
+    seq(f"arch upload archnosign {who}", who, [
+        ("PUT", "/archnosign/upload", {}, package(f"nw-{who}", "1.0-1")),
+        ("GET", "/archnosign/archnosign/x86_64/archnosign.db", {}, None),
+        ("GET", f"/archnosign/archnosign/x86_64/{nw}", {}, None),
+        ("GET", f"/archnosign/archnosign/x86_64/{nw}.sig", {}, None),
+        ("GET", "/archnosign/key.asc", {}, None)])
+    # Methods a repository takes no request of, and a write from another
+    # site's page (and one from its own).
+    for m, path in (("DELETE", f"/archpub/x86_64/{F10}"), ("DELETE", "/"), ("POST", "/upload"),
+                    ("POST", "/"), ("POST", "/legacy/")):
+        for repo in REPOS:
+            rel = path.replace("archpub", repo)
+            add(f"arch {m} {repo}{rel} {who}", who, m, f"/{repo}{rel}", {}, None)
+    add(f"arch upload from another site {who}", who, "PUT", "/archpub/upload",
+        {"Origin": "http://elsewhere.example"}, package(f"w-{who}", "1.0-1"))
+    add(f"arch upload from its own site {who}", who, "PUT", "/archpub/upload",
+        {"Origin": f"http://127.0.0.1:{SERVE}"}, package(f"w-{who}", "1.0-1"))
+
+
+def refusals(who):
+    """(name, body) of each package an upload refuses, each the input
+    that reaches the refusal: no compression it reads, a compression of
+    no tar, a tar cut short, no .PKGINFO or one it cannot read, fields
+    that cannot be file names."""
+    n = f"x-{who}"
+
+    def info(text):
+        return package(n, "1.0-1", info=text.encode() if isinstance(text, str) else text)
+
+    def without(key):
+        return info(b"".join(x for x in pkginfo(n, "1.0-1", "x86_64").splitlines(True)
+                             if not x.startswith(key.encode() + b" = ")))
+
+    def field(key, value):
+        return info(pkginfo(n, "1.0-1", "x86_64").replace(
+            {"pkgname": f"pkgname = {n}\n", "pkgver": "pkgver = 1.0-1\n",
+             "arch": "arch = x86_64\n"}[key].encode(), f"{key} = {value}\n".encode()))
+
+    plain = tar([(".PKGINFO", pkginfo(n, "1.0-1", "x86_64"))])
+    late = "# " + "x" * MAX_PKGINFO + "\n" + pkginfo(n, "1.0-1", "x86_64").decode()
+    cut = "# " + "x" * (MAX_PKGINFO - 3) + "é\n" + pkginfo(n, "1.0-1", "x86_64").decode()
+    return [
+        ("empty", b""),
+        ("not a package", b"not a package\n"),
+        ("zstd that is not", b"\x28\xb5\x2f\xfd" + b"not zstd at all"),
+        ("xz that is not", b"\xfd7zXZ\x00" + b"not xz at all"),
+        ("gzip that is not", b"\x1f\x8b" + b"not gzip at all"),
+        ("bzip2", bz2.compress(plain)),
+        ("a bare tar", plain),
+        ("zstd of no tar", zst(b"not a tar\n" * 100)),
+        ("xz of no tar", compress(b"not a tar\n" * 100, "xz")),
+        ("an empty tar", zst(tar([]))),
+        ("a tar cut short", zst(tar([("usr/", None), (".PKGINFO", pkginfo(n, "1.0-1", "x86_64"))])
+                                [:700])),
+        ("xz cut short", package(n, "1.0-1", how="xz")[:120]),
+        ("gzip cut short", package(n, "1.0-1", how="gz")[:60]),
+        ("no .PKGINFO", package(n, "1.0-1", members=[("usr/", None), ("usr/bin/x", b"x\n")])),
+        ("a .PKGINFO directory", package(n, "1.0-1", members=[(".PKGINFO/", None)])),
+        (".PKGINFO not UTF-8", info(b"pkgname = \xff\npkgver = 1.0-1\narch = x86_64\n")),
+        (".PKGINFO empty", info(b"")),
+        (".PKGINFO past its limit before its fields", info(late)),
+        (".PKGINFO cut inside a character at its limit", info(cut)),
+        ("no pkgname", without("pkgname")),
+        ("no pkgver", without("pkgver")),
+        ("no arch", without("arch")),
+        ("a pkgname of a dot", field("pkgname", ".x")),
+        ("a pkgname of a dash", field("pkgname", "-x")),
+        ("a pkgname with a slash", field("pkgname", "a/b")),
+        ("a pkgname with a space", field("pkgname", "a b")),
+        ("a pkgname not ASCII", field("pkgname", "héllo")),
+        ("a pkgname too long", field("pkgname", "a" * 256)),
+        ("a pkgver with a slash", field("pkgver", "1/0-1")),
+        ("a pkgver of two dots", field("pkgver", "..")),
+        ("an arch of two dots", field("arch", "..")),
+        ("an arch empty", field("arch", "")),
+    ]
+
+
+def taken(who):
+    """(name, query, body) of uploads taken though they might not be: a
+    .PKGINFO in CRLF lines with comments, spaces and lines that are no
+    field; one after the files, with links; one padded past its limit
+    after its fields; a version with an epoch; a package for an
+    architecture no database had, and those whose paths the server's
+    rules name (a pacman repository by-hash, an architecture and
+    repository named as repodata files are, a name with SUMS in it)."""
+    t = f"t-{who}"
+    crlf = (f"# Generated by makepkg\r\n\r\n  pkgname   =   {t}  \r\npkgver = 1.0-1\r\n"
+            f"no field here\r\npkgdesc = a = b\r\narch = x86_64\r\ndepend = hello\r\n"
+            f"depend = \r\n#depend = commented\r\n").encode()
+    last = [("usr/", None), ("usr/bin/", None), (f"usr/bin/{t}", program(t, "1.1-1")),
+            (f"usr/bin/{t}-link", t), (f"usr/bin/{t}-hard", (f"usr/bin/{t}",)),
+            (".INSTALL", b"post_install() { :; }\n"),
+            (".PKGINFO", pkginfo(t, "1.1-1", "x86_64"))]
+    padded = pkginfo(t, "1.2-1", "x86_64") + b"# " + b"x" * MAX_PKGINFO + b"\n"
+    return [
+        ("crlf", "", package(t, "1.0-1", info=crlf)),
+        ("last", "", package(t, "1.1-1", how="xz", members=last)),
+        ("padded", "", package(t, "1.2-1", how="gz", info=padded)),
+        ("epoch", "", package(t, "1:1.3-1")),
+        ("i686", "", package(f"i-{who}", "1.0-1", "i686")),
+        ("by-hash", "?repository=by-hash", package(f"b-{who}", "1.0-1", "any")),
+        ("repodata", f"?repository={HEXREPO}", package(f"{HEX}-{who}", "1.0-1", "repodata")),
+        ("SUMS", f"?repository={HEXREPO}", package(f"{HEX}-SUMS-{who}", "1.0-1", "repodata")),
+    ]
+
+
+def limits(c, who):
+    # A body one byte over put's limit, and a package one over the
+    # format's, by one who may (each body is read); a body that cannot
+    # be read (chunked, its first chunk's size not hex), and a package
+    # sent in two chunks: in sequences, of which no mutant is sent.
+    if who != "writer":
+        return
+    db = "/archpub/archpub/x86_64/archpub.db"
+    for name, n in (("upload", MAX_UPLOAD + 1), ("package", MAX_PKG + 1)):
+        c.seq(f"arch {name} over the limit writer", who, [
+            ("PUT", "/archpub/upload", {"Content-Length": str(n)}, Zeros(n)),
+            ("GET", db, {}, None)])
+    te = {"Transfer-Encoding": "chunked"}
+    c.seq("arch upload unreadable writer", who, [
+        ("PUT", "/archpub/upload", te, b"zz\r\nhello\r\n0\r\n\r\n"),
+        ("GET", db, {}, None)])
+    body = package("chunked", "1.0-1")
+    f = file_name("chunked", "1.0-1")
+    c.seq("arch upload in chunks writer", who, [
+        ("PUT", "/archpub/upload", te, chunked([body[:100], body[100:]])),
+        ("GET", db, {}, None),
+        ("GET", f"/archpub/archpub/x86_64/{f}", {}, None),
+        ("GET", f"/archpub/archpub/x86_64/{f}.sig", {}, None)])
+
+
+# What the writes leave: each repository's pacman repositories and
+# their architectures (each with its databases), the signatures they
+# make, read whole before any listing or part of them.
+AFTER_DIRS = {"archpub": [("archpub", ("x86_64", "aarch64", "i686")), ("extra", ("x86_64", "aarch64")),
+                          ("by-hash", ("x86_64", "aarch64")),
+                          (HEXREPO, ("repodata", "x86_64", "aarch64"))],
+              "archpriv": [("archpriv", ("x86_64", "aarch64")), ("extra", ("x86_64", "aarch64"))],
+              "archnosign": [("archnosign", ("x86_64", "armv7h", "i686"))]}
+
+
+# The seed's packages in each signed repository (pacman repository,
+# None for the one of the repository's name; architecture; file name).
+SEED_FILES = ([(None, "x86_64", f) for f in (F10, F11, FT, FT2, F110, F19)]
+              + [(None, "aarch64", f) for f in (FT, FL)] + [("extra", "x86_64", FF)])
+
+
+def run_files():
+    """Each signed repository's files the writes may make (repository,
+    path): the identities', the writer's sent in chunks."""
+    out = []
+    for w in IDENTS:
+        for where, pr, arch, f in mine(w):
+            for repo in REPOS:
+                if where in ("both", repo[4:]):
+                    out.append((repo, f"/{pr or repo}/{arch}/{f}"))
+    out.append(("archpub", f"/archpub/x86_64/{file_name('chunked', '1.0-1')}"))
+    return out
+
+
+def after(c, who):
+    add, seq = c.add, c.seq
+    # Whole first: every database and signature the writes made, and
+    # the labels' (their listings below show them).
+    for repo, dirs in AFTER_DIRS.items():
+        for pr, arches in dirs:
+            for arch in arches:
+                for n in dbs(pr):
+                    add(f"after arch {repo}/{pr}/{arch}/{n} {who}", who, "GET",
+                        f"/{repo}/{pr}/{arch}/{n}")
+    for repo, path in run_files():
+        add(f"after arch {repo}{path}.sig {who}", who, "GET", f"/{repo}{path}.sig")
+    for repo in REPOS:
+        for pr, arch, f in SEED_FILES:
+            pr = pr or repo
+            add(f"after arch {repo}/{pr}/{arch}/{f}.sig {who}", who, "GET",
+                f"/{repo}/{pr}/{arch}/{f}.sig")
+        for rel in [f"/x86_64/{n}" for n in dbs(repo)] + [f"/x86_64/{F10}.sig"]:
+            add(f"after arch {repo}/@first/{repo}{rel} {who}", who, "GET",
+                f"/{repo}/@first/{repo}{rel}")
+    # Then the listings, and parts of what changed: a database's HEAD, a
+    # range, by the ETag of its whole answer and by one of before.
+    for repo, dirs in AFTER_DIRS.items():
+        add(f"after arch {repo}/ {who}", who, "GET", f"/{repo}/")
+        for pr, arches in dirs:
+            add(f"after arch {repo}/{pr}/ {who}", who, "GET", f"/{repo}/{pr}/")
+            for arch in arches:
+                add(f"after arch {repo}/{pr}/{arch}/ {who}", who, "GET", f"/{repo}/{pr}/{arch}/")
+    for repo in REPOS:
+        d = f"/{repo}/{repo}/x86_64"
+        db = f"{d}/{repo}.db"
+        add(f"after arch {repo}/@first/{repo}/x86_64/ {who}", who, "GET",
+            f"/{repo}/@first/{repo}/x86_64/")
+        seq(f"after arch {repo} listing by size {who}", who, [
+            ("GET", f"{d}/?sort=size", {}, None), ("GET", f"{d}/?sort=size&order=desc", {}, None)])
+        mine_ = "{after arch %s/%s/x86_64/%s.db %s.etag}" % (repo, repo, repo, who)
+        for name, method, h in (("HEAD", "HEAD", {}), ("range", "GET", {"Range": "bytes=0-9"}),
+                                ("range last 5", "GET", {"Range": "bytes=-5"}),
+                                ("range past the end", "GET", {"Range": "bytes=999999-"}),
+                                ("inm", "GET", {"If-None-Match": mine_}),
+                                ("HEAD inm", "HEAD", {"If-None-Match": mine_}),
+                                ("inm any", "GET", {"If-None-Match": "*"}),
+                                ("inm of before", "GET", {
+                                    "If-None-Match": "{arch %s/%s/x86_64/%s.db %s.etag}"
+                                                     % (repo, repo, repo, who)}),
+                                ("if-range", "GET", {"Range": "bytes=0-9", "If-Range": mine_})):
+            add(f"after arch {repo} db {name} {who}", who, method, db, h)
+        f1 = f"{d}/{file_name('w-writer', '1.0-1')}.sig"
+        add(f"after arch {repo} signature HEAD {who}", who, "HEAD", f1)
+        add(f"after arch {repo} signature range {who}", who, "GET", f1, {"Range": "bytes=0-3"})
+    # A path under by-hash that a label's version (or one by number)
+    # does not have: the server looks for it in the repository's
+    # versions of the last day, the newest first, and the newest has it
+    # (made in the run).
+    for rel in ("/@first/by-hash/x86_64/by-hash.db", "/@first/by-hash/x86_64/by-hash.db.sig",
+                "/@first/by-hash/", "/@first/by-hash/nothing", "/@2/by-hash/aarch64/by-hash.files",
+                f"/@first/by-hash/x86_64/{file_name('b-writer', '1.0-1', 'any')}",
+                "/by-hash/nothing"):
+        add(f"after arch archpub{rel} {who}", who, "GET", f"/archpub{rel}")
+    add(f"after arch archpub HEAD /@first/by-hash/x86_64/by-hash.db {who}", who, "HEAD",
+        "/archpub/@first/by-hash/x86_64/by-hash.db")
+
+
+# ---- what is masked ---------------------------------------------------
+
+def packet(b):
+    """The body of `b` if it is one OpenPGP signature packet (tag 2), in
+    the new format or the old; else None."""
+    if len(b) < 2:
+        return None
+    t = b[0]
+    if t & 0xC0 == 0xC0:
+        if t & 0x3F != 2:
+            return None
+        n0 = b[1]
+        if n0 < 192:
+            n, off = n0, 2
+        elif n0 < 224:
+            n, off = ((n0 - 192) << 8) + b[2] + 192, 3
+        elif n0 == 255:
+            n, off = int.from_bytes(b[2:6], "big"), 6
+        else:
+            return None
+    elif t & 0xC0 == 0x80:
+        if (t >> 2) & 0x0F != 2 or t & 3 == 3:
+            return None
+        k = 1 << (t & 3)
+        n, off = int.from_bytes(b[1:1 + k], "big"), 1 + k
+    else:
+        return None
+    return b[off:] if off + n == len(b) else None
+
+
+def subpackets(data):
+    """(start of its data, type, data) of each subpacket of `data`."""
+    out, i = [], 0
+    while i < len(data):
+        n0 = data[i]
+        if n0 < 192:
+            n, i = n0, i + 1
+        elif n0 < 255:
+            n, i = ((n0 - 192) << 8) + data[i + 1] + 192, i + 2
+        else:
+            n, i = int.from_bytes(data[i + 1:i + 5], "big"), i + 5
+        if n < 1 or i + n > len(data):
+            raise ValueError("a subpacket past its area")
+        out.append((i + 1, data[i] & 0x7F, data[i + 1:i + n]))
+        i += n
+    return out
+
+
+def run_signature(b, seed_time):
+    """`b`, a binary signature made at or after `seed_time`, shown
+    without what that time makes (its creation time masked, same
+    length; the hash's first bytes and the numbers left out); None for
+    anything else."""
+    p = packet(b)
+    try:
+        if p is None or p[0] != 4:
+            return None
+        hl = int.from_bytes(p[4:6], "big")
+        hashed = p[6:6 + hl]
+        ul = int.from_bytes(p[6 + hl:8 + hl], "big")
+        unhashed = p[8 + hl:8 + hl + ul]
+        if len(unhashed) != ul or len(p) < 10 + hl + ul:
+            return None
+        made = [(at, d) for at, typ, d in subpackets(hashed) if typ == 2 and len(d) == 4]
+        subpackets(unhashed)
+    except (IndexError, ValueError):
+        return None
+    if len(made) != 1 or int.from_bytes(made[0][1], "big") < seed_time:
+        return None
+    at = made[0][0]
+    return (b"<a signature of the run: %s, hashed %sXXXXXXXX%s, unhashed %s>"
+            % (p[:4].hex().encode(), hashed[:at].hex().encode(),
+               hashed[at + 4:].hex().encode(), unhashed.hex().encode()))
+
+
+PGPSIG = re.compile(rb"(%PGPSIG%\n)([A-Za-z0-9+/=]+)(\n)")
+
+
+def run_database(body, seed_time):
+    """`body`, a database (a gzipped tar) whose entries are dated at or
+    after `seed_time`, unpacked: those dates and the headers' checksums
+    masked (same length), a package's signature made then shown as
+    run_signature shows one (and the size of the entry it is in
+    masked); None for anything else."""
+    if body[:3] != b"\x1f\x8b\x08":
+        return None
+    try:
+        raw = gzip.decompress(body)
+    except (OSError, EOFError, zlib.error):
+        return None
+    out = [b"<an arch database of the run, unpacked; its gzip header ", body[:10].hex().encode(),
+           b">\n"]
+    i, hit = 0, False
+
+    def sig(m):
+        try:
+            s = run_signature(base64.b64decode(m.group(2), validate=True), seed_time)
+        except ValueError:
+            s = None
+        return m.group(0) if s is None else m.group(1) + s + m.group(3)
+
+    while i + 512 <= len(raw):
+        h = bytearray(raw[i:i + 512])
+        if not any(h):
+            break
+        try:
+            size = int(bytes(h[124:136]).strip(b"\0 ") or b"0", 8)
+            mtime = int(bytes(h[136:148]).strip(b"\0 ") or b"0", 8)
+        except ValueError:
+            return None
+        data = raw[i + 512:i + 512 + size]
+        i += 512 + -(-size // 512) * 512
+        if mtime >= seed_time:
+            hit = True
+            h[136:148], h[148:156] = b"X" * 12, b"X" * 8
+        masked = PGPSIG.sub(sig, data)
+        if masked != data:
+            h[124:136], h[148:156] = b"X" * 12, b"X" * 8
+        out += [bytes(h), masked, b"\0" * (-len(masked) % 512)]
+    if not hit:
+        return None
+    out.append(raw[i:])
+    return b"".join(out)
+
+
+# The module's paths, as served; the files of them that may hold the
+# run's time (databases, their links and signatures; signatures).
+PATHS = re.compile(r"/(archpub|archpriv|archnosign|archempty)(/|\?|$)")
+TIMED_NAME = re.compile(r"\.(db|files)(\.tar\.gz)?$|\.sig$")
+ROW = re.compile(rb'(<tr><td><a href="[^"]*">(?:\xf0\x9f\x93\x81 )?)([^<]*)'
+                 rb'(</a></td><td class="num">)([^<]*)(</td>)')
+TOTAL = re.compile(rb'(<div class="meta">\d+ director(?:y|ies), \d+ files?, )([^<]*)(</div>)')
+
+
+def mask(masker):
+    # The etags of whole answers after writes, of the run's time and
+    # not; whether a path's last whole answer held it.
+    timed, plain, held = set(), set(), {}
+
+    def listing(p, body):
+        hit = False
+
+        def row(m):
+            nonlocal hit
+            name = html.unescape(m.group(2).decode("utf-8", "replace"))
+            if not TIMED_NAME.search(name) or held.get(p + name) is False:
+                return m.group(0)
+            hit = True
+            return m.group(1) + m.group(2) + m.group(3) + b"X" * len(m.group(4)) + m.group(5)
+        body = ROW.sub(row, body)
+        if hit:
+            masker.counts["arch listing sizes of the run"] += 1
+            body = TOTAL.sub(lambda m: m.group(1) + b"X" * len(m.group(2)) + m.group(3), body)
+        return body
+
+    def answer(path, hd, body, after_writes, etag):
+        if not after_writes or not PATHS.match(path):
+            return hd, body
+        p = urllib.parse.unquote(path.split("?")[0])
+        h = dict(hd)
+        if body and "content-range" not in h:
+            new, rule = run_database(body, masker.seed_time), "arch databases of the run"
+            if new is None:
+                new, rule = run_signature(body, masker.seed_time), "arch signatures of the run"
+            if etag is not None:
+                (timed if new is not None else plain).add(etag)
+                held[p] = new is not None
+            if new is not None:
+                masker.counts[rule] += 1
+                return [[k, "*" if k in ("etag", "content-length") else v] for k, v in hd], new
+            if h.get("content-type", "").startswith("text/html") and p.endswith("/"):
+                body = listing(p, body)
+            return hd, body
+        if etag is not None and etag not in plain and (etag in timed or TIMED_NAME.search(p)):
+            masker.counts["arch parts of the run"] += 1
+            hd = [[k, "*" if k in ("etag", "content-length", "content-range") else v]
+                  for k, v in hd]
+            body = b"X" * len(body)
+        return hd, body
+    return answer
+
+
 PARTS = [
     ("seed", 140, seed),
     ("grants", 130, {"reader": {"archpriv": "read"},
@@ -365,4 +925,48 @@ PARTS = [
     ("rtoken", 120, ["archpriv"]),
     ("publisher", 110, ["archpub"]),
     ("reads", 150, reads),
+    ("writes", 250, writes),
+    ("writes", 260, limits),
+    ("after", 100, after),
+    # A version made in the run has its databases made then: their
+    # entries are dated by it (and so is the gzip's length, of those
+    # dates), the signatures in them of packages put in the run were
+    # made then. Unpacked, those dates and what they make (the tar
+    # headers' checksums, an entry's size of a signature's length) are
+    # masked, the rest compared.
+    ("rule", 190, ("arch databases of the run", "after writes, an arch database (a gzipped tar) "
+                                                "whose entries are dated at or after the seed: "
+                                                "the body unpacked, those dates, the headers' "
+                                                "checksums and the sizes of entries holding a "
+                                                "signature of the run masked (same length), "
+                                                "such a signature as below; the etag and "
+                                                "content-length")),
+    # ... and its databases, and the packages put in it, signed then: an
+    # Ed25519 signature of that second, whose numbers' leading zero
+    # bytes are left out (its length is of its value too).
+    ("rule", 200, ("arch signatures of the run", "after writes, an arch signature made at or "
+                                                 "after the seed: the body in place of its "
+                                                 "creation time (masked, same length), the "
+                                                 "hash's first bytes and the numbers; the etag "
+                                                 "and content-length")),
+    # A HEAD, a 304, a range (or a 416) has no whole body to look in:
+    # masked where a whole answer after the writes with its etag held
+    # the run's time, or, of a database or a signature, where none had
+    # its etag (whether it holds the run's time is not known; the
+    # corpus reads each whole first, after the writes).
+    ("rule", 210, ("arch parts of the run", "after writes, the etag, content-length, "
+                                            "content-range and bytes (not their length) of an "
+                                            "arch answer with no body or a range, if a whole "
+                                            "answer of the run's time had that etag, or if it "
+                                            "is of a database or signature and no whole answer "
+                                            "after writes had it")),
+    # A listing shows each file's size, and the directory's total: a
+    # signature's and a database's are of the run's time when they are.
+    ("rule", 220, ("arch listing sizes of the run", "after writes, in a listing of an arch "
+                                                    "directory, the size (same length) of each "
+                                                    "database and signature but those whose "
+                                                    "last whole answer after writes held no "
+                                                    "time of the run, and the directory's "
+                                                    "total")),
+    ("mask", 110, mask),
 ]
