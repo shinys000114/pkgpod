@@ -673,7 +673,7 @@ def run_files():
 
 
 def after(c, who):
-    add, seq = c.add, c.seq
+    add = c.add
     # Whole first: every database and signature the writes made, and
     # the labels' (their listings below show them).
     for repo, dirs in AFTER_DIRS.items():
@@ -703,10 +703,11 @@ def after(c, who):
     for repo in REPOS:
         d = f"/{repo}/{repo}/x86_64"
         db = f"{d}/{repo}.db"
+        # No listing sorted by size: its order is of the sizes of the
+        # signatures and databases made in the run, which the rule
+        # masks in their cells but cannot put back in order.
         add(f"after arch {repo}/@first/{repo}/x86_64/ {who}", who, "GET",
             f"/{repo}/@first/{repo}/x86_64/")
-        seq(f"after arch {repo} listing by size {who}", who, [
-            ("GET", f"{d}/?sort=size", {}, None), ("GET", f"{d}/?sort=size&order=desc", {}, None)])
         mine_ = "{after arch %s/%s/x86_64/%s.db %s.etag}" % (repo, repo, repo, who)
         for name, method, h in (("HEAD", "HEAD", {}), ("range", "GET", {"Range": "bytes=0-9"}),
                                 ("range last 5", "GET", {"Range": "bytes=-5"}),
@@ -883,12 +884,12 @@ def mask(masker):
             if not TIMED_NAME.search(name) or held.get(p + name) is False:
                 return m.group(0)
             hit = True
-            return m.group(1) + m.group(2) + m.group(3) + b"X" * len(m.group(4)) + m.group(5)
+            return m.group(1) + m.group(2) + m.group(3) + b"*" + m.group(5)
         body = ROW.sub(row, body)
         if hit:
             masker.counts["arch listing sizes of the run"] += 1
-            body = TOTAL.sub(lambda m: m.group(1) + b"X" * len(m.group(2)) + m.group(3), body)
-        return body
+            body = TOTAL.sub(lambda m: m.group(1) + b"*" + m.group(3), body)
+        return body, hit
 
     def answer(path, hd, body, after_writes, etag):
         if not after_writes or not PATHS.match(path):
@@ -906,13 +907,16 @@ def mask(masker):
                 masker.counts[rule] += 1
                 return [[k, "*" if k in ("etag", "content-length") else v] for k, v in hd], new
             if h.get("content-type", "").startswith("text/html") and p.endswith("/"):
-                body = listing(p, body)
+                body, hit = listing(p, body)
+                if hit:
+                    hd = [[k, "*" if k == "content-length" else v] for k, v in hd]
             return hd, body
         if etag is not None and etag not in plain and (etag in timed or TIMED_NAME.search(p)):
             masker.counts["arch parts of the run"] += 1
             hd = [[k, "*" if k in ("etag", "content-length", "content-range") else v]
                   for k, v in hd]
-            body = b"X" * len(body)
+            # A range's length may be of the whole's (bytes=5-).
+            body = b"<a part of an answer of the run>" if body else body
         return hd, body
     return answer
 
@@ -959,21 +963,23 @@ PARTS = [
     # masked where a whole answer after the writes with its etag held
     # the run's time, or, of a database or a signature, where none had
     # its etag (whether it holds the run's time is not known; the
-    # corpus reads each whole first, after the writes).
+    # corpus reads each whole first, after the writes). A range's
+    # bytes, and its length where it is of the whole's (bytes=5-).
     ("rule", 210, ("arch parts of the run", "after writes, the etag, content-length, "
-                                            "content-range and bytes (not their length) of an "
-                                            "arch answer with no body or a range, if a whole "
-                                            "answer of the run's time had that etag, or if it "
-                                            "is of a database or signature and no whole answer "
-                                            "after writes had it")),
+                                            "content-range and bytes of an arch answer with no "
+                                            "body or a range, if a whole answer of the run's "
+                                            "time had that etag, or if it is of a database or "
+                                            "signature and no whole answer after writes had "
+                                            "it")),
     # A listing shows each file's size, and the directory's total: a
-    # signature's and a database's are of the run's time when they are.
+    # signature's and a database's are of the run's time when they are,
+    # and so is the length of what shows them (99 B, 100 B).
     ("rule", 220, ("arch listing sizes of the run", "after writes, in a listing of an arch "
-                                                    "directory, the size (same length) of each "
-                                                    "database and signature but those whose "
-                                                    "last whole answer after writes held no "
-                                                    "time of the run, and the directory's "
-                                                    "total")),
+                                                    "directory, the size of each database and "
+                                                    "signature but those whose last whole "
+                                                    "answer after writes held no time of the "
+                                                    "run, the directory's total, and then the "
+                                                    "content-length")),
     ("mask", 110, mask),
     ("fuzz sample", 180, package("fz", "1.0-1")),
 ]
