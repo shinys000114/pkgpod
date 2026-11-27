@@ -67,4 +67,5 @@ FORMATS = [import_module(f"{__name__}.{name}") for name in (
     "pub",
     "terraform",
     "nuget",
+    "swift",
 )]
