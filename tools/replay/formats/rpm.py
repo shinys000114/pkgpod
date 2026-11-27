@@ -297,31 +297,37 @@ NOTED_2 = noted(readme=" rebuilt")
 def odd(name="odd"):
     """A package of an odd header the reader still takes: its epoch as a
     string (no number: 0), a file whose directory index is past the
-    directories, fewer changelog names and texts than times, fewer
-    flags and versions than required names, no sizes, a URL that is
-    the last thing in the store and not ended."""
+    directories, fewer changelog names than times, fewer flags and
+    versions than required names, no sizes; at the end of the store,
+    changelog texts that count more strings than there are (the last
+    runs into the next entry's), then a URL not ended."""
     def tweak(entries):
         out = []
         for tag, ty, val in entries:
             if tag == DIRINDEXES:
                 val = val[:-1] + [9]
-            elif tag in (CHANGELOGNAME, CHANGELOGTEXT):
+            elif tag == CHANGELOGNAME:
                 val = val[:1]
             elif tag in (REQUIREFLAGS, REQUIREVERSION):
                 val = val[:1]
-            elif tag == URL:
+            elif tag in (URL, CHANGELOGTEXT):
                 continue
             out.append((tag, ty, val))
         return out + [(EPOCH, STRING, "7")]
     return package(name, "1.0", requires=[("hello", GE, "1.0"), ("a", 0, ""), ("b", 0, "")],
                    changelog=changelog(3), archive=None, size_tag=None, tweak=tweak,
-                   raw=[(URL, STRING, b"https://example.invalid/unended", 1)])
+                   raw=[(CHANGELOGTEXT, STRING_ARRAY, b"- Change 3.\0", 5),
+                        (URL, STRING, b"https://example.invalid/unended", 1)])
 
 
 def lone(name="lone"):
-    """A binary package that names no source: taken for a source
-    package."""
-    return package(name, "1.0", sourcerpm=False)
+    """A binary package that names no source (taken for a source
+    package), whose changelog times, at the end of the store, count
+    more numbers than are there."""
+    def tweak(entries):
+        return [e for e in entries if e[0] != CHANGELOGTIME]
+    return package(name, "1.0", sourcerpm=False, tweak=tweak,
+                   raw=[(CHANGELOGTIME, INT32, (BUILT - 86400).to_bytes(4, "big"), 3)])
 
 
 ODD = odd()
@@ -528,7 +534,8 @@ def writes(c, who):
         # value of replace that is none; a source package; to a label's
         # address (the current version's); one whose header is past
         # what is read first; one of an odd header, to the group named
-        # with spaces around it; one that names no source.
+        # with spaces around it; one that names no source; one whose
+        # text needs escaping.
         seq(f"rpm put {repo} {who}", who, [
             ("PUT", f"{b}/upload?group={w}", {}, rich),
             ("GET", f"{b}/{w}/repodata/repomd.xml", {}, None),
@@ -552,6 +559,7 @@ def writes(c, who):
              package(f"b-{who}", "1.0", description="a big header " * 25000)),
             ("PUT", f"{b}/upload?group=%20{w}+", {}, odd(f"o-{who}")),
             ("PUT", f"{b}/upload?group={w}", {}, lone(f"n-{who}")),
+            ("PUT", f"{b}/upload?group={w}", {}, noted(f"t-{who}")),
             ("GET", f"{b}/{w}/Packages/", {}, None),
             ("GET", f"{b}/{w}/repodata/repomd.xml", {}, None),
             ("GET", f"{b}/@first/{w}/Packages/", {}, None)])
@@ -571,13 +579,13 @@ def writes(c, who):
             ("GET", f"{b}/el9/Packages/", {}, None)])
         # What an upload refuses, each the input that reaches it: no rpm
         # (nothing, other bytes), cut short (the lead only, inside the
-        # signature header, inside the header), a header too large (by
-        # its entries, by its store), a tag outside its header, no
-        # header after the signature; a name, version, release or arch
-        # that cannot be a file name (a name not a string: none); a
-        # group that is none, a parameter it does not take; from
-        # another site's page. Then what the tree takes from no one:
-        # other methods. Nothing changed.
+        # signature header's start, inside its index, inside the
+        # header), a header too large (by its entries, by its store), a
+        # tag outside its header, no header after the signature; a name,
+        # version, release or arch that cannot be a file name (a name
+        # not a string: none); a group that is none, a parameter it does
+        # not take; from another site's page. Then what the tree takes
+        # from no one: other methods. Nothing changed.
         x = f"x-{who}"
         good = package(x, "1.0")
         n, size = struct.unpack(">II", good[104:112])
@@ -585,7 +593,7 @@ def writes(c, who):
         hdr_at += -hdr_at % 8
         lead = good[:96]
         bad = [
-            b"", b"not an rpm", good[:96], good[:120], good[:hdr_at + 40],
+            b"", b"not an rpm", good[:96], good[:106], good[:120], good[:hdr_at + 40],
             lead + b"\x8e\xad\xe8\x01\0\0\0\0" + struct.pack(">II", 70000, 0),
             lead + b"\x8e\xad\xe8\x01\0\0\0\0" + struct.pack(">II", 1, (256 << 20) + 1),
             lead + b"\x8e\xad\xe8\x01\0\0\0\0" + struct.pack(">II", 1, 4)
@@ -761,7 +769,7 @@ PARTS = [
     # none: their entries stay). The primary's size is of its gzipped
     # bytes, which the run's times change by a few: masked to the same
     # length, alike while its digits are as many (the sizes the corpus
-    # reads are 600 to 3600, none within 90 of a power of ten).
+    # reads are 600 to 3700, none within 90 of a power of ten).
     ("rule", 190, ("rpm repodata of the run", "in a repomd.xml of an RPM group written in the "
                                               "run (its revision at or after the seed): the "
                                               "revision and timestamps (same length); the "
