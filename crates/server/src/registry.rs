@@ -190,3 +190,182 @@ static REGISTRY: LazyLock<Registry> = LazyLock::new(Registry::new);
 pub fn get() -> &'static Registry {
     &REGISTRY
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::path::Path;
+
+    use super::*;
+
+    /// The ids of the rows `pick` picks.
+    fn ids(pick: impl Fn(&Row) -> bool) -> BTreeSet<&'static str> {
+        get()
+            .rows()
+            .iter()
+            .filter(|r| pick(r))
+            .map(|r| r.format.id())
+            .collect()
+    }
+
+    fn set(ids: &[&'static str]) -> BTreeSet<&'static str> {
+        ids.iter().copied().collect()
+    }
+
+    /// The format crates: the directories under crates/formats/.
+    fn crates() -> Vec<(String, std::path::PathBuf)> {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../formats");
+        let mut v: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.is_dir())
+            .map(|p| (p.file_name().unwrap().to_str().unwrap().to_string(), p))
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn every_format_crate_has_one_row() {
+        let mut rows: Vec<&str> = get().rows().iter().map(|r| r.format.id()).collect();
+        rows.sort();
+        let unique: BTreeSet<&str> = rows.iter().copied().collect();
+        assert_eq!(unique.len(), rows.len(), "two rows share an id: {rows:?}");
+        let dirs: Vec<String> = crates().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(rows, dirs);
+        // The engine is given every row, in the registry's order.
+        let given: Vec<&str> = crate::formats().iter().map(|f| f.id()).collect();
+        let order: Vec<&str> = get().rows().iter().map(|r| r.format.id()).collect();
+        assert_eq!(given, order);
+    }
+
+    #[test]
+    fn the_derived_sets_are_the_lists_they_replaced() {
+        let r = get();
+        let proxies = set(&["go", "maven", "npm", "pypi", "cargo", "oci", "files"]);
+        let groups = set(&["files", "npm", "pypi", "maven", "go", "cargo", "oci"]);
+        assert_eq!(ids(|r| r.format.proxy()), proxies);
+        assert_eq!(ids(|r| r.format.groups()), groups);
+        assert_eq!(
+            ids(|r| !r.browsable),
+            set(&[
+                "npm",
+                "oci",
+                "cargo",
+                "go",
+                "nuget",
+                "composer",
+                "pub",
+                "terraform",
+                "galaxy",
+                "conan",
+                "swift",
+            ])
+        );
+        assert_eq!(ids(|r| r.claim == Some(HostClaim::V2)), set(&["oci"]));
+        assert_eq!(
+            ids(|r| r.claim == Some(HostClaim::TerraformDiscovery)),
+            set(&["terraform"])
+        );
+        assert_eq!(ids(|r| r.claim.is_some()), set(&["oci", "terraform"]));
+        // The refusals name the same formats, in their order.
+        use crate::serving::{group, proxy};
+        assert_eq!(set(proxy::LISTED), proxies);
+        assert_eq!(set(group::LISTED), groups);
+        assert_eq!(proxy::LISTED.len(), proxies.len());
+        assert_eq!(group::LISTED.len(), groups.len());
+        let refused = proxy::check_settings("deb", &serde_json::json!({})).unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            "deb repositories have no proxies (yet): go, maven, npm, pypi, cargo, oci, files"
+        );
+        assert_eq!(
+            group::LISTED.join(", "),
+            "files, npm, pypi, maven, go, cargo, oci"
+        );
+        // A format not compiled in: a tree, as before.
+        assert!(r.row("nope").is_none());
+        assert!(r.browsable("nope"));
+        assert!(!r.proxy("nope") && !r.groups("nope"));
+        assert!(r.claim("nope").is_none() && r.serving("nope").is_none());
+    }
+
+    #[test]
+    fn formats_with_a_client_protocol_have_a_serving_entry() {
+        assert_eq!(
+            ids(|r| r.serving.is_some()),
+            set(&[
+                "npm",
+                "terraform",
+                "composer",
+                "go",
+                "rpm",
+                "helm",
+                "gems",
+                "swift",
+                "conan",
+                "galaxy",
+                "pub",
+                "nuget",
+                "cargo",
+                "oci",
+            ])
+        );
+        // Their repositories are trees only.
+        assert_eq!(
+            ids(|r| r.serving.is_none()),
+            set(&[
+                "deb", "files", "pypi", "apk", "maven", "arch", "conda", "cran", "ipk",
+            ])
+        );
+        // A format crate with a client protocol has a serving entry,
+        // but pypi, whose upload and index pages are the tree serving's;
+        // rpm has one without: the dnf repository file is the server's.
+        for (name, dir) in crates() {
+            let protocol =
+                dir.join("src/protocol.rs").is_file() || dir.join("src/protocol").is_dir();
+            let entry = get().serving(&name).is_some();
+            assert_eq!(
+                entry,
+                (protocol && name != "pypi") || name == "rpm",
+                "{name}: a protocol {protocol}, a serving entry {entry}"
+            );
+        }
+    }
+
+    #[test]
+    fn what_the_partial_entries_claim() {
+        let r = get();
+        let rel = |p: &str| -> Vec<String> {
+            p.split('/')
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        };
+        let claims = |f: &str, m: Method, p: &str| r.serving(f).unwrap().claims(&m, &rel(p));
+        // rpm: a group's repository file, at the address or a label's.
+        assert!(claims("rpm", Method::GET, "el9.repo"));
+        assert!(claims("rpm", Method::HEAD, "@stable/el9.repo"));
+        assert!(!claims("rpm", Method::PUT, "el9.repo"));
+        assert!(!claims("rpm", Method::GET, "el9/el9.repo"));
+        assert!(!claims("rpm", Method::GET, "@stable/el9/el9.repo"));
+        assert!(!claims("rpm", Method::GET, "el9/repodata/repomd.xml"));
+        assert!(!claims("rpm", Method::GET, ""));
+        // Reads only: uploads are the tree's.
+        for f in ["terraform", "composer", "go"] {
+            assert!(claims(f, Method::GET, "x") && claims(f, Method::HEAD, ""));
+            assert!(!claims(f, Method::PUT, "x") && !claims(f, Method::POST, ""));
+            assert!(!claims(f, Method::DELETE, "x"));
+        }
+        assert!(claims("helm", Method::GET, "api/charts"));
+        assert!(!claims("helm", Method::GET, "index.yaml"));
+        assert!(claims("gems", Method::POST, "api/v1/gems"));
+        assert!(!claims("gems", Method::GET, "api/v1/gems"));
+        for f in [
+            "npm", "swift", "conan", "galaxy", "pub", "nuget", "cargo", "oci",
+        ] {
+            assert!(claims(f, Method::GET, "") && claims(f, Method::PUT, "x/y"));
+            assert!(claims(f, Method::DELETE, "x") && claims(f, Method::POST, ""));
+        }
+    }
+}
