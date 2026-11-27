@@ -37,6 +37,13 @@ PORT_BASE, NO_PORT_BASE = port_base()
 _BASE = PORT_BASE or 0
 MGMT, SERVE, UP, UPB = _BASE, _BASE + 1, _BASE + 9, _BASE + 8
 
+# A proxy's setting that keeps what it fetched of the stub's documents
+# for a day: past the server's 30 minutes, a long run (a deep fuzz on a
+# loaded machine) would ask the stub again for what it fetched early,
+# at a moment that differs from run to run. A proxy made to ask each
+# time says metadata_minutes=0 instead.
+PROXY_KEPT = "metadata_minutes=1440"
+
 
 def need_ports():
     """Exits if REPLAY_PORT_BASE is no port base."""

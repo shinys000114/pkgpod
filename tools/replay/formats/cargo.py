@@ -11,7 +11,7 @@ import re
 import struct
 import tarfile
 
-from core import UP, auth_header, request, times
+from core import PROXY_KEPT, UP, auth_header, request, times
 
 NAME = "cargo"
 # The paths of cargo's answers, which may hold the run's times.
@@ -86,7 +86,8 @@ def seed(p, fx):
                 p.cli("label", repo, "first")
     p.cli("repo", "create", "cempty", "-f", "cargo", "-s", "public=true")
     p.cli("repo", "create", "cproxy", "-f", "cargo", "-k", "proxy", "-s",
-          f"upstream=http://127.0.0.1:{UP}/cargo/index/", "-s", "public=true")
+          f"upstream=http://127.0.0.1:{UP}/cargo/index/", "-s", "public=true", "-s",
+          PROXY_KEPT)
     p.cli("repo", "create", "cgroup", "-f", "cargo", "-k", "group", "-s",
           "members=cpub,cpriv,cproxy", "-s", "public=false")
 

@@ -10,7 +10,7 @@ import json
 import tarfile
 import zipfile
 
-from core import UP, auth_header, request
+from core import PROXY_KEPT, UP, auth_header, request
 
 NAME = "pypi"
 
@@ -111,7 +111,8 @@ def seed(p, fx):
             if i == 0:
                 p.cli("label", repo, "first")
     p.cli("repo", "create", "pproxy", "-f", "pypi", "-k", "proxy", "-s",
-          f"upstream=http://127.0.0.1:{UP}/pypi/simple/", "-s", "public=true")
+          f"upstream=http://127.0.0.1:{UP}/pypi/simple/", "-s", "public=true", "-s",
+          PROXY_KEPT)
     p.cli("repo", "create", "pgroup", "-f", "pypi", "-k", "group", "-s",
           "members=ppub,ppriv,pproxy", "-s", "public=false")
 

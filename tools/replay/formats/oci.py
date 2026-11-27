@@ -8,7 +8,7 @@ import json
 import re
 import time
 
-from core import UP, UPB, Upstream, auth_header, request
+from core import PROXY_KEPT, UP, UPB, Upstream, auth_header, request
 
 NAME = "oci"
 INDEX = "application/vnd.oci.image.index.v1+json"
@@ -193,7 +193,7 @@ def seed(p, fx):
         raise SystemExit(f"push to oroot: {st}")
     p.cli("repo", "create", "oproxy", "-f", "oci", "-k", "proxy", "-s",
           f"upstream=http://127.0.0.1:{UP}/up", "-s", "public=true", "-s",
-          "exclude=secret*", "-s", "max_mib=1")
+          "exclude=secret*", "-s", "max_mib=1", "-s", PROXY_KEPT)
     # Where uploads are started until there are too many.
     p.cli("repo", "create", "oburst", "-f", "oci", "-s", "public=true")
     # One whose upstream asks for a token, asked again each time.

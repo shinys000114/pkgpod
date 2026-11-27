@@ -5,7 +5,7 @@ ranges, a label), a proxy of the stub."""
 import hashlib
 import os
 
-from core import UP
+from core import PROXY_KEPT, UP
 
 NAME = "files"
 
@@ -56,7 +56,7 @@ def seed(p, fx):
 def seed_proxy(p, fx):
     # A files proxy of the stub.
     p.cli("repo", "create", "fproxy", "-f", "files", "-k", "proxy", "-s",
-          f"upstream=http://127.0.0.1:{UP}/files/", "-s", "public=true")
+          f"upstream=http://127.0.0.1:{UP}/files/", "-s", "public=true", "-s", PROXY_KEPT)
 
 
 def reads(c, who):

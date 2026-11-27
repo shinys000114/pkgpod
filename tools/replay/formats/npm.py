@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 
-from core import UP, IDENTS, auth_header, request, times
+from core import PROXY_KEPT, UP, IDENTS, auth_header, request, times
 
 NAME = "npm"
 # The paths of npm's answers, which may hold the run's times.
@@ -61,7 +61,7 @@ def seed(p, fx):
             if st != 201:
                 raise SystemExit(f"npm publish {path}: {st} {body[:200]}")
     p.cli("repo", "create", "nproxy", "-f", "npm", "-k", "proxy", "-s",
-          f"upstream=http://127.0.0.1:{UP}/npm/", "-s", "public=true")
+          f"upstream=http://127.0.0.1:{UP}/npm/", "-s", "public=true", "-s", PROXY_KEPT)
     p.cli("repo", "create", "ngroup", "-f", "npm", "-k", "group", "-s",
           "members=npub,npriv,nproxy", "-s", "public=false")
 

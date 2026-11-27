@@ -22,7 +22,7 @@ import time
 import urllib.parse
 import zipfile
 
-from core import IDENTS, UP, auth_header, request
+from core import IDENTS, PROXY_KEPT, UP, auth_header, request
 
 NAME = "maven"
 # The paths of the hosted repositories' answers, which may hold the
@@ -356,7 +356,7 @@ def seed(p, fx):
     p.cli("repo", "create", "mvnempty", "-f", "maven", "-s", "public=true")
     p.cli("repo", "create", "mvnproxy", "-f", "maven", "-k", "proxy", "-s",
           f"upstream=http://127.0.0.1:{UP}/maven", "-s", "public=true", "-s",
-          "exclude=org.hidden*,org.acme:secret", "-s", "max_mib=1")
+          "exclude=org.hidden*,org.acme:secret", "-s", "max_mib=1", "-s", PROXY_KEPT)
 
 
 # ---- reads ----------------------------------------------------------------

@@ -7,7 +7,7 @@ import io
 import re
 import zipfile
 
-from core import UP, auth_header, request, times
+from core import PROXY_KEPT, UP, auth_header, request, times
 
 NAME = "go"
 # The paths of Go's answers, which may hold the run's times.
@@ -65,7 +65,7 @@ def seed(p, fx):
             if i == 0:
                 p.cli("label", repo, "first")
     p.cli("repo", "create", "gproxy", "-f", "go", "-k", "proxy", "-s",
-          f"upstream=http://127.0.0.1:{UP}/goproxy/", "-s", "public=true")
+          f"upstream=http://127.0.0.1:{UP}/goproxy/", "-s", "public=true", "-s", PROXY_KEPT)
     p.cli("repo", "create", "ggroup", "-f", "go", "-k", "group", "-s",
           "members=gpub,gpriv,gproxy", "-s", "public=false")
 
