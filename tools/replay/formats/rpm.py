@@ -653,7 +653,11 @@ def by_hash(c, who):
         ("HEAD", b + gone, {}, None),
         ("GET", "/rpub/@first/by-hash/repodata/" + gone, {}, None),
         ("GET", b + "0" * 64 + "-filelists.xml.gz", {}, None),
-        ("GET", "/rpub/by-hash/Packages/", {}, None)])
+        ("GET", "/rpub/by-hash/Packages/", {}, None),
+        # A package of the group, under the by-hash rule's Cache-Control
+        # (a file of a path with a by-hash segment), as no other is.
+        ("GET", "/rpub/by-hash/Packages/" + file_name("hello", "1.0"), {}, None),
+        ("HEAD", "/rpub/by-hash/Packages/" + file_name("hello", "1.0"), {}, None)])
 
 
 # The most of a package read for its headers: one whose headers would
