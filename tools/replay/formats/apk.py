@@ -614,17 +614,18 @@ INDEX_PATH = re.compile(r"/apk(pub|priv|riscv|empty)/(?:[^?]*/)?APKINDEX\.tar\.g
 
 
 def members(body):
-    """The gzip members of `body`, each unpacked; None if it is not
-    whole members."""
+    """The gzip members of `body`, each as (its bytes as sent, unpacked);
+    None if it is not whole members."""
     out = []
     while body:
         d = zlib.decompressobj(31)
         try:
-            out.append(d.decompress(body))
+            plain = d.decompress(body)
         except zlib.error:
             return None
         if not d.eof:
             return None
+        out.append((body[:len(body) - len(d.unused_data)], plain))
         body = d.unused_data
     return out
 
@@ -650,25 +651,29 @@ def tar_heads(t):
 
 def run_index(body, seed_time):
     """An APKINDEX.tar.gz made in the run (a header of its tars dated at
-    or after the seed): its tars unpacked, each header's mtime and
-    checksum and the signature's bytes X'd (same length); None if it is
-    none or does not read as one."""
+    or after the seed), member by member: a line of the gzip member's
+    header (its 10 bytes, as sent: no time in them) and the length of
+    its tar, then that tar unpacked, each header's mtime and checksum
+    and the signature's bytes X'd (same length); None if it is none or
+    does not read as one. The members stay apart: apk takes the
+    signature's for the first and checks it over the second's bytes."""
     parts = members(body) if body[:2] == b"\x1f\x8b" else None
     if not parts:
         return None
-    heads = [tar_heads(t) for t in parts]
+    heads = [tar_heads(t) for _, t in parts]
     if any(h is None for h in heads) or not any(m >= seed_time for hs in heads
                                                 for _, _, _, m in hs):
         return None
-    out = []
-    for t, hs in zip(parts, heads):
+    out = bytearray()
+    for (raw, t), hs in zip(parts, heads):
         t = bytearray(t)
         for at, name, size, _ in hs:
             t[at + 136:at + 156] = b"X" * 20
             if name.startswith(b".SIGN."):
                 t[at + 512:at + 512 + size] = b"X" * size
-        out.append(bytes(t))
-    return b"".join(out)
+        out += b"gzip member %s, %d bytes unpacked\n" % (raw[:10].hex().encode(), len(t))
+        out += t
+    return bytes(out)
 
 
 def mask(masker):
@@ -723,13 +728,17 @@ PARTS = [
     # An index made in the run is of that second: its tars' headers say
     # the version's time (and their checksums move with it), the RSA
     # signature is of those bytes, and the gzip's length moves with
-    # them. Compared unpacked, those fields masked to the same length;
-    # DESCRIPTION and APKINDEX, the names, sizes, modes and owners stay.
+    # them. Compared unpacked, member by member (each gzip member's
+    # header and its tar's length kept: the split is apk's), those
+    # fields masked to the same length; DESCRIPTION and APKINDEX, the
+    # names, sizes, modes and owners stay.
     ("rule", 230, ("apk indexes of the run", "of an apk APKINDEX.tar.gz after writes whose tars "
                                              "hold a header dated at or after the seed: the "
-                                             "body, compared unpacked, each tar header's mtime "
-                                             "and checksum and the .SIGN file's bytes masked "
-                                             "(same length); the content-length and etag")),
+                                             "body, compared unpacked member by member (each "
+                                             "gzip member's header and its tar's length kept), "
+                                             "each tar header's mtime and checksum and the "
+                                             ".SIGN file's bytes masked (same length); the "
+                                             "content-length and etag")),
     # ... and a HEAD, a 304 or a range of one (of an etag such an index
     # had): its length, and the bytes of a range, are of that second.
     ("rule", 240, ("apk index parts of the run", "after writes, of an apk APKINDEX.tar.gz with no "
