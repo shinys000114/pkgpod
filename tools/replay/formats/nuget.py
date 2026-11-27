@@ -687,7 +687,8 @@ def after(c, who):
     add = c.add
     # What NuGet's writes left: each one's packages in each feed.
     for repo in ("nupub", "nupriv"):
-        for rel in ("/query?take=1000&prerelease=true", "/query?q=w.", "/query?q=k.",
+        for rel in ("/query", "/query?prerelease=true",
+                    "/query?take=1000&prerelease=true", "/query?q=w.", "/query?q=k.",
                     "/query?skip=5&take=5", f"{FC}/hello.pk/index.json",
                     f"{REG}/hello.pk/index.json", f"{REG}/x.writer/index.json"):
             add(f"after nuget {repo}{rel} {who}", who, "GET", f"/{repo}{rel}")
