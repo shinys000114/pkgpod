@@ -6,7 +6,9 @@ greet, of every packaging and file kind; plugins, by their goal
 prefixes, and jars that only look like plugins; tools, whose directory
 is a plugin's group too; a deep group; names with + and ~; paths under
 by-hash and repodata; an artifact of SNAPSHOTs only), one with nothing
-in it, a proxy of the stub's Maven repository. Maven has no protocol
+in it, a proxy of the stub's Maven repository; groups (private, of
+all; public, of public members with a proxy first, of a private member
+first, of a proxy whose upstream fails first). Maven has no protocol
 module of its own: its repositories are the server's tree, read by
 path, written by PUT to the file's own path; the format makes each
 artifact's maven-metadata.xml, a SNAPSHOT's, a group's of its plugins,
@@ -25,10 +27,10 @@ import zipfile
 from core import IDENTS, PROXY_KEPT, UP, auth_header, request
 
 NAME = "maven"
-# The paths of the hosted repositories' answers, which may hold the
-# run's times (an artifact's maven-metadata.xml says when its last file
-# came, and its checksums are of it).
-TIMES = r"/mvn(pub|priv|empty)(/|$)"
+# The paths of the hosted repositories' answers and their groups', which
+# may hold the run's times (an artifact's maven-metadata.xml says when
+# its last file came, and its checksums are of it).
+TIMES = r"/mvn(pub|priv|empty|group|gall|gmix|gfail)(/|$)"
 
 # The most of a body PUT takes (pkgpod-proto's body::MAX_UPLOAD).
 MAX_UPLOAD = 8 << 30
@@ -712,10 +714,132 @@ def after(c, who):
             c.add(f"after maven {repo}{rel} {who}", who, "GET", b + rel)
 
 
+# ---- groups ---------------------------------------------------------------
+
+# The stub's second Maven repository, behind mvngup: hello of a version
+# of its own (an artifact mvnpub has too), each file with its .sha1;
+# and one that answers 500 to anything, behind mvn500.
+UG = "/maven-g/org/acme/hello"
+UP_G_JAR = jar("hello", "7.0.0", " upstream")
+UP_G_POM = pom("org.acme", "hello", "7.0.0")
+UP_G_META = client_metadata("org.acme", "hello", ["7.0.0"])
+UP_MAVEN_G = {f"{UG}/maven-metadata.xml": UP_G_META, f"{UG}/7.0.0/hello-7.0.0.jar": UP_G_JAR,
+              f"{UG}/7.0.0/hello-7.0.0.pom": UP_G_POM}
+UP_MAVEN_G.update({p + ".sha1": sums(b)["sha1"].encode() for p, b in list(UP_MAVEN_G.items())})
+
+
+def group_stub(method, path, auth, bearer):
+    body = UP_MAVEN_G.get(path)
+    if body is not None:
+        return 200, {"ETag": '"' + hashlib.sha256(body).hexdigest()[:16] + '"',
+                     "Last-Modified": "Mon, 02 Nov 2026 10:00:00 GMT"}, body
+    if path.startswith("/maven500/"):
+        return 500, {"Content-Type": "text/plain"}, b"upstream broken\n"
+    return None
+
+
+# The groups: of every member, private, as the other formats' are (the
+# proxy's excluded names among them); and public ones, of public members
+# only with a proxy first (mvngup), of a private member first (mvnsec:
+# hello of a version of its own, an artifact of its own), of a proxy
+# whose upstream answers 500 first.
+GROUPS = (("mvngroup", "mvnpub,mvnpriv,mvnproxy", "false"), ("mvngall", "mvngup,mvnpub", "true"),
+          ("mvngmix", "mvnsec,mvnpub", "true"), ("mvngfail", "mvn500,mvnpub", "true"))
+SEC = (deployed(f"{HELLO}/5.0.0/hello-5.0.0.jar", jar("hello", "5.0.0", " secret"))
+       + deployed(f"{HELLO}/5.0.0/hello-5.0.0.pom", pom("org.acme", "hello", "5.0.0"))
+       + deployed("org/acme/seconly/1.0.0/seconly-1.0.0.jar", jar("seconly", "1.0.0"))
+       + deployed("org/acme/seconly/1.0.0/seconly-1.0.0.pom", pom("org.acme", "seconly", "1.0.0")))
+
+
+def seed_groups(p, fx):
+    aa = auth_header("admin")
+    p.cli("repo", "create", "mvnsec", "-f", "maven", "-s", "public=false")
+    for path, body in SEC:
+        st, _, out = request("PUT", f"/mvnsec/{path}", aa, body)
+        if st != 201:
+            raise SystemExit(f"maven put mvnsec/{path}: {st} {out[:200]}")
+    for name, up in (("mvngup", "maven-g"), ("mvn500", "maven500")):
+        p.cli("repo", "create", name, "-f", "maven", "-k", "proxy", "-s",
+              f"upstream=http://127.0.0.1:{UP}/{up}", "-s", "public=true")
+    for g, members, public in GROUPS:
+        p.cli("repo", "create", g, "-f", "maven", "-k", "group", "-s", f"members={members}",
+              "-s", f"public={public}")
+
+
+# What a Maven group is asked: its address (First without the slash,
+# Listing with it); listings (every member's entries); an artifact's
+# metadata and checksums, a SNAPSHOT's, a group's of its plugins, a
+# file and its checksums (Name, the artifact's directory: the first
+# member that has its metadata answers alone), of each member's
+# version, names a proxy excludes; what names no artifact (First); a
+# label (Nothing).
+GROUP_READS = (
+    "", "/", "/org/acme/", "/org/acme", f"/{HELLO}/", f"/{HELLO}", f"/{HELLO}/1.0.0/",
+    "/missing/", f"/{HELLO}/maven-metadata.xml", f"/{HELLO}/maven-metadata.xml.sha1",
+    f"/{HELLO}/maven-metadata.xml.md5", f"/{J100}", f"/{J100}.sha1", f"/{P100}",
+    f"/{HELLO}/5.0.0/hello-5.0.0.jar", f"/{HELLO}/7.0.0/hello-7.0.0.jar",
+    f"/{HELLO}/7.0.0/hello-7.0.0.jar.sha1", f"/{SNAP}/maven-metadata.xml", f"/{B2}.jar",
+    f"/{PLUGINS}/maven-metadata.xml", "/org/acme/tools/maven-metadata.xml",
+    "/org/acme/seconly/maven-metadata.xml", "/org/acme/seconly/1.0.0/seconly-1.0.0.jar",
+    "/org/acme/up/maven-metadata.xml", "/org/acme/up/1.0.0/up-1.0.0.jar",
+    "/org/acme/secret/1.0.0/secret-1.0.0.jar", "/org/hidden/x/maven-metadata.xml",
+    "/org/acme/gone/maven-metadata.xml", "/org/acme/nope/maven-metadata.xml",
+    f"/{HELLO}/1.0.0/other-1.0.0.jar", "/maven-metadata.xml", "/@first/",
+    f"/@first/{HELLO}/maven-metadata.xml", f"/@first/{J100}", "/@first")
+
+
+def group_reads(c, who):
+    add = c.add
+    for g, _, _ in GROUPS:
+        b = f"/{g}"
+        for rel in GROUP_READS:
+            add(f"maven group {g}{rel} {who}", who, "GET", b + rel)
+        for rel in (f"/{HELLO}/maven-metadata.xml", f"/{J100}", "/"):
+            add(f"maven group {g} HEAD {rel} {who}", who, "HEAD", b + rel)
+        etag = "{maven group %s/%s %s.etag}" % (g, J100, who)
+        for name, h in (("inm", {"If-None-Match": etag}),
+                        ("ims", {"If-Modified-Since": "Fri, 01 Jan 2100 00:00:00 GMT"}),
+                        ("range", {"Range": "bytes=0-9"})):
+            add(f"maven group {g} jar {name} {who}", who, "GET", f"{b}/{J100}", h)
+
+
+def group_writes(c, who):
+    # Writes to each group, read back: refused (405 naming its first
+    # member, or as the caller may not read the group).
+    a = f"wg-{who}"
+    for g, _, _ in GROUPS:
+        b = f"/{g}"
+        jar_path = f"org/acme/{a}/1.0.0/{a}-1.0.0.jar"
+        c.seq(f"maven group {g} writes {who}", who,
+              put_steps(b, deployed(jar_path, jar(a, "1.0.0"))[:2])
+              + gets(b, [jar_path, f"org/acme/{a}/maven-metadata.xml"])
+              + [("PUT", f"{b}/{J100}", {}, jar("hello", "1.0.0", " again")),
+                 ("DELETE", f"{b}/{J100}", {}, None),
+                 ("GET", f"{b}/{J100}", {}, None),
+                 ("POST", f"{b}/{J100}", {}, b"x"),
+                 ("PUT", f"{b}/@first/{J100}", {}, b"x")])
+
+
+def group_after(c, who):
+    # What Maven's writes left in the members, through each group: the
+    # metadata of an artifact written, whole before its checksums (see
+    # mask), hello's, the listings.
+    for g, _, _ in GROUPS:
+        b = f"/{g}"
+        for art in ("org/acme/w-writer", HELLO):
+            for s in ("",) + SUMS:
+                c.add(f"after maven group {g}/{art}/maven-metadata.xml{s} {who}", who, "GET",
+                      f"{b}/{art}/maven-metadata.xml{s}")
+        for rel in ("/", "/org/acme/", "/org/acme/w-writer/1.0.0/w-writer-1.0.0.jar"):
+            c.add(f"after maven group {g}{rel} {who}", who, "GET", b + rel)
+
+
 # ---- masks ----------------------------------------------------------------
 
 LAST = re.compile(rb"<lastUpdated>(\d{14})</lastUpdated>")
 SUMMED = re.compile(r"/maven-metadata\.xml\.(md5|sha1|sha256|sha512)$")
+# The paths of the groups' answers.
+GROUP_PATH = re.compile(r"/mvng(roup|all|mix|fail)/")
 
 
 def served_file(path):
@@ -730,6 +854,12 @@ def mask(masker):
     # part or 304 is one) if its lastUpdated was a time of the run, none
     # if not: what that file's checksums say until it is written again.
     timed = {}
+    # Of each group's maven-metadata.xml, the digests of every whole
+    # answer whose lastUpdated was a time of the run: a group answers
+    # each caller from the first member that caller may read, so the
+    # latest whole answer at its address may be another caller's, of
+    # another member.
+    group_timed = {}
 
     def answer(path, hd, body, after_writes, etag):
         if not re.match(TIMES, path):
@@ -754,18 +884,26 @@ def mask(masker):
             out = LAST.sub(one, body)
             if whole and etag is not None:
                 timed[served_file(p)] = sums(body) if hit else {}
+                if hit and GROUP_PATH.match(p):
+                    group_timed.setdefault(served_file(p), []).append(sums(body))
             if hit:
                 masker.counts["maven times"] += 1
                 body = out
         elif after_writes and whole and summed:
             # A metadata file's checksum: masked if it is that kind's
             # digest of its own file's latest whole answer, and that
-            # answer had a time of the run.
+            # answer had a time of the run; at a group's address, of any
+            # whole answer of it that had one.
             kind = summed.group(1)
-            of = timed.get(served_file(p[:-len(kind) - 1]), {})
-            if body.strip().decode("ascii", "replace") == of.get(kind):
+            f = served_file(p[:-len(kind) - 1])
+            text = body.strip().decode("ascii", "replace")
+            if text == timed.get(f, {}).get(kind):
                 hit = True
                 masker.counts["maven checksums of times"] += 1
+                body = b"X" * len(body)
+            elif GROUP_PATH.match(p) and any(text == s[kind] for s in group_timed.get(f, ())):
+                hit = True
+                masker.counts["maven group checksums of times"] += 1
                 body = b"X" * len(body)
         if hit:
             hd = [[k, "*" if k == "etag" else v] for k, v in hd]
@@ -800,25 +938,45 @@ PARTS = [
     ("writes", 210, writes),
     ("writes", 210, limits),
     ("after", 80, after),
+    # Groups: noone reads mvngmix by its grant on the group alone.
+    ("seed", 190, seed_groups),
+    ("grants", 180, {"reader": {"mvngroup": "read"},
+                     "writer": {"mvngroup": "read", "mvngmix": "write"},
+                     "noone": {"mvngmix": "read"}}),
+    ("stub", 130, group_stub),
+    ("reads", 200, group_reads),
+    ("writes", 300, group_writes),
+    ("after", 150, group_after),
     # An artifact's maven-metadata.xml says when its last file came
     # (lastUpdated, to the second, UTC), and the tree keeps when each
     # file came: of a write of the run, the run's time.
     ("rule", 190, ("maven times", "lastUpdated in a maven-metadata.xml answer of mvnpub, "
-                                  "mvnpriv or mvnempty if a time of the run (at or after the "
-                                  "seed, not after the answer; same length), the etag of an "
-                                  "answer it was in, the root of a Maven version made in the "
-                                  "run")),
+                                  "mvnpriv, mvnempty or a group of theirs if a time of the "
+                                  "run (at or after the seed, not after the answer; same "
+                                  "length), the etag of an answer it was in, the root of a "
+                                  "Maven version made in the run")),
     # Its checksums are of those bytes: masked when they are that kind's
     # digest of their own file's latest whole answer, if the rule above
     # masked it (the corpus asks for an artifact's metadata whole before
     # its checksums).
     ("rule", 190, ("maven checksums of times", "the body (not its length) and the etag of a "
                                                "whole maven-metadata.xml.md5, .sha1, .sha256 "
-                                               "or .sha512 answer of mvnpub, mvnpriv or "
-                                               "mvnempty after writes, if it is that kind's "
-                                               "digest of the latest whole answer of its own "
-                                               "maven-metadata.xml, and that answer's "
-                                               "lastUpdated was masked")),
+                                               "or .sha512 answer of mvnpub, mvnpriv, "
+                                               "mvnempty or a group of theirs after writes, "
+                                               "if it is that kind's digest of the latest "
+                                               "whole answer of its own maven-metadata.xml, "
+                                               "and that answer's lastUpdated was masked")),
+    # A group answers each caller from the first member that caller may
+    # read: the latest whole answer of a metadata file at its address may
+    # be another caller's, of another member, whose time is the seed's.
+    ("rule", 200, ("maven group checksums of times", "the body (not its length) and the etag "
+                                                     "of a whole maven-metadata.xml checksum "
+                                                     "answer of a Maven group after writes, "
+                                                     "not masked by the rule above, if it is "
+                                                     "that kind's digest of any whole answer "
+                                                     "of its own maven-metadata.xml at the "
+                                                     "group's address whose lastUpdated was "
+                                                     "masked")),
     ("mask", 110, mask),
     ("fuzz sample", 150, jar("fz", "1.0.0")),
     ("fuzz sample", 150, pom("org.acme", "fz", "1.0.0")),
