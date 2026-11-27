@@ -738,6 +738,12 @@ def mask(masker):
     return answer
 
 
+FUZZ = (["rpub", "rpriv", "rnosign", "rempty"],
+        ["el9", "fc43.1", "Packages", "repodata", "repomd.xml", "repomd.xml.asc", "key.asc",
+         "el9.repo", "fc43.1.repo", "@first", "@second", "_inputs", "upload",
+         file_name("hello", "1.0"), file_name("tool", "0.1", arch="x86_64"),
+         file_name("hello", "1.1", arch="src")])
+
 PARTS = [
     ("seed", 120, seed),
     ("grants", 110, {"reader": {"rpriv": "read"},
@@ -771,4 +777,5 @@ PARTS = [
     ("rule", 210, ("rpm times", "the root of an RPM version made in the run (its packages' "
                                 "repodata parts hold their upload time)")),
     ("mask", 110, mask),
+    ("fuzz sample", 150, HELLO_1),
 ]
