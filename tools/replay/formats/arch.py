@@ -7,10 +7,11 @@ by the CLI; tool 0.1-1 for any architecture, a .pkg.tar.gz, and lib
 every field pacman reads, in a pacman repository of its own, extra,
 then a second label; hello 1.10-1 put to the address it is served at;
 hello 1.9-1, older by pacman's order though put last, with tool 0.2-1
-for x86_64 alone), one unsigned with architectures of its own, and
-one with nothing in it. Arch repositories are hosted or mirrors (which
-are jobs): no proxy, no stub (and no group here: the group corpus has
-those).
+for x86_64 alone; 28 versions of one package, ver, in a pacman
+repository of their own, vers, by the CLI), one unsigned with
+architectures of its own, and one with nothing in it. Arch
+repositories are hosted or mirrors (which are jobs): no proxy, no stub
+(and no group here: the group corpus has those).
 
 The server serves a repository as it serves any tree (serving/mod.rs:
 get's tree, put, listings, content types, Cache-Control); the format
@@ -167,6 +168,16 @@ LIB = package("lib", "2:0.5-1", "aarch64")
 HELLO_110 = package("hello", "1.10-1")
 HELLO_19 = package("hello", "1.9-1")
 TOOL_02 = package("tool", "0.2-1")
+# Versions of one package, ver, in a pacman repository of their own,
+# vers: what pacman's order tells apart (numbers and letters, a number
+# against letters, leading zeros, runs of separators, what is left over
+# at the end, epochs written each way, a release or none) and what it
+# takes for one (1.0 and 1.0-1, 001.2-1 and 1.2-1). A database names
+# the newest of each package; every version a run makes asks again.
+VERS = ("1.0-1", "1.0", "1.0a-1", "1.0alpha-1", "1.0beta-1", "1.0rc1-1", "1.0.a-1", "1..0-1",
+        "1.0+1-1", "1.0.0-1", "1.0-1.1", "001.2-1", "1.2-1", "1.5.1-1", "1.5.b-1", "1.5b-1",
+        "2_0-1", "2___a-1", "2_a-1", "2.0a-1", "2.0.a-1", ":0.9-1", "0:1.1-1", "01:1.0-1",
+        "1:0.1-1", "a-1", "b-1", "1.0.-1")
 # What the seed puts in each repository, in order (how, query, files):
 # put to the upload address or the address a file is served at, or by
 # the CLI (files of one upload together); a label after the first and
@@ -181,7 +192,8 @@ SEED = [("put", "/upload", [(F10, HELLO_10)]),
         ("cli", "", [(FT, TOOL), (FL, LIB)]),
         ("put", "/upload?repository=extra", [(FF, FULL)]),
         ("put", "/{repo}/x86_64/" + F110, [(F110, HELLO_110)]),
-        ("cli", "", [(F19, HELLO_19), (FT2, TOOL_02)])]
+        ("cli", "", [(F19, HELLO_19), (FT2, TOOL_02)]),
+        ("cli", "repository=vers", [(file_name("ver", v), package("ver", v)) for v in VERS])]
 LABELS = {0: "first", 3: "second"}
 # The unsigned repository: its own architectures (x86_64, armv7h), a
 # package for one it does not name (i686), the label after the first.
@@ -208,7 +220,7 @@ def fill_repo(p, fx, repo, steps, labels):
                 with open(f, "wb") as fh:
                     fh.write(body)
                 paths.append(f)
-            p.cli("upload", repo, *paths)
+            p.cli("upload", repo, *paths, *(["-s", where] if where else []))
         if i in labels:
             p.cli("label", repo, labels[i])
 
@@ -266,21 +278,23 @@ def tree(repo):
             f"/extra/x86_64/{FF}.sig", f"/extra/aarch64/{FF}", f"{d}/{FF}",
             f"{a}/lib-2%3A0.5-1-aarch64.pkg.tar.zst", f"{d}/hello-1.0-1-x86_64.pkg.tar.xz",
             f"{d}/hello-1.0-1-aarch64.pkg.tar.zst", f"{d}/{F10}.sig.sig", f"{d}/{F10}.asc",
-            "/key.asc", "/key.pub", f"/{repo}.db", f"{d}/_sigs", f"{a}/_sigs", f"/extra/x86_64/_sigs",
-            f"{d}/{repo}.db/", f"{d}/{repo}.db/x", f"{d}/{F10}/", f"/{repo.upper()}/x86_64/{repo}.db",
-            f"/{repo}/X86_64/{repo}.db", f"{d}/{repo.upper()}.db", f"{d}/HELLO-1.0-1-x86_64.pkg.tar.zst",
+            "/key.asc", "/key.pub", f"/{repo}.db", f"{d}/_sigs", f"{a}/_sigs",
+            f"/extra/x86_64/_sigs", f"{d}/{repo}.db/", f"{d}/{repo}.db/x", f"{d}/{F10}/",
+            f"/{repo.upper()}/x86_64/{repo}.db", f"/{repo}/X86_64/{repo}.db",
+            f"{d}/{repo.upper()}.db", f"{d}/HELLO-1.0-1-x86_64.pkg.tar.zst",
             f"/{repo}//x86_64/{repo}.db", f"/{repo}%2fx86_64%2f{repo}.db",
             f"/%2e%2e/{repo}/x86_64/{repo}.db", f"{d}/%2e%2e/aarch64/{repo}.db", f"{d}/%00",
             f"{d}/%FF", f"{d}/..%5c{repo}.db", f"/{repo}/x86_64/{repo}.d%62", "/upload",
-            f"/{repo}/upload", "/by-hash/x", f"{d}/by-hash/SHA256/" + "0" * 64,
-            "/@first", "/@first/", f"/@first/{repo}/", f"/@first{d}/", f"/@first{d}/{repo}.db",
+            f"/{repo}/upload", "/by-hash/x", f"{d}/by-hash/SHA256/" + "0" * 64, "/@first",
+            "/@first/", f"/@first/{repo}/", f"/@first{d}/", f"/@first{d}/{repo}.db",
             f"/@first{d}/{repo}.db.sig", f"/@first{d}/{repo}.files", f"/@first{d}/{F10}",
-            f"/@first{d}/{F10}.sig", f"/@first{d}/{F11}", f"/@first{a}/{repo}.db", "/@first/key.asc",
-            "/@first/extra/x86_64/extra.db", "/@second/extra/x86_64/extra.db",
+            f"/@first{d}/{F10}.sig", f"/@first{d}/{F11}", f"/@first{a}/{repo}.db",
+            "/@first/key.asc", "/@first/extra/x86_64/extra.db", "/@second/extra/x86_64/extra.db",
             "/@second/extra/x86_64/extra.files.sig", f"/@second{a}/{repo}.files",
             f"/@second{d}/{F110}", "/@nope/", f"/@nope{d}/{repo}.db", f"/@1{d}/{repo}.db",
             f"/@3{a}/{repo}.db", f"/@v2{d}/{F11}", f"/@9999{d}/{repo}.db", f"/@{d}/{repo}.db",
-            f"/%40first{d}/{repo}.db", f"/@first/@first{d}/{repo}.db", f"/{repo}/@first/x86_64/{repo}.db",
+            f"/%40first{d}/{repo}.db", f"/@first/@first{d}/{repo}.db",
+            f"/{repo}/@first/x86_64/{repo}.db",
             f"/@first/by-hash/x86_64/{repo}.db"]
     return out
 
@@ -307,6 +321,8 @@ NOSIGN_TREE = ("", "/", "/archnosign/", "/archnosign/x86_64/", "/archnosign/armv
 EMPTY = ("", "/", "/archempty/", "/archempty/x86_64/", "/archempty/x86_64/archempty.db",
          "/key.asc", "/@first/", "/@1/archempty/x86_64/archempty.db")
 FUTURE, PAST = "Fri, 01 Jan 2100 00:00:00 GMT", "Mon, 02 Nov 2026 10:00:00 GMT"
+# Where a repository's badges are, on every serving listener.
+BADGES = "/.well-known/pkgpod/badges"
 
 
 def reads(c, who):
@@ -380,6 +396,40 @@ def reads(c, who):
     # it takes from none.
     for m in ("OPTIONS", "PATCH"):
         add(f"arch {m} {who}", who, m, "/archpub/archpub/x86_64/archpub.db")
+    if who == "anon":
+        # Credentials that are wrong, of each kind the server reads
+        # (Basic, Bearer, Token as ansible-galaxy sends it, a token
+        # alone as cargo does): refused, though the repository is
+        # public; and a header that is no text, taken as none.
+        for name, cred in (("basic", "Basic d3JpdGVyOndyb25n"), ("bearer", "Bearer pkgpod_nope"),
+                           ("token scheme", "Token pkgpod_nope"), ("token alone", "pkgpod_nope"),
+                           ("not ASCII", "Basic \xe9\xe9")):
+            add(f"arch wrong {name} credentials", who, "GET", "/archpub/archpub/x86_64/archpub.db",
+                {"Authorization": cred})
+    # The versions pacman's order tells apart: the database names the
+    # newest; every file is served.
+    for rel in ("/vers/", "/vers/x86_64/", "/vers/x86_64/vers.db", "/vers/x86_64/vers.files",
+                "/vers/aarch64/vers.db", f"/vers/x86_64/{file_name('ver', '1:0.1-1')}",
+                f"/vers/x86_64/{file_name('ver', ':0.9-1')}.sig"):
+        add(f"arch archpub{rel} {who}", who, "GET", f"/archpub{rel}")
+    # A package's version badge: its latest version by pacman's order
+    # (hello 1.10-1, not 1.9-1; ver's epoch), which only the databases
+    # show otherwise; one for any architecture; one not there; none
+    # asked for; the repository's status and count (not its downloads,
+    # which are of the month the run is in).
+    for repo, names in (("archpub", ("hello", "tool", "lib", "full", "ver", "nope")),
+                        ("archpriv", ("hello",)), ("archnosign", ("hello", "arm")),
+                        ("archempty", ("hello",))):
+        for kind, q in ([("version", f"?package={n}") for n in names]
+                        + [("version", ""), ("status", ""), ("packages", "")]):
+            add(f"arch badge {repo} {kind}{q} {who}", who, "GET",
+                f"{BADGES}/{repo}/{kind}.svg{q}")
+    # The private one's with a badge token it does not have; a badge by
+    # the ETag of its answer before.
+    add(f"arch badge archpriv token {who}", who, "GET",
+        f"{BADGES}/archpriv/version.svg?package=hello&token=nope")
+    add(f"arch badge archpub inm {who}", who, "GET", f"{BADGES}/archpub/version.svg?package=hello",
+        {"If-None-Match": "{arch badge archpub version?package=hello %s.etag}" % who})
 
 
 class Zeros:
@@ -646,17 +696,21 @@ def limits(c, who):
 # What the writes leave: each repository's pacman repositories and
 # their architectures (each with its databases), the signatures they
 # make, read whole before any listing or part of them.
-AFTER_DIRS = {"archpub": [("archpub", ("x86_64", "aarch64", "i686")), ("extra", ("x86_64", "aarch64")),
+AFTER_DIRS = {"archpub": [("archpub", ("x86_64", "aarch64", "i686")),
+                          ("extra", ("x86_64", "aarch64")),
+                          ("vers", ("x86_64", "aarch64")),
                           ("by-hash", ("x86_64", "aarch64")),
                           (HEXREPO, ("repodata", "x86_64", "aarch64"))],
-              "archpriv": [("archpriv", ("x86_64", "aarch64")), ("extra", ("x86_64", "aarch64"))],
+              "archpriv": [("archpriv", ("x86_64", "aarch64")), ("extra", ("x86_64", "aarch64")),
+                           ("vers", ("x86_64", "aarch64"))],
               "archnosign": [("archnosign", ("x86_64", "armv7h", "i686"))]}
 
 
 # The seed's packages in each signed repository (pacman repository,
 # None for the one of the repository's name; architecture; file name).
 SEED_FILES = ([(None, "x86_64", f) for f in (F10, F11, FT, FT2, F110, F19)]
-              + [(None, "aarch64", f) for f in (FT, FL)] + [("extra", "x86_64", FF)])
+              + [(None, "aarch64", f) for f in (FT, FL)] + [("extra", "x86_64", FF)]
+              + [("vers", "x86_64", file_name("ver", v)) for v in VERS])
 
 
 def run_files():
@@ -734,6 +788,12 @@ def after(c, who):
         add(f"after arch archpub{rel} {who}", who, "GET", f"/archpub{rel}")
     add(f"after arch archpub HEAD /@first/by-hash/x86_64/by-hash.db {who}", who, "HEAD",
         "/archpub/@first/by-hash/x86_64/by-hash.db")
+    # The latest of what the writes made: of a package replaced, of one
+    # with an epoch, of one sent in chunks, of one whose name is longer
+    # than a badge shows.
+    for n in ("w-writer", "t-writer", "chunked", f"{HEX}-writer"):
+        add(f"after arch badge {n} {who}", who, "GET",
+            f"{BADGES}/archpub/version.svg?package={n}")
 
 
 # ---- what is masked ---------------------------------------------------
