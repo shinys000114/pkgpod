@@ -16,7 +16,9 @@ The writes go to groups no read before them names (main, the default,
 one per identity, w-<who>, and the writer's by-hash), read back in
 sequences only, and no fuzz word names them: what the format makes for
 them holds the run's time (see the rules below), and a listing of their
-repodata/ is in an order of the hashes of that time."""
+repodata/ is in an order of the hashes of that time. Their primary.xml
+is named by its hash, so it is asked for by the name the repomd.xml
+just read gives (see run_primary)."""
 
 import base64
 import gzip
@@ -32,6 +34,16 @@ NAME = "rpm"
 # The paths of the groups the run writes, whose repodata holds its
 # time (see above).
 TIMES = r"/r(pub|priv|nosign)/(main|w-[a-z]+)/"
+
+
+def run_primary(group):
+    """A GET of the primary.xml.gz that the repomd.xml of `group` (its
+    path, /<repo>/<group>) read just before names: made in the run, its
+    name is the hash of bytes that hold the run's times (see the rule
+    "rpm primary of the run"). Not sent when the repomd.xml was not
+    read."""
+    return ("GET", group + '/repodata/{re:href="repodata/([0-9a-f]+-primary\\.xml\\.gz)"}',
+            {}, None)
 
 # The time the packages say they were built, their files' times.
 BUILT = 1790000000
@@ -573,6 +585,7 @@ def writes(c, who):
             ("PUT", f"{b}/upload?group={w}", {}, noted(f"t-{who}")),
             ("GET", f"{b}/{w}/Packages/", {}, None),
             ("GET", f"{b}/{w}/repodata/repomd.xml", {}, None),
+            run_primary(f"{b}/{w}"),
             ("GET", f"{b}/@first/{w}/Packages/", {}, None)])
         # No group: main, whatever the address (a group's, the
         # repository's own), a group given empty; read back.
@@ -585,6 +598,7 @@ def writes(c, who):
             ("PUT", b, {}, package(f"f-{who}", "1.0", arch="x86_64")),
             ("GET", f"{b}/main/Packages/", {}, None),
             ("GET", f"{b}/main/repodata/repomd.xml", {}, None),
+            run_primary(f"{b}/main"),
             ("GET", f"{b}/main/repodata/repomd.xml.asc", {}, None),
             ("GET", f"{b}/main.repo", {}, None),
             ("GET", f"{b}/el9/Packages/", {}, None)])
@@ -635,6 +649,7 @@ def writes(c, who):
     seq(f"rpm put rnosign {who}", who, [
         ("PUT", f"/rnosign/upload?group={w}", {}, package(w, "1.0")),
         ("GET", f"/rnosign/{w}/repodata/repomd.xml", {}, None),
+        run_primary(f"/rnosign/{w}"),
         ("GET", f"/rnosign/{w}/repodata/repomd.xml.asc", {}, None),
         ("GET", f"/rnosign/{w}/Packages/", {}, None),
         ("GET", "/rnosign/key.asc", {}, None),
@@ -738,15 +753,19 @@ def after(c, who):
     for repo in ("rpub", "rpriv"):
         b = f"/{repo}"
         steps = [("GET", f"{b}{rel}", {}, None) for rel in (
-            "/", "/main/", "/main/Packages/", "/main/repodata/repomd.xml",
+            "/", "/main/", "/main/Packages/", "/main/repodata/repomd.xml")]
+        steps.append(run_primary(f"{b}/main"))
+        steps += [("GET", f"{b}{rel}", {}, None) for rel in (
             "/main/repodata/repomd.xml.asc", "/main.repo", MD, "/el9/Packages/",
             "/@first/el9/repodata/repomd.xml")]
         for w in ("writer", "wtoken", "wbearer", "admin", "ptoken"):
             steps += [("GET", f"{b}/w-{w}/Packages/", {}, None),
-                      ("GET", f"{b}/w-{w}/repodata/repomd.xml", {}, None)]
+                      ("GET", f"{b}/w-{w}/repodata/repomd.xml", {}, None),
+                      run_primary(f"{b}/w-{w}")]
         c.seq(f"after rpm {repo} {who}", who, steps)
     c.seq(f"after rpm rnosign {who}", who, [
         ("GET", "/rnosign/", {}, None), ("GET", "/rnosign/w-writer/repodata/repomd.xml", {}, None),
+        run_primary("/rnosign/w-writer"),
         ("GET", "/rnosign/w-admin/Packages/", {}, None)])
 
 
@@ -756,6 +775,10 @@ PRIMARY = re.compile(rb'<data type="primary">.*?</data>', re.S)
 PRIMARY_DERIVED = re.compile(
     rb'(<checksum type="sha256">|<open-checksum type="sha256">|href="repodata/|<size>)'
     rb'([0-9a-f]+)')
+# A primary index (by its name), and the time each package was taken in,
+# in it.
+PRIMARY_GZ = re.compile(r"/repodata/[0-9a-f]{64}-primary\.xml\.gz$")
+FILE_TIME = re.compile(rb'(<time file=")(\d+)(")')
 ARMOR = re.compile(rb"-----BEGIN PGP SIGNATURE-----\r?\n(.*?)-----END PGP SIGNATURE-----", re.S)
 
 
@@ -882,6 +905,25 @@ def mask(masker):
             body = PRIMARY.sub(lambda m: PRIMARY_DERIVED.sub(
                 lambda d: d.group(1) + b"X" * len(d.group(2)), m.group(0)), body)
             hd = [[k, "*" if k == "etag" else v] for k, v in hd]
+        elif after_writes and PRIMARY_GZ.search(path) and body[:2] == b"\x1f\x8b":
+            try:
+                plain = gzip.decompress(body)
+            except (OSError, EOFError):
+                plain = None
+            run = []
+
+            def taken(m):
+                if int(m.group(2)) < masker.seed_time:
+                    return m.group(0)
+                run.append(m)
+                return m.group(1) + b"X" * len(m.group(2)) + m.group(3)
+            if plain is not None:
+                plain = FILE_TIME.sub(taken, plain)
+            if run:
+                hit = True
+                masker.counts["rpm primary of the run"] += 1
+                body = plain
+                hd = [[k, "*" if k in ("etag", "content-length") else v] for k, v in hd]
         elif after_writes and (signed_at(body) or 0) >= masker.seed_time:
             hit = True
             masker.counts["rpm signatures of the run"] += 1
@@ -935,6 +977,15 @@ PARTS = [
                                                 "content-length and etag")),
     ("rule", 210, ("rpm times", "the root of an RPM version made in the run (its packages' "
                                 "repodata parts hold their upload time)")),
+    # ... and its primary.xml holds each package's upload time: read by
+    # the name its repomd.xml gives (see run_primary), it is compared
+    # gunzipped, those times masked. Its gzipped bytes' length moves
+    # with them.
+    ("rule", 220, ("rpm primary of the run", "of a primary.xml.gz of an RPM group written in "
+                                             "the run that holds an upload time at or after "
+                                             "the seed: the body, compared gunzipped, those "
+                                             "times (<time file>) masked to the same length; "
+                                             "the content-length and etag")),
     ("mask", 110, mask),
     ("fuzz sample", 150, HELLO_1),
 ]
