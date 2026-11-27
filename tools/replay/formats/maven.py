@@ -19,6 +19,7 @@ import io
 import re
 import tarfile
 import time
+import urllib.parse
 import zipfile
 
 from core import IDENTS, UP, auth_header, request
@@ -697,17 +698,26 @@ LAST = re.compile(rb"<lastUpdated>(\d{14})</lastUpdated>")
 SUMMED = re.compile(r"/maven-metadata\.xml\.(md5|sha1|sha256|sha512)$")
 
 
+def served_file(path):
+    """The file `path` (as served, its query cut) names, as pkgpod
+    finds it: its segments, each decoded (an empty one dropped)."""
+    return tuple(urllib.parse.unquote(s) for s in path.split("/") if s)
+
+
 def mask(masker):
-    # The digests (hex, of each kind) of whole maven-metadata.xml
-    # answers whose lastUpdated was a time of the run.
-    timed = set()
+    # Of each maven-metadata.xml served, the digests (hex, by kind) of
+    # its latest whole answer (a body, with the file's etag: no refusal,
+    # part or 304 is one) if its lastUpdated was a time of the run, none
+    # if not: what that file's checksums say until it is written again.
+    timed = {}
 
     def answer(path, hd, body, after_writes, etag):
         if not re.match(TIMES, path):
             return hd, body
         p = path.split("?")[0]
-        whole = not any(k == "content-range" for k, _ in hd)
+        whole = bool(body) and not any(k == "content-range" for k, _ in hd)
         hit = False
+        summed = SUMMED.search(p)
         if p.endswith("/maven-metadata.xml"):
             now = time.time()
 
@@ -722,16 +732,21 @@ def mask(masker):
                 hit = True
                 return b"<lastUpdated>" + b"X" * 14 + b"</lastUpdated>"
             out = LAST.sub(one, body)
+            if whole and etag is not None:
+                timed[served_file(p)] = sums(body) if hit else {}
             if hit:
                 masker.counts["maven times"] += 1
-                if whole:
-                    timed.update(sums(body).values())
                 body = out
-        elif (after_writes and whole and body and SUMMED.search(p)
-              and body.strip().decode("ascii", "replace") in timed):
-            hit = True
-            masker.counts["maven checksums of times"] += 1
-            body = b"X" * len(body)
+        elif after_writes and whole and summed:
+            # A metadata file's checksum: masked if it is that kind's
+            # digest of its own file's latest whole answer, and that
+            # answer had a time of the run.
+            kind = summed.group(1)
+            of = timed.get(served_file(p[:-len(kind) - 1]), {})
+            if body.strip().decode("ascii", "replace") == of.get(kind):
+                hit = True
+                masker.counts["maven checksums of times"] += 1
+                body = b"X" * len(body)
         if hit:
             hd = [[k, "*" if k == "etag" else v] for k, v in hd]
         return masker.part(hd, body, hit, after_writes, etag)
@@ -773,15 +788,17 @@ PARTS = [
                                   "seed, not after the answer; same length), the etag of an "
                                   "answer it was in, the root of a Maven version made in the "
                                   "run")),
-    # Its checksums are of those bytes: masked when they are that digest
-    # of a whole metadata answer the rule above masked (the corpus asks
-    # for an artifact's metadata whole before its checksums).
+    # Its checksums are of those bytes: masked when they are that kind's
+    # digest of their own file's latest whole answer, if the rule above
+    # masked it (the corpus asks for an artifact's metadata whole before
+    # its checksums).
     ("rule", 190, ("maven checksums of times", "the body (not its length) and the etag of a "
                                                "whole maven-metadata.xml.md5, .sha1, .sha256 "
                                                "or .sha512 answer of mvnpub, mvnpriv or "
-                                               "mvnempty after writes, if it is that digest of "
-                                               "a whole maven-metadata.xml answer of the run "
-                                               "whose lastUpdated was masked")),
+                                               "mvnempty after writes, if it is that kind's "
+                                               "digest of the latest whole answer of its own "
+                                               "maven-metadata.xml, and that answer's "
+                                               "lastUpdated was masked")),
     ("mask", 110, mask),
     ("fuzz sample", 150, jar("fz", "1.0.0")),
     ("fuzz sample", 150, pom("org.acme", "fz", "1.0.0")),
