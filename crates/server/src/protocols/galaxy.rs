@@ -17,9 +17,8 @@ use base64::Engine as _;
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Upload, Version};
 use pkgpod_proto::host::Host;
+use pkgpod_proto::{Caller, Role};
 use serde_json::{Value, json};
-
-use crate::auth::{Caller, Role};
 
 fn reply(st: StatusCode, v: Value) -> Response {
     let mut r = (st, serde_json::to_string(&v).expect("json")).into_response();
@@ -94,7 +93,7 @@ async fn versions(
 pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
     if a.role.is_none() {
         let mut r = error(StatusCode::UNAUTHORIZED, "authentication required");
-        if a.caller.user.is_none() {
+        if a.caller.anonymous() {
             r.headers_mut().insert(
                 header::WWW_AUTHENTICATE,
                 HeaderValue::from_static("Token realm=\"pkgpod\""),
