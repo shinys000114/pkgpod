@@ -66,7 +66,7 @@ p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
 yaml-rust2 = "0.13"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 quick-xml = "0.42"
-rand = "0.8"
+rand = "0.10"
 ed25519-dalek = "2.2"
 bzip2 = "0.6"
 base64 = "0.22"
