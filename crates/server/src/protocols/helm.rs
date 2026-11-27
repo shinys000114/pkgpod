@@ -14,9 +14,9 @@ use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Upload, Version};
+use pkgpod_proto::host::Host;
 use serde_json::{Map, Value, json};
 
-use crate::App;
 use crate::auth::{Caller, Role};
 
 fn reply(st: StatusCode, v: Value) -> Response {
@@ -55,7 +55,7 @@ fn version_doc(meta: &Value, sha: &pkgpod_base::Digest, file: &str) -> Value {
 }
 
 pub async fn handle(
-    app: Arc<App>,
+    app: Arc<dyn Host>,
     repo: RepoInfo,
     current: Option<Version>,
     caller: Caller,
@@ -87,7 +87,7 @@ pub async fn handle(
             let app2 = app.clone();
             let prefix = path.first().map(|s| s.to_string()).unwrap_or_default();
             let leaves = tokio::task::spawn_blocking(move || {
-                app2.engine
+                app2.engine()
                     .objects()
                     .walk(&v.root, &prefix)
                     .unwrap_or_default()
@@ -126,7 +126,7 @@ pub async fn handle(
             let path = format!("{name}/{name}-{version}.tgz");
             let (app2, r, actor) = (app.clone(), repo.name.clone(), caller.name().to_string());
             let res = tokio::task::spawn_blocking(move || {
-                app2.engine.change(&r, &actor, |_, e| {
+                app2.engine().change(&r, &actor, |_, e| {
                     if e.remove(&path)? {
                         Ok(format!("removed {path}"))
                     } else {
@@ -139,8 +139,7 @@ pub async fn handle(
             .await;
             match res {
                 Ok(Ok(o)) => {
-                    app.auth
-                        .audit(caller.name(), "delete", &repo.name, &o.summary);
+                    app.audit(caller.name(), "delete", &repo.name, &o.summary);
                     reply(StatusCode::OK, json!({"deleted": true}))
                 }
                 Ok(Err(pkgpod_engine::Error::NotFound(m))) => error(StatusCode::NOT_FOUND, m),
@@ -152,7 +151,7 @@ pub async fn handle(
     }
 }
 
-async fn push(app: &Arc<App>, repo: &RepoInfo, caller: &Caller, req: Request) -> Response {
+async fn push(app: &Arc<dyn Host>, repo: &RepoInfo, caller: &Caller, req: Request) -> Response {
     let force = req.uri().query().is_some_and(|q| {
         q.split('&')
             .any(|p| p == "force" || p.starts_with("force="))
@@ -173,7 +172,8 @@ async fn push(app: &Arc<App>, repo: &RepoInfo, caller: &Caller, req: Request) ->
                 Ok(Some(f)) if f.name() == Some("chart") => {
                     found = Some(
                         crate::serving::stream_to_store(repo.store(), f, pkgpod_helm::MAX_CHART)
-                            .await,
+                            .await
+                            .map_err(|e| e.to_string()),
                     );
                     break;
                 }
@@ -192,11 +192,13 @@ async fn push(app: &Arc<App>, repo: &RepoInfo, caller: &Caller, req: Request) ->
             }
         }
     } else {
-        crate::serving::body_to_store(repo.store(), req.into_body(), pkgpod_helm::MAX_CHART).await
+        let body = pkgpod_proto::body::boxed(req.into_body());
+        app.store_body(repo.store(), body, pkgpod_helm::MAX_CHART)
+            .await
     };
     let (sha256, size) = match stored {
         Ok(x) => x,
-        Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
     let up = Upload {
         sha256,
@@ -205,9 +207,9 @@ async fn push(app: &Arc<App>, repo: &RepoInfo, caller: &Caller, req: Request) ->
     };
     let (app2, name, actor) = (app.clone(), repo.name.clone(), caller.name().to_string());
     let res = tokio::task::spawn_blocking(move || {
-        app2.engine
+        app2.engine()
             .upload(&name, &up, &json!({"replace": force}), &actor)
-            .inspect(|o| app2.auth.audit(&actor, "upload", &name, &o.summary))
+            .inspect(|o| app2.audit(&actor, "upload", &name, &o.summary))
     })
     .await;
     match res {
