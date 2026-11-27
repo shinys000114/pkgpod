@@ -78,4 +78,5 @@ FORMATS = [import_module(f"{__name__}.{name}") for name in (
     "arch",
     "ipk",
     "rpm",
+    "apk",
 )]
