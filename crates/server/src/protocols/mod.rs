@@ -6,6 +6,7 @@
 pub mod cargo;
 pub mod composer;
 pub mod conan;
+pub mod deb;
 pub mod galaxy;
 pub mod gems;
 pub mod go;

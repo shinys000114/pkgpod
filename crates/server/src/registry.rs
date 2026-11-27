@@ -28,20 +28,37 @@ pub(crate) trait Serve: Send + Sync {
 }
 
 /// What a format answers itself in its repositories' trees, in place of
-/// the tree serving's answer: its own pages on paths of the tree.
+/// the tree serving's answer: its own pages and files on paths of the
+/// tree. Each answers nothing unless the format says otherwise.
 pub(crate) trait TreeHooks: Send + Sync {
+    /// A file of a mirror's, answered in place of its received tree's
+    /// (`inm`: the request's If-None-Match).
+    fn mirror_file<'a>(
+        &'a self,
+        _app: &'a Arc<App>,
+        _repo: &'a RepoInfo,
+        _rel: &'a [String],
+        _head: bool,
+        _inm: Option<String>,
+    ) -> BoxFuture<'a, Option<Response>> {
+        Box::pin(async { None })
+    }
     /// An answer to a path of the version asked for, before it is looked
     /// up in the tree (a redirect to the path's right spelling, say).
-    fn redirect(&self, rel: &[String], raw_path: &str) -> Option<Response>;
+    fn redirect(&self, _rel: &[String], _raw_path: &str) -> Option<Response> {
+        None
+    }
     /// A directory's page in place of its listing (`head`: without a
     /// body), if the format has one for it.
     fn dir_page<'a>(
         &'a self,
-        repo: &'a RepoInfo,
-        t: &'a Tree,
-        accept: Option<String>,
-        head: bool,
-    ) -> BoxFuture<'a, Option<Response>>;
+        _repo: &'a RepoInfo,
+        _t: &'a Tree,
+        _accept: Option<String>,
+        _head: bool,
+    ) -> BoxFuture<'a, Option<Response>> {
+        Box::pin(async { None })
+    }
 }
 
 /// What a format answers at a host's root, outside its repositories'
@@ -130,7 +147,9 @@ impl Registry {
         use crate::protocols as p;
         Registry {
             rows: vec![
-                Row::of(pkgpod_deb::Deb).tree(pkgpod_deb::TREE),
+                Row::of(pkgpod_deb::Deb)
+                    .tree(pkgpod_deb::TREE)
+                    .hooks(&p::deb::Hooks),
                 Row::of(pkgpod_files::Files).tree(pkgpod_files::TREE),
                 Row::of(pkgpod_oci::Oci)
                     .protocol(&p::oci::Serving)
@@ -371,7 +390,8 @@ mod tests {
         // but pypi, whose upload is the tree serving's and its index
         // pages the tree's hooks; rpm has one without: the dnf
         // repository file is the server's.
-        assert_eq!(ids(|r| r.tree_hooks.is_some()), set(&["pypi"]));
+        // deb answers a re-signing mirror's Release files itself.
+        assert_eq!(ids(|r| r.tree_hooks.is_some()), set(&["deb", "pypi"]));
         for (name, dir) in crates() {
             let protocol =
                 dir.join("src/protocol.rs").is_file() || dir.join("src/protocol").is_dir();
