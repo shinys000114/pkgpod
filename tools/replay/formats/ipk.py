@@ -449,11 +449,11 @@ def writes(c, who):
 def limits(c, who):
     # A PUT one byte over the format's limit and one over the server's,
     # one whose body cannot be read (chunked, its first chunk's size not
-    # hex); controls at and one byte past their limit (OpenWrt's cut
-    # there, Yocto's refused), a control.tar.gz past its limit with the
-    # control file first and last, one inflated past its limit before
-    # it; by one who may (the body is read); in sequences, of which no
-    # mutant is sent.
+    # hex); controls at their limit, one byte past it and a field past
+    # it (OpenWrt's cut there and taken, the field dropped; Yocto's
+    # refused), a control.tar.gz past its limit with the control file
+    # first and last, one inflated past its limit before it; by one who
+    # may (the body is read); in sequences, of which no mutant is sent.
     if who != "writer":
         return
     up = "/ipkpub/upload?feed=main"
@@ -472,8 +472,10 @@ def limits(c, who):
     data = data_tgz("big")
     c.seq("ipk controls at and over their limits writer", who, [
         ("PUT", big, {}, openwrt(padded("big-at", MAX_CONTROL))),
+        ("PUT", big, {}, openwrt(padded("big-past", MAX_CONTROL + 1))),
         ("PUT", big, {}, openwrt(padded("big-over", MAX_CONTROL, tail))),
         ("PUT", big, {}, yocto(padded("ybig-at", MAX_CONTROL))),
+        ("PUT", big, {}, yocto(padded("ybig-past", MAX_CONTROL + 1))),
         ("PUT", big, {}, yocto(padded("ybig-over", MAX_CONTROL, tail))),
         ("PUT", big, {}, openwrt(None, members=[
             ("./debian-binary", b"2.0\n"), ("./data.tar.gz", data),
