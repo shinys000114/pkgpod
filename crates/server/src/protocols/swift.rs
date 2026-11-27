@@ -15,9 +15,8 @@ use base64::Engine as _;
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Upload, Version};
 use pkgpod_proto::host::Host;
+use pkgpod_proto::{Caller, Role};
 use serde_json::{Value, json};
-
-use crate::auth::{Caller, Role};
 
 fn versioned(mut r: Response) -> Response {
     r.headers_mut()
