@@ -12,10 +12,10 @@ the dnf repository file of a group (<group>.repo). RPM repositories
 are hosted (or mirrors, which are jobs): no proxy, no stub.
 
 The writes go to groups no read before them names (main, the default,
-and one per identity, w-<who>), read back in sequences only, and no
-fuzz word names them: what the format makes for them holds the run's
-time (see the rules below), and a listing of their repodata/ is in an
-order of the hashes of that time."""
+one per identity, w-<who>, and the writer's by-hash), read back in
+sequences only, and no fuzz word names them: what the format makes for
+them holds the run's time (see the rules below), and a listing of their
+repodata/ is in an order of the hashes of that time."""
 
 import base64
 import gzip
@@ -630,6 +630,30 @@ def writes(c, who):
         ("GET", f"/rnosign/{w}.repo", {}, None)])
     # A repository with nothing in it, which no one but admin may write.
     c.add(f"rpm put rempty {who}", who, "PUT", "/rempty/upload?group=el9", {}, b"not an rpm")
+    if who == "writer":
+        by_hash(c, who)
+
+
+def by_hash(c, who):
+    # A group named by-hash: the tree serves a path naming by-hash that
+    # the version asked lacks from a version of the last day (the newest
+    # 50), as apt asks for an index the Release before listed. Its
+    # versions are made here, a moment before: the seed's would be served
+    # only while the seed is a day old or less. hello 1.0 alone has the
+    # filelists.xml of the seed's first el9 (it holds no time); after
+    # another package, that name is the version before's, at the current
+    # address and at a label's; a name of no version is none.
+    gone = repodata(c)["rpub"]["@first/el9"]["filelists"]
+    b = "/rpub/by-hash/repodata/"
+    c.seq(f"rpm by-hash {who}", who, [
+        ("PUT", "/rpub/upload?group=by-hash", {}, HELLO_1),
+        ("GET", b + gone, {}, None),
+        ("PUT", "/rpub/upload?group=by-hash", {}, HELLO_11),
+        ("GET", b + gone, {}, None),
+        ("HEAD", b + gone, {}, None),
+        ("GET", "/rpub/@first/by-hash/repodata/" + gone, {}, None),
+        ("GET", b + "0" * 64 + "-filelists.xml.gz", {}, None),
+        ("GET", "/rpub/by-hash/Packages/", {}, None)])
 
 
 # The most of a package read for its headers: one whose headers would
