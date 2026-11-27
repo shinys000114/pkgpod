@@ -378,7 +378,7 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
         && matches!(method, Method::GET | Method::HEAD)
         && let Some(prefix) = table.terraform_prefix(&host)
     {
-        return crate::protocols::terraform::discovery(&prefix);
+        return crate::protocols::terraform::discovery(&prefix).map(axum::body::Body::new);
     }
     // Badges, at every host's root.
     if path.len() > 3
@@ -667,8 +667,10 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
                 ),
             );
         }
+        let req = req.map(pkgpod_proto::body::boxed);
         return crate::protocols::terraform::read(app, &served.repo, version, &rel, &base_url, req)
-            .await;
+            .await
+            .map(axum::body::Body::new);
     }
     if served.repo.format == "composer" && matches!(method, Method::GET | Method::HEAD) {
         if role.is_none() {

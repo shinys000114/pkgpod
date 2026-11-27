@@ -9,12 +9,10 @@
 
 use std::sync::Arc;
 
-use axum::body::Body;
-use axum::extract::Request;
-use axum::http::{HeaderValue, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use http::{HeaderValue, StatusCode, header};
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Version};
+use pkgpod_proto::body::{Request, Response};
 use serde_json::{Value, json};
 
 /// What Terraform's registry asks of the server it runs in, besides what
@@ -29,13 +27,9 @@ pub trait Host: pkgpod_proto::host::Host {
 }
 
 fn reply(st: StatusCode, v: Value) -> Response {
-    let mut r = (st, serde_json::to_string(&v).expect("json")).into_response();
-    let h = r.headers_mut();
-    h.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    let mut r = pkgpod_proto::reply::json(st, &v);
+    r.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     r
 }
 
@@ -251,7 +245,7 @@ pub async fn read(
             // go-getter takes the archive's type from its extension; it
             // sends no token: a signed URL.
             let q = signed_query(&*app, &repo.name, &format!("{}{path}", label_of(base)));
-            let mut r = StatusCode::NO_CONTENT.into_response();
+            let mut r = pkgpod_proto::reply::status(StatusCode::NO_CONTENT);
             if let Ok(h) = HeaderValue::from_str(&format!("{base}{path}{q}")) {
                 r.headers_mut().insert("X-Terraform-Get", h);
             }
@@ -270,7 +264,6 @@ pub async fn read(
             match found {
                 Some(Entry::Blob { sha256, .. }) if !rel.iter().any(|x| x.starts_with('_')) => {
                     let name = rel.last().cloned().unwrap_or_default();
-                    let req = req.map(pkgpod_proto::body::boxed);
                     app.serve_counted(
                         &repo.name,
                         "",
@@ -280,7 +273,6 @@ pub async fn read(
                         req,
                     )
                     .await
-                    .map(Body::new)
                 }
                 _ => not_found(),
             }
