@@ -560,6 +560,15 @@ def after(c, who):
         c.add(f"after cran cranempty{rel} {who}", who, "GET", f"/cranempty{rel}")
 
 
+FUZZ = (["cranpub", "cranpriv", "cranempty"],
+        ["src", "contrib", "PACKAGES", "PACKAGES.gz", "PACKAGES.rds", "Archive", "hellopk",
+         "hellopk_1.10.tar.gz", "hellopk_1.0.tar.gz", "toolpk_0.1-2.tar.gz", "upload", "@first",
+         "@second", "@2", "by-hash", "bin", "nope"])
+# An upload the fuzz makes is kept with no time but those the core's
+# rules mask (the version's, the audit's, the catalog's); and nothing
+# a repository's address takes removes a file, so no download is lost.
+FUZZ_WRITABLE = True
+
 PARTS = [
     ("seed", 130, seed),
     ("grants", 120, {"reader": {"cranpriv": "read"},
@@ -571,4 +580,5 @@ PARTS = [
     ("writes", 230, writes),
     ("writes", 240, limits),
     ("after", 90, after),
+    ("fuzz sample", 170, rpkg("fzpk", "1.0")),
 ]
