@@ -428,7 +428,17 @@ def end_state(data, seed_time, counts, times):
         r[1] = "*"
     counts["audit time"] += len(a)
     out["audit"] = a
-    out["downloads"] = rows("SELECT repo, day, name, version, n FROM downloads ORDER BY 1,2,3,4")
+    # The days counted from the seed's on are the clock's (a run may
+    # cross a midnight, UTC, that another does not): of those, one row
+    # per package and version, its counts summed.
+    day = int(seed_time) // 86400
+    out["downloads"] = rows(
+        f"SELECT repo, day, name, version, n FROM downloads WHERE day < {day} "
+        "ORDER BY 1,2,3,4")
+    run = rows(f"SELECT repo, '*', name, version, SUM(n) FROM downloads WHERE day >= {day} "
+               "GROUP BY repo, name, version ORDER BY 1,3,4")
+    counts["download days"] += len(run)
+    out["downloads"] += run
     ca = rows("SELECT r.name, c.path, c.kind, hex(c.sha256), c.size, c.content_type, c.etag, "
               "c.last_modified, c.fetched, c.used, c.pinned, c.name, c.version FROM cache c "
               "JOIN repos r ON r.id = c.repo ORDER BY 1, 2")
@@ -522,6 +532,8 @@ PARTS = [
     ("rule", 80, ("cache times", "cache.fetched, cache.used")),
     ("rule", 90, ("catalog times of writes", "catalog.added after the seed")),
     ("rule", 100, ("version times", "versions.created after the seed")),
+    ("rule", 100, ("download days", "downloads.day from the seed's day on, the counts of "
+                                    "those days summed per package and version")),
     # The host index says when each repository's version was made, to
     # the minute (the system's time zone): of one made in the run, the
     # run's minute.
