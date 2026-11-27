@@ -17,6 +17,9 @@ pub mod proxy;
 pub mod stats;
 pub mod status;
 
+#[cfg(test)]
+mod same_rules;
+
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 
