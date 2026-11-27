@@ -38,6 +38,7 @@ pub struct Ipk;
 /// What the server serves of an ipk tree beside its files.
 pub const TREE: TreeRules = TreeRules {
     cache: CACHE,
+    content_type: Some(content_type),
     ..TreeRules::DEFAULT
 };
 
@@ -47,6 +48,12 @@ const CACHE: &[(&str, &str)] = &[
     ("**/Packages.*", "no-cache"),
     ("key.pub", "no-cache"),
 ];
+
+/// The content type of a feed's index: text, as Debian's.
+fn content_type(path: &str) -> Option<&'static str> {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    (base == "Packages").then_some("text/plain; charset=utf-8")
+}
 
 /// Largest package taken in, and largest control member.
 pub const MAX_PKG: u64 = 2 << 30;

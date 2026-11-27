@@ -362,6 +362,7 @@ mod tests {
                 "deb", "apk", "rpm", "helm", "maven", "gems", "arch", "conda", "cran", "ipk",
             ])
         );
+        assert_eq!(ids(|r| r.tree.content_type.is_some()), set(&["deb", "ipk"]));
         // A format crate that says what its trees are has it in its row,
         // the others the default.
         for (name, dir) in crates() {

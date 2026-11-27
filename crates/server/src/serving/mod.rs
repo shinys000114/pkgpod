@@ -835,19 +835,22 @@ async fn get(
 const BY_HASH_KEPT: i64 = 86400;
 
 /// Content types by file name, for the names of the served tree (blob
-/// files in the store have none).
+/// files in the store have none): the formats' own (any format's, as
+/// one table answers for every tree, the first that knows the name),
+/// then [`shared_content_type`].
 pub fn content_type(name: &str) -> &'static str {
+    crate::registry::get()
+        .rows()
+        .iter()
+        .find_map(|r| r.tree.content_type.and_then(|f| f(name)))
+        .unwrap_or_else(|| shared_content_type(name))
+}
+
+/// The content types of every tree's names, after the formats' own.
+fn shared_content_type(name: &str) -> &'static str {
     let base = name.rsplit('/').next().unwrap_or(name);
     match base.rsplit_once('.').map(|(_, e)| e) {
-        _ if matches!(
-            base,
-            "Release" | "InRelease" | "Packages" | "Sources" | "Contents"
-        ) =>
-        {
-            "text/plain; charset=utf-8"
-        }
         _ if base == "key.asc" => "application/pgp-keys",
-        Some("deb" | "udeb") => "application/vnd.debian.binary-package",
         Some("gpg" | "asc") => "application/pgp-signature",
         Some("gz" | "tgz") => "application/gzip",
         Some("xz") => "application/x-xz",

@@ -52,6 +52,7 @@ pub struct Deb;
 /// What the server serves of a Debian tree beside its files.
 pub const TREE: TreeRules = TreeRules {
     cache: CACHE,
+    content_type: Some(content_type),
     ..TreeRules::DEFAULT
 };
 
@@ -69,6 +70,23 @@ const CACHE: &[(&str, &str)] = &[
     ("pool/**", "no-cache"),
     ("project/trace/**", "no-cache"),
 ];
+
+/// The content types of a Debian tree's names: its indexes are text,
+/// its packages Debian's.
+fn content_type(path: &str) -> Option<&'static str> {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    match base.rsplit_once('.').map(|(_, e)| e) {
+        _ if matches!(
+            base,
+            "Release" | "InRelease" | "Packages" | "Sources" | "Contents"
+        ) =>
+        {
+            Some("text/plain; charset=utf-8")
+        }
+        Some("deb" | "udeb") => Some("application/vnd.debian.binary-package"),
+        _ => None,
+    }
+}
 
 /// Settings of a deb mirror.
 pub fn mirror_settings() -> Vec<Field> {
