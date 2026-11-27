@@ -208,6 +208,16 @@ def mask(masker):
         if re.match(TIMES, path):
             also = ("content-length",) if "/-/v1/search" in path else ()
             hd, body = times(masker, "npm times", path, hd, body, after_writes, etag, also)
+        # A group's search says when it was asked, with as many digits
+        # of the nanoseconds as that time needs, so its length is the
+        # clock's; a HEAD of it has no body for "npm times" to find the
+        # time in. Its 401s and 404s are not "private" alone.
+        h = dict(hd)
+        if (re.match(r"/ngroup/-/v1/search(\?|$)", path) and not body
+                and h.get("content-type") == "application/json"
+                and h.get("cache-control") == "private"):
+            masker.counts["npm group search length"] += 1
+            hd = [[k, "*" if k == "content-length" else v] for k, v in hd]
         return hd, body
     return answer
 
@@ -237,6 +247,9 @@ PARTS = [
                                "search's of any length, with its content-length), the etag of "
                                "an answer they were in, the root of an npm version made in the "
                                "run")),
+    ("rule", 41, ("npm group search length", "the content-length of a HEAD of an npm group's "
+                                             "search: the time it holds is the request's, of "
+                                             "any length")),
     ("mask", 30, mask),
     ("fuzz sample", 10, npm_doc("fz", "1.0.0", b"fz")),
     ("fuzz sample", 70, b'"1.0.0"'),
