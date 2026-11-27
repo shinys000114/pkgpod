@@ -77,4 +77,5 @@ FORMATS = [import_module(f"{__name__}.{name}") for name in (
     "cran",
     "arch",
     "ipk",
+    "rpm",
 )]
