@@ -9,27 +9,25 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use axum::extract::Request;
-use axum::http::{HeaderValue, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use http::{HeaderValue, StatusCode, header};
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Version};
+use pkgpod_proto::body::{Request, Response};
 use pkgpod_proto::host::Host;
 use serde_json::{Value, json};
 
 fn reply(v: Value) -> Response {
-    let mut r = (StatusCode::OK, axum::Json(v)).into_response();
+    let mut r = pkgpod_proto::reply::json(StatusCode::OK, &v);
     r.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     r
 }
 
 fn not_found() -> Response {
-    (
+    pkgpod_proto::reply::json(
         StatusCode::NOT_FOUND,
-        axum::Json(json!({"status": "error", "message": "not found"})),
+        &json!({"status": "error", "message": "not found"}),
     )
-        .into_response()
 }
 
 pub async fn read(
@@ -116,7 +114,6 @@ pub async fn read(
             let path = format!("{vendor}/{pkg}/{file}");
             match app.engine().objects().resolve(&v.root, &path) {
                 Ok(Some(Entry::Blob { sha256, .. })) => {
-                    let req = req.map(pkgpod_proto::body::boxed);
                     app.serve_counted(
                         &repo.name,
                         &path,
@@ -126,7 +123,6 @@ pub async fn read(
                         req,
                     )
                     .await
-                    .map(axum::body::Body::new)
                 }
                 _ => not_found(),
             }

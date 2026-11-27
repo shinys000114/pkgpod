@@ -701,8 +701,10 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
                 ),
             );
         }
+        let req = req.map(pkgpod_proto::body::boxed);
         return crate::protocols::composer::read(app, &served.repo, version, &rel, &base_url, req)
-            .await;
+            .await
+            .map(axum::body::Body::new);
     }
     if served.repo.format == "go" && matches!(method, Method::GET | Method::HEAD) {
         if role.is_none() {
