@@ -427,12 +427,15 @@ def writes(c, who):
         ("GET", f"{base}/true/Packages", {}, None),
         ("GET", f"{base}/@first/main/Packages", {}, None),
         ("GET", f"{base}/", {}, None)])
-    # Feeds it refuses (and one at the length it takes), then packages.
+    # Feeds it refuses (and one at the length it takes; one named as
+    # the key, taken, which the key is put over where it is served),
+    # then packages.
     feeds = ["..%2Fx", "a%2Fb", ".hidden", "-x", "_x", "x:y", "a%20b", "f" * 201, "f" * 200,
-             "%00"]
+             "%00", "key.pub"]
     seq(f"ipk feeds refused {who}", who,
         [("PUT", f"{base}/upload?feed={f}", {}, pkg("bf")) for f in feeds]
-        + gets(base, ["", f"{'f' * 200}/Packages"]))
+        + gets(base, ["", f"{'f' * 200}/Packages", "key.pub", "key.pub/", "key.pub/Packages",
+                      f"key.pub/bf-{who}_1.0_all.ipk"]))
     seq(f"ipk uploads refused {who}", who,
         [("PUT", f"{base}/upload?feed=main", {}, b) for _, b in refused()]
         + [("PUT", f"{base}/upload?feed=x86_64", {}, HELLO11)]
