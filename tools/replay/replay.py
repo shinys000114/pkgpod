@@ -182,6 +182,9 @@ FUZZ_FORMATS = {m.NAME: m.FUZZ for m in FORMATS if hasattr(m, "FUZZ")}
 # Formats whose writes the fuzz may make: their times are masked (or they
 # keep none), so an accepted write leaves both runs alike.
 FUZZ_WRITABLE = {m.NAME for m in FORMATS if getattr(m, "FUZZ_WRITABLE", False)}
+# Who may write, held back from writing in the other formats: the trust
+# rule's token too, since a format may list a repository for it.
+FUZZ_WRITERS = ("writer", "wtoken", "wbearer", "admin", "ptoken")
 # What a format's addresses start with before the repository.
 FUZZ_PREFIX = {m.NAME: m.FUZZ_PREFIX for m in FORMATS if hasattr(m, "FUZZ_PREFIX")}
 FUZZ_ACCEPT = ["*/*", "application/json", "text/html", "application/vnd.pypi.simple.v1+json",
@@ -241,7 +244,7 @@ def fuzz_requests(n=FUZZ_N):
         method = rng.choices(["GET", "HEAD", "PUT", "POST", "DELETE", "PATCH", "OPTIONS"],
                              weights=[45, 15, 12, 10, 8, 5, 5])[0]
         writes = method not in ("GET", "HEAD", "OPTIONS")
-        if writes and f not in FUZZ_WRITABLE and who in ("writer", "wtoken", "wbearer", "admin"):
+        if writes and f not in FUZZ_WRITABLE and who in FUZZ_WRITERS:
             method = rng.choice(["GET", "HEAD"])
             writes = False
         h = {}
@@ -347,7 +350,7 @@ def fuzz_mutants(base, n=FUZZ_N):
         path = fuzz_escape(path)
         f = fuzz_format(path)
         if (method not in ("GET", "HEAD", "OPTIONS") and f not in FUZZ_WRITABLE
-                and who in ("writer", "wtoken", "wbearer", "admin")):
+                and who in FUZZ_WRITERS):
             method, body = rng.choice(["GET", "HEAD"]), None
         out.append((f"mutant {i:04d} {f} {who}", who, method, path, h, body))
     return out
