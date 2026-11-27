@@ -16,7 +16,7 @@ pub mod source;
 pub mod verify;
 pub mod version;
 
-pub use format::Deb;
+pub use format::{Deb, TREE};
 
 /// Helpers for tests of pkgpod crates (dpkg-deb fixtures, gpg keys); not
 /// part of the API.

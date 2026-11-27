@@ -26,12 +26,25 @@ use pkgpod_engine::format::{OpSpec, PublishCx};
 use pkgpod_engine::settings::Field;
 use pkgpod_engine::tree::{Edit, Entry};
 use pkgpod_engine::{Cx, Error, Format, Item, Kind, Result, Upload};
+use pkgpod_proto::tree::TreeRules;
 use serde_json::{Map, Value, json};
 use yaml_rust2::Yaml;
 
 pub mod protocol;
 
 pub struct Helm;
+
+/// What the server serves of a chart repository beside its files.
+pub const TREE: TreeRules = TreeRules {
+    cache: CACHE,
+    ..TreeRules::DEFAULT
+};
+
+const CACHE: &[(&str, &str)] = &[
+    // Indexes made per version: always revalidated (by ETag), so a
+    // cache in between never serves one an upload replaced.
+    ("index.yaml", "no-cache"),
+];
 
 /// Largest chart taken in, and largest Chart.yaml.
 pub const MAX_CHART: u64 = 256 << 20;

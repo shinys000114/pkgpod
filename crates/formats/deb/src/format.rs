@@ -30,6 +30,7 @@ use pkgpod_base::Digest;
 use pkgpod_engine::settings::Field;
 use pkgpod_engine::tree::{Edit, Entry};
 use pkgpod_engine::{Cx, Error, FormHints, Format, Item, Kind, PublishCx, Result, Upload};
+use pkgpod_proto::tree::TreeRules;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
@@ -47,6 +48,27 @@ use crate::version;
 const GENERATOR: u32 = 4;
 
 pub struct Deb;
+
+/// What the server serves of a Debian tree beside its files.
+pub const TREE: TreeRules = TreeRules {
+    cache: CACHE,
+    ..TreeRules::DEFAULT
+};
+
+/// Cache-Control by path: apt indexes are revalidated (they change
+/// in place), by-hash files kept (their names change with their
+/// content), pool files revalidated (cheap, by ETag): a replace in a
+/// hosted repository and a mirror's sync (of a file upstream rebuilt,
+/// by rsync, from another source) put other content at a pool name, and
+/// a cache that kept the old file would fail apt's hash check. A
+/// mirror's trace files (project/trace/<host>, written at each sync)
+/// are revalidated too.
+const CACHE: &[(&str, &str)] = &[
+    ("**/by-hash/**", "public, max-age=31536000, immutable"),
+    ("dists/**", "no-cache"),
+    ("pool/**", "no-cache"),
+    ("project/trace/**", "no-cache"),
+];
 
 /// Settings of a deb mirror.
 pub fn mirror_settings() -> Vec<Field> {

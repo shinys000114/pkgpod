@@ -2319,6 +2319,7 @@ dependencies = [
  "flate2",
  "pkgpod-base",
  "pkgpod-engine",
+ "pkgpod-proto",
  "serde_json",
  "sha1 0.11.0",
  "tar",
@@ -2333,6 +2334,7 @@ dependencies = [
  "liblzma",
  "pkgpod-base",
  "pkgpod-engine",
+ "pkgpod-proto",
  "serde_json",
  "tar",
  "zstd",
@@ -2404,6 +2406,7 @@ dependencies = [
  "md-5 0.11.0",
  "pkgpod-base",
  "pkgpod-engine",
+ "pkgpod-proto",
  "serde_json",
  "tar",
  "zstd",
@@ -2417,6 +2420,7 @@ dependencies = [
  "md-5 0.11.0",
  "pkgpod-base",
  "pkgpod-engine",
+ "pkgpod-proto",
  "serde_json",
  "tar",
 ]
@@ -2433,6 +2437,7 @@ dependencies = [
  "pkgpod-base",
  "pkgpod-deb",
  "pkgpod-engine",
+ "pkgpod-proto",
  "rand 0.8.8",
  "serde",
  "serde_json",
@@ -2543,6 +2548,7 @@ dependencies = [
  "pkgpod-base",
  "pkgpod-deb",
  "pkgpod-engine",
+ "pkgpod-proto",
  "serde_json",
  "tar",
 ]
@@ -2555,6 +2561,7 @@ dependencies = [
  "md-5 0.11.0",
  "pkgpod-base",
  "pkgpod-engine",
+ "pkgpod-proto",
  "serde_json",
  "sha1 0.11.0",
  "sha2 0.11.0",
@@ -2684,6 +2691,7 @@ dependencies = [
  "flate2",
  "pkgpod-base",
  "pkgpod-engine",
+ "pkgpod-proto",
  "serde_json",
 ]
 

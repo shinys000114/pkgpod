@@ -36,10 +36,26 @@ use pkgpod_engine::format::{OpSpec, PublishCx};
 use pkgpod_engine::settings::Field;
 use pkgpod_engine::tree::{Edit, Entry};
 use pkgpod_engine::{Cx, Error, Format, Item, Kind, Result, Upload};
+use pkgpod_proto::tree::TreeRules;
 use serde_json::{Value, json};
 use yaml_rust2::Yaml;
 
 pub struct Gems;
+
+/// What the server serves of a gems tree beside its files.
+pub const TREE: TreeRules = TreeRules {
+    cache: CACHE,
+    ..TreeRules::DEFAULT
+};
+
+const CACHE: &[(&str, &str)] = &[
+    // Indexes made per version: always revalidated (by ETag), so a
+    // cache in between never serves one an upload replaced.
+    ("versions", "no-cache"),
+    ("names", "no-cache"),
+    ("*specs.4.8.gz", "no-cache"),
+    ("info/*", "no-cache"),
+];
 
 /// Largest gem taken in, and largest metadata.gz unpacked.
 pub const MAX_GEM: u64 = 512 << 20;

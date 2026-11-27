@@ -864,51 +864,39 @@ pub fn content_type(name: &str) -> &'static str {
     }
 }
 
-/// Built-in Cache-Control rules: apt indexes are revalidated (they change
-/// in place), by-hash files kept (their names change with their
-/// content), pool files revalidated (cheap, by ETag): a replace in a
-/// hosted repository and a mirror's sync (of a file upstream rebuilt,
-/// by rsync, from another source) put other content at a pool name, and
-/// a cache that kept the old file would fail apt's hash check. Checksum
-/// files are revalidated, the rest kept for an hour.
-const DEFAULT_CACHE: [(&str, &str); 28] = [
-    ("**/by-hash/**", "public, max-age=31536000, immutable"),
-    ("dists/**", "no-cache"),
-    ("pool/**", "no-cache"),
-    ("project/trace/**", "no-cache"),
+/// The Cache-Control rows of every tree, after its format's own:
+/// checksum files are revalidated, the rest kept for an hour.
+const SHARED_CACHE: [(&str, &str); 5] = [
     ("**/*SUMS*", "no-cache"),
     ("**/*.sha256", "no-cache"),
     ("**/*.sha512", "no-cache"),
-    // Indexes made per version: always revalidated (by ETag), so a
-    // cache in between never serves one an upload replaced.
-    ("**/APKINDEX.tar.gz", "no-cache"),
-    ("**/repodata.json", "no-cache"),
-    ("**/PACKAGES*", "no-cache"),
-    ("**/repodata/repomd.xml*", "no-cache"),
-    ("**/*.db", "no-cache"),
-    ("**/*.db.*", "no-cache"),
-    ("**/*.files", "no-cache"),
-    ("**/*.files.*", "no-cache"),
-    ("index.yaml", "no-cache"),
-    ("versions", "no-cache"),
-    ("names", "no-cache"),
-    ("*specs.4.8.gz", "no-cache"),
-    ("info/*", "no-cache"),
-    ("**/maven-metadata.xml*", "no-cache"),
-    ("**/*.md5", "no-cache"),
-    ("**/*.sha1", "no-cache"),
+    // The key deb, rpm and arch clients trust, put in each version:
+    // revalidated as their indexes are.
     ("key.asc", "no-cache"),
-    // ipk feeds: the index and its signature change together.
-    ("**/Packages", "no-cache"),
-    ("**/Packages.*", "no-cache"),
-    ("key.pub", "no-cache"),
     ("**", "public, max-age=3600"),
 ];
 
-/// [`DEFAULT_CACHE`] compiled, once: each pattern, and for "**/x" also
+/// The Cache-Control rows of the served trees: every format's own (its
+/// [`TreeRules`](pkgpod_proto::tree::TreeRules)), in the registry's
+/// order, then [`SHARED_CACHE`]; the first that matches answers. One
+/// table answers for every repository whatever its format (a pypi
+/// repository's tree is asked deb's rows too), as it did when the
+/// server wrote them all.
+pub(crate) fn cache_rows(
+    registry: &crate::registry::Registry,
+) -> Vec<(&'static str, &'static str)> {
+    registry
+        .rows()
+        .iter()
+        .flat_map(|r| r.tree.cache.iter().copied())
+        .chain(SHARED_CACHE)
+        .collect()
+}
+
+/// [`cache_rows`] compiled, once: each pattern, and for "**/x" also
 /// "x" (which matches at the top).
 static CACHE_RULES: LazyLock<Vec<(Vec<glob::Pattern>, &'static str)>> = LazyLock::new(|| {
-    DEFAULT_CACHE
+    cache_rows(crate::registry::get())
         .iter()
         .map(|(p, v)| {
             let pats = std::iter::once(*p)

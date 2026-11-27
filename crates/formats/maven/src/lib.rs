@@ -32,10 +32,25 @@ use pkgpod_engine::format::{OpSpec, PublishCx};
 use pkgpod_engine::settings::Field;
 use pkgpod_engine::tree::{Edit, Entry};
 use pkgpod_engine::{Cx, Error, Format, Item, Kind, Result, Upload};
+use pkgpod_proto::tree::TreeRules;
 use serde_json::{Value, json};
 use sha1::Digest as _;
 
 pub struct Maven;
+
+/// What the server serves of a Maven tree beside its files.
+pub const TREE: TreeRules = TreeRules {
+    cache: CACHE,
+    ..TreeRules::DEFAULT
+};
+
+const CACHE: &[(&str, &str)] = &[
+    // Indexes made per version: always revalidated (by ETag), so a
+    // cache in between never serves one an upload replaced.
+    ("**/maven-metadata.xml*", "no-cache"),
+    ("**/*.md5", "no-cache"),
+    ("**/*.sha1", "no-cache"),
+];
 
 pub const METADATA: &str = "maven-metadata.xml";
 pub const SUMS: &[&str] = &["md5", "sha1", "sha256", "sha512"];

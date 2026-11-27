@@ -31,9 +31,22 @@ use pkgpod_engine::format::{OpSpec, PublishCx};
 use pkgpod_engine::settings::Field;
 use pkgpod_engine::tree::{Edit, Entry};
 use pkgpod_engine::{Cx, Error, Format, Item, Kind, Result, Upload};
+use pkgpod_proto::tree::TreeRules;
 use serde_json::{Map, Value, json};
 
 pub struct Conda;
+
+/// What the server serves of a channel beside its files.
+pub const TREE: TreeRules = TreeRules {
+    cache: CACHE,
+    ..TreeRules::DEFAULT
+};
+
+const CACHE: &[(&str, &str)] = &[
+    // Indexes made per version: always revalidated (by ETag), so a
+    // cache in between never serves one an upload replaced.
+    ("**/repodata.json", "no-cache"),
+];
 
 /// Largest package taken in, and largest info/index.json.
 pub const MAX_PKG: u64 = 2 << 30;

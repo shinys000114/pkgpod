@@ -11,6 +11,7 @@ use axum::http::Method;
 use axum::response::Response;
 use futures_util::future::BoxFuture;
 use pkgpod_engine::Format;
+use pkgpod_proto::tree::TreeRules;
 
 use crate::App;
 use crate::serving::At;
@@ -48,6 +49,9 @@ pub struct Row {
     pub browsable: bool,
     /// What it answers at a host's root, if anything.
     pub claim: Option<HostClaim>,
+    /// What it says of its trees' files, which the tree serving asks
+    /// (its Cache-Control rows, …).
+    pub tree: TreeRules,
 }
 
 impl Row {
@@ -57,7 +61,12 @@ impl Row {
             serving: None,
             browsable: true,
             claim: None,
+            tree: TreeRules::DEFAULT,
         }
+    }
+
+    fn tree(self, tree: TreeRules) -> Row {
+        Row { tree, ..self }
     }
 
     fn protocol(self, serving: &'static dyn Serve) -> Row {
@@ -93,7 +102,7 @@ impl Registry {
         use crate::protocols as p;
         Registry {
             rows: vec![
-                Row::of(pkgpod_deb::Deb),
+                Row::of(pkgpod_deb::Deb).tree(pkgpod_deb::TREE),
                 Row::of(pkgpod_files::Files),
                 Row::of(pkgpod_oci::Oci)
                     .protocol(&p::oci::Serving)
@@ -107,24 +116,30 @@ impl Registry {
                     .protocol(&p::cargo::Serving)
                     .unlisted(),
                 Row::of(pkgpod_go::Go).protocol(&p::go::Serving).unlisted(),
-                Row::of(pkgpod_apk::Apk),
-                Row::of(pkgpod_rpm::Rpm).protocol(&p::rpm::Serving),
-                Row::of(pkgpod_helm::Helm).protocol(&p::helm::Serving),
-                Row::of(pkgpod_maven::Maven),
-                Row::of(pkgpod_gems::Gems).protocol(&p::gems::Serving),
-                Row::of(pkgpod_arch::Arch),
+                Row::of(pkgpod_apk::Apk).tree(pkgpod_apk::TREE),
+                Row::of(pkgpod_rpm::Rpm)
+                    .protocol(&p::rpm::Serving)
+                    .tree(pkgpod_rpm::TREE),
+                Row::of(pkgpod_helm::Helm)
+                    .protocol(&p::helm::Serving)
+                    .tree(pkgpod_helm::TREE),
+                Row::of(pkgpod_maven::Maven).tree(pkgpod_maven::TREE),
+                Row::of(pkgpod_gems::Gems)
+                    .protocol(&p::gems::Serving)
+                    .tree(pkgpod_gems::TREE),
+                Row::of(pkgpod_arch::Arch).tree(pkgpod_arch::TREE),
                 Row::of(pkgpod_nuget::Nuget)
                     .protocol(&p::nuget::Serving)
                     .unlisted(),
                 Row::of(pkgpod_composer::Composer)
                     .protocol(&p::composer::Serving)
                     .unlisted(),
-                Row::of(pkgpod_conda::Conda),
-                Row::of(pkgpod_cran::Cran),
+                Row::of(pkgpod_conda::Conda).tree(pkgpod_conda::TREE),
+                Row::of(pkgpod_cran::Cran).tree(pkgpod_cran::TREE),
                 Row::of(pkgpod_pub::Pub)
                     .protocol(&p::pub_api::Serving)
                     .unlisted(),
-                Row::of(pkgpod_ipk::Ipk),
+                Row::of(pkgpod_ipk::Ipk).tree(pkgpod_ipk::TREE),
                 Row::of(pkgpod_terraform::Terraform)
                     .protocol(&p::terraform::Serving)
                     .unlisted()
@@ -330,6 +345,32 @@ mod tests {
                 (protocol && name != "pypi") || name == "rpm",
                 "{name}: a protocol {protocol}, a serving entry {entry}"
             );
+        }
+    }
+
+    #[test]
+    fn formats_with_tree_rules_have_them_in_their_row() {
+        let says = |t: &TreeRules| {
+            !t.cache.is_empty()
+                || t.content_named.is_some()
+                || t.content_type.is_some()
+                || t.put_path
+        };
+        assert_eq!(
+            ids(|r| !r.tree.cache.is_empty()),
+            set(&[
+                "deb", "apk", "rpm", "helm", "maven", "gems", "arch", "conda", "cran", "ipk",
+            ])
+        );
+        // A format crate that says what its trees are has it in its row,
+        // the others the default.
+        for (name, dir) in crates() {
+            let declared = std::fs::read_dir(dir.join("src")).unwrap().any(|e| {
+                std::fs::read_to_string(e.unwrap().path())
+                    .is_ok_and(|s| s.contains("pub const TREE: TreeRules"))
+            });
+            let row = get().row(&name).unwrap();
+            assert_eq!(says(&row.tree), declared, "{name}");
         }
     }
 

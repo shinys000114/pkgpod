@@ -30,9 +30,23 @@ use pkgpod_engine::format::{FormHints, OpSpec, PublishCx};
 use pkgpod_engine::settings::Field;
 use pkgpod_engine::tree::{Edit, Entry};
 use pkgpod_engine::{Cx, Error, Format, Item, Kind, Result, Upload};
+use pkgpod_proto::tree::TreeRules;
 use serde_json::{Value, json};
 
 pub struct Ipk;
+
+/// What the server serves of an ipk tree beside its files.
+pub const TREE: TreeRules = TreeRules {
+    cache: CACHE,
+    ..TreeRules::DEFAULT
+};
+
+const CACHE: &[(&str, &str)] = &[
+    // ipk feeds: the index and its signature change together.
+    ("**/Packages", "no-cache"),
+    ("**/Packages.*", "no-cache"),
+    ("key.pub", "no-cache"),
+];
 
 /// Largest package taken in, and largest control member.
 pub const MAX_PKG: u64 = 2 << 30;

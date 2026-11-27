@@ -13,7 +13,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use super::{cache_control, content_type, stored_cache_control};
+use super::{cache_control, cache_rows, content_type, stored_cache_control};
 
 /// The Cache-Control rows, as they were.
 const TABLE: [(&str, &str); 28] = [
@@ -64,17 +64,20 @@ fn compiled() -> Vec<Vec<glob::Pattern>> {
         .collect()
 }
 
-/// The row of [`TABLE`] that answered `rel`, as it was matched.
-fn first_row(rules: &[Vec<glob::Pattern>], rel: &str) -> Option<usize> {
+/// Whether a compiled row matches `rel`, as it was matched.
+fn matches(pats: &[glob::Pattern], rel: &str) -> bool {
     let opts = glob::MatchOptions {
         case_sensitive: true,
         require_literal_separator: true,
         require_literal_leading_dot: false,
     };
     let rel = rel.trim_start_matches('/');
-    rules
-        .iter()
-        .position(|pats| pats.iter().any(|g| g.matches_with(rel, opts)))
+    pats.iter().any(|g| g.matches_with(rel, opts))
+}
+
+/// The row of [`TABLE`] that answered `rel`.
+fn first_row(rules: &[Vec<glob::Pattern>], rel: &str) -> Option<usize> {
+    rules.iter().position(|pats| matches(pats, rel))
 }
 
 fn was_cache_control(rules: &[Vec<glob::Pattern>], rel: &str) -> &'static str {
@@ -381,6 +384,42 @@ fn cache_control_is_as_it_was() {
         assert!(*n > 0, "{:?} answered no path", TABLE[i].0);
     }
     assert!(paths.len() > 50_000, "{} paths", paths.len());
+}
+
+/// The registry's rows are [`TABLE`]'s, each once, in another order: a
+/// pair of rows whose order changed gives one value, so whichever comes
+/// first answers alike, or else no path matches both. By-hash's row (the
+/// only one kept for a year) is still first, "**" still last.
+#[test]
+fn rows_reordered_only_where_it_cannot_matter() {
+    let union = cache_rows(crate::registry::get());
+    let (mut a, mut b) = (union.clone(), TABLE.to_vec());
+    a.sort();
+    b.sort();
+    assert_eq!(a, b, "the rows are not the table's, each once");
+    assert_eq!(union.first(), TABLE.first());
+    assert_eq!(union.last(), TABLE.last());
+    let at = |row: (&str, &str)| union.iter().position(|r| *r == row).unwrap();
+    let rules = compiled();
+    let paths = paths();
+    for i in 0..TABLE.len() {
+        for j in i + 1..TABLE.len() {
+            if at(TABLE[i]) < at(TABLE[j]) {
+                continue;
+            }
+            if TABLE[i].1 == TABLE[j].1 {
+                continue;
+            }
+            for p in &paths {
+                assert!(
+                    !(matches(&rules[i], p) && matches(&rules[j], p)),
+                    "{:?} and {:?} change places and both match {p:?}",
+                    TABLE[i].0,
+                    TABLE[j].0
+                );
+            }
+        }
+    }
 }
 
 #[test]

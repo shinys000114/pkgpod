@@ -38,10 +38,23 @@ use pkgpod_engine::format::{OpSpec, PublishCx};
 use pkgpod_engine::settings::Field;
 use pkgpod_engine::tree::{Edit, Entry};
 use pkgpod_engine::{Cx, Error, Format, Item, Kind, Result, Upload};
+use pkgpod_proto::tree::TreeRules;
 use serde_json::{Value, json};
 use sha1::Digest as _;
 
 pub struct Apk;
+
+/// What the server serves of an Alpine tree beside its files.
+pub const TREE: TreeRules = TreeRules {
+    cache: CACHE,
+    ..TreeRules::DEFAULT
+};
+
+const CACHE: &[(&str, &str)] = &[
+    // Indexes made per version: always revalidated (by ETag), so a
+    // cache in between never serves one an upload replaced.
+    ("**/APKINDEX.tar.gz", "no-cache"),
+];
 
 /// Changes what publishing makes; reused indexes are made again.
 const GENERATOR: i64 = 1;
