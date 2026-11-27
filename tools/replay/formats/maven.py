@@ -1,0 +1,501 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+"""Maven: hosted public and private (hello: a SNAPSHOT of plain files,
+a release deployed as mvn deploy does, a label, a release uploaded by
+the API, a SNAPSHOT of timestamped builds and of names that are none;
+greet, of every packaging and file kind; plugins, by their goal
+prefixes, and jars that only look like plugins; tools, whose directory
+is a plugin's group too; a deep group; names with + and ~; paths under
+by-hash and repodata; an artifact of SNAPSHOTs only), one with nothing
+in it, a proxy of the stub's Maven repository. Maven has no protocol
+module of its own: its repositories are the server's tree, read by
+path, written by PUT to the file's own path; the format makes each
+artifact's maven-metadata.xml, a SNAPSHOT's, a group's of its plugins,
+and every file's checksums."""
+
+import gzip
+import hashlib
+import io
+import tarfile
+import zipfile
+
+from core import UP, auth_header, request
+
+NAME = "maven"
+# The most of a plugin's META-INF/maven/plugin.xml read (the format's).
+MAX_PLUGIN_XML = 4 << 20
+
+
+def zipped(members, deflate=False):
+    """A zip of `members` (name, bytes), stored or deflated, the same
+    bytes each time."""
+    raw = io.BytesIO()
+    method = zipfile.ZIP_DEFLATED if deflate else zipfile.ZIP_STORED
+    with zipfile.ZipFile(raw, "w", method) as z:
+        for name, data in members:
+            info = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
+            info.create_system = 3
+            info.external_attr = 0o644 << 16
+            info.compress_type = method
+            z.writestr(info, data)
+    return raw.getvalue()
+
+
+def tgz(members):
+    """A .tar.gz of `members` (name, bytes), the same bytes each time."""
+    raw = io.BytesIO()
+    with tarfile.open(fileobj=raw, mode="w", format=tarfile.USTAR_FORMAT) as t:
+        for name, data in members:
+            info = tarfile.TarInfo(name)
+            info.size, info.mtime, info.mode = len(data), 1790000000, 0o644
+            t.addfile(info, io.BytesIO(data))
+    return gzip.compress(raw.getvalue(), mtime=0)
+
+
+def jar(artifact, version, note=""):
+    """A jar of `artifact` `version` (`note` makes other bytes of it)."""
+    return zipped([("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\r\nCreated-By: replay\r\n\r\n"),
+                   (f"demo/{artifact}.txt", f"{artifact} {version}{note}\n".encode())])
+
+
+def pom(group, artifact, version, packaging="jar"):
+    return (f'<?xml version="1.0" encoding="UTF-8"?>\n'
+            f'<project xmlns="http://maven.apache.org/POM/4.0.0">\n'
+            f"  <modelVersion>4.0.0</modelVersion>\n  <groupId>{group}</groupId>\n"
+            f"  <artifactId>{artifact}</artifactId>\n  <version>{version}</version>\n"
+            f"  <packaging>{packaging}</packaging>\n</project>\n").encode()
+
+
+def plugin_xml(prefix, name=None, pad=0):
+    """A plugin's descriptor: its name (if any) and goal prefix before
+    the mojos (whose own goal prefix is not the plugin's), padded with a
+    comment of `pad` bytes."""
+    x = "<plugin>\n"
+    if name is not None:
+        x += f"  <name>{name}</name>\n"
+    x += f"  <goalPrefix>{prefix}</goalPrefix>\n"
+    if pad:
+        x += "  <!-- " + "p" * pad + " -->\n"
+    x += "  <mojos><mojo><goal>hello</goal><goalPrefix>no</goalPrefix></mojo></mojos>\n</plugin>\n"
+    return x.encode()
+
+
+def plugin_jar(prefix, name=None, pad=0):
+    return zipped([("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\r\n\r\n"),
+                   ("META-INF/maven/plugin.xml", plugin_xml(prefix, name, pad)),
+                   ("demo/HelloMojo.class", b"\xca\xfe\xba\xbe")], deflate=True)
+
+
+def client_metadata(group, artifact, versions):
+    """The maven-metadata.xml mvn deploy uploads (the server makes its
+    own)."""
+    vs = "".join(f"      <version>{v}</version>\n" for v in versions)
+    return (f'<?xml version="1.0" encoding="UTF-8"?>\n<metadata>\n  <groupId>{group}</groupId>\n'
+            f"  <artifactId>{artifact}</artifactId>\n  <versioning>\n"
+            f"    <release>{versions[-1]}</release>\n    <versions>\n{vs}    </versions>\n"
+            f"    <lastUpdated>20260101000000</lastUpdated>\n  </versioning>\n</metadata>\n"
+            ).encode()
+
+
+def sums(body):
+    """A file's checksums as Maven names them."""
+    return {"md5": hashlib.md5(body).hexdigest(), "sha1": hashlib.sha1(body).hexdigest(),
+            "sha256": hashlib.sha256(body).hexdigest(),
+            "sha512": hashlib.sha512(body).hexdigest()}
+
+
+def deployed(path, body, exts=("sha1", "md5")):
+    """What mvn deploy PUTs for a file at `path`: it, then its
+    checksums."""
+    s = sums(body)
+    return [(path, body)] + [(f"{path}.{e}", s[e].encode()) for e in exts]
+
+
+HELLO = "org/acme/hello"
+J100 = f"{HELLO}/1.0.0/hello-1.0.0.jar"
+P100 = f"{HELLO}/1.0.0/hello-1.0.0.pom"
+SNAP = f"{HELLO}/1.2.0-SNAPSHOT"
+B2 = f"{SNAP}/hello-1.2.0-20260102.100000-2"
+PLUGINS = "org/acme/plugins"
+DEEP = "com/example/deep/lib/lib"
+ODD = "org/acme/odd~name"
+BY_HASH = "org/by-hash/x/1.0"
+HEX = "ab" * 32
+REPODATA = f"org/acme/{HEX}/repodata"
+# Names of files of greet by what the server serves them as (a content
+# type each).
+KINDS = (".tar", ".tar.xz", ".tar.zst", ".tar.bz2", ".tgz", ".img", ".iso", ".deb", ".udeb",
+         ".gpg", "-SHA256SUMS", ".md", ".sum", ".htm", ".xml", ".bin")
+
+
+def tree():
+    """What the seed puts in each hosted repository, in order: (how,
+    path, bytes), how "put" (to the tree, as mvn deploy does), "api"
+    (pkgpod upload, by the management API) or "label" (the label first,
+    of what is there). An artifact's versions come in the order of
+    their names: its maven-metadata.xml lists them by when they came,
+    then by name, so those of one second keep that order."""
+    out = []
+
+    def put(path, body, exts=("sha1", "md5")):
+        out.extend(("put", p, b) for p, b in deployed(path, body, exts))
+
+    def api(path, body):
+        out.append(("api", path, body))
+
+    # hello 0.9.0-SNAPSHOT: plain files (no timestamped build, so no
+    # SNAPSHOT metadata), by the API.
+    api(f"{HELLO}/0.9.0-SNAPSHOT/hello-0.9.0-SNAPSHOT.pom",
+        pom("org.acme", "hello", "0.9.0-SNAPSHOT"))
+    api(f"{HELLO}/0.9.0-SNAPSHOT/hello-0.9.0-SNAPSHOT.jar", jar("hello", "0.9.0-SNAPSHOT"))
+    # hello 1.0.0, as mvn deploy sends it: each file and its checksums,
+    # a signature, then the metadata it made (dropped: the server makes
+    # its own).
+    put(J100, jar("hello", "1.0.0"))
+    put(P100, pom("org.acme", "hello", "1.0.0"))
+    put(f"{HELLO}/1.0.0/hello-1.0.0-sources.jar", jar("hello", "1.0.0", " sources"))
+    put(f"{J100}.asc", b"-----BEGIN PGP SIGNATURE-----\nreplay\n-----END PGP SIGNATURE-----\n")
+    put(f"{HELLO}/maven-metadata.xml", client_metadata("org.acme", "hello", ["1.0.0"]))
+    out.append(("label", "first", None))
+    # hello 1.1.0, by the API.
+    api(f"{HELLO}/1.1.0/hello-1.1.0.pom", pom("org.acme", "hello", "1.1.0"))
+    api(f"{HELLO}/1.1.0/hello-1.1.0.jar", jar("hello", "1.1.0"))
+    api(f"{HELLO}/1.1.0/hello-1.1.0-javadoc.jar", jar("hello", "1.1.0", " javadoc"))
+    # hello 1.2.0-SNAPSHOT: two timestamped builds (the second with a
+    # classifier), their metadata (dropped), and names that are no
+    # build: plain, a time that is not digits, a build number that is
+    # none, no extension, a classifier without one.
+    for ts, n in (("20260101.100000", 1), ("20260102.100000", 2)):
+        put(f"{SNAP}/hello-1.2.0-{ts}-{n}.pom", pom("org.acme", "hello", "1.2.0-SNAPSHOT"))
+        put(f"{SNAP}/hello-1.2.0-{ts}-{n}.jar", jar("hello", f"1.2.0-{ts}-{n}"))
+    put(f"{B2}-sources.jar", jar("hello", "1.2.0-20260102.100000-2", " sources"))
+    put(f"{SNAP}/maven-metadata.xml", client_metadata("org.acme", "hello", ["1.2.0-SNAPSHOT"]))
+    for f in ("hello-1.2.0-SNAPSHOT.jar", "hello-1.2.0-20260103.10000x-3.jar",
+              "hello-1.2.0-20260103.100000-x.jar", "hello-1.2.0-20260103.100000-3",
+              "hello-1.2.0-20260103.100000-3-tests", "hello-1.2.0-2026010.100000-3.jar"):
+        api(f"{SNAP}/{f}", jar("hello", f))
+    # greet 1.0.0: a file of every kind, by the API.
+    g = "org/acme/greet/1.0.0/greet-1.0.0"
+    api(f"{g}.pom", pom("org.acme", "greet", "1.0.0", "war"))
+    for ext in (".war", ".aar", ".ear"):
+        api(g + ext, jar("greet", "1.0.0", ext))
+    api(f"{g}.module", b'{"formatVersion": "1.1", "component": {"group": "org.acme", '
+                       b'"module": "greet", "version": "1.0.0"}}\n')
+    api(f"{g}-dist.zip", zipped([("greet/README", b"greet 1.0.0\n")]))
+    api(f"{g}-bin.tar.gz", tgz([("greet/bin/greet", b"#!/bin/sh\necho greet\n")]))
+    api(f"{g}.txt", b"greet 1.0.0\n")
+    api(f"{g}.json", b'{"greet": "1.0.0"}\n')
+    api(f"{g}.html", b"<!doctype html><p>greet 1.0.0</p>\n")
+    for ext in KINDS:
+        api(g + ext, f"greet 1.0.0 {ext}\n".encode())
+    # Plugins, by their goal prefixes (with a name, without one); a
+    # goal prefix that is empty, a descriptor past what is read, a jar
+    # that is no zip, a zip that is no jar: no plugins.
+    for art, body, ext in (("hello-maven-plugin", plugin_jar("hello", "Hello Plugin"), "jar"),
+                           ("noname-maven-plugin", plugin_jar("noname"), "jar"),
+                           ("empty-maven-plugin", plugin_jar(""), "jar"),
+                           ("big-maven-plugin", plugin_jar("big", "Big", MAX_PLUGIN_XML), "jar"),
+                           ("broken-maven-plugin", b"not a zip", "jar"),
+                           ("zipped-maven-plugin", plugin_jar("zipped"), "zip")):
+        put(f"{PLUGINS}/{art}/1.0.0/{art}-1.0.0.{ext}", body)
+        put(f"{PLUGINS}/{art}/1.0.0/{art}-1.0.0.pom", pom("org.acme.plugins", art, "1.0.0",
+                                                          "maven-plugin"))
+    # tools: an artifact whose directory is a plugin's group too (one
+    # maven-metadata.xml says both).
+    api("org/acme/tools/1.0.0/tools-1.0.0.pom", pom("org.acme", "tools", "1.0.0"))
+    api("org/acme/tools/1.0.0/tools-1.0.0.jar", jar("tools", "1.0.0"))
+    t = "org/acme/tools/tools-maven-plugin/1.0.0/tools-maven-plugin-1.0.0"
+    put(f"{t}.jar", plugin_jar("tools", "Tools"))
+    put(f"{t}.pom", pom("org.acme.tools", "tools-maven-plugin", "1.0.0", "maven-plugin"))
+    # A deep group; names with + and ~.
+    api(f"{DEEP}/2.0.0/lib-2.0.0.pom", pom("com.example.deep.lib", "lib", "2.0.0"))
+    api(f"{DEEP}/2.0.0/lib-2.0.0.jar", jar("lib", "2.0.0"))
+    put(f"{ODD}/1.0+build/odd~name-1.0+build.jar", jar("odd~name", "1.0+build"))
+    put(f"{ODD}/1.0+build/odd~name-1.0+build.pom", pom("org.acme", "odd~name", "1.0+build"))
+    # Paths the content-named rules know: under by-hash, and in a
+    # repodata directory (named by a hash, and not).
+    api(f"{BY_HASH}/x-1.0.jar", jar("x", "1.0"))
+    api(f"{REPODATA}/{HEX}-repodata.jar", jar(HEX, "repodata"))
+    api("org/acme/r/repodata/r-repodata.jar", jar("r", "repodata"))
+    # An artifact of SNAPSHOTs only (its metadata names no release).
+    put("org/acme/snaponly/1.0.0-SNAPSHOT/snaponly-1.0.0-20260101.100000-1.jar",
+        jar("snaponly", "1.0.0-20260101.100000-1"))
+    return out
+
+
+TREE = tree()
+# hello 1.0.0's jar's ETag before the writes (its sha256), to send as a
+# weak one.
+J100_TAG = hashlib.sha256(jar("hello", "1.0.0")).hexdigest()
+
+
+# ---- the upstream stub ----------------------------------------------------
+
+UP_JAR = jar("up", "1.0.0")
+UP_POM = pom("org.acme", "up", "1.0.0")
+UP_META = client_metadata("org.acme", "up", ["1.0.0"])
+UP_SNAP_JAR = jar("up", "1.1.0-20260101.100000-1")
+UP_SNAP_META = (b'<?xml version="1.0" encoding="UTF-8"?>\n<metadata modelVersion="1.1.0">\n'
+                b"  <groupId>org.acme</groupId>\n  <artifactId>up</artifactId>\n"
+                b"  <versioning>\n    <lastUpdated>20260101100000</lastUpdated>\n"
+                b"    <snapshot>\n      <timestamp>20260101.100000</timestamp>\n"
+                b"      <buildNumber>1</buildNumber>\n    </snapshot>\n  </versioning>\n"
+                b"  <version>1.1.0-SNAPSHOT</version>\n</metadata>\n")
+UA = "/maven/org/acme/up/1.0.0/up-1.0.0"
+# The stub's Maven repository: path -> (status, Content-Type or None,
+# body). Of the files whose .sha1 the proxy asks first: right (lower
+# case alone, upper case with the file's name), none, an error, no
+# hex, too short, wrong.
+UP_MAVEN = {
+    "/maven/org/acme/up/maven-metadata.xml": (200, "text/xml", UP_META),
+    "/maven/org/acme/up/maven-metadata.xml.sha1": (200, "text/plain",
+                                                   sums(UP_META)["sha1"].encode()),
+    f"{UA}.pom": (200, None, UP_POM),
+    f"{UA}.pom.sha1": (200, "text/plain", sums(UP_POM)["sha1"].encode()),
+    f"{UA}.jar": (200, "application/java-archive", UP_JAR),
+    f"{UA}.jar.sha1": (200, "text/plain", sums(UP_JAR)["sha1"].encode()),
+    f"{UA}.jar.md5": (200, "text/plain", sums(UP_JAR)["md5"].encode()),
+    f"{UA}.jar.sha256": (200, None, sums(UP_JAR)["sha256"].encode()),
+    f"{UA}.jar.sha512": (200, None, sums(UP_JAR)["sha512"].encode()),
+    f"{UA}.jar.asc": (200, "application/pgp-signature", b"up's signature\n"),
+    f"{UA}-sources.jar": (200, "application/java-archive", jar("up", "1.0.0", " sources")),
+    f"{UA}.war": (200, None, jar("up", "1.0.0", " war")),
+    f"{UA}.war.sha1": (200, "text/plain",
+                       sums(jar("up", "1.0.0", " war"))["sha1"].upper().encode()
+                       + b"  up-1.0.0.war\n"),
+    f"{UA}.aar": (200, None, jar("up", "1.0.0", " aar")),
+    f"{UA}.aar.sha1": (500, "text/plain", b"upstream broken\n"),
+    f"{UA}.ear": (200, None, jar("up", "1.0.0", " ear")),
+    f"{UA}.ear.sha1": (200, "text/plain", b"z" * 40),
+    f"{UA}.module": (200, "application/json", b'{"formatVersion": "1.1"}\n'),
+    f"{UA}.module.sha1": (200, "text/plain", b"abc def\n"),
+    "/maven/org/acme/up/1.1.0-SNAPSHOT/maven-metadata.xml": (200, "text/xml", UP_SNAP_META),
+    "/maven/org/acme/up/1.1.0-SNAPSHOT/up-1.1.0-20260101.100000-1.jar":
+        (200, "application/java-archive", UP_SNAP_JAR),
+    "/maven/org/acme/bad/1.0.0/bad-1.0.0.jar": (200, None, b"not what its sha1 says"),
+    "/maven/org/acme/bad/1.0.0/bad-1.0.0.jar.sha1": (200, "text/plain", b"0" * 40),
+    "/maven/org/acme/gone/1.0.0/gone-1.0.0.jar": (503, "text/plain", b"down\n"),
+    "/maven/org/acme/gone/maven-metadata.xml": (503, "text/plain", b"down\n"),
+}
+
+
+def stub(method, path, auth, bearer):
+    got = UP_MAVEN.get(path)
+    if got is None:
+        return None
+    st, ct, body = got
+    hd = {"ETag": '"' + hashlib.sha256(body).hexdigest()[:16] + '"',
+          "Last-Modified": "Mon, 02 Nov 2026 10:00:00 GMT"}
+    if ct:
+        hd["Content-Type"] = ct
+    return st, hd, body
+
+
+# ---- the seed -------------------------------------------------------------
+
+def seed(p, fx):
+    # Maven: hosted public and private (TREE; the private one takes a
+    # release's files again), one with nothing in it, a proxy of the
+    # stub (its address without the slash after it, names it excludes,
+    # a size it keeps that nothing here reaches).
+    aa = auth_header("admin")
+    for repo, settings in (("mvnpub", ["public=true"]),
+                           ("mvnpriv", ["public=false", "redeploy=true"])):
+        args = ["repo", "create", repo, "-f", "maven"]
+        for s in settings:
+            args += ["-s", s]
+        p.cli(*args)
+        for how, path, body in TREE:
+            if how == "label":
+                p.cli("label", repo, path)
+            elif how == "api":
+                f = f"{fx}/maven_" + path.replace("/", "_")
+                with open(f, "wb") as fh:
+                    fh.write(body)
+                p.cli("upload", repo, f, "-s", f"path={path}")
+            else:
+                st, _, out = request("PUT", f"/{repo}/{path}", aa, body)
+                if st != 201:
+                    raise SystemExit(f"maven put {repo}/{path}: {st} {out[:200]}")
+    p.cli("repo", "create", "mvnempty", "-f", "maven", "-s", "public=true")
+    p.cli("repo", "create", "mvnproxy", "-f", "maven", "-k", "proxy", "-s",
+          f"upstream=http://127.0.0.1:{UP}/maven", "-s", "public=true", "-s",
+          "exclude=org.hidden*,org.acme:secret", "-s", "max_mib=1")
+
+
+# ---- reads ----------------------------------------------------------------
+
+SUMS = (".md5", ".sha1", ".sha256", ".sha512")
+# What each hosted repository is asked. Directories, with and without
+# their slash, sorted; each kind of metadata the format makes (an
+# artifact's, a SNAPSHOT's, a group's plugins, both in one) and its
+# checksums; a file of each kind and its checksums; paths the
+# content-named rules know (under by-hash, in repodata), and one under
+# by-hash not there (looked for in the versions of the day before); what
+# is not there, a file taken for a directory, a checksum of no kind,
+# paths mis-cased, escaped, with a query, unsafe; a label's (its
+# version, what came after it, a label not there, an escaped @, an
+# empty label).
+TREE_READS = (
+    ["", "/", "/org", "/org/", "/org/acme", "/org/acme/", f"/{HELLO}", f"/{HELLO}/",
+     f"/{HELLO}/?sort=size&order=desc", f"/{HELLO}/1.0.0/?sort=time", f"/{HELLO}/1.0.0/",
+     f"/{SNAP}/", f"/{HELLO}/0.9.0-SNAPSHOT/", f"/{PLUGINS}/", f"/{DEEP}/2.0.0/",
+     f"/{ODD}/1.0+build/", "/org/acme/tools/"]
+    + [f"/{HELLO}/maven-metadata.xml" + s for s in ("",) + SUMS]
+    + [f"/{SNAP}/maven-metadata.xml" + s for s in ("", ".sha1", ".sha256")]
+    + [f"/{HELLO}/0.9.0-SNAPSHOT/maven-metadata.xml", f"/{PLUGINS}/maven-metadata.xml",
+       f"/{PLUGINS}/maven-metadata.xml.sha1", f"/{PLUGINS}/hello-maven-plugin/maven-metadata.xml",
+       f"/{PLUGINS}/big-maven-plugin/maven-metadata.xml", "/org/acme/tools/maven-metadata.xml",
+       "/org/acme/tools/maven-metadata.xml.md5",
+       "/org/acme/tools/tools-maven-plugin/maven-metadata.xml",
+       "/org/acme/greet/maven-metadata.xml", f"/{DEEP}/maven-metadata.xml",
+       "/com/example/deep/lib/maven-metadata.xml", f"/{ODD}/maven-metadata.xml",
+       "/org/acme/maven-metadata.xml", "/maven-metadata.xml"]
+    + [f"/{J100}" + s for s in ("",) + SUMS + (".asc", ".asc.sha1", ".asc.md5")]
+    + [f"/{P100}" + s for s in ("", ".sha1", ".sha512")]
+    + [f"/{HELLO}/1.0.0/hello-1.0.0-sources.jar", f"/{HELLO}/1.1.0/hello-1.1.0-javadoc.jar",
+       f"/{HELLO}/1.1.0/hello-1.1.0.jar.sha256",
+       f"/{HELLO}/0.9.0-SNAPSHOT/hello-0.9.0-SNAPSHOT.jar", f"{B2}.jar", f"{B2}.jar.sha1",
+       f"{B2}-sources.jar", f"/{SNAP}/hello-1.2.0-SNAPSHOT.jar",
+       f"/{SNAP}/hello-1.2.0-20260103.100000-3", f"/{SNAP}/hello-1.2.0-20260103.100000-3.sha1"]
+    + ["/org/acme/greet/1.0.0/greet-1.0.0" + e
+       for e in (".pom", ".war", ".aar", ".ear", ".module", "-dist.zip", "-bin.tar.gz", ".txt",
+                 ".json", ".html", ".war.sha512", ".module.sha256") + KINDS]
+    + [f"/{BY_HASH}/x-1.0.jar", f"/{BY_HASH}/x-1.0.jar.sha1", f"/{BY_HASH}/",
+       f"/{REPODATA}/{HEX}-repodata.jar", f"/{REPODATA}/{HEX}-repodata.jar.sha256",
+       "/org/acme/r/repodata/r-repodata.jar", "/org/acme/snaponly/maven-metadata.xml",
+       "/org/acme/snaponly/1.0.0-SNAPSHOT/maven-metadata.xml", "/org/by-hash/nope",
+       "/org/acme/by-hash/x"]
+    + [f"/{PLUGINS}/hello-maven-plugin/1.0.0/hello-maven-plugin-1.0.0.jar",
+       f"/{PLUGINS}/broken-maven-plugin/1.0.0/broken-maven-plugin-1.0.0.jar",
+       f"/{PLUGINS}/zipped-maven-plugin/1.0.0/zipped-maven-plugin-1.0.0.zip",
+       "/org/acme/tools/tools-maven-plugin/1.0.0/tools-maven-plugin-1.0.0.jar",
+       f"/{DEEP}/2.0.0/lib-2.0.0.jar", f"/{ODD}/1.0+build/odd~name-1.0+build.jar",
+       f"/{ODD}/1.0%2Bbuild/odd~name-1.0%2Bbuild.jar.sha1"]
+    + [f"/{J100}/x", f"/{HELLO}/1.0.0/nope.jar", f"/{HELLO}/9.9.9/", f"/{J100}.sha3",
+       f"/{J100}.SHA1", "/ORG/acme/hello/maven-metadata.xml", "/nope",
+       f"/{HELLO}/maven-metadata.xml?x=1", "/org%2facme/hello/maven-metadata.xml",
+       f"/{HELLO}//maven-metadata.xml", "/%2e%2e/org/", f"/{HELLO}/%2e/maven-metadata.xml"]
+    + ["/@first", "/@first/", f"/@first/{HELLO}/", f"/@first/{HELLO}/maven-metadata.xml",
+       f"/@first/{HELLO}/maven-metadata.xml.sha1", f"/@first/{J100}",
+       f"/@first/{HELLO}/1.1.0/hello-1.1.0.jar",
+       f"/@first/{HELLO}/0.9.0-SNAPSHOT/hello-0.9.0-SNAPSHOT.jar", f"/@first/{SNAP}/",
+       "/@nope/", f"/@nope/{J100}", f"/%40first/{J100}", f"/@/{J100}"])
+# The proxy: its address; the stub's metadata (an artifact's, a
+# SNAPSHOT's) and files (each with the .sha1 asked first: see UP_MAVEN;
+# a SNAPSHOT's build, a checksum, a signature); what the stub has wrong,
+# fails on or lacks; what is no Maven path (no group, not the
+# artifact's, hidden, a directory); what it excludes; a label (none:
+# asked of the upstream as it is).
+PROXY_READS = (
+    "", "/", "/org/acme/up/maven-metadata.xml", "/org/acme/up/maven-metadata.xml.sha1",
+    "/org/acme/up/1.0.0/up-1.0.0.pom", "/org/acme/up/1.0.0/up-1.0.0.pom.sha1",
+    "/org/acme/up/1.0.0/up-1.0.0.jar", "/org/acme/up/1.0.0/up-1.0.0.jar.sha1",
+    "/org/acme/up/1.0.0/up-1.0.0.jar.md5", "/org/acme/up/1.0.0/up-1.0.0.jar.asc",
+    "/org/acme/up/1.0.0/up-1.0.0.jar.sha256", "/org/acme/up/1.0.0/up-1.0.0.jar.sha512",
+    "/org/acme/up/1.0.0/up-1.0.0-sources.jar", "/org/acme/up/1.0.0/up-1.0.0.war",
+    "/org/acme/up/1.0.0/up-1.0.0.aar", "/org/acme/up/1.0.0/up-1.0.0.ear",
+    "/org/acme/up/1.0.0/up-1.0.0.module", "/org/acme/up/1.1.0-SNAPSHOT/maven-metadata.xml",
+    "/org/acme/up/1.1.0-SNAPSHOT/up-1.1.0-20260101.100000-1.jar",
+    "/org/acme/bad/1.0.0/bad-1.0.0.jar", "/org/acme/gone/1.0.0/gone-1.0.0.jar",
+    "/org/acme/gone/maven-metadata.xml", "/org/acme/up/1.0.0/up-1.0.0-nope.jar",
+    "/org/acme/maven-metadata.xml", "/org/maven-metadata.xml", "/up.jar", "/org/up.jar",
+    "/up/1.0.0/up-1.0.0.jar", "/org/acme/up/1.0.0/other-1.0.0.jar",
+    "/org/acme/up/1.0.0/.up-1.0.0.jar", "/org/acme/up/", "/org/acme/up",
+    "/org/acme/secret/1.0.0/secret-1.0.0.jar", "/org/hidden/x/1.0/x-1.0.jar",
+    "/org/hidden/x/maven-metadata.xml", "/org/acme/up/1.0.0/up-1.0.0.jar?x=1",
+    "/@first/org/acme/up/1.0.0/up-1.0.0.jar")
+
+
+def reads(c, who):
+    add = c.add
+    for repo in ("mvnpub", "mvnpriv"):
+        b = f"/{repo}"
+        for rel in TREE_READS:
+            add(f"maven {repo}{rel} {who}", who, "GET", b + rel)
+        for rel in ("/", f"/{HELLO}/", f"/{HELLO}/maven-metadata.xml", f"/{J100}", f"/{J100}.sha1",
+                    "/nope", f"/@first/{J100}"):
+            add(f"maven {repo} HEAD {rel} {who}", who, "HEAD", b + rel)
+        # A file's validators and ranges (no Last-Modified: the served
+        # tree keeps no times, so If-Modified-Since is not looked at).
+        etag = "{maven %s/%s %s.etag}" % (repo, J100, who)
+        for name, h in (("inm", {"If-None-Match": etag}), ("inm any", {"If-None-Match": "*"}),
+                        ("inm weak", {"If-None-Match": f'W/"{J100_TAG}"'}),
+                        ("inm other", {"If-None-Match": '"other"'}),
+                        ("ims", {"If-Modified-Since": "Fri, 01 Jan 2100 00:00:00 GMT"}),
+                        ("range", {"Range": "bytes=0-9"}), ("range from 10", {"Range": "bytes=10-"}),
+                        ("range of the end", {"Range": "bytes=-5"}),
+                        ("range past the end", {"Range": "bytes=999999-"}),
+                        ("ranges", {"Range": "bytes=0-1,4-5"}),
+                        ("if-range", {"Range": "bytes=0-9", "If-Range": etag}),
+                        ("if-range stale", {"Range": "bytes=0-9", "If-Range": '"stale"'})):
+            add(f"maven {repo} jar {name} {who}", who, "GET", f"{b}/{J100}", h)
+        add(f"maven {repo} jar HEAD inm {who}", who, "HEAD", f"{b}/{J100}",
+            {"If-None-Match": etag})
+        metag = "{maven %s/%s/maven-metadata.xml %s.etag}" % (repo, HELLO, who)
+        for name, h in (("inm", {"If-None-Match": metag}), ("range", {"Range": "bytes=0-9"})):
+            add(f"maven {repo} metadata {name} {who}", who, "GET",
+                f"{b}/{HELLO}/maven-metadata.xml", h)
+    # A repository with nothing in it.
+    for rel in ("", "/", f"/{HELLO}/maven-metadata.xml", f"/{J100}", "/@first/"):
+        add(f"maven mvnempty{rel} {who}", who, "GET", f"/mvnempty{rel}")
+    if who == "anon":
+        # Credentials that are wrong: refused before the repository is
+        # asked, though it is public.
+        for name, cred in (("basic", "Basic d3JpdGVyOndyb25n"), ("bearer", "Bearer pkgpod_nope")):
+            for repo in ("mvnpub", "mvnproxy"):
+                add(f"maven {repo} wrong {name} credentials", who, "GET",
+                    f"/{repo}/{HELLO}/maven-metadata.xml", {"Authorization": cred})
+
+
+def proxy_gone(c):
+    # The proxy while its upstream is gone: what it keeps (a file, the
+    # metadata, a miss) as it was; what it does not keep, refused (the
+    # .sha1 asked first is not there either).
+    c.seq("maven stub open stops", "anon", [("STUB", "stop open", {}, None)])
+    for who in ("anon", "writer"):
+        for rel in ("/org/acme/up/1.0.0/up-1.0.0.jar", "/org/acme/up/maven-metadata.xml",
+                    "/org/acme/up/1.0.0/up-1.0.0-nope.jar", "/org/acme/up/1.0.0/up-1.0.0-tests.jar",
+                    "/org/acme/up/2.0.0/maven-metadata.xml"):
+            c.add(f"maven gone mvnproxy{rel} {who}", who, "GET", f"/mvnproxy{rel}")
+    c.seq("maven stub open starts", "anon", [("STUB", "start open", {}, None)])
+
+
+def proxy_reads(c, who):
+    add = c.add
+    for rel in PROXY_READS:
+        add(f"maven mvnproxy{rel} {who}", who, "GET", f"/mvnproxy{rel}")
+    j = "/mvnproxy/org/acme/up/1.0.0/up-1.0.0.jar"
+    add(f"maven mvnproxy HEAD jar {who}", who, "HEAD", j)
+    add(f"maven mvnproxy HEAD metadata {who}", who, "HEAD",
+        "/mvnproxy/org/acme/up/maven-metadata.xml")
+    add(f"maven mvnproxy jar range {who}", who, "GET", j, {"Range": "bytes=0-9"})
+    add(f"maven mvnproxy jar inm {who}", who, "GET", j,
+        {"If-None-Match": "{maven mvnproxy/org/acme/up/1.0.0/up-1.0.0.jar %s.etag}" % who})
+
+
+FUZZ = (["mvnpub", "mvnpriv", "mvnproxy", "mvnempty"],
+        ["org", "acme", "hello", "0.9.0-SNAPSHOT", "1.0.0", "1.1.0", "1.2.0-SNAPSHOT",
+         "hello-1.0.0.jar", "hello-1.0.0.pom", "hello-1.0.0.jar.sha1", "hello-1.0.0-sources.jar",
+         "maven-metadata.xml", "maven-metadata.xml.sha1", "maven-metadata.xml.sha256", "plugins",
+         "tools", "up", "up-1.0.0.jar", "up-1.0.0.jar.sha1", "@first", "by-hash", "x"])
+# Not FUZZ_WRITABLE: an artifact's maven-metadata.xml lists its versions
+# by when each came, to the second, then by name, so versions a fuzzed
+# write made in the same second in one run and in two in the other
+# would be listed in other orders. The fuzz holds back Maven writes of
+# writer, its tokens, admin and the trust rule's token; no other
+# identity's is taken.
+
+PARTS = [
+    ("seed", 120, seed),
+    ("grants", 110, {"reader": {"mvnpriv": "read"},
+                     "writer": {"mvnpub": "write", "mvnpriv": "write"}}),
+    ("wtoken", 100, ["mvnpub"]),
+    ("rtoken", 100, ["mvnpriv"]),
+    ("publisher", 90, ["mvnpub"]),
+    ("stub", 70, stub),
+    ("reads", 130, reads),
+    ("reads", 130, proxy_reads),
+    ("reads end", 30, proxy_gone),
+    ("fuzz sample", 150, jar("fz", "1.0.0")),
+    ("fuzz sample", 150, pom("org.acme", "fz", "1.0.0")),
+]

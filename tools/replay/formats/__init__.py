@@ -72,4 +72,5 @@ FORMATS = [import_module(f"{__name__}.{name}") for name in (
     "helm",
     "galaxy",
     "conan",
+    "maven",
 )]
