@@ -12,6 +12,7 @@ import gzip
 import hashlib
 import io
 import json
+import random
 import re
 import tarfile
 
@@ -23,9 +24,12 @@ REPOS = ("galpub", "galpriv", "galempty")
 TIMES = r"/gal(pub|priv|empty)(/|$)"
 # The boundary of the forms the corpus sends (the fuzz's too).
 B = "replay-form"
+CT = {"Content-Type": f"multipart/form-data; boundary={B}"}
 UPLOAD = "/api/v3/artifacts/collections/"
 C = "/api/v3/collections/team/hello"
 DL = "/download/team-hello-1.0.0.tar.gz"
+# The most of a sha256 part read (galaxy.rs).
+MAX_SHA = 128
 
 
 def tgz(members):
@@ -137,6 +141,13 @@ def publish(data, encoded=False, digest=True):
     then the file; both as they are, or both base64."""
     parts = [spart(sha(data), encoded)] if digest else []
     return form(parts + [fpart(data, encoded)])
+
+
+def chunked(pieces):
+    """A body of HTTP/1.1 chunks, one for each of `pieces`, then the
+    last (sent as it is: http.client chunks nothing itself where the
+    request says Transfer-Encoding)."""
+    return b"".join(b"%x\r\n" % len(p) + p + b"\r\n" for p in pieces) + b"0\r\n\r\n"
 
 
 # A collection of every kind of value its metadata echoes.
@@ -342,6 +353,105 @@ def variants(who):
     return out
 
 
+def refusals(who):
+    """Uploads refused: (key, headers, body)."""
+    n = f"e_{who}"
+    good = artifact("team", n, "1.0.0")
+    hd, ok = publish(good)
+    k = ok.index(b"\r\n\r\n") + 4
+
+    def bad(data, encoded=False):
+        return form([fpart(data, encoded)])
+
+    def ns(x):
+        return bad(artifact(x, n, "1.0.0"))
+
+    def nm(x):
+        return bad(artifact("team", x, "1.0.0"))
+
+    def ver(x):
+        return bad(artifact("team", n, x))
+
+    def raw(text):
+        return bad(artifact(None, None, None, man=text))
+    fh = fpart(good)
+    return [
+        ("not a form", ({"Content-Type": "text/plain"}, b"not a form")),
+        ("no content-type", ({}, ok)),
+        ("no boundary", ({"Content-Type": "multipart/form-data"}, ok)),
+        ("an empty boundary", ({"Content-Type": "multipart/form-data; boundary="}, ok)),
+        ("mixed", ({"Content-Type": f"multipart/mixed; boundary={B}"}, ok)),
+        ("another boundary", ({"Content-Type": "multipart/form-data; boundary=other"}, ok)),
+        ("a header that is not one", (CT, f"--{B}\r\nnot a header\r\n\r\nx\r\n".encode()
+                                      + close())),
+        ("empty", (CT, b"")),
+        ("garbage", (CT, b"garbage")),
+        ("the closing only", (CT, close())),
+        ("only a sha256", form([spart(sha(good))])),
+        ("only other parts", form([part("junk", b"j" * 100)])),
+        ("a file otherwise named", form([part("File", good, "c.tar.gz")])),
+        ("no blank line", (CT, f'--{B}\r\nContent-Disposition: form-data; name="file"'
+                               .encode())),
+        ("cut in the sha256", (CT, spart(sha(good))[:-20])),
+        ("cut at the file", (CT, ok[:ok.index(b"\r\n\r\n", k) + 4])),
+        ("cut in the file", (CT, ok[:-60])),
+        ("cut in a base64 file", (CT, fpart(good, True)[:-30])),
+        ("no closing", (CT, ok[:-len(close())])),
+        ("lf only", (CT, ok.replace(b"\r\n", b"\n"))),
+        ("a bad base64 symbol", form([part("file", b"QU*D" + b64(good), cte="base64")])),
+        ("base64 cut short", form([part("file", b"QUJDRA", cte="base64")])),
+        ("base64 padded then more", form([part("file", b"QQ==QUJD", cte="base64")])),
+        ("base64 of a bad last symbol", form([part("file", b"QUJDRB==", cte="base64")])),
+        ("a bad base64 sha256", form([part("sha256", b"QU*D", cte="base64"), fh])),
+        ("a base64 sha256 cut short", form([part("sha256", b"QUJ", cte="base64"), fh])),
+        ("a sha256 over the limit", form([spart(b"a" * (MAX_SHA + 1)), fh])),
+        ("a sha256 at the limit", form([spart(b"a" * MAX_SHA), fh])),
+        ("a base64 sha256 over the limit", form([spart(b"a" * 100, True), fh])),
+        ("a wrong sha256", form([spart(b"0" * 64), fh])),
+        ("a sha256 in upper case", form([spart(sha(good).upper()), fh])),
+        ("two sha256, the last wrong", form([spart(sha(good)), spart(b"0" * 64), fh])),
+        ("a refused part, then broken framing", (CT, spart(b"a" * (MAX_SHA + 1))
+                                                 + f"--{B}\r\nnot a header\r\n\r\nx".encode())),
+        ("a bad base64 file, then broken framing", (CT, part("file", b"QU*D", cte="base64")
+                                                    + f"--{B}X".encode())),
+        ("a file, then broken framing", (CT, fh + f"--{B}\r\nnot a header\r\n\r\nx".encode())),
+        ("not gzip", bad(b"not gzip")),
+        ("an empty file", bad(b"")),
+        ("gzip of no tar", bad(gzip.compress(b"not a tar" * 100, mtime=0))),
+        ("a cut artifact", bad(good[:len(good) // 2])),
+        ("no manifest", bad(tgz([("README.md", b"# x\n")]))),
+        ("the manifest below the top", bad(tgz([(f"team-{n}/MANIFEST.json",
+                                                  manifest(info("team", n, "1.0.0")))]))),
+        ("the manifest a directory", bad(tgz([("MANIFEST.json", None)]))),
+        ("a manifest not json", raw(b"not json")),
+        ("a manifest of a list", raw(b"[1]")),
+        ("a manifest of nothing", raw(b"{}")),
+        ("a collection_info not an object", raw(b'{"collection_info": "x"}')),
+        ("a namespace of upper case", ns("Team")),
+        ("a namespace of a digit first", ns("1team")),
+        ("a namespace of _ first", ns("_team")),
+        ("a namespace with a dash", ns("te-am")),
+        ("a namespace too long", ns("a" * 65)),
+        ("a namespace of 64 taken", bad(artifact("a" * 64, n, "1.0.0"))),
+        ("no namespace", raw(json.dumps({"collection_info": {"name": n, "version": "1.0.0"}})
+                             .encode())),
+        ("a namespace of a number", raw(json.dumps({"collection_info": {
+            "namespace": 1, "name": n, "version": "1.0.0"}}).encode())),
+        ("a name with a dash", nm("hello-x")),
+        ("a name too long", nm("b" * 65)),
+        ("no name", raw(json.dumps({"collection_info": {"namespace": "team",
+                                                         "version": "1.0.0"}}).encode())),
+        ("a version 1.0", ver("1.0")),
+        ("a version v1.0.0", ver("v1.0.0")),
+        ("a version 01.0.0", ver("01.0.0")),
+        ("a version 1.0.0-", ver("1.0.0-")),
+        ("no version", raw(json.dumps({"collection_info": {"namespace": "team",
+                                                            "name": n}}).encode())),
+        ("a version of a number", raw(json.dumps({"collection_info": {
+            "namespace": "team", "name": n, "version": 1}}).encode())),
+    ]
+
+
 def writes(c, who):
     add, seq = c.add, c.seq
     w = f"w_{who}"
@@ -408,6 +518,63 @@ def writes(c, who):
             ("OPTIONS", "OPTIONS", "/galpub/api/", {}, None),
             ("POST galempty", "POST", f"/galempty/@first{UPLOAD}") + publish(data)):
         add(f"galaxy {name} {who}", who, method, path, h, body)
+    # Uploads refused, each alone: the form's or the artifact's fault.
+    for key, (h, body) in refusals(who):
+        add(f"galaxy refused {key} {who}", who, "POST", f"/galpub{UPLOAD}", h, body)
+    if who == "writer":
+        spoilt(c, who)
+
+
+def spoilt(c, who):
+    """Forms spoilt past the file and forms sent in chunks, each read
+    back (and so no single request: the fuzz cuts those, and a cut
+    chunked body would be waited on)."""
+    seq = c.seq
+    up = f"/galpub{UPLOAD}"
+
+    def back(n):
+        return ("GET", f"/galpub/api/v3/collections/team/{n}/versions/", {}, None)
+    # The file whole, the form spoilt only past it: a delimiter of
+    # another boundary, one closing with a single dash, the body ending
+    # at it, a part whose header is not one.
+    for i, (name, tail) in enumerate((
+            ("another boundary", f"--{B}X".encode()),
+            ("one dash", f"--{B}-\r\n".encode()),
+            ("ending at the delimiter", f"--{B}".encode()),
+            ("a bad part", f"--{B}\r\nnot a header\r\n\r\nx".encode())), 1):
+        n = f"g{i}_{who}"
+        data = artifact("team", n, "1.0.0")
+        seq(f"galaxy form spoilt past the file {name} {who}", who, [
+            ("POST", up, CT, spart(sha(data)) + fpart(data) + tail), back(n)])
+    # Forms of several reads (a file of 40 KiB that does not shrink):
+    # whole; spoilt past the file.
+    rnd = random.Random(20261127)
+    noise = bytes(rnd.randrange(256) for _ in range(40 << 10))
+    for i, (name, tail) in enumerate((("whole", close()),
+                                      ("spoilt past the file", f"--{B}X".encode())), 1):
+        n = f"h{i}_{who}"
+        data = artifact("team", n, "1.0.0", files=[("noise.bin", noise)])
+        seq(f"galaxy large form {name} {who}", who, [
+            ("POST", up, CT, spart(sha(data)) + fpart(data) + tail), back(n)])
+    # Forms sent in chunks (no Content-Length): whole, in small ones;
+    # cut in the file; spoilt past the file, the byte after its
+    # delimiter in the delimiter's chunk, then in one of its own; a
+    # large one, whole and base64.
+    te = dict(CT, **{"Transfer-Encoding": "chunked"})
+    _, whole = publish(artifact("team", f"c1_{who}", "1.0.0"))
+    _, cut = publish(artifact("team", f"c2_{who}", "1.0.0"))
+    cut = cut[:-80]
+    d3, d4 = artifact("team", f"c3_{who}", "1.0.0"), artifact("team", f"c4_{who}", "1.0.0")
+    d5 = artifact("team", f"c5_{who}", "1.0.0", files=[("noise.bin", noise)])
+    _, big = publish(d5, encoded=True)
+    for i, (name, pieces) in enumerate((
+            ("whole", [whole[j:j + 64] for j in range(0, len(whole), 64)]),
+            ("cut in the file", [cut[j:j + 64] for j in range(0, len(cut), 64)]),
+            ("spoilt past the file", [fpart(d3) + f"--{B}X".encode()]),
+            ("spoilt past the file a chunk later", [fpart(d4) + f"--{B}".encode(), b"X"]),
+            ("large base64", [big[j:j + 1000] for j in range(0, len(big), 1000)])), 1):
+        seq(f"galaxy chunked {name} {who}", who, [("POST", up, te, chunked(pieces)),
+                                                  back(f"c{i}_{who}")])
 
 
 def after(c, who):
