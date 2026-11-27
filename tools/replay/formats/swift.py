@@ -116,11 +116,14 @@ def eocd(count, cd_size, cd_at):
     return b"PK\x05\x06" + struct.pack("<HHHHIIH", 0, 0, count, count, cd_size, cd_at, 0)
 
 
-def poke(data, at, raw):
-    """`data` with the bytes at `at` of its first central directory
-    entry (Package.swift's, first in the archives refused) replaced by
-    `raw`."""
-    cd = data.index(b"PK\x01\x02") + at
+def poke(data, at, raw, nth=0):
+    """`data` with the bytes at `at` of its central directory's entry
+    `nth` (the first is Package.swift's in the archives refused)
+    replaced by `raw`."""
+    cd = -1
+    for _ in range(nth + 1):
+        cd = data.index(b"PK\x01\x02", cd + 1)
+    cd += at
     return data[:cd] + raw + data[cd + len(raw):]
 
 
@@ -604,6 +607,24 @@ def writes_writer(c, who):
         ("PUT", f"{k4}/Pkg/1.0.0") + form(zipped([
             ("a/Package.swift", manifest("A")), ("b/Package.swift", manifest("B"))])),
         ("GET", f"{k4}/pkg/1.0.0/Package.swift", {}, None)])
+    # Releases whose names sort otherwise than their versions: listed,
+    # and the latest told, in semver's order (a pre-release before its
+    # release, build metadata after it); an archive broken past its
+    # manifests (only they are read), taken and served as it came.
+    k5, k6 = f"/swpub/k5-{who}", f"/swpub/k6-{who}"
+    broken = poke(zipped([("Pkg/Package.swift", manifest("Pkg")),
+                          ("Pkg/Sources/Pkg/Pkg.swift", b"// k6\n")]), 16, bytes(4), 1)
+    seq(f"swift versions in their order {who}", who, [
+        ("PUT", f"{k5}/Pkg/1.10.0") + form(pkg("k5", "1.10.0")),
+        ("PUT", f"{k5}/Pkg/1.9.0") + form(pkg("k5", "1.9.0")),
+        ("GET", f"{k5}/pkg", {}, None),
+        ("PUT", f"{k5}/Pkg/1.10.0+b.1") + form(pkg("k5 b.1", "1.10.0")),
+        ("PUT", f"{k5}/Pkg/1.10.0-rc.1") + form(pkg("k5", "1.10.0-rc.1")),
+        ("GET", f"{k5}/pkg", {}, None),
+        ("GET", f"{k5}/pkg/1.10.0+b.1", {}, None),
+        ("PUT", f"{k6}/Pkg/1.0.0") + form(broken),
+        ("GET", f"{k6}/pkg/1.0.0.zip", {}, None),
+        ("GET", f"{k6}/pkg/1.0.0/Package.swift", {}, None)])
     https = {"X-Forwarded-Proto": "https"}
     host = {"Host": f"swift.example.invalid:{SERVE}"}
     seq(f"swift publish behind a proxy {who}", who, [
