@@ -183,11 +183,13 @@ def tree():
     put("aarch64_generic", yocto(control("hello", "1.2-1", "aarch64_generic"), "xz"),
         "hello_1.2-1_aarch64_generic.ipk")
     # Feeds the content-named rules know: by-hash (kept a year), and
-    # repodata, its files named by a hash (kept an hour; one whose name
-    # an index rule knows, revalidated).
+    # repodata, its files named by a hash (kept an hour; those whose
+    # names an index rule knows, revalidated: *SUMS*, *.db.*, *.files.*,
+    # the rows of the table a package's name can reach).
     api("by-hash", openwrt(control("byhash", "1.0", "all")), "byhash_1.0_all.ipk")
-    api("repodata", openwrt(control(f"{HEX}-hello", "1.0", "all")), f"{HEX}-hello_1.0_all.ipk")
-    api("repodata", openwrt(control(f"{HEX}-SUMS", "1.0", "all")), f"{HEX}-SUMS_1.0_all.ipk")
+    for name in ("hello", "SUMS", "a.db.b", "a.files.b"):
+        api("repodata", openwrt(control(f"{HEX}-{name}", "1.0", "all")),
+            f"{HEX}-{name}_1.0_all.ipk")
     # A package removed, as the API removes one.
     api("main", openwrt(control("gone", "1.0", "all")), "gone_1.0_all.ipk")
     out.append(("rm", "main", "gone_1.0_all.ipk", None))
@@ -249,7 +251,8 @@ TREE_READS = (
        "/x86_64/hello-utils_0.1_x86_64.ipk", "/aarch64_generic/hello_0.9-1_aarch64_generic.ipk",
        "/aarch64_generic/hello_1:0.9-1_aarch64_generic.ipk",
        "/aarch64_generic/hello_1.2-1_aarch64_generic.ipk", "/by-hash/byhash_1.0_all.ipk",
-       f"/repodata/{HEX}-hello_1.0_all.ipk", f"/repodata/{HEX}-SUMS_1.0_all.ipk"]
+       f"/repodata/{HEX}-hello_1.0_all.ipk", f"/repodata/{HEX}-SUMS_1.0_all.ipk",
+       f"/repodata/{HEX}-a.db.b_1.0_all.ipk", f"/repodata/{HEX}-a.files.b_1.0_all.ipk"]
     + ["/main/gone_1.0_all.ipk", "/main/nope.ipk", "/main/Packages.xz", "/main/Packages.zst",
        "/main/Packages.asc", "/Packages", "/key.asc", "/nope/Packages", "/nope/",
        "/main/Packages/x", "/key.pub/x", "/MAIN/Packages", "/main/packages", "/main//Packages",
