@@ -45,6 +45,7 @@ pub struct Rpm;
 /// What the server serves of an RPM tree beside its files.
 pub const TREE: TreeRules = TreeRules {
     cache: CACHE,
+    content_named: Some(content_named),
     ..TreeRules::DEFAULT
 };
 
@@ -53,6 +54,18 @@ const CACHE: &[(&str, &str)] = &[
     // cache in between never serves one an upload replaced.
     ("**/repodata/repomd.xml*", "no-cache"),
 ];
+
+/// What is named by its content: the repodata files
+/// (`<sha256>-primary.xml.gz`).
+fn content_named(path: &str) -> bool {
+    let mut up = path.rsplit('/');
+    match (up.next(), up.next()) {
+        (Some(f), Some("repodata")) => f
+            .split_once('-')
+            .is_some_and(|(h, _)| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit())),
+        _ => false,
+    }
+}
 
 /// Changes what publishing makes; reused repodata is made again.
 const GENERATOR: i64 = 1;

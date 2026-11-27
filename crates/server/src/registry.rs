@@ -363,6 +363,10 @@ mod tests {
             ])
         );
         assert_eq!(ids(|r| r.tree.content_type.is_some()), set(&["deb", "ipk"]));
+        assert_eq!(
+            ids(|r| r.tree.content_named.is_some()),
+            set(&["deb", "rpm"])
+        );
         // A format crate that says what its trees are has it in its row,
         // the others the default.
         for (name, dir) in crates() {

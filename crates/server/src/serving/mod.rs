@@ -929,18 +929,16 @@ pub fn cache_control(rel: &str) -> &'static str {
 /// [`cache_control`] for a file of a stored version (not a mirror's
 /// received tree): revalidated (by its ETag), as a replace, a removal
 /// and a new upload, or a rollback put other content at its name, in
-/// any format; only what is named by its content is still kept: what is
-/// under by-hash, and rpm's repodata files (`<sha256>-primary.xml.gz`).
+/// any format; only what a format says is named by its content is still
+/// kept (deb's by-hash files, rpm's repodata files): any format's, as
+/// one table answers for every tree.
 fn stored_cache_control(rel: &str) -> &'static str {
     let rel = rel.trim_start_matches('/');
-    let mut up = rel.rsplit('/');
-    let repodata = match (up.next(), up.next()) {
-        (Some(f), Some("repodata")) => f
-            .split_once('-')
-            .is_some_and(|(h, _)| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit())),
-        _ => false,
-    };
-    if rel.split('/').any(|s| s == "by-hash") || repodata {
+    let named = crate::registry::get()
+        .rows()
+        .iter()
+        .any(|r| r.tree.content_named.is_some_and(|f| f(rel)));
+    if named {
         cache_control(rel)
     } else {
         "no-cache"

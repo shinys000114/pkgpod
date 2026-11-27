@@ -52,6 +52,7 @@ pub struct Deb;
 /// What the server serves of a Debian tree beside its files.
 pub const TREE: TreeRules = TreeRules {
     cache: CACHE,
+    content_named: Some(content_named),
     content_type: Some(content_type),
     ..TreeRules::DEFAULT
 };
@@ -70,6 +71,11 @@ const CACHE: &[(&str, &str)] = &[
     ("pool/**", "no-cache"),
     ("project/trace/**", "no-cache"),
 ];
+
+/// What is named by its content: what is under by-hash.
+fn content_named(path: &str) -> bool {
+    path.split('/').any(|s| s == "by-hash")
+}
 
 /// The content types of a Debian tree's names: its indexes are text,
 /// its packages Debian's.
