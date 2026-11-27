@@ -69,4 +69,5 @@ FORMATS = [import_module(f"{__name__}.{name}") for name in (
     "nuget",
     "swift",
     "helm",
+    "galaxy",
 )]
