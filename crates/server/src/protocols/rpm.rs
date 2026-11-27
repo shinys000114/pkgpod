@@ -41,13 +41,13 @@ impl Serving {
             host,
             ..
         } = at;
+        if role.is_none() {
+            return deny(&caller);
+        }
         // The group claims() found.
         let Some(group) = repo_file_group(&rel) else {
             return status(StatusCode::NOT_FOUND);
         };
-        if role.is_none() {
-            return deny(&caller);
-        }
         let mut base_url = client_base(route.as_ref(), &host, &base, &req);
         let version = match rel
             .first()
