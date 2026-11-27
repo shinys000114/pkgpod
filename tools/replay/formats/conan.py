@@ -534,7 +534,9 @@ class Zeros:
 def limits(c, who):
     # A file one byte over the limit, by one who may (its body is read);
     # a body that cannot be read (chunked, its first chunk's size not
-    # hex), in a sequence: no mutant of it is sent.
+    # hex), and one sent in two chunks with an empty file beside it,
+    # brought in by their manifest: in sequences, of which no mutant is
+    # sent.
     if who == "writer":
         big = f"/kpub/v2/conans/big/1.0/_/_/revisions/{md5('big')}"
         c.add("conan upload over the limit writer", who, "PUT", f"{big}/files/conanfile.py",
@@ -543,6 +545,17 @@ def limits(c, who):
             ("PUT", f"{big}/files/conanfile.py", {"Transfer-Encoding": "chunked"},
              b"zz\r\nhello\r\n0\r\n\r\n"),
             ("GET", "/kpub/v2/conans/big/1.0/_/_/revisions", {}, None)])
+        ch = f"/kpub/v2/conans/chunked/1.0/_/_/revisions/{md5('chunked')}"
+        body = b"from conan import ConanFile\n\n# sent in two chunks\n"
+        c.seq("conan upload in chunks writer", who, [
+            ("PUT", f"{ch}/files/conanfile.py", {"Transfer-Encoding": "chunked"},
+             b"%x\r\n%s\r\n%x\r\n%s\r\n0\r\n\r\n" % (20, body[:20], len(body) - 20, body[20:])),
+            ("PUT", f"{ch}/files/conan_export.tgz", {}, b""),
+            ("PUT", f"{ch}/files/{MANIFEST}", {},
+             manifest({"conanfile.py": body, "conan_export.tgz": b""})),
+            ("GET", f"{ch}/files", {}, None),
+            ("GET", f"{ch}/files/conanfile.py", {}, None),
+            ("GET", f"{ch}/files/conan_export.tgz", {}, None)])
 
 
 def shared(c):
@@ -565,6 +578,16 @@ def shared(c):
               f"{rdir}/files/{MANIFEST}", {}, r[MANIFEST])
         c.seq(f"conan staged by {stager} read back", "anon", [
             ("GET", f"{ref}/revisions", {}, None), ("GET", f"{rdir}/files", {}, None)])
+    # They wait in their repository: a file put to kpub is not brought
+    # in by the same revision's manifest in kpriv.
+    y = f"/v2/conans/y-writer/1.0/_/_/revisions/{md5('y-writer')}"
+    r = recipe("y-writer", "1.0", "staged in kpub", sources=False)
+    c.seq("conan staged in another repository writer", "writer", [
+        ("PUT", f"/kpub{y}/files/conanfile.py", {}, r["conanfile.py"]),
+        ("PUT", f"/kpriv{y}/files/{MANIFEST}", {}, r[MANIFEST]),
+        ("PUT", f"/kpub{y}/files/{MANIFEST}", {}, r[MANIFEST]),
+        ("GET", f"/kpriv{y}/files", {}, None),
+        ("GET", f"/kpub{y}/files", {}, None)])
 
 
 def after(c, who):
