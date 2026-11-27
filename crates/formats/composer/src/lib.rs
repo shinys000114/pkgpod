@@ -26,6 +26,8 @@ use pkgpod_engine::{Cx, Error, Format, Item, Kind, Result, Upload};
 use serde_json::{Map, Value, json};
 use sha1::Digest as _;
 
+pub mod protocol;
+
 pub struct Composer;
 
 /// Largest package taken in, and largest composer.json.

@@ -2373,11 +2373,14 @@ dependencies = [
 name = "pkgpod-composer"
 version = "0.0.0"
 dependencies = [
+ "http",
  "jiff",
  "pkgpod-base",
  "pkgpod-engine",
+ "pkgpod-proto",
  "serde_json",
  "sha1 0.11.0",
+ "tokio",
 ]
 
 [[package]]
