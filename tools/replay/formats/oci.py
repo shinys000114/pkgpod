@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """OCI: hosted public and private (an image index, a referrer), a
 registry at a host's root, proxies of the stub (one asking for a token),
-a group; the stub's registry."""
+a group; public groups (of public members with a proxy first, of a
+private member first, of a proxy whose upstream fails first); the
+stub's registry."""
 
 import hashlib
 import json
@@ -421,6 +423,105 @@ def last(c):
         ("SLEEP", "9", {}, None)])
 
 
+# ---- groups ---------------------------------------------------------------
+
+def group_stub(method, path, auth, bearer):
+    """A registry that answers 500 to anything (its root too), behind
+    o500."""
+    if path.startswith("/v2/o500/"):
+        return 500, {"Content-Type": "application/json"}, \
+            b'{"errors":[{"code":"UNKNOWN","message":"upstream broken"}]}'
+    return None
+
+
+# The public groups: of public members only with a proxy first (ogup, of
+# the stub's registry as oproxy is, keeping all it is sent), of a
+# private member first (opriv: app:1 of other bytes than opub's), of a
+# proxy whose upstream answers 500 first.
+GROUPS = (("ogall", "ogup,opub"), ("ogmix", "opriv,opub"), ("ogfail", "o500,opub"))
+
+
+def seed_groups(p, fx):
+    for name, up in (("ogup", "up"), ("o500", "o500")):
+        p.cli("repo", "create", name, "-f", "oci", "-k", "proxy", "-s",
+              f"upstream=http://127.0.0.1:{UP}/{up}", "-s", "public=true")
+    for g, members in GROUPS:
+        p.cli("repo", "create", g, "-f", "oci", "-k", "group", "-s", f"members={members}",
+              "-s", "public=true")
+
+
+def group_reads(c, who):
+    add = c.add
+    pl, pc, pm = app_image("opub")
+    vl, _, vm = app_image("opriv")
+    # By tag and by digest, each member's: the first member that has the
+    # image answers alone (a proxy, what its upstream has); tags,
+    # referrers, a name none has; the group's address outside /v2.
+    rels = ("/app/manifests/1", f"/app/manifests/{blob_digest(pm)}",
+            f"/app/manifests/{blob_digest(vm)}", "/app/manifests/multi", "/app/manifests/two",
+            f"/app/blobs/{blob_digest(pl)}", f"/app/blobs/{blob_digest(vl)}",
+            f"/app/blobs/{blob_digest(pc)}", "/app/tags/list", "/app/tags/list?n=1",
+            f"/app/referrers/{blob_digest(pm)}", "/hello/manifests/1",
+            f"/hello/manifests/{blob_digest(UP_MANIFEST)}", "/hello/manifests/multi",
+            f"/hello/manifests/{blob_digest(UP_MANIFEST2)}",
+            f"/hello/blobs/{blob_digest(UP_LAYER)}", f"/hello/blobs/{blob_digest(UP_CONFIG)}",
+            "/hello/tags/list", "/hello/manifests/2",
+            "/nope/manifests/1", f"/nope/blobs/{ZERO}", "/app/manifests/nope")
+    # Of those, what the corpus asks ogroup already.
+    asked = {"/app/manifests/1", f"/app/manifests/{blob_digest(pm)}",
+             f"/app/blobs/{blob_digest(pl)}", f"/app/blobs/{blob_digest(pc)}", "/app/tags/list",
+             "/app/tags/list?n=1",
+             f"/app/referrers/{blob_digest(pm)}", "/hello/manifests/1", "/hello/manifests/2",
+             f"/hello/blobs/{blob_digest(UP_LAYER)}", "/app/manifests/nope"}
+    for g in ["ogroup"] + [g for g, _ in GROUPS]:
+        v = f"/v2/{g}"
+        for rel in rels:
+            if g != "ogroup" or rel not in asked:
+                add(f"oci group {g}{rel} {who}", who, "GET", v + rel, OCI_ACCEPT)
+        if g != "ogroup":
+            add(f"oci group {g} HEAD {who}", who, "HEAD", f"{v}/app/manifests/1", OCI_ACCEPT)
+            add(f"oci group {g} HEAD blob {who}", who, "HEAD", f"{v}/app/blobs/{blob_digest(pl)}")
+            add(f"oci group {g} blob range {who}", who, "GET", f"{v}/app/blobs/{blob_digest(pl)}",
+                {"Range": "bytes=3-12"})
+        add(f"oci group {g} HEAD digest {who}", who, "HEAD",
+            f"{v}/hello/manifests/{blob_digest(UP_MANIFEST)}", OCI_ACCEPT)
+        add(f"oci group {g} inm {who}", who, "GET", f"{v}/app/manifests/1",
+            dict(OCI_ACCEPT, **{"If-None-Match": f'"{blob_digest(pm)}"'}))
+        add(f"oci group {g} index accept {who}", who, "GET", f"{v}/app/manifests/multi",
+            {"Accept": INDEX})
+        for rel in ("", "/", "/x"):
+            add(f"oci group /{g}{rel} {who}", who, "GET", f"/{g}{rel}")
+
+
+def group_writes(c, who):
+    octet = {"Content-Type": "application/octet-stream"}
+    mt = {"Content-Type": "application/vnd.oci.image.manifest.v1+json"}
+    layer, config, manifest = app_image("opub")
+    # Writes to each group, read back: refused (405, read through; or as
+    # the caller may not read the group).
+    for g in ["ogroup"] + [g for g, _ in GROUPS]:
+        v = f"/v2/{g}"
+        c.seq(f"oci group {g} writes {who}", who, [
+            ("POST", f"{v}/w/blobs/uploads/", {}, None),
+            ("POST", f"{v}/w/blobs/uploads/?digest={blob_digest(layer)}", octet, layer),
+            ("POST", f"{v}/w/blobs/uploads/?mount={blob_digest(layer)}&from=opub/app", {}, None),
+            ("PUT", f"{v}/w/manifests/{who}", mt, manifest),
+            ("GET", f"{v}/w/manifests/{who}", OCI_ACCEPT, None),
+            ("DELETE", f"{v}/app/manifests/1", {}, None),
+            ("GET", f"{v}/app/manifests/1", OCI_ACCEPT, None),
+            ("DELETE", f"{v}/app/blobs/{blob_digest(layer)}", {}, None),
+            ("PATCH", f"{v}/app/blobs/uploads/" + "0" * 32, octet, b"x"),
+            ("PUT", f"/{g}/x", {}, b"x"),
+            ("DELETE", f"/{g}/", {}, None)])
+
+
+def group_after(c, who):
+    # What OCI's writes left in the members, through each group.
+    for g in ["ogroup"] + [g for g, _ in GROUPS]:
+        for rel in ("/w/tags/list", "/w/manifests/writer", "/mono/tags/list", "/app/tags/list"):
+            c.add(f"after oci group {g}{rel} {who}", who, "GET", f"/v2/{g}{rel}", OCI_ACCEPT)
+
+
 def mask(masker):
     # Upload ids as they appear, and the number each is given.
     uploads = {}
@@ -465,6 +566,13 @@ PARTS = [
     ("writes end", 10, writes_end),
     ("after", 30, after),
     ("last", 10, last),
+    # Groups: noone reads ogmix by its grant on the group alone.
+    ("seed", 200, seed_groups),
+    ("grants", 190, {"writer": {"ogmix": "write"}, "noone": {"ogmix": "read"}}),
+    ("stub", 140, group_stub),
+    ("reads", 210, group_reads),
+    ("writes", 310, group_writes),
+    ("after", 160, group_after),
     # OCI upload ids are random: numbered in the order they appear (in
     # location and docker-upload-uuid; where a body names one of them).
     ("rule", 30, ("oci upload ids", "upload ids in location, docker-upload-uuid and bodies")),
