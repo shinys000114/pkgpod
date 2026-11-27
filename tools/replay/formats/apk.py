@@ -474,8 +474,53 @@ def by_hash(c, who):
         ("GET", "/apkpub/by-hash/main/", {}, None)])
 
 
-# The most of a control part unpacked to read it.
+# The most of a control part unpacked to read it; the largest package
+# the format takes, and the largest body a PUT to the tree takes
+# (pkgpod's upload limit).
 MAX_CONTROL = 16 << 20
+MAX_APK = 2 << 30
+MAX_UPLOAD = 8 << 30
+
+
+class Zeros:
+    """Zero bytes, `n` in all, sent a MiB at a time (http.client sends an
+    iterable as it comes, with the Content-Length given): a body past a
+    limit, not held whole (the corpus keeps its bodies for the whole
+    run)."""
+
+    def __init__(self, n):
+        self.n = n
+
+    def __len__(self):
+        return self.n
+
+    def __iter__(self):
+        piece = bytes(1 << 20)
+        left = self.n
+        while left > 0:
+            yield piece if left >= len(piece) else piece[:left]
+            left -= len(piece)
+
+
+def limits(c, who):
+    # Each body limit, one byte over, by one who may (the body is read),
+    # read back: a package past the format's limit (the tree stores it
+    # first, then the format refuses it); a body past the tree's; and
+    # one that cannot be read (chunked, its first chunk's size not
+    # hex). In sequences, of which no mutant is sent (a cut chunked body
+    # would be waited on).
+    if who != "writer":
+        return
+    at = run_place("/apkpub", who)
+    back = [("GET", f"{at}/x86_64/APKINDEX.tar.gz", {}, None), ("GET", f"{at}/", {}, None)]
+    for name, path, n in (
+            ("over the format's limit", "/apkpub/upload?branch=w-writer", MAX_APK + 1),
+            ("over the tree's limit", f"{at}/x86_64/huge-1.0-r0.apk", MAX_UPLOAD + 1)):
+        c.seq(f"apk put {name} writer", who,
+              [("PUT", path, {"Content-Length": str(n)}, Zeros(n))] + back)
+    c.seq("apk put unreadable writer", who, [
+        ("PUT", "/apkpub/upload?branch=w-writer", {"Transfer-Encoding": "chunked"},
+         b"zz\r\nhello\r\n0\r\n\r\n")] + back)
 
 
 def after(c, who):
@@ -598,6 +643,7 @@ PARTS = [
     ("publisher", 100, ["apkpub"]),
     ("reads", 140, reads),
     ("writes", 230, writes),
+    ("writes", 240, limits),
     ("after", 90, after),
     # An index made in the run is of that second: its tars' headers say
     # the version's time (and their checksums move with it), the RSA
