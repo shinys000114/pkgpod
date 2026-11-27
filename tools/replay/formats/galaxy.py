@@ -15,7 +15,7 @@ import json
 import re
 import tarfile
 
-from core import auth_header, request, times
+from core import IDENTS, auth_header, request, times
 
 NAME = "galaxy"
 REPOS = ("galpub", "galpriv", "galempty")
@@ -272,6 +272,175 @@ def reads(c, who):
         add(f"galaxy galempty{rel} {who}", who, "GET", f"/galempty{rel}")
 
 
+def variants(who):
+    """Uploads taken, each of its own collection, team.v<k>_<who>
+    1.0.0: (key, path, headers, body)."""
+    up = f"/galpub{UPLOAD}"
+
+    def a(k, **kw):
+        return artifact("team", f"v{k}_{who}", "1.0.0", **kw)
+    out = []
+
+    def add(key, k, parts=None, path=up, h=None, data=None, boundary=B, **kw):
+        data = a(k) if data is None else data
+        ps = parts(data) if parts else [spart(sha(data), boundary=boundary),
+                                        fpart(data, boundary=boundary)]
+        hd, body = form(ps, boundary, **kw)
+        out.append((key, path, dict(hd, **(h or {})), body))
+    add("base64 upper case", 1, lambda d: [spart(sha(d), True, "BASE64"),
+                                           fpart(d, True, "BASE64")])
+    add("disposition file", 2, lambda d: [
+        spart(sha(d)), fpart(d, disposition='file; name="file"; filename="x.tar.gz"')])
+    d = a(3)
+    _, body = form([spart(sha(d)), fpart(d)])
+    out.append(("boundary quoted", up,
+                {"Content-Type": f'multipart/form-data; charset=utf-8; boundary="{B}"'}, body))
+    add("base64 in one line", 4, lambda d: [part("file", b64(d, 0), cte="base64")])
+    add("base64 lf", 5, lambda d: [part("file", b64(d, sep=b"\n"), cte="base64")])
+    add("sha256 after the file", 6, lambda d: [fpart(d), spart(sha(d))])
+    add("no sha256", 7, lambda d: [fpart(d)])
+    add("sha256 empty", 8, lambda d: [spart(b""), fpart(d)])
+    add("sha256 in white space", 9, lambda d: [spart(b"  " + sha(d) + b"\r\n"), fpart(d)])
+    add("sha256 base64", 10, lambda d: [spart(sha(d), True), fpart(d)])
+    add("parts passed over", 11, lambda d: [
+        part("junk", b"j" * 4096), part(None, b"no name"), part("File", b"not this"),
+        part("sha", b"0" * 64), spart(sha(d)), fpart(d), part("after", b"x")])
+    add("two files, the first not gzip", 12, lambda d: [fpart(b"not gzip"), fpart(d)])
+    first = artifact("team", f"v13a_{who}", "1.0.0")
+    add("two files, the last taken", 13, lambda d: [fpart(first), spart(sha(d)), fpart(d)])
+    add("preamble and epilogue", 14, preamble=b"a preamble\r\n", epilogue=b"an epilogue\r\n")
+    add("no trailing slash", 15, path=up.rstrip("/"))
+    add("manifest at ./", 16, data=a(16, top="./MANIFEST.json"))
+    add("manifest last", 17, data=tgz([("README.md", b"# read me\n"), ("roles", None),
+                                       ("roles/hello/tasks/main.yml", b"- debug: msg=hello\n"),
+                                       ("MANIFEST.json", manifest(info("team", f"v17_{who}",
+                                                                       "1.0.0")))]))
+    add("file with no filename", 18, lambda d: [part("file", d)])
+    add("a long boundary", 19, boundary="-" * 20 + "replay" + "0123456789" * 5)
+    add("https", 20, h={"X-Forwarded-Proto": "https"})
+    add("another host", 21, h={"Host": "alt.localhost"})
+    add("metadata of every kind", 22, data=a(
+        22, authors=["A", "B"], tags=["one", "two"], license=["GPL-3.0-or-later"],
+        dependencies={"team.hello": ">=1.0.0,<2.0.0", "acme.tools": "*"},
+        description="héllo, " + "a description longer than the catalog keeps " * 3))
+    add("metadata of odd kinds", 23, data=a(
+        23, authors="not a list", tags=None, license={"x": 1}, dependencies=None,
+        description=7))
+    add("metadata left out", 24, data=artifact(None, None, None, man=json.dumps(
+        {"collection_info": {"namespace": "team", "name": f"v24_{who}",
+                             "version": "1.0.0"}}).encode()))
+    add("a pre-release with build metadata", 25,
+        data=artifact("team", f"v25_{who}", "1.0.0-rc.1+build.5"))
+    add("two manifests, the first taken", 26, data=tgz([
+        ("MANIFEST.json", manifest(info("team", f"v26_{who}", "1.0.0"))),
+        ("MANIFEST.json", manifest(info("team", "v26_never", "1.0.0")))]))
+    add("two sha256, the last taken", 27, lambda d: [spart(b"0" * 64), spart(sha(d)),
+                                                    fpart(d)])
+    add("other headers", 28, lambda d: [
+        part("sha256", sha(d), ctype="text/plain", cte="7bit"),
+        part("file", d, filename="a.tar.gz", ctype="application/gzip", cte="binary")])
+    return out
+
+
+def writes(c, who):
+    add, seq = c.add, c.seq
+    w = f"w_{who}"
+    # An upload to each repository, as ansible-galaxy does it, read
+    # back: the import task, the collection, its versions, the version
+    # and its download.
+    for repo in REPOS:
+        data = artifact("team", w, "1.0.0")
+        cw = f"/{repo}/api/v3/collections/team/{w}"
+        seq(f"galaxy publish {repo} {who}", who, [
+            ("POST", f"/{repo}{UPLOAD}") + publish(data),
+            ("GET", "{json:task}", {}, None),
+            ("GET", f"{cw}/", {}, None),
+            ("GET", f"{cw}/versions/", {}, None),
+            ("GET", f"{cw}/versions/1.0.0/", {}, None),
+            ("GET", f"/{repo}/download/team-{w}-1.0.0.tar.gz", {}, None)])
+    # Both parts base64, read back: the version's sha256 and size are of
+    # what was decoded.
+    b = f"b_{who}"
+    data = artifact("team", b, "1.0.0")
+    seq(f"galaxy publish base64 {who}", who, [
+        ("POST", f"/galpub{UPLOAD}") + publish(data, encoded=True),
+        ("GET", "{json:task}", {}, None),
+        ("GET", f"/galpub/api/v3/collections/team/{b}/versions/1.0.0/", {}, None),
+        ("GET", f"/galpub/download/team-{b}-1.0.0.tar.gz", {}, None)])
+    # One request alone each, for the fuzz to change: as it is and in
+    # base64, to the public and the private repository.
+    for repo in ("galpub", "galpriv"):
+        add(f"galaxy upload {repo} {who}", who, "POST", f"/{repo}{UPLOAD}",
+            *publish(artifact("team", f"s_{who}", "1.0.0")))
+    add(f"galaxy upload base64 galpub {who}", who, "POST", f"/galpub{UPLOAD}",
+        *publish(artifact("team", f"t_{who}", "1.0.0"), encoded=True))
+    # The seed's own bytes again; others for a version that is there.
+    other = artifact("team", "hello", "1.0.0", description="other bytes")
+    seq(f"galaxy publish again {who}", who, [
+        ("POST", f"/galpub{UPLOAD}") + publish(SEED_HELLO["1.0.0"]),
+        ("POST", f"/galpub{UPLOAD}") + publish(SEED_HELLO["1.1.0"], encoded=True),
+        ("POST", f"/galpub{UPLOAD}") + publish(other),
+        ("GET", f"/galpub{C}/versions/1.0.0/", {}, None),
+        ("GET", f"/galpub{C}/versions/", {}, None)])
+    # Uploads taken in other forms, each alone.
+    for key, path, h, body in variants(who):
+        add(f"galaxy variant {key} {who}", who, "POST", path, h, body)
+    # A label is read-only; what else is asked of a Galaxy repository's
+    # paths with a method that writes.
+    data = artifact("team", f"l_{who}", "1.0.0")
+    for name, method, path, h, body in (
+            ("labelled", "POST", f"/galpub/@first{UPLOAD}") + publish(data),
+            ("labelled galpriv", "POST", f"/galpriv/@first{UPLOAD}") + publish(data),
+            ("label not there", "POST", f"/galpub/@nope{UPLOAD}") + publish(data),
+            ("PUT", "PUT", f"/galpub{UPLOAD}") + publish(data),
+            ("PUT galpriv", "PUT", f"/galpriv{UPLOAD}") + publish(data),
+            ("POST collection", "POST", f"/galpub{C}/", {}, None),
+            ("PUT collection", "PUT", f"/galpub{C}/", {}, None),
+            ("DELETE collection", "DELETE", f"/galpub{C}/", {}, None),
+            ("DELETE version", "DELETE", f"/galpub{C}/versions/1.0.0/", {}, None),
+            ("DELETE version galpriv", "DELETE", f"/galpriv{C}/versions/1.0.0/", {}, None),
+            ("DELETE download", "DELETE", f"/galpub{DL}", {}, None),
+            ("PUT download", "PUT", f"/galpub{DL}", {"Content-Type": "application/gzip"},
+             SEED_HELLO["1.0.0"]),
+            ("POST root", "POST", "/galpub/", {}, None),
+            ("POST import", "POST", "/galpub/api/v3/imports/collections/x/", {}, None),
+            ("PATCH", "PATCH", "/galpub/api/", {}, None),
+            ("OPTIONS", "OPTIONS", "/galpub/api/", {}, None),
+            ("POST galempty", "POST", f"/galempty/@first{UPLOAD}") + publish(data)):
+        add(f"galaxy {name} {who}", who, method, path, h, body)
+
+
+def after(c, who):
+    add = c.add
+    # What the writes left: the seed's collection after uploads of it,
+    # each one's in each repository, writer's in other forms.
+    for repo in REPOS:
+        for rel in (f"{C}/", f"{C}/versions/", f"{C}/versions/1.0.0/", "/@first" + C + "/"):
+            add(f"after galaxy {repo}{rel} {who}", who, "GET", f"/{repo}{rel}")
+        for w in IDENTS:
+            add(f"after galaxy {repo}/w_{w} {who}", who, "GET",
+                f"/{repo}/api/v3/collections/team/w_{w}/versions/")
+    for w in IDENTS:
+        for pre in ("b", "s", "t"):
+            add(f"after galaxy galpub/{pre}_{w} {who}", who, "GET",
+                f"/galpub/api/v3/collections/team/{pre}_{w}/versions/")
+        add(f"after galaxy galpriv/s_{w} {who}", who, "GET",
+            f"/galpriv/api/v3/collections/team/s_{w}/versions/")
+    for k in range(1, 29):
+        add(f"after galaxy galpub/v{k}_writer {who}", who, "GET",
+            f"/galpub/api/v3/collections/team/v{k}_writer/versions/")
+    for rel in ("/api/v3/collections/team/v13a_writer/versions/",
+                "/api/v3/collections/team/v25_writer/versions/1.0.0-rc.1+build.5/",
+                "/api/v3/collections/team/v22_writer/versions/1.0.0/",
+                "/api/v3/collections/team/v23_writer/versions/1.0.0/",
+                "/api/v3/collections/team/v24_writer/versions/1.0.0/",
+                "/api/v3/collections/team/v26_never/versions/",
+                "/download/team-v25_writer-1.0.0-rc.1+build.5.tar.gz"):
+        add(f"after galaxy galpub{rel} {who}", who, "GET", f"/galpub{rel}")
+    add(f"after galaxy galpub HEAD w_writer download {who}", who, "HEAD",
+        "/galpub/download/team-w_writer-1.0.0.tar.gz")
+
+
 def ours(path):
     """`path` (as served, or a URL followed: an import task's) without
     a scheme and host."""
@@ -300,6 +469,8 @@ PARTS = [
     ("rtoken", 90, ["galpriv"]),
     ("publisher", 80, ["galpub"]),
     ("reads", 120, reads),
+    ("writes", 170, writes),
+    ("after", 70, after),
     # Galaxy keeps when each version was uploaded (its tree's metadata,
     # and so its root), and says it as each version's created_at and
     # updated_at; an import task says it is done at the time it is asked.
