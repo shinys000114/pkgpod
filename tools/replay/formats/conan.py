@@ -588,6 +588,17 @@ def shared(c):
         ("PUT", f"/kpub{y}/files/{MANIFEST}", {}, r[MANIFEST]),
         ("GET", f"/kpriv{y}/files", {}, None),
         ("GET", f"/kpub{y}/files", {}, None)])
+    # Two revisions of the same files (so of the same manifest), each
+    # one's manifest downloaded: a download is named by the catalog row
+    # of the path asked for (by its bytes only if no row has the path),
+    # so each counts as its own revision's. Never removed (see writes).
+    ref = "/kpub/v2/conans/twin/1.0/_/_"
+    r = recipe("twin", "1.0", "a twin", sources=False)
+    twins = ("3" * 32, "4" * 32)
+    c.seq("conan twin revisions downloaded writer", "writer",
+          [("PUT", f"{ref}/revisions/{t}/files/{n}", {}, d) for t in twins for n, d in r.items()]
+          + [("GET", f"{ref}/revisions/{t}/files/{MANIFEST}", {}, None) for t in twins]
+          + [("GET", f"{ref}/revisions", {}, None)])
 
 
 def after(c, who):
