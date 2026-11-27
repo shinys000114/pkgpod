@@ -634,6 +634,12 @@ def mask(masker):
     return answer
 
 
+FUZZ = (["apkpub", "apkpriv", "apkriscv", "apkempty"],
+        ["v3.22", "v3.20", "main", "community", "x86_64", "aarch64", "armv7", "riscv64",
+         "noarch", "APKINDEX.tar.gz", "_inputs", "upload", "@first", "@second",
+         file_name("hello", "1.0-r0"), file_name("hello", "1.1-r0"), file_name("motd", "2-r0"),
+         file_name("tool", "0.1_alpha-r1"), file_name("blink", "1.0-r0")])
+
 PARTS = [
     ("seed", 130, seed),
     ("grants", 120, {"reader": {"apkpriv": "read"},
@@ -663,4 +669,5 @@ PARTS = [
                                                  "content-range's total and the bytes (same "
                                                  "length)")),
     ("mask", 120, mask),
+    ("fuzz sample", 160, HELLO_10),
 ]
