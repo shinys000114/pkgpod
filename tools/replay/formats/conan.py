@@ -2,9 +2,10 @@
 """Conan: hosted public and private (hello/1.0 of two recipe revisions,
 a label after the first; the first with a binary package, the second
 with two, one of them in two package revisions; hello/1.0@team/stable;
-other/2.0), one with nothing in it, one at a host's root, and ktrust,
-the one the trust rule writes (see FUZZ). Conan repositories are
-hosted only: no proxy, no group, no stub."""
+other/2.0; gap/1.0, of packages a removal by path left broken), one
+with nothing in it, one at a host's root, and ktrust, the one the trust
+rule writes (see FUZZ). Conan repositories are hosted only: no proxy,
+no group, no stub."""
 
 import calendar
 import gzip
@@ -130,19 +131,41 @@ SEED = [
 ]
 SEED_LABEL_AFTER = 2
 
+# gap/1.0, uploaded after SEED (not in the label): one recipe revision,
+# three packages. Removing by path (pkgpod rm, which the format points
+# to for what conan remove does not) then leaves two broken in ways no
+# Conan request leaves one: P1's latest package revision (Q2) without
+# its conaninfo.txt (Q1, before it, keeps its own), P2's only revision
+# without its manifest. The package search leaves both out; P3 is found.
+P3 = "3c" * 20
+GAP = "/v2/conans/gap/1.0/_/_"
+GAP_RV = rv(R1, GAP)
+GPK1, GPK2, GPK3 = (pk(R1, p, GAP) for p in (P1, P2, P3))
+GAP_SEED = [
+    (GAP_RV, recipe("gap", "1.0", "gap", sources=False)),
+    (f"{GPK1}/revisions/{Q1}", package(INFO_A, "gap P1 Q1")),
+    (f"{GPK1}/revisions/{Q2}", package(INFO_B, "gap P1 Q2")),
+    (f"{GPK2}/revisions/{Q1}", package(INFO_A, "gap P2 Q1")),
+    (f"{GPK3}/revisions/{Q1}", package(INFO_WIN, "gap P3 Q1")),
+]
+# The paths removed, as the repository's tree has them.
+GAP_RM = (f"gap/1.0/_/_/{R1}/packages/{P1}/{Q2}/conaninfo.txt",
+          f"gap/1.0/_/_/{R1}/packages/{P2}/{Q1}/{MANIFEST}")
+
 
 # A download is named by its catalog row, and Conan's are its manifests:
 # by path, else by the bytes of a manifest. No other file may have a
 # manifest's bytes, or downloading it would count as that one's.
-_m = [files[MANIFEST] for _, files in SEED]
-if len(set(_m)) != len(_m) or set(_m) & {d for _, files in SEED
+_m = [files[MANIFEST] for _, files in SEED + GAP_SEED]
+if len(set(_m)) != len(_m) or set(_m) & {d for _, files in SEED + GAP_SEED
                                          for n, d in files.items() if n != MANIFEST}:
     raise SystemExit("conan: the seed has a manifest of another's bytes")
 
 
 def seed(p, fx):
     # Conan: hosted public and private (SEED, the label after its first
-    # two), one with nothing in it, the trust rule's (hello/1.0's first
+    # two; then GAP_SEED, broken by removing GAP_RM's paths one by one),
+    # one with nothing in it, the trust rule's (hello/1.0's first
     # revision, the label), one at conan.localhost's root (the same).
     aa = auth_header("admin")
 
@@ -159,6 +182,10 @@ def seed(p, fx):
             if i == SEED_LABEL_AFTER:
                 p.cli("label", repo, "first")
             send(f"/{repo}", where, files)
+        for where, files in GAP_SEED:
+            send(f"/{repo}", where, files)
+        for path in GAP_RM:
+            p.cli("rm", repo, path, "--yes")
     p.cli("repo", "create", "kempty", "-f", "conan", "-s", "public=true")
     p.cli("repo", "create", "ktrust", "-f", "conan", "-s", "public=true")
     send("/ktrust", RV1, HELLO_R1)
@@ -248,6 +275,22 @@ PACKAGES = (f"{RV1}/search", f"{RV2}/search", f"{rv(R3, TEAM)}/search",
             f"{pk(R3, P1, TEAM)}/latest", "/@first" + f"{PK1}/revisions",
             "/@first" + f"{PK}/revisions", "/@first" + f"{RV1}/search",
             "/@first" + f"{RV2}/search")
+# gap/1.0's packages (see GAP_SEED): the search (P3 alone), each one's
+# revisions and latest, each package revision's files (listed and served
+# without the conaninfo.txt removed; none of the one whose manifest is
+# removed); found by the search of references; at the label, not there.
+GAPS = (f"{GAP}/revisions", f"{GAP}/latest", f"{GAP_RV}/files", f"{GAP_RV}/search",
+        f"{GPK1}/revisions", f"{GPK1}/latest", f"{GPK1}/revisions/{Q2}/files",
+        f"{GPK1}/revisions/{Q2}/files/conaninfo.txt",
+        f"{GPK1}/revisions/{Q2}/files/conan_package.tgz",
+        f"{GPK1}/revisions/{Q2}/files/{MANIFEST}", f"{GPK1}/revisions/{Q1}/files",
+        f"{GPK1}/revisions/{Q1}/files/conaninfo.txt", f"{GPK2}/revisions", f"{GPK2}/latest",
+        f"{GPK2}/revisions/latest", f"{GPK2}/revisions/{Q1}/files",
+        f"{GPK2}/revisions/{Q1}/files/conaninfo.txt",
+        f"{GPK2}/revisions/{Q1}/files/conan_package.tgz",
+        f"{GPK2}/revisions/{Q1}/files/{MANIFEST}", f"{GPK3}/latest",
+        f"{GPK3}/revisions/{Q1}/files/conaninfo.txt", "/v2/conans/search?q=gap*",
+        "/@first" + f"{GAP_RV}/search", "/@first" + f"{GPK3}/latest")
 # What only GET (ping, logging in, search) and GET and HEAD (the rest)
 # answer, asked with HEAD.
 HEADS = ("/", "/v1/ping", "/v2/users/authenticate", "/v2/users/check_credentials",
@@ -270,7 +313,7 @@ def reads(c, who):
     add = c.add
     for repo in ("kpub", "kpriv"):
         for rel in ADDRESS + tuple("/v2/conans/search" + q for q in SEARCH) + RECIPE + FILES \
-                + PACKAGES:
+                + PACKAGES + GAPS:
             add(f"conan {repo}{rel} {who}", who, "GET", f"/{repo}{rel}")
         for rel in HEADS:
             add(f"conan {repo} HEAD {rel} {who}", who, "HEAD", f"/{repo}{rel}")
