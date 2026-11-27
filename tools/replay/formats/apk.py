@@ -2,16 +2,16 @@
 """Alpine (apk): hosted public and private (packages in two branches and
 two repositories: x86_64, aarch64 and noarch ones, one of an
 architecture outside the defaults, one with a signature part, one
-without a datahash, one with an install script, one replaced; a label
-after the first, another later), one whose settings name its
-architectures and description, one with nothing in it. Each is served
-as the server's generic tree: the packages under
-<branch>/<repository>/<arch>/ (a noarch one in every architecture's),
-the APKINDEX.tar.gz the format makes per version, branch, repository
-and architecture, signed with the server's RSA key, and that key at
-the root (pkgpod-<8 hex digits>.rsa.pub, of the seed's key: its name
-is in the seed's fixtures). Alpine repositories are hosted (or
-mirrors, which are jobs): no proxy, no stub.
+without a datahash, one with an install script, one replaced, one at a
+path the tree takes for named by its content; a label after the first,
+another later), one whose settings name its architectures and
+description, one with nothing in it. Each is served as the server's
+generic tree: the packages under <branch>/<repository>/<arch>/ (a noarch
+one in every architecture's), the APKINDEX.tar.gz the format makes per
+version, branch, repository and architecture, signed with the server's
+RSA key, and that key at the root (pkgpod-<8 hex digits>.rsa.pub, of the
+seed's key: its name is in the seed's fixtures). Alpine repositories are
+hosted (or mirrors, which are jobs): no proxy, no stub.
 
 The writes go to branches no read before them names (edge, the
 default, one per identity, w-<who>, and the writer's by-hash), read
@@ -151,7 +151,15 @@ TOOL = package("tool", "0.1_alpha-r1", "aarch64", signed=True,
                        ("replaces", "tool-old")])
 # Of an architecture outside the defaults, without a datahash, its
 # description not ASCII.
-BLINK = package("blink", "1.0-r0", "armv7", desc="blinks a light, café", datahash=False)
+BLINK = package("blink", "1.0-r0", "armv7", desc="blinks a light, caf\u00e9", datahash=False)
+# Of an architecture named repodata, its name 64 hex digits: its file
+# name is the one the tree takes for an rpm repodata file named by its
+# content (<sha256>-...), kept an hour, where other stored files are
+# revalidated.
+HEXNAME = "0123456789abcdef" * 4
+HEXY = package(HEXNAME, "1.0-r0", "repodata")
+HEXY_FILE = file_name(HEXNAME, "1.0-r0")
+HEXY_AT = "/v3.22/community/repodata/" + HEXY_FILE
 
 # What the seed does to each of the public and private repositories,
 # in order, as (how, place or label, packages): uploads by the CLI
@@ -169,6 +177,7 @@ SEED = [
     ("label", "second", None),
     ("/" + file_name("hello", "1.0-r0") + "?branch=v3.20&repository=main", None, HELLO_10),
     ("/upload?branch=v3.22&repository=main&replace=true", None, HELLO_11B),
+    ("cli", "v3.22/community", [HEXY]),
 ]
 
 
@@ -239,8 +248,9 @@ PKG = MAIN + file_name("hello", "1.0-r0")
 # noarch directory, mis-cased, escaped, not there), each place's
 # indexes (an architecture of the defaults with no package of its own,
 # one outside them) and packages (a noarch one in each architecture's
-# directory, not in its own); a label's version, one not there; what
-# is no address of the tree (the upload address, a path through ..).
+# directory, not in its own; one the tree takes for named by its
+# content); a label's version, one not there; what is no address of
+# the tree (the upload address, a path through ..).
 PATHS = [
     "", "/", "/v3.22", "/v3.22/", "/v3.22/main", "/v3.22/main/", "/v3.22/main/x86_64",
     MAIN, MAIN + "?sort=size", MAIN + "?sort=size&order=desc", MAIN + "?sort=time",
@@ -254,7 +264,10 @@ PATHS = [
     "/v3.22/community/armv7/", "/v3.22/community/armv7/APKINDEX.tar.gz",
     "/v3.22/community/armv7/" + file_name("blink", "1.0-r0"),
     "/v3.22/community/armv7/" + file_name("motd", "2-r0"),
-    "/v3.22/community/x86_64/APKINDEX.tar.gz", "/v3.20/", "/v3.20/main/x86_64/APKINDEX.tar.gz",
+    "/v3.22/community/x86_64/APKINDEX.tar.gz", "/v3.22/community/repodata/",
+    "/v3.22/community/repodata/APKINDEX.tar.gz", HEXY_AT,
+    "/v3.22/community/repodata/" + file_name("motd", "2-r0"),
+    "/v3.20/", "/v3.20/main/x86_64/APKINDEX.tar.gz",
     "/v3.20/main/aarch64/APKINDEX.tar.gz", "/v3.20/main/x86_64/" + file_name("hello", "1.0-r0"),
     "/V3.22/main/x86_64/APKINDEX.tar.gz", "/v3.22/main/X86_64/APKINDEX.tar.gz",
     MAIN + "apkindex.tar.gz", MAIN + "APKINDEX.tar", MAIN + "APKINDEX",
@@ -289,7 +302,8 @@ def reads(c, who):
         # date: the files keep none, so it is never met), ranges (one,
         # two, one past the end, one only if the ETag is still the
         # file's).
-        for name, rel in ((PKG, PKG), (INDEX, INDEX), ("/<key>", k), (MAIN, MAIN), ("/", "/")):
+        for name, rel in ((PKG, PKG), (INDEX, INDEX), ("/<key>", k), (MAIN, MAIN), ("/", "/"),
+                          (HEXY_AT, HEXY_AT)):
             add(f"apk {repo} HEAD {name} {who}", who, "HEAD", b + rel)
         for name, rel in ((PKG, PKG), (INDEX, INDEX), ("/<key>", k)):
             add(f"apk {repo} inm {name} {who}", who, "GET", b + rel,
