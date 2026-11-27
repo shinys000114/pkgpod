@@ -624,18 +624,30 @@ def spoilt(c, who):
 
 def limits(c, who):
     # Over the format's limits, by one who may (the bodies are read): a
-    # file part over the largest artifact; one in base64 over what is
-    # read of it, of white space (dropped: nothing is decoded of it, so
-    # the decoded limit is not reached first); a MANIFEST.json past what
-    # is read of it (unpacked; packed it is small).
+    # file part over the largest artifact, as it is and in base64 (one
+    # byte more decoded, below what is read of base64); one in base64
+    # over what is read of it, of white space (dropped: nothing is
+    # decoded of it, so the decoded limit is not reached first); a
+    # MANIFEST.json past what is read of it (unpacked; packed it is
+    # small). And base64 that goes on past its padding, the two in
+    # pieces of their own (in one, the padding is a bad symbol): 64 MiB
+    # of white space between them, far more than one read of the body
+    # brings (the socket buffers of both ends hold less).
     if who != "writer":
         return
     tail = b"\r\n" + close()
-    for name, byte, n, cte in (("file", b"\0", MAX_ARTIFACT + 1, None),
-                               ("base64 file", b" ", MAX_SENT + 1, "base64")):
-        h = head("file", "big.tar.gz", "application/octet-stream", cte)
-        body = Run(h, byte, n, tail)
-        c.seq(f"galaxy {name} over the limit {who}", who, [
+    b64h = head("file", "big.tar.gz", "application/octet-stream", "base64")
+    for name, h, byte, n, t in (
+            ("file over the limit", head("file", "big.tar.gz", "application/octet-stream"),
+             b"\0", MAX_ARTIFACT + 1, tail),
+            ("base64 file over the limit", b64h, b" ", MAX_SENT + 1, tail),
+            ("base64 file decoded over the limit", b64h, b"A", (MAX_ARTIFACT + 3) // 3 * 4,
+             tail),
+            ("base64 file padded then more far on",
+             head("file", "x.tar.gz", "application/octet-stream", "base64") + b"QQ==",
+             b" ", 64 << 20, b"QUJD" + tail)):
+        body = Run(h, byte, n, t)
+        c.seq(f"galaxy {name} {who}", who, [
             ("POST", f"/galpub{UPLOAD}", dict(CT, **{"Content-Length": str(body.size)}), body),
             ("GET", f"/galpub{C}/versions/", {}, None)])
     big = artifact("team", "big", "1.0.0", description="x" * (MAX_MANIFEST + 10))
