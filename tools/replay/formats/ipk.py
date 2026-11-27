@@ -15,10 +15,12 @@ run signs with the same) and the key's key.pub."""
 import gzip
 import hashlib
 import io
+import json
 import lzma
+import os
 import tarfile
 
-from core import auth_header, request
+from core import SERVE, auth_header, request
 
 NAME = "ipk"
 
@@ -265,6 +267,182 @@ def reads(c, who):
                 {"Authorization": cred})
 
 
+# ---- writes ---------------------------------------------------------------
+
+def gets(base, paths, method="GET"):
+    return [(method, f"{base}/{p}", {}, None) for p in paths]
+
+
+def refused():
+    """Bodies the format refuses (or takes once), each (name, bytes):
+    what is no ipk; OpenWrt's with a member missing or broken; controls
+    it cannot use; Yocto's with a member missing or of no known kind;
+    a version there with other bytes (its own, by epoch); the same bytes
+    again."""
+    data = data_tgz("hello")
+    ctl = tgz([("./control", control("bad", "1.0", "all"))])
+    return [
+        ("empty", b""),
+        ("text", b"hello, not a package\n"),
+        ("gzip of no tar", gzip.compress(b"not a tar", mtime=0)),
+        ("no control.tar.gz", openwrt(None, members=[("./debian-binary", b"2.0\n"),
+                                                     ("./data.tar.gz", data)])),
+        ("control.tar.gz no gzip", openwrt(None, members=[("./debian-binary", b"2.0\n"),
+                                                          ("./control.tar.gz", b"not gzip")])),
+        ("control.tar.gz no control", openwrt(None, members=[
+            ("./debian-binary", b"2.0\n"), ("./control.tar.gz", tgz([("./conffiles", b"")]))])),
+        ("control.tar.gz no tar", openwrt(None, members=[
+            ("./control.tar.gz", gzip.compress(b"not a tar", mtime=0))])),
+        ("control.tar.gz first", openwrt(None, members=[
+            ("./control.tar.gz", tgz([("./control", control("ctl-first", "1.0", "all"))])),
+            ("./debian-binary", b"2.0\n")])),
+        ("no Package", openwrt(b"Version: 1.0\nArchitecture: all\n")),
+        ("no Version", openwrt(b"Package: bad\nArchitecture: all\n")),
+        ("no Architecture", openwrt(b"Package: bad\nVersion: 1.0\n")),
+        ("Version with a space", openwrt(control("bad", "1.0 beta", "all"))),
+        ("Package with a dot first", openwrt(control(".bad", "1.0", "all"))),
+        ("Package with a dash first", openwrt(control("-bad", "1.0", "all"))),
+        ("Package too long", openwrt(control("p" * 201, "1.0", "all"))),
+        ("Package at its length", openwrt(control("p" * 200, "1.0", "all"))),
+        ("Architecture with a slash", openwrt(control("bad", "1.0", "x/y"))),
+        ("Version with a slash", openwrt(control("bad", "1.0/2", "all"))),
+        ("control no paragraph", openwrt(b"not a control file\n")),
+        ("control not UTF-8", openwrt(b"Package: bad\xff\nVersion: 1.0\nArchitecture: all\n")),
+        ("yocto no control.tar", yocto(None, members=[("debian-binary", b"2.0\n"),
+                                                      ("data.tar.gz", data)])),
+        ("yocto no debian-binary", yocto(None, members=[
+            ("control.tar.gz", ctl), ("data.tar.gz", data)])),
+        ("yocto debian-binary 3.0", yocto(None, members=[
+            ("debian-binary", b"3.0\n"), ("control.tar.gz", ctl), ("data.tar.gz", data)])),
+        ("yocto control.tar.bz2", yocto(None, members=[
+            ("debian-binary", b"2.0\n"), ("control.tar.bz2", b"BZh9"), ("data.tar.gz", data)])),
+        ("yocto no Version", yocto(b"Package: bad\nArchitecture: all\n")),
+        ("yocto Version with a space", yocto(control("bad", "1.0 beta", "all"))),
+        ("ar of no members", b"!<arch>\n"),
+        ("ar broken", b"!<arch>\nnot a member header\n"),
+        ("hello 1.1-1 other bytes", openwrt(control("hello", "1.1-1", "all", "changed"))),
+        ("hello 1:1.1-1", openwrt(control("hello", "1:1.1-1", "all"))),
+        ("hello 1.1-1 again", HELLO11),
+    ]
+
+
+def writes(c, who):
+    seq = c.seq
+    # An upload as curl -T sends it, to each repository (refused where
+    # the caller may not write); what the format made of it, read back.
+    a = f"w-{who}"
+    body = openwrt(control(a, "1.0-1", "all", f"written by {who}"), who)
+    for repo in REPOS + ("ipkempty",):
+        base = f"/{repo}"
+        seq(f"ipk upload {repo} {who}", who,
+            [("PUT", f"{base}/upload?feed=main", {}, body)]
+            + gets(base, ["main/Packages", "main/Packages.gz", "main/Packages.sig",
+                          f"main/{a}_1.0-1_all.ipk", "main/", "key.pub"])
+            + gets(base, ["main/Packages"], "HEAD"))
+    base = "/ipkpub"
+
+    def pkg(k, arch="all"):
+        return openwrt(control(f"{k}-{who}", "1.0", arch), k)
+    # Where a PUT goes (the URL's path is not looked at: the feed is
+    # ?feed='s, main without one), and what it takes in its query: a
+    # file's own address, the repository's (with and without its
+    # slash), a label's path, the feed empty, padded, given no value;
+    # a file name; parameters it does not take.
+    seq(f"ipk puts {who}", who, [
+        ("PUT", f"{base}/x86_64/y-{who}_1.0_x86_64.ipk?feed=x86_64", {},
+         yocto(control(f"y-{who}", "1.0", "x86_64"), "xz")),
+        ("PUT", f"{base}/upload", {}, pkg("n")),
+        ("PUT", f"{base}/?feed=main", {}, pkg("r")),
+        ("PUT", base, {}, pkg("s")),
+        ("PUT", f"{base}/@first/upload?feed=main", {}, pkg("l")),
+        ("PUT", f"{base}/upload?feed=", {}, pkg("e")),
+        ("PUT", f"{base}/upload?feed=%20f-{who}%20", {}, pkg("f")),
+        ("PUT", f"{base}/upload?feed", {}, pkg("t")),
+        ("PUT", f"{base}/upload?feed=main&filename=x.ipk", {}, pkg("fn")),
+        ("PUT", f"{base}/upload?feed=main&path=main/x.ipk", {}, pkg("p")),
+        ("PUT", f"{base}/upload?feed=main&foo=1", {}, pkg("o")),
+        ("GET", f"{base}/x86_64/Packages", {}, None),
+        ("GET", f"{base}/main/Packages", {}, None),
+        ("GET", f"{base}/f-{who}/Packages", {}, None),
+        ("GET", f"{base}/true/Packages", {}, None),
+        ("GET", f"{base}/@first/main/Packages", {}, None),
+        ("GET", f"{base}/", {}, None)])
+    # Feeds it refuses (and one at the length it takes), then packages.
+    feeds = ["..%2Fx", "a%2Fb", ".hidden", "-x", "_x", "x:y", "a%20b", "f" * 201, "f" * 200,
+             "%00"]
+    seq(f"ipk feeds refused {who}", who,
+        [("PUT", f"{base}/upload?feed={f}", {}, pkg("bf")) for f in feeds]
+        + gets(base, ["", f"{'f' * 200}/Packages"]))
+    seq(f"ipk uploads refused {who}", who,
+        [("PUT", f"{base}/upload?feed=main", {}, b) for _, b in refused()]
+        + [("PUT", f"{base}/upload?feed=x86_64", {}, HELLO11)]
+        + gets(base, ["main/Packages", "x86_64/Packages", "main/hello_1.1-1_all.ipk"]))
+    # What the tree takes from no one: DELETE and POST (of a file, of
+    # the address, of twine's), methods the server takes for no
+    # repository, writes from another site's page (by its Origin, by
+    # Sec-Fetch-Site) and from this one's.
+    for repo in REPOS + ("ipkempty",):
+        b = f"/{repo}"
+        f = f"{b}/main/hello_1.1-1_all.ipk"
+        seq(f"ipk methods {repo} {who}", who, [
+            ("DELETE", f, {}, None),
+            ("DELETE", f"{b}/", {}, None),
+            ("POST", f"{b}/upload?feed=main", {}, pkg("post")),
+            ("POST", f"{b}/", {}, pkg("post")),
+            ("POST", f"{b}/legacy/", {}, pkg("post")),
+            ("PATCH", f, {}, pkg("patch")),
+            ("OPTIONS", f, {}, None),
+            ("PUT", f"{b}/upload?feed=main", {"Origin": "http://elsewhere.example"}, pkg("o")),
+            ("PUT", f"{b}/upload?feed=main", {"Sec-Fetch-Site": "cross-site"}, pkg("o")),
+            ("PUT", f"{b}/upload?feed=main", {"Origin": f"http://127.0.0.1:{SERVE}"},
+             pkg("same")),
+            ("GET", f"{b}/main/Packages", {}, None),
+            ("GET", f, {}, None)])
+
+
+def seed_tokens(c):
+    """The seed's plaintext tokens (ident: token), from the file the
+    seed keeps them in, beside its fixtures: core.TOKENS is filled from
+    it only once the run starts, after the corpus is made."""
+    path = os.path.join(os.path.dirname(c.fx), "tokens.json")
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"ipk: the seed's tokens ({path}): {e}")
+
+
+def writes_end(c):
+    # A token sent alone, as cargo sends one: of writer's that writes
+    # (ipkpub only), that only reads (ipkpriv), and none.
+    tok = seed_tokens(c)
+    for name, cred in (("wtoken", tok["wtoken"]), ("rtoken", tok["rtoken"]),
+                       ("unknown", "pkgpod_nope")):
+        h = {"Authorization": cred}
+        c.seq(f"ipk raw {name} anon", "anon", [
+            ("PUT", "/ipkpub/upload?feed=main", h, openwrt(control(f"raw-{name}", "1.0", "all"))),
+            ("PUT", "/ipkpriv/upload?feed=main", h, openwrt(control(f"raw-{name}", "1.0", "all"))),
+            ("GET", "/ipkpub/main/Packages", h, None),
+            ("GET", "/ipkpriv/main/Packages", h, None),
+            ("GET", "/ipkpriv/main/", h, None)])
+
+
+def after(c, who):
+    # What ipk's writes left in each repository: the listings, each
+    # feed's index, the key, the label's index (unchanged).
+    for repo in REPOS + ("ipkempty",):
+        b = f"/{repo}"
+        for rel in (["/", "/main/", "/x86_64/", "/key.pub", "/@first/main/Packages",
+                     "/true/Packages", "/big/Packages", "/big/"]
+                    + [f"/main/{ix}" for ix in INDEXES] + ["/x86_64/Packages"]
+                    + [f"/f-{w}/Packages" for w in ("writer", "wtoken", "wbearer", "admin",
+                                                    "ptoken")]):
+            c.add(f"after ipk {repo}{rel} {who}", who, "GET", b + rel)
+        c.add(f"after ipk {repo} HEAD /main/Packages {who}", who, "HEAD", f"{b}/main/Packages")
+        c.add(f"after ipk {repo} range /main/Packages {who}", who, "GET", f"{b}/main/Packages",
+              {"Range": "bytes=0-9"})
+
+
 PARTS = [
     ("seed", 130, seed),
     ("grants", 120, {"reader": {"ipkpriv": "read"},
@@ -273,4 +451,7 @@ PARTS = [
     ("rtoken", 110, ["ipkpriv"]),
     ("publisher", 100, ["ipkpub"]),
     ("reads", 140, reads),
+    ("writes", 220, writes),
+    ("writes end", 40, writes_end),
+    ("after", 90, after),
 ]
