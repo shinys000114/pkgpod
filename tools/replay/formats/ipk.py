@@ -495,6 +495,21 @@ def writes(c, who):
     # the address, of twine's), methods the server takes for no
     # repository, writes from another site's page (by its Origin, by
     # Sec-Fetch-Site) and from this one's.
+    # A package put into the feed named by-hash, read back as the head
+    # has it, and through a label made before it: a file under by-hash
+    # that a version does not have is looked for in the versions of the
+    # day before, newest first, and this one is in the version its write
+    # made, or in none where the write is refused (whatever the seed's
+    # age). The rest of by-hash through a label is asked in after, once
+    # the writes made versions of their own.
+    for repo in REPOS:
+        b = f"/{repo}"
+        f = f"by-hash/bh-{who}_1.0_all.ipk"
+        seq(f"ipk by-hash {repo} {who}", who,
+            [("PUT", f"{b}/upload?feed=by-hash", {},
+              openwrt(control(f"bh-{who}", "1.0", "all"), who))]
+            + gets(b, [f, "by-hash/Packages", f"@first/{f}", f"@1/{f}", f"@stable/{f}"])
+            + gets(b, [f"@first/{f}"], "HEAD"))
     for repo in REPOS + ("ipkempty",):
         b = f"/{repo}"
         f = f"{b}/main/hello_1.1-1_all.ipk"
@@ -609,6 +624,29 @@ def after(c, who):
         c.add(f"after ipk {repo} HEAD /main/Packages {who}", who, "HEAD", f"{b}/main/Packages")
         c.add(f"after ipk {repo} range /main/Packages {who}", who, "GET", f"{b}/main/Packages",
               {"Range": "bytes=0-9"})
+    # By-hash through a label or a version made before what is asked:
+    # looked for in the versions of the day before, newest first, which
+    # are the writes' now (before them, the seed's age would decide): the
+    # seed's package, the index of the newest, packages the writes put,
+    # one none put; the feed itself (a directory, which this does not
+    # find), without its slash; a by-hash below a feed; HEAD, its ETag,
+    # a range. A label the repository does not have is not looked past.
+    for repo in REPOS:
+        b = f"/{repo}"
+        for rel in ("/@first/by-hash/byhash_1.0_all.ipk", "/@first/by-hash/Packages",
+                    "/@first/by-hash/Packages.gz", "/@first/by-hash/Packages.sig",
+                    "/@1/by-hash/Packages", "/@stable/by-hash/bh-writer_1.0_all.ipk",
+                    "/@first/by-hash/bh-admin_1.0_all.ipk", "/@first/by-hash/bh-anon_1.0_all.ipk",
+                    "/@first/by-hash/", "/@first/by-hash", "/@first/main/by-hash/Packages"):
+            c.add(f"after ipk {repo}{rel} {who}", who, "GET", b + rel)
+        f = f"{b}/@first/by-hash/byhash_1.0_all.ipk"
+        c.add(f"after ipk {repo} HEAD by-hash {who}", who, "HEAD", f)
+        c.add(f"after ipk {repo} by-hash inm {who}", who, "GET", f,
+              {"If-None-Match": "{after ipk %s/@first/by-hash/byhash_1.0_all.ipk %s.etag}"
+               % (repo, who)})
+        c.add(f"after ipk {repo} by-hash range {who}", who, "GET", f, {"Range": "bytes=0-9"})
+    c.add(f"after ipk ipkempty/@first/by-hash/Packages {who}", who, "GET",
+          "/ipkempty/@first/by-hash/Packages")
 
 
 FUZZ = (["ipkpub", "ipkpriv", "ipkempty"],
