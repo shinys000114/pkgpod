@@ -19,7 +19,9 @@ import io
 import json
 import lzma
 import os
+import struct
 import tarfile
+import zlib
 
 from core import SERVE, auth_header, request
 
@@ -27,11 +29,13 @@ NAME = "ipk"
 
 # The most of a body PUT takes (pkgpod-proto's body::MAX_UPLOAD), the
 # most of a package the format takes (MAX_PKG), of a control member and
-# control file (MAX_CONTROL), and how far control.tar.gz is inflated to
+# control file (MAX_CONTROL), how far OpenWrt's tar is inflated to find
+# control.tar.gz (MAX_TAR) and how far control.tar.gz is inflated to
 # find the control file (MAX_CONTROL_TAR).
 MAX_UPLOAD = 8 << 30
 MAX_PKG = 2 << 30
 MAX_CONTROL = 1 << 20
+MAX_TAR = 2 * MAX_PKG
 MAX_CONTROL_TAR = 64 << 20
 
 REPOS = ("ipkpub", "ipkpriv")
@@ -71,6 +75,53 @@ def tar(members):
 
 def tgz(members):
     return gzip.compress(tar(members), mtime=0)
+
+
+def header(name, size):
+    """A tar member's header (GNU's, as tar's), for `size` bytes."""
+    info = tarfile.TarInfo(name)
+    info.size, info.mtime, info.mode = size, 1790000000, 0o644
+    return info.tobuf(tarfile.GNU_FORMAT)
+
+
+def member(name, data):
+    """A tar member: its header, `data`, padded to tar's 512 bytes."""
+    return header(name, len(data)) + data + bytes(-len(data) % 512)
+
+
+def gzip_zeros(head, n, tail):
+    """A gzip (as gzip.compress's, of mtime 0) of `head`, `n` zero bytes
+    and `tail`, made in a moment though `n` is GiBs: after a full flush
+    deflate refers to nothing before it, so 16 MiB of zeros deflated
+    after one are the same bytes each time, repeated; the trailer's
+    CRC is of all of it."""
+    piece = 16 << 20
+    z = zlib.compressobj(9, zlib.DEFLATED, -15)
+    out = [z.compress(head), z.flush(zlib.Z_FULL_FLUSH)]
+    block = z.compress(bytes(piece)) + z.flush(zlib.Z_FULL_FLUSH)
+    if z.compress(bytes(piece)) + z.flush(zlib.Z_FULL_FLUSH) != block:
+        raise SystemExit("ipk: zeros deflated after a full flush are not the same twice")
+    out += [block] * (n // piece)
+    out += [z.compress(bytes(n % piece) + tail), z.flush()]
+    crc, zeros = zlib.crc32(head), bytes(piece)
+    for _ in range(n // piece):
+        crc = zlib.crc32(zeros, crc)
+    crc = zlib.crc32(bytes(n % piece) + tail, crc)
+    size = (len(head) + n + len(tail)) & 0xFFFFFFFF
+    return (b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff" + b"".join(out)
+            + struct.pack("<II", crc, size))
+
+
+def tar_to(name, past):
+    """OpenWrt's ipk of `name` whose control.tar.gz comes after GiBs of
+    zeros (a member of its tar), so that the member ends where the tar
+    stops being inflated (MAX_TAR, past False), or its header starts
+    there (past True): a reader that went on would take it."""
+    lead = (member("./debian-binary", b"2.0\n") + member("./data.tar.gz", data_tgz("big"))
+            + header("./zeros", 0))
+    ctl = member("./control.tar.gz", tgz([("./control", control(name, "1.0", "all"))]))
+    n = MAX_TAR - len(lead) - (0 if past else len(ctl))
+    return gzip_zeros(lead[:-512] + header("./zeros", n), n, ctl + bytes(1024))
 
 
 def control(name, version, arch, desc="A package for the replay.", extra=()):
@@ -469,8 +520,10 @@ def limits(c, who):
     # hex); controls at their limit, one byte past it and a field past
     # it (OpenWrt's cut there and taken, the field dropped; Yocto's
     # refused), a control.tar.gz past its limit with the control file
-    # first and last, one inflated past its limit before it; by one who
-    # may (the body is read); in sequences, of which no mutant is sent.
+    # first and last, one inflated past its limit before it; OpenWrt's
+    # tar inflated to its limit, control.tar.gz's last block there and
+    # its header there; by one who may (the body is read); in
+    # sequences, of which no mutant is sent.
     if who != "writer":
         return
     up = "/ipkpub/upload?feed=main"
@@ -508,6 +561,10 @@ def limits(c, who):
                                       ("./control", control("bigzeros", "1.0", "all"))]))])),
         ("GET", "/ipkpub/big/Packages", {}, None),
         ("GET", "/ipkpub/big/", {}, None)])
+    c.seq("ipk tar at and past its limit writer", who, [
+        ("PUT", big, {}, tar_to("bigtar-at", False)),
+        ("PUT", big, {}, tar_to("bigtar-past", True)),
+        ("GET", "/ipkpub/big/Packages", {}, None)])
 
 
 def seed_tokens(c):
