@@ -8,12 +8,12 @@
 
 use std::sync::Arc;
 
-use axum::extract::{FromRequest, Multipart, Request};
-use axum::http::{HeaderValue, Method, StatusCode, header};
-use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
+use http::{HeaderValue, Method, StatusCode, header};
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Upload, Version};
+use pkgpod_proto::body::{Request, Response};
+use pkgpod_proto::form::Form;
 use pkgpod_proto::host::Host;
 use pkgpod_proto::{Caller, Role};
 use serde_json::{Value, json};
@@ -25,22 +25,14 @@ fn versioned(mut r: Response) -> Response {
 }
 
 fn reply(st: StatusCode, v: Value) -> Response {
-    let mut r = (st, serde_json::to_string(&v).expect("json")).into_response();
-    let h = r.headers_mut();
-    h.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    let mut r = pkgpod_proto::reply::json(st, &v);
+    r.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     versioned(r)
 }
 
 fn problem(st: StatusCode, m: impl Into<String>) -> Response {
-    let mut r = (
-        st,
-        serde_json::to_string(&json!({"detail": m.into()})).expect("json"),
-    )
-        .into_response();
+    let mut r = pkgpod_proto::reply::json(st, &json!({"detail": m.into()}));
     r.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/problem+json"),
@@ -125,7 +117,7 @@ pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
     let get = matches!(method, Method::GET | Method::HEAD);
     match (&method, r.as_slice()) {
         // Logging in: the token works.
-        (&Method::POST, [] | ["login"]) => versioned(StatusCode::OK.into_response()),
+        (&Method::POST, [] | ["login"]) => versioned(pkgpod_proto::reply::status(StatusCode::OK)),
         (_, ["identifiers"]) if get => {
             let q = pkgpod_proto::query::params(req.uri().query().unwrap_or(""));
             let want = q
@@ -205,11 +197,9 @@ pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
                     format!("{scope}.{name} {ver} not found"),
                 );
             };
-            let req = req.map(pkgpod_proto::body::boxed);
             let mut resp = app
                 .serve_counted(&a.repo.name, "", a.repo.store().path(sha), *sha, file, req)
-                .await
-                .map(axum::body::Body::new);
+                .await;
             let h = resp.headers_mut();
             h.insert(
                 header::CONTENT_TYPE,
@@ -266,7 +256,7 @@ pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
                 .or_else(|| manifests.get("Package.swift").cloned())
                 .and_then(|v| v.as_str().map(String::from))
                 .unwrap_or_default();
-            let mut resp = (StatusCode::OK, text).into_response();
+            let mut resp = pkgpod_proto::reply::text(StatusCode::OK, text);
             let h = resp.headers_mut();
             h.insert(
                 header::CONTENT_TYPE,
@@ -318,7 +308,7 @@ async fn publish(
     ver: &str,
     req: Request,
 ) -> Response {
-    let mut m = match Multipart::from_request(req, &()).await {
+    let mut m = match Form::of(req, pkgpod_proto::body::MAX_UPLOAD) {
         Ok(m) => m,
         Err(e) => return problem(StatusCode::BAD_REQUEST, format!("not a publication: {e}")),
     };
@@ -328,32 +318,26 @@ async fn publish(
         match m.next_field().await {
             Ok(Some(f)) => match f.name().unwrap_or("") {
                 "source-archive" => {
-                    match crate::serving::stream_to_store(
-                        a.repo.store(),
-                        f,
-                        pkgpod_swift::MAX_ARCHIVE,
-                    )
-                    .await
-                    {
+                    let stored =
+                        app.store_body(a.repo.store(), f.into_body(), pkgpod_swift::MAX_ARCHIVE);
+                    match stored.await {
                         Ok(x) => archive = Some(x),
-                        Err(e) => return problem(StatusCode::BAD_REQUEST, e.to_string()),
+                        Err(e) => return problem(StatusCode::BAD_REQUEST, e),
                     }
                 }
-                "metadata" => {
-                    match crate::serving::field_capped(f, crate::serving::MAX_FIELD).await {
-                        Ok(b) if !b.is_empty() => match serde_json::from_slice(&b) {
-                            Ok(v) => metadata = v,
-                            Err(e) => {
-                                return problem(
-                                    StatusCode::UNPROCESSABLE_ENTITY,
-                                    format!("metadata: {e}"),
-                                );
-                            }
-                        },
-                        Ok(_) => {}
-                        Err(e) => return problem(StatusCode::BAD_REQUEST, e.to_string()),
-                    }
-                }
+                "metadata" => match f.capped(pkgpod_proto::form::MAX_FIELD).await {
+                    Ok(b) if !b.is_empty() => match serde_json::from_slice(&b) {
+                        Ok(v) => metadata = v,
+                        Err(e) => {
+                            return problem(
+                                StatusCode::UNPROCESSABLE_ENTITY,
+                                format!("metadata: {e}"),
+                            );
+                        }
+                    },
+                    Ok(_) => {}
+                    Err(e) => return problem(StatusCode::BAD_REQUEST, e),
+                },
                 "source-archive-signature" | "metadata-signature" => {
                     return problem(
                         StatusCode::UNPROCESSABLE_ENTITY,
@@ -388,7 +372,7 @@ async fn publish(
     .await;
     match res {
         Ok(Ok(_)) => {
-            let mut r = versioned(StatusCode::CREATED.into_response());
+            let mut r = versioned(pkgpod_proto::reply::status(StatusCode::CREATED));
             if let Ok(h) = HeaderValue::from_str(&format!("{}{scope}/{name}/{ver}", a.base)) {
                 r.headers_mut().insert(header::LOCATION, h);
             }
