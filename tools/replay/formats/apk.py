@@ -11,7 +11,15 @@ the APKINDEX.tar.gz the format makes per version, branch, repository
 and architecture, signed with the server's RSA key, and that key at
 the root (pkgpod-<8 hex digits>.rsa.pub, of the seed's key: its name
 is in the seed's fixtures). Alpine repositories are hosted (or
-mirrors, which are jobs): no proxy, no stub."""
+mirrors, which are jobs): no proxy, no stub.
+
+The writes go to branches no read before them names (edge, the
+default, one per identity, w-<who>, and the writer's by-hash), read
+back in sequences only, and no fuzz word names them: an APKINDEX made
+for them holds the run's time (see the rules below), so a HEAD, a 304
+or a range of one is asked only after a whole GET of it in the run,
+and their architectures' directories are not listed (a listing shows
+the index's size, which moves with that time)."""
 
 import gzip
 import hashlib
@@ -19,6 +27,7 @@ import json
 import os
 import re
 import tarfile
+import zlib
 
 from core import auth_header, request
 
@@ -90,7 +99,8 @@ def package(name, version, arch, *, files=None, desc=None, fields=(), info=None,
         if datahash:
             h = datahash if isinstance(datahash, str) else hashlib.sha256(part).hexdigest()
             lines.append(f"datahash = {h}")
-        info = ("\n".join(lines) + "\n").encode()
+        # A string's lone surrogates (\udcXX) are the bytes they escape.
+        info = ("\n".join(lines) + "\n").encode("utf-8", "surrogateescape")
     control = gz(tar([(".PKGINFO", info, 0o644, tarfile.REGTYPE, None)]
                      + [(n, d, 0o755, tarfile.REGTYPE, None) for n, d in scripts], end=False))
     sig = b""
@@ -312,6 +322,273 @@ def reads(c, who):
         add(f"apk apkempty{name} {who}", who, "GET", "/apkempty" + rel)
 
 
+# Who may write (the others are refused before their bodies are read).
+WRITERS = ("writer", "wtoken", "wbearer", "admin", "ptoken")
+
+
+def run_place(b, who):
+    """The place an identity writes to in the run, its address."""
+    return f"{b}/w-{who}/main"
+
+
+def writes(c, who):
+    seq = c.seq
+    for repo in ("apkpub", "apkpriv"):
+        b = f"/{repo}"
+        w = f"w-{who}"
+        at = run_place(b, who)
+        idx = f"{at}/x86_64/APKINDEX.tar.gz"
+        rid = f"apk put {repo} {who}"
+        pkg = package(w, "1.0-r0", "x86_64")
+        other = package(w, "1.0-r0", "x86_64", desc="the same name and version, other bytes")
+        # A package to a place of its own (new: every default
+        # architecture's index made, signed), read back (the index by
+        # HEAD, by its ETag, by a range too, after a whole GET); the
+        # same bytes again; other bytes of one name and version
+        # (refused, refused with replace given as false, taken with
+        # replace given alone); a value of replace that is none; a
+        # noarch package (in each architecture's index again); one of
+        # another architecture to another repository of the branch; to
+        # a label's address (the current version's); one with a
+        # signature part, to the branch named with spaces around it;
+        # one to a file's address in the place; one of a control part
+        # alone (no datahash: nothing to check the data against); one
+        # whose description is not UTF-8.
+        seq(rid, who, [
+            ("PUT", f"{b}/upload?branch={w}", {}, pkg),
+            ("GET", idx, {}, None),
+            ("HEAD", idx, {}, None),
+            ("GET", idx, {"If-None-Match": "{%s.etag}" % rid}, None),
+            ("GET", idx, {"Range": "bytes=0-99"}, None),
+            ("GET", f"{at}/aarch64/APKINDEX.tar.gz", {}, None),
+            ("GET", f"{at}/x86_64/{file_name(w, '1.0-r0')}", {}, None),
+            ("GET", f"{at}/", {}, None),
+            ("GET", f"{b}/{w}/", {}, None),
+            ("GET", f"{b}/", {}, None),
+            ("PUT", f"{b}/upload?branch={w}", {}, pkg),
+            ("PUT", f"{b}/upload?branch={w}", {}, other),
+            ("PUT", f"{b}/upload?branch={w}&replace=false", {}, other),
+            ("PUT", f"{b}/upload?branch={w}&replace=maybe", {}, other),
+            ("PUT", f"{b}/upload?branch={w}&replace", {}, other),
+            ("GET", f"{at}/x86_64/{file_name(w, '1.0-r0')}", {}, None),
+            ("PUT", f"{b}/upload?branch={w}", {}, package(f"n-{who}", "1.0-r0", "noarch")),
+            ("PUT", f"{b}/upload?branch={w}&repository=community", {},
+             package(f"a-{who}", "1.0-r0", "armv7")),
+            ("PUT", f"{b}/@first/upload?branch={w}", {}, package(f"l-{who}", "1.0-r0", "x86_64")),
+            ("PUT", f"{b}/upload?branch=%20{w}+&repository=+main", {},
+             package(f"s-{who}", "1.0-r0", "aarch64", signed=True)),
+            ("PUT", f"{at}/x86_64/whatever.apk?branch={w}", {},
+             package(f"f-{who}", "1.0-r0", "x86_64")),
+            ("PUT", f"{b}/upload?branch={w}", {},
+             package(f"c-{who}", "1.0-r0", "x86_64", datahash=False, data=b"")),
+            ("PUT", f"{b}/upload?branch={w}", {},
+             package(f"u-{who}", "1.0-r0", "x86_64", desc="not UTF-8: \udce9t\udce9")),
+            ("GET", idx, {}, None),
+            ("GET", f"{at}/aarch64/APKINDEX.tar.gz", {}, None),
+            ("GET", f"{at}/aarch64/{file_name(f'n-{who}', '1.0-r0')}", {}, None),
+            ("GET", f"{at}/aarch64/{file_name(f's-{who}', '1.0-r0')}", {}, None),
+            ("GET", f"{b}/{w}/community/armv7/APKINDEX.tar.gz", {}, None),
+            ("GET", f"{b}/{w}/community/x86_64/APKINDEX.tar.gz", {}, None),
+            ("GET", f"{b}/{w}/community/", {}, None),
+            ("GET", f"{b}/@first/{w}/", {}, None),
+            ("GET", f"{at}/x86_64/_inputs", {}, None)])
+        # No place given: edge/main, whatever the address (the upload
+        # address, the repository's own), a place given empty; read back.
+        e = f"{b}/edge/main"
+        seq(f"apk put default place {repo} {who}", who, [
+            ("PUT", f"{b}/upload", {}, package(f"d-{who}", "1.0-r0", "x86_64")),
+            ("PUT", f"{b}?branch=&repository=", {}, package(f"e-{who}", "1.0-r0", "x86_64")),
+            ("PUT", b, {}, package(f"g-{who}", "1.0-r0", "noarch")),
+            ("GET", f"{e}/x86_64/APKINDEX.tar.gz", {}, None),
+            ("GET", f"{e}/aarch64/APKINDEX.tar.gz", {}, None),
+            ("GET", f"{e}/x86_64/{file_name(f'd-{who}', '1.0-r0')}", {}, None),
+            ("GET", f"{e}/aarch64/{file_name(f'g-{who}', '1.0-r0')}", {}, None),
+            ("GET", f"{b}/edge/", {}, None),
+            ("GET", f"{e}/", {}, None)])
+        # What an upload refuses, each the input that reaches it: no apk
+        # (nothing, other bytes, an apk v3, a gzip of no tar, a tar of
+        # a bad header), a signature part alone, a control part without
+        # .PKGINFO (an empty tar too), cut short, a control part past
+        # what is unpacked of one; a name, version or architecture that
+        # cannot be a file's (or none), data that is not its datahash's;
+        # a branch or repository that is none, a parameter it does not
+        # take; from another site's page. Then what the tree takes from
+        # no one: other methods. Nothing changed.
+        x = f"x-{who}"
+        good = package(x, "1.0-r0", "x86_64")
+        bad = [
+            b"", b"not an apk", b"ADB.pckg" + bytes(8), gz(b"not a tar"), gz(b"x" * 512),
+            gz(tar([(".SIGN.RSA.replay.rsa.pub", b"sig", 0o644, tarfile.REGTYPE, None)],
+                   end=False)),
+            gz(tar([("README", b"x", 0o644, tarfile.REGTYPE, None)], end=False))
+            + data_part([("x", b"x", 0o644)]),
+            gz(bytes(1024)), good[:40], good[:-30], gz(bytes(MAX_CONTROL + 1)),
+            package("a/b", "1.0-r0", "x86_64"), package(".hidden", "1.0-r0", "x86_64"),
+            package("", "1.0-r0", "x86_64"), package(x, "r1.0", "x86_64"),
+            package(x, "1.0/r0", "x86_64"), package(x, "", "x86_64"),
+            package(x, "1.0-r0", "X86_64"), package(x, "1.0-r0", "x86-64"),
+            package(x, "1.0-r0", ""), package(x, "1.0-r0", "x86_64", datahash="0" * 64),
+        ]
+        places = ["branch=V3.22", "branch=.hidden", "branch=-x", "branch=a+b", "branch=a%2Fb",
+                  "branch=" + "x" * 129, "repository=Main", "repository=..",
+                  "branch=w&dists=stable"]
+        steps = [("PUT", f"{b}/upload?branch={w}", {}, body) for body in bad]
+        steps += [("PUT", f"{b}/upload?{q}", {}, good) for q in places]
+        steps += [("PUT", f"{b}/upload?branch={w}", {"Origin": "http://elsewhere.example"}, good),
+                  ("POST", f"{b}/upload?branch={w}", {}, good),
+                  ("POST", f"{b}{MAIN}", {}, good),
+                  ("DELETE", f"{b}{PKG}", {}, None),
+                  ("DELETE", f"{b}/v3.22/", {}, None),
+                  ("PATCH", f"{b}{PKG}", {}, b"x"),
+                  ("OPTIONS", f"{b}{PKG}", {}, None),
+                  ("GET", f"{b}{INDEX}", {}, None),
+                  ("GET", f"{b}/{w}/", {}, None)]
+        seq(f"apk puts refused {repo} {who}", who, steps)
+    # A repository with nothing in it, which no one but admin may write.
+    c.add(f"apk put apkempty {who}", who, "PUT", "/apkempty/upload", {}, b"not an apk")
+    if who == "writer":
+        by_hash(c, who)
+
+
+def by_hash(c, who):
+    # A branch named by-hash: every stored file of a path with a by-hash
+    # segment keeps the by-hash rule's Cache-Control (a year, immutable),
+    # its index too; and the tree serves a path naming by-hash that the
+    # version asked lacks from a version of the last day (the newest
+    # 50), as apt asks for an index the Release before listed. Made
+    # here, a moment before: a version of the seed would be served only
+    # while the seed is a day old or less. Before the upload, nothing.
+    b = "/apkpub/by-hash/main/x86_64/"
+    idx = b + "APKINDEX.tar.gz"
+    pkg = b + file_name("hello", "1.0-r0")
+    c.seq(f"apk by-hash {who}", who, [
+        ("GET", idx, {}, None),
+        ("PUT", "/apkpub/upload?branch=by-hash", {}, HELLO_10),
+        ("GET", idx, {}, None),
+        ("HEAD", idx, {}, None),
+        ("GET", pkg, {}, None),
+        ("HEAD", pkg, {}, None),
+        ("GET", "/apkpub/@first" + idx[len("/apkpub"):], {}, None),
+        ("GET", "/apkpub/@first" + pkg[len("/apkpub"):], {}, None),
+        ("GET", b + file_name("nope", "1.0-r0"), {}, None),
+        ("GET", "/apkpub/by-hash/main/", {}, None)])
+
+
+# The most of a control part unpacked to read it.
+MAX_CONTROL = 16 << 20
+
+
+def after(c, who):
+    # What the writes left, in sequences (see the module's docstring):
+    # each repository's tree, the default place, each identity's, the
+    # seed's places as they were.
+    for repo in ("apkpub", "apkpriv"):
+        b = f"/{repo}"
+        steps = [("GET", f"{b}{rel}", {}, None) for rel in (
+            "/", "/edge/", "/edge/main/", "/edge/main/x86_64/APKINDEX.tar.gz",
+            "/edge/main/aarch64/APKINDEX.tar.gz", INDEX, MAIN,
+            "/@first" + INDEX, "/@second/v3.22/community/armv7/APKINDEX.tar.gz")]
+        for w in WRITERS:
+            at = run_place(b, w)
+            steps += [("GET", f"{at}/x86_64/APKINDEX.tar.gz", {}, None),
+                      ("GET", f"{at}/aarch64/APKINDEX.tar.gz", {}, None),
+                      ("GET", f"{b}/w-{w}/community/armv7/APKINDEX.tar.gz", {}, None),
+                      ("GET", f"{at}/", {}, None)]
+        c.seq(f"after apk {repo} {who}", who, steps)
+
+
+# An APKINDEX.tar.gz of an apk repository, as served.
+INDEX_PATH = re.compile(r"/apk(pub|priv|riscv|empty)/(?:[^?]*/)?APKINDEX\.tar\.gz(\?|$)")
+
+
+def members(body):
+    """The gzip members of `body`, each unpacked; None if it is not
+    whole members."""
+    out = []
+    while body:
+        d = zlib.decompressobj(31)
+        try:
+            out.append(d.decompress(body))
+        except zlib.error:
+            return None
+        if not d.eof:
+            return None
+        body = d.unused_data
+    return out
+
+
+def tar_heads(t):
+    """The headers of tar `t` (one cut short of its end blocks, too), as
+    (offset, name, size, mtime); None if it does not read as one."""
+    heads, i = [], 0
+    while i + 512 <= len(t):
+        h = t[i:i + 512]
+        if h == bytes(512):
+            i += 512
+            continue
+        try:
+            size = int(h[124:136].strip(b"\0 ") or b"0", 8)
+            mtime = int(h[136:148].strip(b"\0 ") or b"0", 8)
+        except ValueError:
+            return None
+        heads.append((i, h[:100].rstrip(b"\0"), size, mtime))
+        i += 512 + size + (-size % 512)
+    return heads if i == len(t) else None
+
+
+def run_index(body, seed_time):
+    """An APKINDEX.tar.gz made in the run (a header of its tars dated at
+    or after the seed): its tars unpacked, each header's mtime and
+    checksum and the signature's bytes X'd (same length); None if it is
+    none or does not read as one."""
+    parts = members(body) if body[:2] == b"\x1f\x8b" else None
+    if not parts:
+        return None
+    heads = [tar_heads(t) for t in parts]
+    if any(h is None for h in heads) or not any(m >= seed_time for hs in heads
+                                                for _, _, _, m in hs):
+        return None
+    out = []
+    for t, hs in zip(parts, heads):
+        t = bytearray(t)
+        for at, name, size, _ in hs:
+            t[at + 136:at + 156] = b"X" * 20
+            if name.startswith(b".SIGN."):
+                t[at + 512:at + 512 + size] = b"X" * size
+        out.append(bytes(t))
+    return b"".join(out)
+
+
+def mask(masker):
+    # Etags of whole indexes of the run, as sent.
+    run = set()
+
+    def answer(path, hd, body, after_writes, etag):
+        if not after_writes or not INDEX_PATH.match(path):
+            return hd, body
+        h = dict(hd)
+        if body and "content-range" not in h:
+            plain = run_index(body, masker.seed_time)
+            if plain is None:
+                return hd, body
+            masker.counts["apk indexes of the run"] += 1
+            run.add(etag)
+            return [[k, "*" if k in ("etag", "content-length") else v] for k, v in hd], plain
+        if etag not in run:
+            return hd, body
+        # A HEAD, a 304 or a range of one: what it says of the whole.
+        masker.counts["apk index parts of the run"] += 1
+        out = []
+        for k, v in hd:
+            if k in ("etag", "content-length"):
+                v = "*"
+            elif k == "content-range":
+                v = re.sub(r"/\d+$", lambda m: "/" + "X" * (len(m.group(0)) - 1), v)
+            out.append([k, v])
+        return out, b"X" * len(body)
+    return answer
+
+
 PARTS = [
     ("seed", 130, seed),
     ("grants", 120, {"reader": {"apkpriv": "read"},
@@ -320,4 +597,24 @@ PARTS = [
     ("rtoken", 110, ["apkpriv"]),
     ("publisher", 100, ["apkpub"]),
     ("reads", 140, reads),
+    ("writes", 230, writes),
+    ("after", 90, after),
+    # An index made in the run is of that second: its tars' headers say
+    # the version's time (and their checksums move with it), the RSA
+    # signature is of those bytes, and the gzip's length moves with
+    # them. Compared unpacked, those fields masked to the same length;
+    # DESCRIPTION and APKINDEX, the names, sizes, modes and owners stay.
+    ("rule", 230, ("apk indexes of the run", "of an apk APKINDEX.tar.gz after writes whose tars "
+                                             "hold a header dated at or after the seed: the "
+                                             "body, compared unpacked, each tar header's mtime "
+                                             "and checksum and the .SIGN file's bytes masked "
+                                             "(same length); the content-length and etag")),
+    # ... and a HEAD, a 304 or a range of one (of an etag such an index
+    # had): its length, and the bytes of a range, are of that second.
+    ("rule", 240, ("apk index parts of the run", "after writes, of an apk APKINDEX.tar.gz with no "
+                                                 "body or a range, whose etag a whole index of "
+                                                 "the run had: the etag, the content-length, the "
+                                                 "content-range's total and the bytes (same "
+                                                 "length)")),
+    ("mask", 120, mask),
 ]
