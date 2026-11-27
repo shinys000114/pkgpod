@@ -219,6 +219,12 @@ impl Registry {
         self.row(id).and_then(|r| r.serving)
     }
 
+    /// What `id`'s format says of its trees (a format not compiled in:
+    /// nothing).
+    pub fn tree(&self, id: &str) -> &TreeRules {
+        self.row(id).map_or(&TreeRules::DEFAULT, |r| &r.tree)
+    }
+
     /// What `id`'s format answers itself in its trees, if anything.
     pub(crate) fn tree_hooks(&self, id: &str) -> Option<&'static dyn TreeHooks> {
         self.row(id).and_then(|r| r.tree_hooks)
@@ -356,6 +362,7 @@ mod tests {
         assert!(!r.proxy("nope") && !r.groups("nope"));
         assert!(r.claim("nope").is_none() && r.serving("nope").is_none());
         assert!(r.tree_hooks("nope").is_none());
+        assert!(!r.tree("nope").plain && !r.tree("nope").put_path);
     }
 
     #[test]
@@ -411,6 +418,7 @@ mod tests {
                 || t.content_named.is_some()
                 || t.content_type.is_some()
                 || t.put_path
+                || t.plain
         };
         assert_eq!(
             ids(|r| !r.tree.cache.is_empty()),
@@ -424,6 +432,7 @@ mod tests {
             set(&["deb", "rpm"])
         );
         assert_eq!(ids(|r| r.tree.put_path), set(&["files", "maven"]));
+        assert_eq!(ids(|r| r.tree.plain), set(&["files"]));
         // A format crate that says what its trees are has it in its row,
         // the others the default.
         for (name, dir) in crates() {

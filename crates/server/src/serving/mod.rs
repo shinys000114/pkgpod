@@ -657,6 +657,7 @@ async fn get(
     let head = req.method() == Method::HEAD;
     let query = req.uri().query().unwrap_or("").to_string();
     let dir_url = raw_path.ends_with('/');
+    let plain = app.registry.tree(&s.repo.format).plain;
     if s.repo.kind == Kind::Mirror {
         if let Some(h) = app.registry.tree_hooks(&s.repo.format)
             && let Some(r) = h
@@ -674,9 +675,8 @@ async fn get(
         {
             return r;
         }
-        let files = s.repo.format == "files";
         let counts = crate::serving::stats::counts(req.method(), req.headers());
-        let r = serve_mirror(s.repo.tree_dir(), &rel, raw_path, files, req).await;
+        let r = serve_mirror(s.repo.tree_dir(), &rel, raw_path, plain, req).await;
         if !raw_path.ends_with('/') {
             app.stats
                 .mirrored(counts, &r, &s.repo.name, &s.repo.format, &rel.join("/"));
@@ -703,7 +703,7 @@ async fn get(
         return r;
     }
     let rel_s = rel.join("/");
-    let followed = if s.repo.format == "files" {
+    let followed = if plain {
         resolve_links(app.engine.objects(), &version.served(), &rel_s)
     } else {
         app.engine.objects().resolve(&version.served(), &rel_s)
@@ -780,7 +780,7 @@ async fn get(
                         }),
                     }),
                     // A files link, as what it points at.
-                    Entry::Ref { target } if s.repo.format == "files" => {
+                    Entry::Ref { target } if plain => {
                         match resolve_links(app.engine.objects(), &version.served(), target) {
                             Ok(Some(Entry::Dir { .. })) => Some(ListEntry {
                                 name: name.clone(),
@@ -808,7 +808,6 @@ async fn get(
         }
         Entry::Blob { sha256, meta, .. } => {
             let mtime = meta.get("mtime").and_then(Value::as_i64);
-            let files = s.repo.format == "files";
             // The ETag a format's clients check a file against, if it
             // gives one (bundler before 2.5: a compact index file's MD5).
             let etag = match meta
@@ -821,7 +820,7 @@ async fn get(
             };
             let counts = crate::serving::stats::counts(req.method(), req.headers());
             let file = s.repo.store().path(&sha256);
-            let r = serve_tagged(&file, &etag, &rel_s, mtime, files, true, req).await;
+            let r = serve_tagged(&file, &etag, &rel_s, mtime, plain, true, req).await;
             app.stats
                 .file(counts, &r, &s.repo.name, &rel_s, Some(&sha256));
             r
@@ -1366,7 +1365,7 @@ impl tower_http::services::fs::Backend for MirrorFs {
 pub(crate) fn dir_entries(app: &App, s: &crate::Served, rel: &[String]) -> Option<Vec<ListEntry>> {
     let rel_s = rel.join("/");
     if s.repo.kind == Kind::Mirror {
-        let files = s.repo.format == "files";
+        let files = app.registry.tree(&s.repo.format).plain;
         let hidden = move |name: &str| mirror_hidden(files, name);
         if rel.iter().any(|x| hidden(x)) {
             return None;
@@ -1633,15 +1632,15 @@ pub(crate) fn listing(
 pub(crate) const LISTING_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; \
     img-src 'self' https: data:; base-uri 'none'; form-action 'none'";
 
-/// A files repository's notes in a directory of its tree, read from the
-/// store; nothing for other formats or on HEAD.
+/// A plain tree's notes (a files repository's) in a directory of it,
+/// read from the store; nothing for other formats or on HEAD.
 pub(crate) async fn tree_notes(
     repo: &pkgpod_engine::RepoInfo,
     t: &pkgpod_engine::tree::Tree,
     head: bool,
 ) -> crate::ops::notes::Notes {
     use crate::ops::notes::{FOOTER, HEADER, MAX, Notes};
-    if repo.format != "files" || head {
+    if !crate::registry::get().tree(&repo.format).plain || head {
         return Notes::default();
     }
     let blobs: Vec<(String, pkgpod_base::Digest)> = [HEADER, FOOTER]

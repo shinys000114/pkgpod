@@ -20,9 +20,10 @@ use serde_json::{Value, json};
 pub struct Files;
 
 /// What the server serves of a files tree beside its files: an upload
-/// by PUT goes where its URL says.
+/// by PUT goes where its URL says, and the tree is plain files.
 pub const TREE: TreeRules = TreeRules {
     put_path: true,
+    plain: true,
     ..TreeRules::DEFAULT
 };
 

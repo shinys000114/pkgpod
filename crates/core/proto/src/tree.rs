@@ -27,6 +27,12 @@ pub struct TreeRules {
     /// Whether a PUT puts the file at the path its URL names in the tree
     /// (otherwise the format places it, by the upload's parameters).
     pub put_path: bool,
+    /// Whether its trees are plain files, served as they are: a path may
+    /// get other content any time, so every file is revalidated whatever
+    /// the rows say; a tree's links are followed and its directories'
+    /// notes shown; a mirror's dot-files are served, and the type a file
+    /// server guesses kept where the server's lookup knows none.
+    pub plain: bool,
 }
 
 impl TreeRules {
@@ -36,6 +42,7 @@ impl TreeRules {
         content_named: None,
         content_type: None,
         put_path: false,
+        plain: false,
     };
 }
 
@@ -52,7 +59,7 @@ mod tests {
     #[test]
     fn the_default_says_nothing() {
         let r = TreeRules::default();
-        assert!(r.cache.is_empty() && !r.put_path);
+        assert!(r.cache.is_empty() && !r.put_path && !r.plain);
         assert!(r.content_named.is_none() && r.content_type.is_none());
         // A format's rules are built on it, as a const.
         const SOME: TreeRules = TreeRules {
