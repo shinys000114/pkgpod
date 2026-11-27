@@ -17,9 +17,8 @@ use axum::response::{IntoResponse, Response};
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Upload, Version};
 use pkgpod_proto::host::Host;
+use pkgpod_proto::{Caller, Role};
 use serde_json::{Value, json};
-
-use crate::auth::{Caller, Role};
 
 const V2: &str = "application/vnd.pub.v2+json";
 
@@ -50,7 +49,7 @@ pub struct Ask {
 
 pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
     if a.role.is_none() {
-        if a.caller.user.is_none() {
+        if a.caller.anonymous() {
             let mut r = error(StatusCode::UNAUTHORIZED, "authentication required");
             r.headers_mut().insert(
                 header::WWW_AUTHENTICATE,
