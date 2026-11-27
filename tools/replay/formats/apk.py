@@ -5,13 +5,14 @@ architecture outside the defaults, one with a signature part, one
 without a datahash, one with an install script, one replaced, one at a
 path the tree takes for named by its content; a label after the first,
 another later), one whose settings name its architectures and
-description, one with nothing in it. Each is served as the server's
-generic tree: the packages under <branch>/<repository>/<arch>/ (a noarch
-one in every architecture's), the APKINDEX.tar.gz the format makes per
-version, branch, repository and architecture, signed with the server's
-RSA key, and that key at the root (pkgpod-<8 hex digits>.rsa.pub, of the
-seed's key: its name is in the seed's fixtures). Alpine repositories are
-hosted (or mirrors, which are jobs): no proxy, no stub.
+description, one with nothing in it, one at apktop.localhost's root.
+Each is served as the server's generic tree: the packages under
+<branch>/<repository>/<arch>/ (a noarch one in every architecture's),
+the APKINDEX.tar.gz the format makes per version, branch, repository
+and architecture, signed with the server's RSA key, and that key at
+the root (pkgpod-<8 hex digits>.rsa.pub, of the seed's key: its name
+is in the seed's fixtures). Alpine repositories are hosted (or
+mirrors, which are jobs): no proxy, no stub.
 
 The writes go to branches no read before them names (edge, the
 default, one per identity, w-<who>, and the writer's by-hash), read
@@ -35,6 +36,7 @@ NAME = "apk"
 # The time of the packages' files and their builddate.
 BUILT = 1790000000
 KEYS = "apk-keys.json"
+TOP_HOST = "apktop.localhost"
 
 
 def tar(entries, end=True):
@@ -222,6 +224,14 @@ def seed(p, fx):
         raise SystemExit(f"apk: no key in the listing of apkempty ({st})")
     with open(os.path.join(fx, KEYS), "w") as f:
         json.dump({"key": names[0].decode()}, f)
+    # One at apktop.localhost's root (made last: the others keep their
+    # ids).
+    p.cli("repo", "create", "apkroot", "-f", "apk", "-s", "public=true", "-s",
+          f"urls=http://{TOP_HOST}/")
+    st, _, out = request("PUT", "/upload?branch=v3.22&repository=main",
+                         dict(aa, Host=TOP_HOST), HELLO_10)
+    if st != 201:
+        raise SystemExit(f"apk upload at {TOP_HOST}: {st} {out[:200]}")
 
 
 _KEY = {}
@@ -331,6 +341,14 @@ def reads(c, who):
                 "/v3.22/main/riscv64/" + file_name("motd", "2-r0"),
                 "/v3.22/main/aarch64/APKINDEX.tar.gz", "/v3.22/main/armv7/APKINDEX.tar.gz"):
         add(f"apk apkriscv{rel} {who}", who, "GET", "/apkriscv" + rel)
+    # At apktop.localhost's root: its listing there (no row up, as at no
+    # other address), a directory's address without the slash, an
+    # index, a package, the key; not at the default host's /apkroot/.
+    for name, rel in (("/", "/"), ("/?sort=size", "/?sort=size"), ("/v3.22", "/v3.22"),
+                      (INDEX, INDEX), (PKG, PKG), ("/<key>", k), ("/apkroot/", "/apkroot/")):
+        add(f"apk top {name} {who}", who, "GET", rel, {"Host": TOP_HOST})
+    add(f"apk top HEAD / {who}", who, "HEAD", "/", {"Host": TOP_HOST})
+    add(f"apk top default /apkroot/ {who}", who, "GET", "/apkroot/")
     # Nothing uploaded: its key alone.
     for name, rel in (("", ""), ("/", "/"), ("/<key>", k), (INDEX, INDEX), ("/v3.22/", "/v3.22/")):
         add(f"apk apkempty{name} {who}", who, "GET", "/apkempty" + rel)
