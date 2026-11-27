@@ -26,6 +26,8 @@ use pkgpod_engine::{Cx, Error, Format, Item, Kind, Result, Upload};
 use serde_json::{Map, Value, json};
 use yaml_rust2::Yaml;
 
+pub mod protocol;
+
 pub struct Pub;
 
 /// Largest archive taken in (pub.dev takes 100 MiB), and pubspec.
