@@ -6,8 +6,9 @@ it brings to the lists that keep an order: each (kind, place, thing),
 a list in order of place (a tie in the order of FORMATS, the core's
 parts first). Writes change state and the seed's order is the
 repositories' ids, so a part keeps its place; today's are tens, in the
-order the corpus was first written in. A new part takes a free place,
-one past all others' to come last. The kinds:
+order the corpus was first written in. A new part takes a place one
+past all others' it knows of; parts written side by side may share a
+place, and FORMATS' order then decides, as fixed. The kinds:
 
   seed         f(p, fx): the format's repositories made and filled (p
                the seed's core.Pkgpod, fx the fixtures' directory)
