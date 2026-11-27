@@ -19,9 +19,8 @@ use axum::response::{IntoResponse, Response};
 use pkgpod_base::Digest;
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Version};
+use pkgpod_proto::{Caller, Role};
 use serde_json::{Value, json};
-
-use crate::auth::{Caller, Role};
 
 /// Files put before their revision's manifest: by repository and
 /// revision directory, each file's digest and size, and when the first
@@ -174,7 +173,7 @@ pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
         // and logging in too (they would tell a private repository from
         // one that is not there). Logging in, conan pings with the
         // credentials it logs in with, or not at all.
-        return if a.caller.user.is_none() {
+        return if a.caller.anonymous() {
             text(
                 StatusCode::UNAUTHORIZED,
                 "log in: conan remote login <remote> token -p <token>",
@@ -194,19 +193,20 @@ pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
             return resp;
         }
         (&Method::GET, ["v2", "users", "authenticate"]) => {
-            return match (&a.caller.user, &a.token) {
-                (Some(_), Some(t)) => text(StatusCode::OK, t.clone()),
-                (Some(_), None) => text(
+            return match (a.caller.anonymous(), &a.token) {
+                (false, Some(t)) => text(StatusCode::OK, t.clone()),
+                (false, None) => text(
                     StatusCode::UNAUTHORIZED,
                     "log in with a pkgpod token as the password",
                 ),
-                _ => text(StatusCode::UNAUTHORIZED, "wrong user or token"),
+                (true, _) => text(StatusCode::UNAUTHORIZED, "wrong user or token"),
             };
         }
         (&Method::GET, ["v2", "users", "check_credentials"]) => {
-            return match &a.caller.user {
-                Some(_) => text(StatusCode::OK, a.caller.name().to_string()),
-                None => text(StatusCode::UNAUTHORIZED, "not logged in"),
+            return if a.caller.anonymous() {
+                text(StatusCode::UNAUTHORIZED, "not logged in")
+            } else {
+                text(StatusCode::OK, a.caller.name().to_string())
             };
         }
         _ => {}

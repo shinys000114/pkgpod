@@ -871,8 +871,8 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
             version,
             labelled,
             rel,
-            caller,
-            role,
+            caller: crate::protocols::who(&app, &caller),
+            role: role.map(Into::into),
             token,
         };
         return crate::protocols::conan::handle(app, ask, req).await;
