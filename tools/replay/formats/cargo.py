@@ -316,10 +316,10 @@ def mask(masker):
     return answer
 
 
-FUZZ = (["cpub", "cpriv", "cproxy", "cgroup", "cempty"],
+FUZZ = (["cpub", "cpriv", "cproxy", "cgroup", "cempty", "cgall", "cgmix", "cgfail"],
         ["index", "config.json", "he", "ll", "hello_pod", "api", "v1", "crates",
          "download", "owners", "yank", "unyank", "new", "1.0.0", "@first", "up", "-p",
-         "up-pkg"])
+         "up-pkg", "se", "c_", "sec_only", "7.0.0"])
 FUZZ_WRITABLE = True
 
 PARTS = [

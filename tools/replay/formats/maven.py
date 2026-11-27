@@ -911,11 +911,13 @@ def mask(masker):
     return answer
 
 
-FUZZ = (["mvnpub", "mvnpriv", "mvnproxy", "mvnempty"],
+FUZZ = (["mvnpub", "mvnpriv", "mvnproxy", "mvnempty", "mvngroup", "mvngall", "mvngmix",
+         "mvngfail"],
         ["org", "acme", "hello", "0.9.0-SNAPSHOT", "1.0.0", "1.1.0", "1.2.0-SNAPSHOT",
          "hello-1.0.0.jar", "hello-1.0.0.pom", "hello-1.0.0.jar.sha1", "hello-1.0.0-sources.jar",
          "maven-metadata.xml", "maven-metadata.xml.sha1", "maven-metadata.xml.sha256", "plugins",
-         "tools", "up", "up-1.0.0.jar", "up-1.0.0.jar.sha1", "@first", "by-hash", "x"])
+         "tools", "up", "up-1.0.0.jar", "up-1.0.0.jar.sha1", "@first", "by-hash", "x",
+         "seconly", "7.0.0", "hello-7.0.0.jar"])
 # Not FUZZ_WRITABLE: an artifact's maven-metadata.xml lists its versions
 # by when each came, to the second, then by name, so versions a fuzzed
 # write made in the same second in one run and in two in the other

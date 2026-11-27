@@ -337,10 +337,11 @@ def group_after(c, who):
             c.add(f"after pypi group {g}{rel} {who}", who, "GET", f"/{g}{rel}")
 
 
-FUZZ = (["ppub", "ppriv", "pproxy", "pgroup"],
+FUZZ = (["ppub", "ppriv", "pproxy", "pgroup", "pgall", "pgmix", "pgfail"],
         ["simple", "files", "hello-world", "Hello_World", "legacy", "index.json",
          "other-pkg", "up-pkg", "hello_world-1.0-py3-none-any.whl",
-         "hello_world-1.0-py3-none-any.whl.metadata", "@first", "x"])
+         "hello_world-1.0-py3-none-any.whl.metadata", "@first", "x", "sec-only",
+         "hello_world-7.0-py3-none-any.whl", "hidden-pkg"])
 FUZZ_WRITABLE = True
 
 PARTS = [

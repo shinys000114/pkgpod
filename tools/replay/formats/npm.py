@@ -353,10 +353,11 @@ def mask(masker):
     return answer
 
 
-FUZZ = (["npub", "npriv", "nproxy", "ngroup"],
+FUZZ = (["npub", "npriv", "nproxy", "ngroup", "ngall", "ngmix", "ngfail"],
         ["hello", "@team", "lib", "@team%2flib", "-", "ping", "whoami", "v1", "search",
          "package", "dist-tags", "label", "first", "-rev", "1-x", "hello-1.0.0.tgz",
-         "1.0.0", "latest", "up-pkg", "x"])
+         "1.0.0", "latest", "up-pkg", "x", "sec-only", "5.0.0", "hello-7.0.0.tgz",
+         "hidden-pkg"])
 FUZZ_WRITABLE = True
 
 PARTS = [

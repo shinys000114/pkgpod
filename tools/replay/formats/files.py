@@ -228,9 +228,9 @@ def group_after(c, who):
             c.add(f"after files group {g}{rel} {who}", who, "GET", f"/{g}{rel}")
 
 
-FUZZ = (["fpub", "fpriv", "fproxy"],
+FUZZ = (["fpub", "fpriv", "fproxy", "fgroup", "fgall", "fgmix", "fgfail", "fgnone"],
         ["a.txt", "dir", "b.txt", "big.bin", "v2", "x.txt", "@stable", "latest", "w",
-         "a.img", "c.txt", "missing"])
+         "a.img", "c.txt", "missing", "dir_b.txt", "only", "s.txt", "up.txt"])
 
 PARTS = [
     ("seed", 10, seed),

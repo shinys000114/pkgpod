@@ -273,9 +273,10 @@ def mask(masker):
     return answer
 
 
-FUZZ = (["gpub", "gpriv", "gproxy", "ggroup"],
+FUZZ = (["gpub", "gpriv", "gproxy", "ggroup", "ggall", "ggmix", "ggfail"],
         ["example.com", "hello", "!upper", "Upper", "@v", "list", "@latest", "v1.0.0.info",
-         "v1.0.0.mod", "v1.0.0.zip", "@first", "example.org", "up", "v9.9.9.info"])
+         "v1.0.0.mod", "v1.0.0.zip", "@first", "example.org", "up", "v9.9.9.info",
+         "seconly", "v1.7.0.info", "hidden"])
 FUZZ_WRITABLE = True
 
 PARTS = [

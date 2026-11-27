@@ -545,9 +545,9 @@ def mask(masker):
     return answer
 
 
-FUZZ = (["opub", "opriv", "oproxy", "ogroup"],
+FUZZ = (["opub", "opriv", "oproxy", "ogroup", "ogall", "ogmix", "ogfail"],
         ["app", "manifests", "blobs", "uploads", "tags", "list", "referrers", "1.0", "1",
-         "latest", "w", "sha256:" + "0" * 64, "hello"])
+         "latest", "w", "sha256:" + "0" * 64, "hello", "two", "multi"])
 FUZZ_WRITABLE = True
 FUZZ_PREFIX = "/v2"
 
