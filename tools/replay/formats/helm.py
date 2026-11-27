@@ -4,8 +4,8 @@ prerelease, sent raw, as a form and with another Content-Type; a label
 after the first; num, whose Chart.yaml holds numbers in fields helm
 reads as text; vchart, whose version starts with v; keyed, whose
 Chart.yaml has keys the server writes; one put to the tree), one with
-nothing in it. Helm repositories are hosted only: no proxy, no group,
-no stub."""
+nothing in it, and htrust, the one the trust rule writes (see FUZZ).
+Helm repositories are hosted only: no proxy, no group, no stub."""
 
 import gzip
 import io
@@ -18,7 +18,7 @@ NAME = "helm"
 # The paths of Helm's answers, which may hold the run's times (a
 # version's upload time: the API's created, index.yaml's created and
 # generated).
-TIMES = r"/h(pub|priv|empty)(/|$)"
+TIMES = r"/h(pub|priv|empty|trust)(/|$)"
 
 OCTET = {"Content-Type": "application/octet-stream"}
 BOUNDARY = "replay-form"
@@ -133,7 +133,8 @@ def push(repo, how, chart):
 
 def seed(p, fx):
     # Helm: hosted public and private (web 0.1.0, the label, the rest of
-    # SEED), one with nothing in it.
+    # SEED), one with nothing in it, the trust rule's (web 0.1.0, the
+    # label), last.
     aa = auth_header("admin")
 
     def send(repo, how, chart):
@@ -149,6 +150,9 @@ def seed(p, fx):
         for how, chart in SEED:
             send(repo, how, chart)
     p.cli("repo", "create", "hempty", "-f", "helm", "-s", "public=true")
+    p.cli("repo", "create", "htrust", "-f", "helm", "-s", "public=true")
+    send("htrust", "raw", WEB_1)
+    p.cli("label", "htrust", "first")
 
 
 TGZ = "/charts/web-0.1.0.tgz"
@@ -223,6 +227,13 @@ def reads(c, who):
                 "/@1/index.yaml"):
         add(f"helm hempty{rel} {who}", who, "GET", f"/hempty{rel}")
     add(f"helm hempty HEAD /api/charts {who}", who, "HEAD", "/hempty/api/charts")
+    # The trust rule's repository, asked in sequences only (see FUZZ).
+    c.seq(f"helm htrust {who}", who, [
+        ("GET", "/htrust/api/charts", {}, None),
+        ("GET", "/htrust/api/charts/web/0.1.0", {}, None),
+        ("GET", "/htrust/index.yaml", {}, None),
+        ("GET", f"/htrust{TGZ}", {}, None),
+        ("GET", "/htrust/@first/index.yaml", {}, None)])
     # What the server refuses before the repository is asked: a method
     # it takes from none.
     for m in ("OPTIONS", "PATCH"):
@@ -238,17 +249,18 @@ def reads(c, who):
 def writes(c, who):
     seq = c.seq
     o = OCTET
-    # Helm: a push to each hosted repository (raw, as a form's "chart"
-    # with a file name and without), read back; the same bytes again,
-    # other bytes of a version (refused unless forced: by any value of
-    # force, not by what only looks like it), more versions; deletes, of
-    # a version by its name as pushed, and of the last of a chart. A
-    # chart forced or deleted later is read back by the API (its digest),
-    # not downloaded: the server names the downloads it counted when it
+    # Helm: a push to each hosted repository (the trust rule's too, the
+    # only one its token writes; raw, as a form's "chart" with a file
+    # name and without), read back; the same bytes again, other bytes of
+    # a version (refused unless forced: by any value of force, not by
+    # what only looks like it), more versions; deletes, of a version by
+    # its name as pushed, and of the last of a chart. A chart forced or
+    # deleted later is read back by the API (its digest), not
+    # downloaded: the server names the downloads it counted when it
     # writes them, every few seconds, by the catalog as it is then, so a
     # download of what is gone by then is not counted, and the end
     # state's downloads would depend on when that was.
-    for repo in ("hpub", "hpriv"):
+    for repo in ("hpub", "hpriv", "htrust"):
         api = f"/{repo}/api/charts"
         w, f, g, v = (f"{x}-{who}" for x in ("w", "f", "g", "v"))
         w1 = helm_chart(w, "0.1.0")
@@ -451,7 +463,14 @@ def limits(c, who):
 def after(c, who):
     # What Helm's writes left: index.yaml and the API's list in each
     # hosted repository (whole, HEAD, a range), each identity's
-    # charts, the label's version as it was.
+    # charts, the label's version as it was; the trust rule's, in a
+    # sequence (see FUZZ).
+    c.seq(f"after helm htrust {who}", who,
+          [("GET", f"/htrust{rel}", {}, None)
+           for rel in ("/index.yaml", "/api/charts", "/", "/@first/index.yaml")]
+          + [("HEAD", "/htrust/index.yaml", {}, None)]
+          + [("GET", f"/htrust/api/charts/f-{w}", {}, None) for w in IDENTS]
+          + [("GET", f"/htrust/charts/t-{w}-0.1.0.tgz", {}, None) for w in IDENTS])
     for repo in ("hpub", "hpriv"):
         for rel in ("/index.yaml", "/api/charts", "/", "/charts/", "/@first/index.yaml"):
             c.add(f"after helm {repo}{rel} {who}", who, "GET", f"/{repo}{rel}")
@@ -482,7 +501,14 @@ FUZZ = (["hpub", "hpriv", "hempty"],
 # "helm times" rule, and the core's), but a fuzzed delete or forced push
 # would drop the downloads of what it removed that the server had not
 # written yet (see writes), so the end state's downloads would depend
-# on when it wrote them, which no rule masks.
+# on when it wrote them, which no rule masks. The fuzz holds back the
+# Helm writes of writer, wtoken, wbearer and admin, not those of the
+# trust rule's token (ptoken), so that rule writes htrust alone, which
+# the fuzz never asks: its requests are made of FUZZ's repositories,
+# its mutants of the corpus's single requests, and htrust is asked
+# only in sequences of more than one step, and no segment of a single
+# request starts with its name (a mutant cuts one short). No Helm write
+# of the fuzz is taken.
 
 PARTS = [
     ("seed", 100, seed),
@@ -490,7 +516,7 @@ PARTS = [
                     "writer": {"hpub": "write", "hpriv": "write"}}),
     ("wtoken", 80, ["hpub"]),
     ("rtoken", 80, ["hpriv"]),
-    ("publisher", 70, ["hpub"]),
+    ("publisher", 70, ["htrust"]),
     ("reads", 110, reads),
     ("writes", 150, writes),
     ("writes", 160, limits),
