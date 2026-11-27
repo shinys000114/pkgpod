@@ -181,24 +181,34 @@ HELLO_100_SYM = nupkg("Hello.Pk", "1.0.0", symbols=True)
 # in its description (a name not XML's, a code that is no character
 # kept as they are), a group written open and closed, a dependency
 # with no version, an attribute with a reference.
-HELLO_110 = nupkg("Hello.Pk", "1.1.0+build.5", nuspec("Hello.Pk", "1.1.0+build.5", (
+HELLO_110_META = (
     "    <authors>t, u</authors>\n"
     "    <description>says hello &#38; &#x26; &unknown; &lt;again&gt; &#xD800; &quot;"
     "</description>\n    <dependencies>\n"
     "      <group targetFramework=\"net&amp;10.0\"></group>\n"
     "      <group targetFramework=\"net8.0\">\n        <dependency id=\"Any.Pk\" />\n"
-    "      </group>\n    </dependencies>\n")), deflate=True)
+    "      </group>\n    </dependencies>\n")
+HELLO_110 = nupkg("Hello.Pk", "1.1.0+build.5",
+                  nuspec("Hello.Pk", "1.1.0+build.5", HELLO_110_META), deflate=True)
 # Other.Pk: leading zeros and a fourth number; a dependency in no group
 # (after the groups) beside one in a group.
-OTHER = nupkg("Other.Pk", "01.2.3.4", nuspec("Other.Pk", "01.2.3.4", META + (
+OTHER_META = META + (
     "    <dependencies>\n      <dependency id=\"Hello.Pk\" version=\"1.0.0\" />\n"
     "      <group targetFramework=\"net10.0\">\n"
     "        <dependency id=\"Pre.Only\" version=\"1.0.0-alpha\" />\n      </group>\n"
-    "    </dependencies>\n")))
+    "    </dependencies>\n")
+OTHER = nupkg("Other.Pk", "01.2.3.4", nuspec("Other.Pk", "01.2.3.4", OTHER_META))
+
+
+def ns_spec(id, version):
+    """A .nuspec whose elements have a prefix."""
+    return (f'<?xml version="1.0"?>\n<nu:package xmlns:nu="{NS}"><nu:metadata>'
+            f"<nu:id>{id}</nu:id><nu:version>{version}</nu:version><nu:authors>ns</nu:authors>"
+            "<nu:description>prefixed</nu:description></nu:metadata></nu:package>\n").encode()
+
+
 # A .nuspec named in upper case, its elements with a prefix.
-NS_SPEC = (f'<?xml version="1.0"?>\n<nu:package xmlns:nu="{NS}"><nu:metadata>'
-           "<nu:id>Ns.Pk</nu:id><nu:version>1.0.0</nu:version><nu:authors>ns</nu:authors>"
-           "<nu:description>prefixed</nu:description></nu:metadata></nu:package>\n").encode()
+NS_SPEC = ns_spec("Ns.Pk", "1.0.0")
 # What the seed pushes to each repository, in order (where, package);
 # after the first two, the label; Gone.Pk is unlisted after.
 SEED = [
@@ -563,6 +573,24 @@ def writes_writer(c, who):
         ("DELETE", f"/nupub{PUSH}/Pre.Only/1.0.0-ALPHA.10", {}, None),
         ("GET", "/nupub/query?q=pre&prerelease=true", {}, None),
         ("GET", f"/nupub{REG}/pre.only/index.json", {}, None)])
+    # A package of every kind the seed has, pushed in the run: the build
+    # that runs reads them (the old one read the seed's). One package's
+    # versions, a release among prereleases of its numbers.
+    y1, y2, y3, y4, y5 = (f"Y{i}.{who}" for i in range(1, 6))
+    kinds = [(y1, nupkg(y1, "1.0.0.0", nuspec(y1, "1.0.0.0", HELLO_META))),
+             (y2, nupkg(y2, "1.1.0+build.5", nuspec(y2, "1.1.0+build.5", HELLO_110_META),
+                        deflate=True)),
+             (y3, nupkg(y3, "01.2.3.4", nuspec(y3, "01.2.3.4", OTHER_META))),
+             (y4, nupkg(y4, "1.0.0", ns_spec(y4, "1.0.0"), name=f"{y4}.NUSPEC".upper()))]
+    kinds += [(y5, nupkg(y5, v)) for v in ("1.0.0-rc.1", "1.0.0", "1.0.0-01", "1.0.0-Alpha",
+                                           "0.9.0")]
+    seq(f"nuget every kind of package {who}", who, [
+        ("PUT", f"/nupub{PUSH}") + form(data) for _, data in kinds] + [
+        ("GET", f"/nupub{REG}/{y.lower()}/index.json", {}, None) for y in (y1, y2, y3, y4, y5)] + [
+        ("GET", f"/nupub{FC}/{y5.lower()}/index.json", {}, None),
+        ("GET", f"/nupub{FC}/{y3.lower()}/index.json", {}, None),
+        ("GET", "/nupub/query?q=y&prerelease=true", {}, None),
+        ("GET", "/nupub/query?q=y", {}, None)])
     _, body = form(nupkg(f"O.{who}", "1.0.0"))
     seq(f"nuget other sites {who}", who, [
         ("PUT", f"/nupub{PUSH}", dict(CT, Origin="http://elsewhere.example"), body),
