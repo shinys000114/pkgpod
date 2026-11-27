@@ -43,6 +43,8 @@ MAX_CONTROL_TAR = 64 << 20
 MAX_AR_NAMES = 1 << 20
 
 REPOS = ("ipkpub", "ipkpriv")
+# Where a repository's badges are, on every serving listener.
+BADGES = "/.well-known/pkgpod/badges"
 
 
 class Zeros:
@@ -424,12 +426,37 @@ def reads(c, who):
     # A repository with nothing in it.
     for rel in ("", "/", "/main/", "/main/Packages", "/key.pub", "/@first/"):
         add(f"ipk ipkempty{rel} {who}", who, "GET", f"/ipkempty{rel}")
+    # Each repository's badges: a package's latest version by the
+    # format's order, which ipk does not give (the server's for any
+    # format is used, not dpkg's), of several versions in several feeds,
+    # of two that compare equal, of one feed's; one removed, one not
+    # there, none asked; its status (the version) and count, with a
+    # label of the caller's, HEAD and by ETag. Not its downloads:
+    # counted as the server writes them, every few seconds, they are
+    # asked after a pause, in writes_end.
+    for repo in REPOS + ("ipkempty",):
+        for kind, q in (("version", "?package=hello"), ("version", "?package=same"),
+                        ("version", "?package=libhello"), ("version", "?package=hello-utils"),
+                        ("version", "?package=gone"), ("version", "?package=nope"),
+                        ("version", ""), ("status", ""), ("packages", ""),
+                        ("status", "?label=opkg")):
+            add(f"ipk badge {repo} {kind}{q} {who}", who, "GET",
+                f"{BADGES}/{repo}/{kind}.svg{q}")
+        add(f"ipk badge {repo} HEAD status {who}", who, "HEAD", f"{BADGES}/{repo}/status.svg")
+        add(f"ipk badge {repo} status inm {who}", who, "GET", f"{BADGES}/{repo}/status.svg",
+            {"If-None-Match": "{ipk badge %s status %s.etag}" % (repo, who)})
+    # A label of what SVG escapes, and one longer than a badge shows.
+    for name, label in (("escaped", "%3Ca%26b%3E%22%27"), ("long", "l" * 61)):
+        add(f"ipk badge ipkpub status label {name} {who}", who, "GET",
+            f"{BADGES}/ipkpub/status.svg?label={label}")
     if who == "anon":
         # Credentials that are wrong: refused before the repository is
         # asked, though it is public.
         for name, cred in (("basic", "Basic d3JpdGVyOndyb25n"), ("bearer", "Bearer pkgpod_nope")):
             add(f"ipk ipkpub wrong {name} credentials", who, "GET", "/ipkpub/main/Packages",
                 {"Authorization": cred})
+        # A private repository's badge by a token it does not have.
+        add("ipk badge ipkpriv token", who, "GET", f"{BADGES}/ipkpriv/status.svg?token=nope")
 
 
 # ---- writes ---------------------------------------------------------------
@@ -572,6 +599,15 @@ def writes(c, who):
                     ("#1/12", b"data.tar.gz\0", data)]))]
         + gets(base, ["main/Packages"] + [f"main/y-{k}-{who}_1.0_all.ipk"
                                           for k in ("plain", "zst", "slash", "gnu", "bsd")]))
+    # The version badge's latest where the server's order for any format
+    # and dpkg's (the index's) differ: 1.0~rc1-1 is before 1.0-1 in
+    # dpkg's, 2.0 before 1:1.0.
+    t, e = f"tilde-{who}", f"epoch-{who}"
+    seq(f"ipk badge order {who}", who,
+        [("PUT", f"{base}/upload?feed=main", {}, openwrt(control(n, v, "all"), who))
+         for n, v in ((t, "1.0-1"), (t, "1.0~rc1-1"), (e, "2.0"), (e, "1:1.0"))]
+        + [("GET", f"{BADGES}/ipkpub/version.svg?package={n}", {}, None) for n in (t, e)]
+        + gets(base, ["main/Packages"]))
     # What the tree takes from no one: DELETE and POST (of a file, of
     # the address, of twine's), methods the server takes for no
     # repository, writes from another site's page (by its Origin, by
@@ -721,6 +757,19 @@ def writes_end(c):
             ("GET", "/ipkpub/main/Packages", h, None),
             ("GET", "/ipkpriv/main/Packages", h, None),
             ("GET", "/ipkpriv/main/", h, None)])
+    # The downloads badges, of each repository and package: the server
+    # counts a download as it answers and writes the counts every five
+    # seconds, which the badge reads as they are, so they are asked
+    # after a pause of two of those (all downloads so far written; none
+    # is made after it), and only in sequences (no mutant of them is
+    # sent, which the fuzz would ask while it downloads).
+    for i, who in enumerate(("anon", "reader", "writer")):
+        c.seq(f"ipk badge downloads {who}", who,
+              ([("SLEEP", "11", {}, None)] if i == 0 else [])
+              + [("GET", f"{BADGES}/{repo}/downloads.svg{q}", {}, None)
+                 for repo in REPOS + ("ipkempty",)
+                 for q in ("", "?package=hello", "?package=same", "?package=libhello",
+                           "?package=byhash", "?package=nope")])
 
 
 def after(c, who):
@@ -761,6 +810,13 @@ def after(c, who):
         c.add(f"after ipk {repo} by-hash range {who}", who, "GET", f, {"Range": "bytes=0-9"})
     c.add(f"after ipk ipkempty/@first/by-hash/Packages {who}", who, "GET",
           "/ipkempty/@first/by-hash/Packages")
+    # The badges of what the writes made (not the downloads: see
+    # writes_end).
+    for repo in REPOS + ("ipkempty",):
+        for kind, q in (("version", "?package=hello"), ("version", "?package=w-writer"),
+                        ("version", "?package=y-zst-writer"), ("status", ""), ("packages", "")):
+            c.add(f"after ipk badge {repo} {kind}{q} {who}", who, "GET",
+                  f"{BADGES}/{repo}/{kind}.svg{q}")
 
 
 FUZZ = (["ipkpub", "ipkpriv", "ipkempty"],
