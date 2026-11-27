@@ -635,22 +635,62 @@ def writes(c, who):
 # The most of a package read for its headers: one whose headers would
 # need more is refused once that much is read.
 HEADER_READ = 256 << 20
+# The largest package the format takes, and the largest body a PUT to
+# the tree takes (pkgpod's upload limit).
+MAX_RPM = 4 << 30
+MAX_UPLOAD = 8 << 30
+
+
+class Zeros:
+    """`head`, then zero bytes up to `n` bytes in all, sent a MiB at a
+    time (http.client sends an iterable as it comes, with the
+    Content-Length given): a body past a limit, not held whole (the
+    corpus keeps its bodies for the whole run)."""
+
+    def __init__(self, n, head=b""):
+        self.n, self.head = n, head
+
+    def __len__(self):
+        return self.n
+
+    def __iter__(self):
+        if self.head:
+            yield self.head
+        piece = bytes(1 << 20)
+        left = self.n - len(self.head)
+        while left > 0:
+            yield piece if left >= len(piece) else piece[:left]
+            left -= len(piece)
 
 
 def limits(c, who):
-    # A package whose header is past what is read of it, by one who may
-    # (its body is read). The format's own limit (4 GiB) and the tree's
-    # (8 GiB) are past what a run sends.
-    if who == "writer":
-        lead = package("big", "1.0")[:96]
-        sig = header([(SIG_SIZE, INT32, [0])])
-        sig += b"\0" * (-len(sig) % 8)
-        start = b"\x8e\xad\xe8\x01\0\0\0\0" + struct.pack(">II", 1, HEADER_READ) + struct.pack(
-            ">IIII", NAME_T, STRING, 0, 1)
-        body = lead + sig + start
-        body += b"\0" * (HEADER_READ + 1 - len(body))
-        c.add("rpm put past the header read writer", who, "PUT", "/rpub/upload?group=w-writer",
-              {}, body)
+    # Each body limit, one byte over, by one who may (the body is read),
+    # read back: a package whose header is past what is read of it; a
+    # package past the format's limit (the tree stores it first, then
+    # the format refuses it); a body past the tree's; and one that
+    # cannot be read (chunked, its first chunk's size not hex). In
+    # sequences, of which no mutant is sent (a cut chunked body would be
+    # waited on).
+    if who != "writer":
+        return
+    w, b = "w-writer", "/rpub"
+    lead = package("big", "1.0")[:96]
+    sig = header([(SIG_SIZE, INT32, [0])])
+    sig += b"\0" * (-len(sig) % 8)
+    start = b"\x8e\xad\xe8\x01\0\0\0\0" + struct.pack(">II", 1, HEADER_READ) + struct.pack(
+        ">IIII", NAME_T, STRING, 0, 1)
+    for name, path, n, head in (
+            ("past the header read", f"{b}/upload?group={w}", HEADER_READ + 1, lead + sig + start),
+            ("over the format's limit", f"{b}/upload?group={w}", MAX_RPM + 1, b""),
+            ("over the tree's limit", f"{b}/{w}/Packages/huge-1.0-1.noarch.rpm", MAX_UPLOAD + 1,
+             b"")):
+        c.seq(f"rpm put {name} writer", who, [
+            ("PUT", path, {"Content-Length": str(n)}, Zeros(n, head)),
+            ("GET", f"{b}/{w}/Packages/", {}, None)])
+    c.seq("rpm put unreadable writer", who, [
+        ("PUT", f"{b}/{w}/Packages/x-1.0-1.noarch.rpm", {"Transfer-Encoding": "chunked"},
+         b"zz\r\nhello\r\n0\r\n\r\n"),
+        ("GET", f"{b}/{w}/Packages/", {}, None)])
 
 
 def after(c, who):
