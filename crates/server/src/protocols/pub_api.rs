@@ -11,11 +11,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use axum::extract::{FromRequest, Multipart, Request};
-use axum::http::{HeaderValue, Method, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use http::{HeaderValue, Method, StatusCode, header};
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Upload, Version};
+use pkgpod_proto::body::{Request, Response};
+use pkgpod_proto::form::Form;
 use pkgpod_proto::host::Host;
 use pkgpod_proto::{Caller, Role};
 use serde_json::{Value, json};
@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 const V2: &str = "application/vnd.pub.v2+json";
 
 fn reply(st: StatusCode, v: Value) -> Response {
-    let mut r = (st, serde_json::to_string(&v).expect("json")).into_response();
+    let mut r = pkgpod_proto::reply::json(st, &v);
     let h = r.headers_mut();
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static(V2));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
@@ -127,7 +127,6 @@ pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
                 .resolve(&v.root, &format!("{name}/{file}"))
             {
                 Ok(Some(Entry::Blob { sha256, .. })) => {
-                    let req = req.map(pkgpod_proto::body::boxed);
                     app.serve_counted(
                         &a.repo.name,
                         "",
@@ -137,7 +136,6 @@ pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
                         req,
                     )
                     .await
-                    .map(axum::body::Body::new)
                 }
                 _ => error(StatusCode::NOT_FOUND, "not found"),
             }
@@ -180,7 +178,7 @@ async fn versions(
 }
 
 async fn upload(app: &Arc<dyn Host>, a: &Ask, req: Request) -> Response {
-    let mut m = match Multipart::from_request(req, &()).await {
+    let mut m = match Form::of(req, pkgpod_proto::body::MAX_UPLOAD) {
         Ok(m) => m,
         Err(e) => return error(StatusCode::BAD_REQUEST, format!("not an upload: {e}")),
     };
@@ -192,12 +190,11 @@ async fn upload(app: &Arc<dyn Host>, a: &Ask, req: Request) -> Response {
             Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
         }
     };
-    let (sha256, size) =
-        match crate::serving::stream_to_store(a.repo.store(), field, pkgpod_pub::MAX_ARCHIVE).await
-        {
-            Ok(x) => x,
-            Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
-        };
+    let stored = app.store_body(a.repo.store(), field.into_body(), pkgpod_pub::MAX_ARCHIVE);
+    let (sha256, size) = match stored.await {
+        Ok(x) => x,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
     let up = Upload {
         sha256,
         size,
@@ -243,7 +240,7 @@ async fn upload(app: &Arc<dyn Host>, a: &Ask, req: Request) -> Response {
             q.push_str(&format!("%{b:02X}"));
         }
     }
-    let mut r = StatusCode::NO_CONTENT.into_response();
+    let mut r = pkgpod_proto::reply::status(StatusCode::NO_CONTENT);
     if let Ok(v) = HeaderValue::from_str(&format!(
         "{}api/packages/versions/finalize?{key}={q}",
         a.base
