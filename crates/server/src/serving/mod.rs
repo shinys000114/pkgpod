@@ -701,7 +701,7 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
                 ),
             );
         }
-        return crate::protocols::composer::read(&app, &served.repo, version, &rel, &base_url, req)
+        return crate::protocols::composer::read(app, &served.repo, version, &rel, &base_url, req)
             .await;
     }
     if served.repo.format == "go" && matches!(method, Method::GET | Method::HEAD) {

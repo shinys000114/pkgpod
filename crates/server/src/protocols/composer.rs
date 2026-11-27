@@ -14,9 +14,8 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Version};
+use pkgpod_proto::host::Host;
 use serde_json::{Value, json};
-
-use crate::App;
 
 fn reply(v: Value) -> Response {
     let mut r = (StatusCode::OK, axum::Json(v)).into_response();
@@ -34,7 +33,7 @@ fn not_found() -> Response {
 }
 
 pub async fn read(
-    app: &Arc<App>,
+    app: Arc<dyn Host>,
     repo: &RepoInfo,
     version: Option<Version>,
     rel: &[String],
@@ -50,7 +49,7 @@ pub async fn read(
         let app2 = app2.clone();
         async move {
             tokio::task::spawn_blocking(move || {
-                app2.engine
+                app2.engine()
                     .objects()
                     .walk(&root, &prefix)
                     .unwrap_or_default()
@@ -115,20 +114,19 @@ pub async fn read(
         }
         ["files", vendor, pkg, file] => {
             let path = format!("{vendor}/{pkg}/{file}");
-            match app.engine.objects().resolve(&v.root, &path) {
+            match app.engine().objects().resolve(&v.root, &path) {
                 Ok(Some(Entry::Blob { sha256, .. })) => {
-                    crate::serving::serve_counted(
-                        app,
+                    let req = req.map(pkgpod_proto::body::boxed);
+                    app.serve_counted(
                         &repo.name,
                         &path,
-                        &repo.store().path(&sha256),
-                        &sha256,
+                        repo.store().path(&sha256),
+                        sha256,
                         file,
-                        None,
-                        false,
                         req,
                     )
                     .await
+                    .map(axum::body::Body::new)
                 }
                 _ => not_found(),
             }
