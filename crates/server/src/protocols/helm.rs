@@ -15,9 +15,8 @@ use axum::response::{IntoResponse, Response};
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Upload, Version};
 use pkgpod_proto::host::Host;
+use pkgpod_proto::{Caller, Role};
 use serde_json::{Map, Value, json};
-
-use crate::auth::{Caller, Role};
 
 fn reply(st: StatusCode, v: Value) -> Response {
     (st, axum::Json(v)).into_response()
@@ -54,21 +53,31 @@ fn version_doc(meta: &Value, sha: &pkgpod_base::Digest, file: &str) -> Value {
     Value::Object(m)
 }
 
-pub async fn handle(
-    app: Arc<dyn Host>,
-    repo: RepoInfo,
-    current: Option<Version>,
-    caller: Caller,
-    role: Option<Role>,
-    rel: Vec<String>,
-    req: Request,
-) -> Response {
+/// A request of the API, as the server found it.
+pub struct Ask {
+    pub repo: RepoInfo,
+    /// The repository's current version (none before its first chart).
+    pub current: Option<Version>,
+    /// The path below the repository, `api/charts` first.
+    pub rel: Vec<String>,
+    pub caller: Caller,
+    pub role: Option<Role>,
+}
+
+pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
+    let Ask {
+        repo,
+        current,
+        rel,
+        caller,
+        role,
+    } = a;
     let method = req.method().clone();
     let reading = method == Method::GET || method == Method::HEAD;
     if role.is_none() || (!reading && role < Some(Role::Write)) {
         // Logged in without a right: as if it were not there; a reader
         // who may not write is refused.
-        let st = if caller.user.is_none() {
+        let st = if caller.anonymous() {
             StatusCode::UNAUTHORIZED
         } else if role.is_none() {
             StatusCode::NOT_FOUND

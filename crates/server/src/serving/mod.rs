@@ -773,9 +773,14 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
         );
     }
     if served.repo.format == "helm" && crate::protocols::helm::is_api(&rel) {
-        let current = served.current.clone();
-        return crate::protocols::helm::handle(app, served.repo, current, caller, role, rel, req)
-            .await;
+        let ask = crate::protocols::helm::Ask {
+            repo: served.repo,
+            current: served.current,
+            rel,
+            caller: crate::protocols::who(&app, &caller),
+            role: role.map(Into::into),
+        };
+        return crate::protocols::helm::handle(app, ask, req).await;
     }
     if served.repo.format == "gems" && crate::protocols::gems::is_api(&method, &rel) {
         let ask = crate::protocols::gems::Ask {
