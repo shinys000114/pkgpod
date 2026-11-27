@@ -24,7 +24,35 @@ from core import SERVE, auth_header, request
 
 NAME = "ipk"
 
+# The most of a body PUT takes (pkgpod-proto's body::MAX_UPLOAD), the
+# most of a package the format takes (MAX_PKG), of a control member and
+# control file (MAX_CONTROL), and how far control.tar.gz is inflated to
+# find the control file (MAX_CONTROL_TAR).
+MAX_UPLOAD = 8 << 30
+MAX_PKG = 2 << 30
+MAX_CONTROL = 1 << 20
+MAX_CONTROL_TAR = 64 << 20
+
 REPOS = ("ipkpub", "ipkpriv")
+
+
+class Zeros:
+    """`n` zero bytes, sent a MiB at a time (http.client sends an
+    iterable as it comes, with the Content-Length given): a body past
+    the limit, not held whole."""
+
+    def __init__(self, n):
+        self.n = n
+
+    def __len__(self):
+        return self.n
+
+    def __iter__(self):
+        piece = bytes(1 << 20)
+        left = self.n
+        while left > 0:
+            yield piece if left >= len(piece) else piece[:left]
+            left -= len(piece)
 
 
 # ---- packages, the same bytes each time ----------------------------------
@@ -86,6 +114,24 @@ def yocto(ctl, comp="gz", note="hello", members=None):
         members = [("debian-binary", b"2.0\n"), ("control.tar" + (f".{comp}" if comp else ""),
                                                    packed), ("data.tar.gz", data_tgz(note))]
     return ar(members)
+
+
+def noise(n):
+    """`n` bytes that do not compress, the same each time."""
+    out = bytearray()
+    i = 0
+    while len(out) < n:
+        out += hashlib.sha256(b"ipk noise %d" % i).digest()
+        i += 1
+    return bytes(out[:n])
+
+
+def padded(name, size, tail=b""):
+    """A control of `name` exactly `size` bytes long (an X-Padding field
+    fills it), then `tail`."""
+    base = control(name, "1.0", "all")
+    head = b"X-Padding: "
+    return base + head + b"a" * (size - len(base) - len(head) - 1) + b"\n" + tail
 
 
 HEX = "ab" * 32
@@ -400,6 +446,51 @@ def writes(c, who):
             ("GET", f, {}, None)])
 
 
+def limits(c, who):
+    # A PUT one byte over the format's limit and one over the server's,
+    # one whose body cannot be read (chunked, its first chunk's size not
+    # hex); controls at and one byte past their limit (OpenWrt's cut
+    # there, Yocto's refused), a control.tar.gz past its limit with the
+    # control file first and last, one inflated past its limit before
+    # it; by one who may (the body is read); in sequences, of which no
+    # mutant is sent.
+    if who != "writer":
+        return
+    up = "/ipkpub/upload?feed=main"
+    c.seq("ipk upload over the package limit writer", who, [
+        ("PUT", up, {"Content-Length": str(MAX_PKG + 1)}, Zeros(MAX_PKG + 1)),
+        ("GET", "/ipkpub/main/Packages", {}, None)])
+    c.seq("ipk upload over the upload limit writer", who, [
+        ("PUT", up, {"Content-Length": str(MAX_UPLOAD + 1)}, Zeros(MAX_UPLOAD + 1)),
+        ("GET", "/ipkpub/main/Packages", {}, None)])
+    c.seq("ipk upload unreadable writer", who, [
+        ("PUT", up, {"Transfer-Encoding": "chunked"}, b"zz\r\nhello\r\n0\r\n\r\n"),
+        ("GET", "/ipkpub/main/Packages", {}, None)])
+    big = "/ipkpub/upload?feed=big"
+    tail = b"X-Tail: cut\n"
+    ctl = control("bigctl", "1.0", "all")
+    data = data_tgz("big")
+    c.seq("ipk controls at and over their limits writer", who, [
+        ("PUT", big, {}, openwrt(padded("big-at", MAX_CONTROL))),
+        ("PUT", big, {}, openwrt(padded("big-over", MAX_CONTROL, tail))),
+        ("PUT", big, {}, yocto(padded("ybig-at", MAX_CONTROL))),
+        ("PUT", big, {}, yocto(padded("ybig-over", MAX_CONTROL, tail))),
+        ("PUT", big, {}, openwrt(None, members=[
+            ("./debian-binary", b"2.0\n"), ("./data.tar.gz", data),
+            ("./control.tar.gz", tgz([("./control", ctl),
+                                      ("./noise", noise(MAX_CONTROL + 4096))]))])),
+        ("PUT", big, {}, openwrt(None, members=[
+            ("./debian-binary", b"2.0\n"), ("./data.tar.gz", data),
+            ("./control.tar.gz", tgz([("./noise", noise(MAX_CONTROL + 4096)),
+                                      ("./control", control("bignoise", "1.0", "all"))]))])),
+        ("PUT", big, {}, openwrt(None, members=[
+            ("./debian-binary", b"2.0\n"), ("./data.tar.gz", data),
+            ("./control.tar.gz", tgz([("./zeros", bytes(MAX_CONTROL_TAR + 4096)),
+                                      ("./control", control("bigzeros", "1.0", "all"))]))])),
+        ("GET", "/ipkpub/big/Packages", {}, None),
+        ("GET", "/ipkpub/big/", {}, None)])
+
+
 def seed_tokens(c):
     """The seed's plaintext tokens (ident: token), from the file the
     seed keeps them in, beside its fixtures: core.TOKENS is filled from
@@ -452,6 +543,7 @@ PARTS = [
     ("publisher", 100, ["ipkpub"]),
     ("reads", 140, reads),
     ("writes", 220, writes),
+    ("writes", 220, limits),
     ("writes end", 40, writes_end),
     ("after", 90, after),
 ]
