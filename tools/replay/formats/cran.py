@@ -206,6 +206,8 @@ HEADS = ("", "/", f"{C}/", C, PK, PKGZ, HP, f"{AR}/hellopk_1.0.tar.gz", f"{C}/no
          f"/@first{PK}", f"/@nope{PK}")
 EMPTY = ("", "/", "/src/", f"{C}/", PK, PKGZ, HP, f"/@1{PK}", "/@1/", f"/@first{PK}")
 FUTURE, PAST = "Fri, 01 Jan 2100 00:00:00 GMT", "Mon, 02 Nov 2026 10:00:00 GMT"
+# Where a repository's badges are, on every serving listener.
+BADGES = "/.well-known/pkgpod/badges"
 
 
 def etag(data):
@@ -264,6 +266,16 @@ def reads(c, who):
             add(f"cran {repo} {name} {rel} {who}", who, "GET", f"/{repo}{rel}", h)
         add(f"cran {repo} HEAD inm {PK} {who}", who, "HEAD", f"/{repo}{PK}",
             {"If-None-Match": pk})
+    # A package's version badge: its latest version by R's order
+    # (hellopk 1.10, not 1.9), which only PACKAGES shows otherwise; one
+    # not there; none asked for; the repository's status and count (not
+    # its downloads, which are of the month the run is in).
+    for repo in REPOS + ("cranempty",):
+        for kind, q in (("version", "?package=hellopk"), ("version", "?package=toolpk"),
+                        ("version", "?package=nope"), ("version", ""), ("status", ""),
+                        ("packages", "")):
+            add(f"cran badge {repo} {kind}{q} {who}", who, "GET",
+                f"{BADGES}/{repo}/{kind}.svg{q}")
     # One at a host's root: its listing is the host's (no ../), and R's
     # doubled slash is the path's first; its own name is no path there,
     # nor does the default host serve it.
@@ -579,6 +591,10 @@ def after(c, who):
               {"Range": "bytes=0-9"})
         c.add(f"after cran {repo} inm {PK} {who}", who, "GET", f"/{repo}{PK}",
               {"If-None-Match": "{cran cranpub%s %s.etag}" % (PK, who)})
+    # The latest version of a package whose other version has a part
+    # past what a number holds (1.5, by R's order as the format has it).
+    c.add(f"after cran badge gwriter {who}", who, "GET",
+          f"{BADGES}/cranpub/version.svg?package=gwriter")
     for rel in (f"{C}/", PK):
         c.add(f"after cran cranempty{rel} {who}", who, "GET", f"/cranempty{rel}")
         c.add(f"after cran root {rel} {who}", who, "GET", rel, ROOT)
