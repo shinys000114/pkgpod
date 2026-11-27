@@ -36,6 +36,8 @@ MAX_ARTIFACT = 512 << 20
 MAX_SENT = MAX_ARTIFACT // 2 * 3
 MAX_MANIFEST = 4 << 20
 MAX_SHA = 128
+# The most of a whole form read (pkgpod-proto's body::MAX_UPLOAD).
+MAX_UPLOAD = 8 << 30
 
 
 def tgz(members):
@@ -657,6 +659,14 @@ def limits(c, who):
     big = artifact("team", "big", "1.0.0", description="x" * (MAX_MANIFEST + 10))
     c.add(f"galaxy manifest over the limit {who}", who, "POST", f"/galpub{UPLOAD}",
           *publish(big))
+    # A form over what is read of a whole one (pkgpod's limit, given by
+    # the format once its API moves), by a part that is passed over: it
+    # is not stored, and were the limit not kept the form would be
+    # refused as one with no file.
+    body = Run(head("junk"), b"j", MAX_UPLOAD + 1, tail)
+    c.seq(f"galaxy form over the limit {who}", who, [
+        ("POST", f"/galpub{UPLOAD}", dict(CT, **{"Content-Length": str(body.size)}), body),
+        ("GET", f"/galpub{C}/versions/", {}, None)])
 
 
 def writes_end(c):
