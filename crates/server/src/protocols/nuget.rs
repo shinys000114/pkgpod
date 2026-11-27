@@ -9,29 +9,21 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use axum::extract::{FromRequest, Multipart, Request};
-use axum::http::{HeaderValue, Method, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use http::{HeaderValue, Method, StatusCode, header};
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Upload, Version};
 use pkgpod_nuget::{Kept, versions};
+use pkgpod_proto::body::{Request, Response};
+use pkgpod_proto::form::Form;
+use pkgpod_proto::reply::text;
 use pkgpod_proto::{Caller, Role};
 use serde_json::{Value, json};
 
 fn reply(st: StatusCode, v: Value) -> Response {
-    let mut r = (st, axum::Json(v)).into_response();
+    let mut r = pkgpod_proto::reply::json(st, &v);
     r.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     r
-}
-
-fn text(st: StatusCode, m: impl Into<String>) -> Response {
-    (
-        st,
-        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        m.into(),
-    )
-        .into_response()
 }
 
 fn not_found() -> Response {
@@ -127,7 +119,6 @@ pub async fn handle(app: Arc<dyn Host>, mut a: Ask, req: Request) -> Response {
             };
             let stem = format!("{}.{}", id.to_ascii_lowercase(), ver.to_ascii_lowercase());
             if *file == format!("{stem}.nupkg") {
-                let req = req.map(pkgpod_proto::body::boxed);
                 app.serve_counted(
                     &a.repo.name,
                     "",
@@ -137,14 +128,11 @@ pub async fn handle(app: Arc<dyn Host>, mut a: Ask, req: Request) -> Response {
                     req,
                 )
                 .await
-                .map(axum::body::Body::new)
             } else if *file == format!("{stem}.nuspec") {
                 match k.nuspec() {
                     Some(d) => {
-                        let req = req.map(pkgpod_proto::body::boxed);
                         app.serve_counted(&a.repo.name, "", a.repo.store().path(&d), d, file, req)
                             .await
-                            .map(axum::body::Body::new)
                     }
                     None => not_found(),
                 }
@@ -178,7 +166,7 @@ pub async fn handle(app: Arc<dyn Host>, mut a: Ask, req: Request) -> Response {
             })
             .await;
             match res {
-                Ok(Ok(_)) => StatusCode::NO_CONTENT.into_response(),
+                Ok(Ok(_)) => pkgpod_proto::reply::status(StatusCode::NO_CONTENT),
                 Ok(Err(pkgpod_engine::Error::NotFound(m))) => text(StatusCode::NOT_FOUND, m),
                 Ok(Err(e)) => text(StatusCode::BAD_REQUEST, e.to_string()),
                 Err(e) => text(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -364,7 +352,7 @@ async fn search(app: &Arc<dyn Host>, a: &Ask, query: &str) -> Response {
 }
 
 async fn push(app: &Arc<dyn Host>, a: &Ask, req: Request, symbols: bool) -> Response {
-    let mut m = match Multipart::from_request(req, &()).await {
+    let mut m = match Form::of(req, pkgpod_proto::body::MAX_UPLOAD) {
         Ok(m) => m,
         Err(e) => {
             return text(
@@ -379,15 +367,14 @@ async fn push(app: &Arc<dyn Host>, a: &Ask, req: Request, symbols: bool) -> Resp
         Ok(None) => return text(StatusCode::BAD_REQUEST, "no package in the upload"),
         Err(e) => return text(StatusCode::BAD_REQUEST, e.to_string()),
     };
-    let up = match crate::serving::stream_to_store(a.repo.store(), field, pkgpod_nuget::MAX_NUPKG)
-        .await
-    {
+    let stored = app.store_body(a.repo.store(), field.into_body(), pkgpod_nuget::MAX_NUPKG);
+    let up = match stored.await {
         Ok((sha256, size)) => Upload {
             sha256,
             size,
             filename: None,
         },
-        Err(e) => return text(StatusCode::BAD_REQUEST, e.to_string()),
+        Err(e) => return text(StatusCode::BAD_REQUEST, e),
     };
     let (app2, name, actor) = (
         app.clone(),
