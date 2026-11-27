@@ -12,17 +12,46 @@ path, written by PUT to the file's own path; the format makes each
 artifact's maven-metadata.xml, a SNAPSHOT's, a group's of its plugins,
 and every file's checksums."""
 
+import calendar
 import gzip
 import hashlib
 import io
+import re
 import tarfile
+import time
 import zipfile
 
-from core import UP, auth_header, request
+from core import IDENTS, UP, auth_header, request
 
 NAME = "maven"
+# The paths of the hosted repositories' answers, which may hold the
+# run's times (an artifact's maven-metadata.xml says when its last file
+# came, and its checksums are of it).
+TIMES = r"/mvn(pub|priv|empty)(/|$)"
+
+# The most of a body PUT takes (pkgpod-proto's body::MAX_UPLOAD).
+MAX_UPLOAD = 8 << 30
 # The most of a plugin's META-INF/maven/plugin.xml read (the format's).
 MAX_PLUGIN_XML = 4 << 20
+
+
+class Zeros:
+    """`n` zero bytes, sent a MiB at a time (http.client sends an
+    iterable as it comes, with the Content-Length given): a body past
+    the limit, not held whole."""
+
+    def __init__(self, n):
+        self.n = n
+
+    def __len__(self):
+        return self.n
+
+    def __iter__(self):
+        piece = bytes(1 << 20)
+        left = self.n
+        while left > 0:
+            yield piece if left >= len(piece) else piece[:left]
+            left -= len(piece)
 
 
 def zipped(members, deflate=False):
@@ -473,6 +502,242 @@ def proxy_reads(c, who):
         {"If-None-Match": "{maven mvnproxy/org/acme/up/1.0.0/up-1.0.0.jar %s.etag}" % who})
 
 
+# ---- writes ---------------------------------------------------------------
+
+def put_steps(base, files):
+    return [("PUT", f"{base}/{p}", {}, body) for p, body in files]
+
+
+def gets(base, paths, method="GET"):
+    return [(method, f"{base}/{p}", {}, None) for p in paths]
+
+
+def writes(c, who):
+    seq = c.seq
+    i = IDENTS.index(who)
+    # A deploy as mvn deploy makes it, to each repository (refused where
+    # the caller may not write, and by the proxy): an artifact's jar and
+    # pom, their checksums, its metadata (dropped); what the server made
+    # of it, read back.
+    a = f"w-{who}"
+    files = (deployed(f"org/acme/{a}/1.0.0/{a}-1.0.0.jar", jar(a, "1.0.0"))
+             + deployed(f"org/acme/{a}/1.0.0/{a}-1.0.0.pom", pom("org.acme", a, "1.0.0"))
+             + deployed(f"org/acme/{a}/maven-metadata.xml",
+                        client_metadata("org.acme", a, ["1.0.0"])))
+    for repo in ("mvnpub", "mvnpriv", "mvnempty", "mvnproxy"):
+        base = f"/{repo}"
+        meta = f"org/acme/{a}/maven-metadata.xml"
+        seq(f"maven deploy {repo} {who}", who,
+            put_steps(base, files)
+            + gets(base, [meta] + [meta + s for s in SUMS])
+            + gets(base, [meta], "HEAD")
+            + gets(base, [f"org/acme/{a}/1.0.0/{a}-1.0.0.jar",
+                          f"org/acme/{a}/1.0.0/{a}-1.0.0.jar.sha1",
+                          f"org/acme/{a}/1.0.0/{a}-1.0.0.jar.sha256",
+                          f"org/acme/{a}/1.0.0/{a}-1.0.0.pom.sha512",
+                          f"org/acme/{a}/1.0.0/", f"org/acme/{a}"]))
+    for repo in ("mvnpub", "mvnpriv"):
+        base = f"/{repo}"
+        meta = f"{HELLO}/maven-metadata.xml"
+        # A release of hello of each who may: their versions' names in
+        # the order they come (see TREE), read back with the metadata,
+        # the label's unchanged.
+        v = f"2.{i}.0"
+        seq(f"maven release {repo} {who}", who,
+            put_steps(base, [(f"{HELLO}/{v}/hello-{v}.jar", jar("hello", v)),
+                             (f"{HELLO}/{v}/hello-{v}.pom", pom("org.acme", "hello", v))])
+            + gets(base, [meta, meta + ".sha1", f"@first/{meta}", f"{HELLO}/{v}/"]))
+        # A release's file again: the same bytes (taken as there), other
+        # bytes (refused, but where redeploy is on); a SNAPSHOT's, plain
+        # and timestamped, with other bytes (taken). Each version keeps
+        # a file of the seed's, so its place in the metadata stays.
+        seq(f"maven redeploy {repo} {who}", who,
+            put_steps(base, [(J100, jar("hello", "1.0.0")),
+                             (J100, jar("hello", "1.0.0", f" by {who}"))])
+            + gets(base, [J100, f"{J100}.sha1", f"{J100}.md5", f"@first/{J100}"])
+            + put_steps(base, [(f"{B2}.jar", jar("hello", "1.2.0", f" by {who}")),
+                               (f"{HELLO}/0.9.0-SNAPSHOT/hello-0.9.0-SNAPSHOT.jar",
+                                jar("hello", "0.9.0-SNAPSHOT", f" by {who}"))])
+            + gets(base, [f"{B2}.jar", f"{HELLO}/0.9.0-SNAPSHOT/hello-0.9.0-SNAPSHOT.jar",
+                          meta, meta + ".sha256"]))
+        # A SNAPSHOT build of each who may, later than the last: the
+        # SNAPSHOT's metadata names it (its time is the file's name's).
+        ts, n = f"202603{i + 1:02d}.120000", 10 + i
+        f = f"{SNAP}/hello-1.2.0-{ts}-{n}"
+        seq(f"maven snapshot {repo} {who}", who,
+            put_steps(base, deployed(f"{f}.pom", pom("org.acme", "hello", "1.2.0-SNAPSHOT"))
+                      + deployed(f"{f}.jar", jar("hello", f"1.2.0-{ts}-{n}"))
+                      + deployed(f"{f}-sources.jar", jar("hello", f"1.2.0-{ts}-{n}", " src"))
+                      + deployed(f"{SNAP}/maven-metadata.xml",
+                                 client_metadata("org.acme", "hello", ["1.2.0-SNAPSHOT"])))
+            + gets(base, [f"{SNAP}/maven-metadata.xml", f"{SNAP}/maven-metadata.xml.sha1",
+                          f"{SNAP}/maven-metadata.xml.md5", meta, f"{f}.jar"]))
+    base = "/mvnpub"
+    # Checksums put to the tree: of a file there (right, in upper case
+    # with its name, wrong, empty; of each kind), of a file not there;
+    # metadata put anywhere (dropped); a signature, the same each time
+    # (taken once, then as there).
+    ps = sums(pom("org.acme", "hello", "1.0.0"))
+    seq(f"maven checksums {who}", who, put_steps(base, [
+        (f"{P100}.sha1", ps["sha1"].encode()),
+        (f"{P100}.sha1", ps["sha1"].upper().encode() + b"  hello-1.0.0.pom\n"),
+        (f"{P100}.sha1", b"0" * 40),
+        (f"{P100}.md5", ps["md5"].encode() + b"\n"),
+        (f"{P100}.md5", b""),
+        (f"{P100}.sha256", ps["sha256"].encode()),
+        (f"{P100}.sha512", ps["sha512"].encode()),
+        (f"{P100}.sha512", ps["sha256"].encode()),
+        (f"{HELLO}/1.0.0/hello-1.0.0-nothing.jar.sha1", b"0" * 40),
+        (f"{HELLO}/maven-metadata.xml", b"<metadata/>\n"),
+        (f"{HELLO}/maven-metadata.xml.sha256", b"0" * 64),
+        (f"{SNAP}/maven-metadata.xml.md5", b"0" * 32),
+        ("maven-metadata.xml", b"<metadata/>\n"),
+        ("x/maven-metadata.xml.sha1", b"0" * 40),
+        (f"{P100}.asc", b"a signature of the pom\n")])
+        + gets(base, [f"{P100}.sha1", f"{P100}.asc", f"{P100}.asc.sha1",
+                      f"{HELLO}/1.0.0/hello-1.0.0-nothing.jar.sha1", f"{HELLO}/maven-metadata.xml"]))
+    # Paths PUT takes and refuses: no group, not the artifact's file, a
+    # segment hidden, with a space or a ?, too long; no path at all; a
+    # label's; ?path= other than the URL's, empty, or the URL's with
+    # slashes; parameters it does not take, and one it does; an escaped
+    # slash; an empty file.
+    p = f"org/acme/p-{who}/1.0.0/p-{who}-1.0.0"
+    pj = jar(f"p-{who}", "1.0.0")
+    seq(f"maven paths {who}", who, [
+        ("PUT", f"{base}/hello-1.0.0.jar", {}, pj),
+        ("PUT", f"{base}/hello/1.0.0/hello-1.0.0.jar", {}, pj),
+        ("PUT", f"{base}/{HELLO}/1.0.0/other-1.0.0.jar", {}, pj),
+        ("PUT", f"{base}/org/.acme/hello/1.0.0/hello-1.0.0.jar", {}, pj),
+        ("PUT", f"{base}/org/a%20b/x/1.0/x-1.0.jar", {}, pj),
+        ("PUT", f"{base}/org/acme/x/1.0/x-1.0.jar%3F", {}, pj),
+        ("PUT", f"{base}/org/{'y' * 256}/x/1.0/x-1.0.jar", {}, pj),
+        ("PUT", f"{base}/", {}, pj),
+        ("PUT", base, {}, pj),
+        ("PUT", f"{base}/@first/{p}.jar", {}, pj),
+        ("PUT", f"{base}/{p}.jar?path=org/acme/other", {}, pj),
+        ("PUT", f"{base}/{p}.jar?path=", {}, pj),
+        ("PUT", f"{base}/{p}.jar?foo=1", {}, pj),
+        ("PUT", f"{base}/{p}.jar?mtime=1790000000", {}, pj),
+        ("PUT", f"{base}/{p}.jar?path=/{p}.jar/", {}, pj),
+        ("PUT", f"{base}/{p}.pom?filename=x.pom", {}, pom("org.acme", f"p-{who}", "1.0.0")),
+        ("PUT", f"{base}/org%2Facme/p-{who}/1.0.0/p-{who}-1.0.0.jar", {}, pj),
+        ("PUT", f"{base}/{p}-empty.jar", {}, b""),
+        ("PUT", f"{base}/org/acme/p-{who}/1.0.0-SNAPSHOT/p-{who}-1.0.0-SNAPSHOT.jar", {}, pj),
+        ("GET", f"{base}/org/acme/p-{who}/maven-metadata.xml", {}, None),
+        ("GET", f"{base}/org/acme/p-{who}/1.0.0/", {}, None),
+        ("GET", f"{base}/{p}-empty.jar", {}, None)])
+    # A plugin of each who may: the group's metadata lists them all.
+    a = f"w-{who}-maven-plugin"
+    w = f"org/acme/wplugins/{a}"
+    seq(f"maven plugin {who}", who,
+        put_steps(base, [(f"{w}/1.0.0/{a}-1.0.0.jar", plugin_jar(f"w{who}", f"Plugin of {who}")),
+                         (f"{w}/1.0.0/{a}-1.0.0.pom",
+                          pom("org.acme.wplugins", a, "1.0.0", "maven-plugin"))])
+        + gets(base, ["org/acme/wplugins/maven-metadata.xml",
+                      "org/acme/wplugins/maven-metadata.xml.sha1", f"{w}/maven-metadata.xml"]))
+    # What the tree takes from no one: DELETE and POST (of a file, of
+    # the address), methods the server takes for no repository, a write
+    # from another site's page.
+    for repo in ("mvnpub", "mvnpriv", "mvnproxy"):
+        base = f"/{repo}"
+        seq(f"maven methods {repo} {who}", who, [
+            ("DELETE", f"{base}/{J100}", {}, None),
+            ("POST", f"{base}/{J100}", {}, jar("hello", "1.0.0")),
+            ("DELETE", f"{base}/", {}, None),
+            ("POST", f"{base}/", {}, jar("hello", "1.0.0")),
+            ("PATCH", f"{base}/{J100}", {}, jar("hello", "1.0.0")),
+            ("OPTIONS", f"{base}/{J100}", {}, None),
+            ("PUT", f"{base}/org/acme/o-{who}/1.0.0/o-{who}-1.0.0.jar",
+             {"Origin": "http://elsewhere.example"}, jar(f"o-{who}", "1.0.0")),
+            ("GET", f"{base}/org/acme/o-{who}/maven-metadata.xml", {}, None),
+            ("GET", f"{base}/{J100}.sha1", {}, None)])
+
+
+def limits(c, who):
+    # A PUT one byte over the limit, and one whose body cannot be read
+    # (chunked, its first chunk's size not hex), by one who may (the
+    # body is read); in sequences, of which no mutant is sent.
+    if who == "writer":
+        big = "/mvnpub/org/acme/big/1.0.0/big-1.0.0.jar"
+        c.seq("maven put over the limit writer", who, [
+            ("PUT", big, {"Content-Length": str(MAX_UPLOAD + 1)}, Zeros(MAX_UPLOAD + 1)),
+            ("GET", big, {}, None)])
+        c.seq("maven put unreadable writer", who, [
+            ("PUT", big, {"Transfer-Encoding": "chunked"}, b"zz\r\nhello\r\n0\r\n\r\n"),
+            ("GET", big, {}, None)])
+
+
+def after(c, who):
+    # What Maven's writes left in each hosted repository: the listings,
+    # every artifact's metadata a write changed (whole, before its
+    # checksums: see mask), hello's whole, HEAD, a range; the SNAPSHOT's,
+    # the plugins' group's, the label's; a release's file taken again.
+    for repo in ("mvnpub", "mvnpriv", "mvnempty"):
+        b = f"/{repo}"
+        meta = f"{HELLO}/maven-metadata.xml"
+        for rel in ("/", "/org/acme/", f"/{meta}") + tuple(f"/{meta}{s}" for s in SUMS):
+            c.add(f"after maven {repo}{rel} {who}", who, "GET", b + rel)
+        c.add(f"after maven {repo} HEAD /{meta} {who}", who, "HEAD", f"{b}/{meta}")
+        c.add(f"after maven {repo} range /{meta} {who}", who, "GET", f"{b}/{meta}",
+              {"Range": "bytes=0-9"})
+        for art in ([f"org/acme/w-{w}" for w in IDENTS] + [f"org/acme/p-{w}" for w in IDENTS]
+                    + [f"org/acme/wplugins/w-{w}-maven-plugin" for w in IDENTS]):
+            for s in ("", ".sha1"):
+                c.add(f"after maven {repo}/{art}/maven-metadata.xml{s} {who}", who, "GET",
+                      f"{b}/{art}/maven-metadata.xml{s}")
+        for rel in (f"/{SNAP}/maven-metadata.xml", f"/{SNAP}/maven-metadata.xml.sha1",
+                    "/org/acme/wplugins/maven-metadata.xml", f"/@first/{meta}", f"/{J100}",
+                    f"/{J100}.sha1"):
+            c.add(f"after maven {repo}{rel} {who}", who, "GET", b + rel)
+
+
+# ---- masks ----------------------------------------------------------------
+
+LAST = re.compile(rb"<lastUpdated>(\d{14})</lastUpdated>")
+SUMMED = re.compile(r"/maven-metadata\.xml\.(md5|sha1|sha256|sha512)$")
+
+
+def mask(masker):
+    # The digests (hex, of each kind) of whole maven-metadata.xml
+    # answers whose lastUpdated was a time of the run.
+    timed = set()
+
+    def answer(path, hd, body, after_writes, etag):
+        if not re.match(TIMES, path):
+            return hd, body
+        p = path.split("?")[0]
+        whole = not any(k == "content-range" for k, _ in hd)
+        hit = False
+        if p.endswith("/maven-metadata.xml"):
+            now = time.time()
+
+            def one(m):
+                nonlocal hit
+                try:
+                    t = calendar.timegm(time.strptime(m.group(1).decode(), "%Y%m%d%H%M%S"))
+                except ValueError:
+                    return m.group(0)
+                if not masker.seed_time <= t <= now:
+                    return m.group(0)
+                hit = True
+                return b"<lastUpdated>" + b"X" * 14 + b"</lastUpdated>"
+            out = LAST.sub(one, body)
+            if hit:
+                masker.counts["maven times"] += 1
+                if whole:
+                    timed.update(sums(body).values())
+                body = out
+        elif (after_writes and whole and body and SUMMED.search(p)
+              and body.strip().decode("ascii", "replace") in timed):
+            hit = True
+            masker.counts["maven checksums of times"] += 1
+            body = b"X" * len(body)
+        if hit:
+            hd = [[k, "*" if k == "etag" else v] for k, v in hd]
+        return masker.part(hd, body, hit, after_writes, etag)
+    return answer
+
+
 FUZZ = (["mvnpub", "mvnpriv", "mvnproxy", "mvnempty"],
         ["org", "acme", "hello", "0.9.0-SNAPSHOT", "1.0.0", "1.1.0", "1.2.0-SNAPSHOT",
          "hello-1.0.0.jar", "hello-1.0.0.pom", "hello-1.0.0.jar.sha1", "hello-1.0.0-sources.jar",
@@ -481,9 +746,10 @@ FUZZ = (["mvnpub", "mvnpriv", "mvnproxy", "mvnempty"],
 # Not FUZZ_WRITABLE: an artifact's maven-metadata.xml lists its versions
 # by when each came, to the second, then by name, so versions a fuzzed
 # write made in the same second in one run and in two in the other
-# would be listed in other orders. The fuzz holds back Maven writes of
-# writer, its tokens, admin and the trust rule's token; no other
-# identity's is taken.
+# would be listed in other orders (the curated writes make an
+# artifact's versions in the order of their names). The fuzz holds back
+# Maven writes of writer, its tokens, admin and the trust rule's token;
+# no other identity's is taken.
 
 PARTS = [
     ("seed", 120, seed),
@@ -496,6 +762,27 @@ PARTS = [
     ("reads", 130, reads),
     ("reads", 130, proxy_reads),
     ("reads end", 30, proxy_gone),
+    ("writes", 210, writes),
+    ("writes", 210, limits),
+    ("after", 80, after),
+    # An artifact's maven-metadata.xml says when its last file came
+    # (lastUpdated, to the second, UTC), and the tree keeps when each
+    # file came: of a write of the run, the run's time.
+    ("rule", 190, ("maven times", "lastUpdated in a maven-metadata.xml answer of mvnpub, "
+                                  "mvnpriv or mvnempty if a time of the run (at or after the "
+                                  "seed, not after the answer; same length), the etag of an "
+                                  "answer it was in, the root of a Maven version made in the "
+                                  "run")),
+    # Its checksums are of those bytes: masked when they are that digest
+    # of a whole metadata answer the rule above masked (the corpus asks
+    # for an artifact's metadata whole before its checksums).
+    ("rule", 190, ("maven checksums of times", "the body (not its length) and the etag of a "
+                                               "whole maven-metadata.xml.md5, .sha1, .sha256 "
+                                               "or .sha512 answer of mvnpub, mvnpriv or "
+                                               "mvnempty after writes, if it is that digest of "
+                                               "a whole maven-metadata.xml answer of the run "
+                                               "whose lastUpdated was masked")),
+    ("mask", 110, mask),
     ("fuzz sample", 150, jar("fz", "1.0.0")),
     ("fuzz sample", 150, pom("org.acme", "fz", "1.0.0")),
 ]
