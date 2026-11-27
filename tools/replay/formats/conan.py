@@ -428,32 +428,42 @@ def writes(c, who):
               ("GET", f"{ref}/revisions/{s2}/packages/{P1}/latest", {}, None),
               ("GET", f"{ref}/revisions/{s2}/search", {}, None)] + back
     seq(f"conan two revisions {who}", who, steps)
-    # Removing: a package revision, a revision's packages, a revision,
-    # each again (not there); read back by the lists only (a download
-    # of a manifest is named by its catalog row when the counts are
-    # written, every few seconds: of one removed by then, it is not).
-    ref = f"/kpub/v2/conans/r-{who}/1.0/_/_"
-    h, q = md5(f"removed {who}"), md5(f"removed package {who}")
-    rdir = f"{ref}/revisions/{h}"
-    pdir = f"{rdir}/packages/{P1}/revisions/{q}"
-    seq(f"conan remove {who}", who,
-        [("PUT", f"{rdir}/files/{n}", {}, d)
-         for n, d in recipe(f"r-{who}", "1.0", f"removed by {who}").items()]
-        + [("PUT", f"{pdir}/files/{n}", {}, d)
-           for n, d in package(INFO_A, f"r-{who} package").items()]
-        + [("GET", f"{rdir}/packages/{P1}/revisions", {}, None),
-           ("DELETE", pdir, {}, None),
-           ("DELETE", pdir, {}, None),
-           ("GET", f"{rdir}/packages/{P1}/revisions", {}, None),
-           ("GET", f"{rdir}/search", {}, None),
-           ("DELETE", f"{rdir}/packages", {}, None),
-           ("DELETE", f"{rdir}/packages", {}, None),
-           ("GET", f"{rdir}/files", {}, None),
-           ("DELETE", rdir, {}, None),
-           ("DELETE", rdir, {}, None),
-           ("GET", f"{ref}/revisions", {}, None),
-           ("GET", f"{rdir}/files", {}, None),
-           ("GET", f"/kpub/v2/conans/search?q=r-{who}*", {}, None)])
+    # Removing, in each hosted repository (the trust rule's too, where
+    # its token's removal is audited as the publisher's): a package
+    # revision (at the label, from another site's page, then as asked),
+    # a revision's packages (the other package's), a revision, each
+    # again (not there); read back by the lists only (a download of a
+    # manifest is named by its catalog row when the counts are written,
+    # every few seconds: of one removed by then, it is not).
+    for repo in ("kpub", "kpriv", "ktrust"):
+        rel = f"/v2/conans/r-{who}/1.0/_/_"
+        ref = f"/{repo}{rel}"
+        h, q = md5(f"removed {who} {repo}"), md5(f"removed package {who} {repo}")
+        rdir = f"{ref}/revisions/{h}"
+        pdir = f"{rdir}/packages/{P1}/revisions/{q}"
+        seq(f"conan remove {repo} {who}", who,
+            [("PUT", f"{rdir}/files/{n}", {}, d)
+             for n, d in recipe(f"r-{who}", "1.0", f"removed by {who} in {repo}").items()]
+            + [("PUT", f"{pdir}/files/{n}", {}, d)
+               for n, d in package(INFO_A, f"r-{who} {repo} package").items()]
+            + [("PUT", f"{rdir}/packages/{P2}/revisions/{q}/files/{n}", {}, d)
+               for n, d in package(INFO_WIN, f"r-{who} {repo} other package").items()]
+            + [("GET", f"{rdir}/packages/{P1}/revisions", {}, None),
+               ("DELETE", f"/{repo}/@first{rel}/revisions/{h}/packages/{P1}/revisions/{q}", {},
+                None),
+               ("DELETE", pdir, {"Origin": "http://elsewhere.example"}, None),
+               ("DELETE", pdir, {}, None),
+               ("DELETE", pdir, {}, None),
+               ("GET", f"{rdir}/packages/{P1}/revisions", {}, None),
+               ("GET", f"{rdir}/search", {}, None),
+               ("DELETE", f"{rdir}/packages", {}, None),
+               ("DELETE", f"{rdir}/packages", {}, None),
+               ("GET", f"{rdir}/files", {}, None),
+               ("DELETE", rdir, {}, None),
+               ("DELETE", rdir, {}, None),
+               ("GET", f"{ref}/revisions", {}, None),
+               ("GET", f"{rdir}/files", {}, None),
+               ("GET", f"/{repo}/v2/conans/search?q=r-{who}*", {}, None)])
     # A package of a recipe revision that is not there: taken, though
     # the revision is not (it has no manifest); its package is found.
     ref = f"/kpub/v2/conans/o-{who}/1.0/_/_"
@@ -550,12 +560,18 @@ def writes(c, who):
         ("DELETE", f"{pf}/packages", {}, None),
         ("GET", f"{pf}/files", {}, None)])
     # A repository with nothing in it, and the one at a host's root: a
-    # manifest alone (refused for what it is, or for who sends it); at
-    # the root, what the server takes under /v2/ only with GET, HEAD and
-    # PUT.
+    # manifest alone (refused for what it is, or for who sends it);
+    # removals of what is not there (refused for that, or for who asks);
+    # at the root, what the server takes under /v2/ only with GET, HEAD
+    # and PUT.
     root = {"Host": "conan.localhost"}
     seq(f"conan kempty and kroot writes {who}", who, [
         ("PUT", f"/kempty{RV1}/files/{MANIFEST}", {}, HELLO_R1[MANIFEST]),
+        ("GET", f"/kempty{REF}/revisions", {}, None),
+        ("DELETE", f"/kempty{PK1}/revisions/{Q1}", {}, None),
+        ("DELETE", f"/kempty{RV1}/packages", {}, None),
+        ("DELETE", f"/kempty{RV1}", {}, None),
+        ("DELETE", f"/kempty/@first{RV1}", {}, None),
         ("GET", f"/kempty{REF}/revisions", {}, None),
         ("PUT", f"{rv(lone)}/files/{MANIFEST}", root, HELLO_R1[MANIFEST]),
         ("DELETE", RV1, root, None),
@@ -681,7 +697,8 @@ def after(c, who):
     c.seq(f"after conan ktrust {who}", who,
           [("GET", f"/ktrust{rel}", {}, None)
            for rel in ("/v2/conans/search", f"{REF}/revisions", "/v2/conans/w-ptoken/1.0/_/_/latest",
-                       "/v2/conans/w-admin/1.0/_/_/latest", "/@first/v2/conans/search")])
+                       "/v2/conans/w-admin/1.0/_/_/latest", "/v2/conans/search?q=r-*",
+                       "/@first/v2/conans/search")])
     c.add(f"after conan kempty {who}", who, "GET", "/kempty/v2/conans/search")
     c.add(f"after conan kroot {who}", who, "GET", "/v2/conans/search",
           {"Host": "conan.localhost"})
