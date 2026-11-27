@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Go: hosted public and private (a module with two versions and a
 pseudo-version, one whose path has an upper-case letter, a label), a
-proxy of the stub's GOPROXY, a group."""
+proxy of the stub's GOPROXY, a group; public groups (of public members
+with a proxy first, of a private member first, of a proxy whose
+upstream fails first)."""
 
 import io
 import re
@@ -11,7 +13,7 @@ from core import PROXY_KEPT, UP, auth_header, request, times
 
 NAME = "go"
 # The paths of Go's answers, which may hold the run's times.
-TIMES = r"/g(pub|priv|proxy|group)(/|$)"
+TIMES = r"/g(pub|priv|proxy|group|gall|gmix|gfail)(/|$)"
 
 
 def go_zip(module, version, files=None):
@@ -149,6 +151,120 @@ def writes(c, who):
         ("GET", f"/gpub{h}/list", {}, None)])
 
 
+# ---- groups ---------------------------------------------------------------
+
+# The stub's second GOPROXY, behind ggup: example.com/hello of a version
+# of its own (a module gpub has too); and one that answers 500 to
+# anything, behind g500.
+UP_GO_G_ZIP = go_zip("example.com/hello", "v1.7.0")
+UP_GO_G_INFO = b'{"Version":"v1.7.0","Time":"2026-01-02T00:00:00Z"}'
+UP_GO_G = {
+    "/go-g/example.com/hello/@v/list": (b"v1.7.0\n", "text/plain"),
+    "/go-g/example.com/hello/@v/v1.7.0.info": (UP_GO_G_INFO, "application/json"),
+    "/go-g/example.com/hello/@latest": (UP_GO_G_INFO, "application/json"),
+    "/go-g/example.com/hello/@v/v1.7.0.mod": (b"module example.com/hello\n", "text/plain"),
+    "/go-g/example.com/hello/@v/v1.7.0.zip": (UP_GO_G_ZIP, "application/zip"),
+}
+
+
+def group_stub(method, path, auth, bearer):
+    if path in UP_GO_G:
+        body, ct = UP_GO_G[path]
+        return 200, {"Content-Type": ct}, body
+    if path.startswith("/go500/"):
+        return 500, {"Content-Type": "text/plain"}, b"upstream broken\n"
+    return None
+
+
+# The public groups: of public members only with a proxy first (ggup,
+# which leaves modules it excludes to gpub), of a private member first
+# (gsec: example.com/hello of a version of its own, a module of its
+# own), of a proxy whose upstream answers 500 first.
+GROUPS = (("ggall", "ggup,gpub"), ("ggmix", "gsec,gpub"), ("ggfail", "g500,gpub"))
+
+
+def seed_groups(p, fx):
+    aa = auth_header("admin")
+    p.cli("repo", "create", "gsec", "-f", "go", "-s", "public=false")
+    for m, v in (("example.com/hello", "v1.5.0"), ("example.com/seconly", "v1.0.0")):
+        st, _, out = request("PUT", "/gsec/m.zip", aa, go_zip(m, v))
+        if st != 201:
+            raise SystemExit(f"go upload {m}@{v}: {st} {out[:200]}")
+    p.cli("repo", "create", "ggup", "-f", "go", "-k", "proxy", "-s",
+          f"upstream=http://127.0.0.1:{UP}/go-g/", "-s", "public=true", "-s",
+          "exclude=example.com/hidden*")
+    p.cli("repo", "create", "g500", "-f", "go", "-k", "proxy", "-s",
+          f"upstream=http://127.0.0.1:{UP}/go500/", "-s", "public=true")
+    for g, members in GROUPS:
+        p.cli("repo", "create", g, "-f", "go", "-k", "group", "-s", f"members={members}",
+              "-s", "public=true")
+
+
+# What a Go group is asked: its address (First); a module's list, info,
+# mod, zip and latest (Name, the path before @v or @latest: the first
+# member that has the module answers alone), of each member's version,
+# escaped, a module a proxy excludes; what names no module (First); a
+# label at each place (Nothing first and alone; else part of the
+# module's path, asked of the members as one).
+GROUP_READS = ("", "/", f"{H}/list", f"{H}/v1.0.0.info", f"{H}/v1.0.0.mod", f"{H}/v1.0.0.zip",
+               f"{H}/v1.5.0.info", f"{H}/v1.7.0.info", f"{H}/v1.7.0.zip",
+               "/example.com/hello/@latest", "/example.com/!upper/@v/list",
+               "/example.com/Upper/@v/list", "/example.com/seconly/@v/list",
+               "/example.org/up/@v/list", "/example.com/hidden/@v/list",
+               "/example.com/nope/@v/list", "/example.com/hello", "/example.com/hello/", f"{H}/",
+               f"{H}", "/@v/list", "/@latest", "/@first", "/@first/",
+               "/@first/example.com/hello/@v/list", "/@first/example.com/hello/@latest",
+               f"/@first{H}/v1.0.0.info", "/@first/@v/list", "/@first/@latest",
+               "/example.com/@first/hello/@v/list", "/example.com/hello/@first/@v/list",
+               f"{H}/@first", "/@nope/example.com/hello/@v/list")
+# Of those, what the corpus asks ggroup already.
+GGROUP_ASKED = {f"{H}/list", f"{H}/v1.0.0.zip", "/example.com/hello/@latest", "/"}
+
+
+def group_reads(c, who):
+    add = c.add
+    for g in ["ggroup"] + [g for g, _ in GROUPS]:
+        b = f"/{g}"
+        for rel in GROUP_READS:
+            if g != "ggroup" or rel not in GGROUP_ASKED:
+                add(f"go group {g}{rel} {who}", who, "GET", b + rel)
+        mod = f"go group {g}{H}/v1.0.0.mod {who}"
+        add(f"go group {g} HEAD list {who}", who, "HEAD", f"{b}{H}/list")
+        add(f"go group {g} HEAD mod {who}", who, "HEAD", f"{b}{H}/v1.0.0.mod")
+        add(f"go group {g} inm {who}", who, "GET", f"{b}{H}/v1.0.0.mod",
+            {"If-None-Match": "{%s.etag}" % mod})
+        add(f"go group {g} ims {who}", who, "GET", f"{b}{H}/v1.0.0.mod",
+            {"If-Modified-Since": "Fri, 01 Jan 2100 00:00:00 GMT"})
+        add(f"go group {g} range {who}", who, "GET", f"{b}{H}/v1.0.0.zip", {"Range": "bytes=0-9"})
+
+
+def group_writes(c, who):
+    octet = {"Content-Type": "application/octet-stream"}
+    # Writes to each group, read back: refused (405 naming its first
+    # member, or as the caller may not read the group).
+    for g in ["ggroup"] + [g for g, _ in GROUPS]:
+        b = f"/{g}"
+        m = f"example.com/wg{who}"
+        c.seq(f"go group {g} writes {who}", who, [
+            ("PUT", f"{b}/w.zip", octet, go_zip(m, "v1.0.0")),
+            ("GET", f"{b}/{m}/@v/list", {}, None),
+            ("PUT", f"{b}{H}/v1.0.0.zip", octet, go_zip("example.com/hello", "v1.0.0")),
+            ("DELETE", f"{b}{H}/v1.0.0.zip", {}, None),
+            ("GET", f"{b}{H}/list", {}, None),
+            ("POST", f"{b}/w.zip", octet, go_zip(m, "v1.0.0")),
+            ("PUT", f"{b}/@first/w.zip", octet, go_zip(m, "v1.0.0"))])
+
+
+def group_after(c, who):
+    # What Go's writes left in the members, through each group: a module
+    # each uploaded (with its time), escaped and not.
+    for g in ["ggroup"] + [g for g, _ in GROUPS]:
+        for rel in ("/example.com/wwriter/@v/list", "/example.com/wwriter/@v/v1.0.0.info",
+                    "/example.com/wwriter/@latest", "/example.com/!uwriter/@v/v1.0.0.info",
+                    f"{H}/list"):
+            c.add(f"after go group {g}{rel} {who}", who, "GET", f"/{g}{rel}")
+
+
 def mask(masker):
     def answer(path, hd, body, after_writes, etag):
         if re.match(TIMES, path):
@@ -172,6 +288,13 @@ PARTS = [
     ("stub", 30, stub),
     ("reads", 80, reads),
     ("writes", 60, writes),
+    # Groups: noone reads ggmix by its grant on the group alone.
+    ("seed", 180, seed_groups),
+    ("grants", 170, {"writer": {"ggmix": "write"}, "noone": {"ggmix": "read"}}),
+    ("stub", 120, group_stub),
+    ("reads", 190, group_reads),
+    ("writes", 290, group_writes),
+    ("after", 140, group_after),
     # Go keeps when each module version was uploaded (served as its
     # .info's Time, kept in the tree too).
     ("rule", 50, ("go times", "Times at or after the seed in Go answers (same length), the etag "
