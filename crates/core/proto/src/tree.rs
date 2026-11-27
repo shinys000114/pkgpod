@@ -3,9 +3,10 @@
 //! What a format says of the files of its repositories' trees, which the
 //! server serves alike for every format: how long a cache may keep each
 //! (by its path), which are named by their content, what type each is,
-//! and whether an upload by PUT goes where its URL says. Data and plain
-//! functions, so the server builds its tables from every format's, and a
-//! format's own tests can ask them.
+//! whether an upload by PUT goes where its URL says, and whether its
+//! trees are plain files served as they are. Data and plain functions,
+//! so the server builds its tables from every format's, and a format's
+//! own tests can ask them.
 
 /// A format's rules for the files of its trees. [`TreeRules::DEFAULT`]
 /// says nothing of its own: the rules the server has for any tree answer
