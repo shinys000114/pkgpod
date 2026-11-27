@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """PyPI: hosted public and private (a project whose name is not
 normalized, two versions, a wheel and an sdist, a label), a proxy of
-the stub, a group."""
+the stub, a group; public groups (of public members with a proxy
+first, of a private member first, of a proxy whose upstream fails
+first)."""
 
 import gzip
 import hashlib
@@ -211,6 +213,130 @@ def limits(c, who):
         c.add("pypi upload digest over the limit writer", who, "POST", "/ppub/legacy/", hd, body)
 
 
+# ---- groups ---------------------------------------------------------------
+
+# The stub's second index, behind pgup: hello-world of a version of its
+# own (a project ppub has too); and one that answers 500 to anything,
+# behind p500.
+UP_PY_G_WHEEL = wheel("Hello_World", "7.0", "from the second upstream")
+UP_PY_G_META = py_meta("Hello_World", "7.0", "from the second upstream")
+UP_PY_G_PAGE = json.dumps({
+    "meta": {"api-version": "1.0"}, "name": "hello-world",
+    "files": [{"filename": UP_PY_G_WHEEL[0],
+               "url": f"http://127.0.0.1:{UP}/pypi-g/files/{UP_PY_G_WHEEL[0]}",
+               "hashes": {"sha256": hashlib.sha256(UP_PY_G_WHEEL[1]).hexdigest()},
+               "core-metadata": {"sha256": hashlib.sha256(UP_PY_G_META).hexdigest()}}]},
+    sort_keys=True).encode()
+
+
+def group_stub(method, path, auth, bearer):
+    if path == "/pypi-g/simple/hello-world/":
+        return 200, {"Content-Type": "application/vnd.pypi.simple.v1+json"}, UP_PY_G_PAGE
+    if path == f"/pypi-g/files/{UP_PY_G_WHEEL[0]}":
+        return 200, {"Content-Type": "application/octet-stream"}, UP_PY_G_WHEEL[1]
+    if path == f"/pypi-g/files/{UP_PY_G_WHEEL[0]}.metadata":
+        return 200, {"Content-Type": "application/octet-stream"}, UP_PY_G_META
+    if path.startswith("/pypi500/"):
+        return 500, {"Content-Type": "text/plain"}, b"upstream broken\n"
+    return None
+
+
+# The public groups: of public members only with a proxy first (pgup,
+# which leaves names it excludes to ppub), of a private member first
+# (psec: hello-world of a version of its own, a project of its own), of
+# a proxy whose upstream answers 500 first.
+GROUPS = (("pgall", "pgup,ppub"), ("pgmix", "psec,ppub"), ("pgfail", "p500,ppub"))
+SEC_WHEELS = (wheel("Hello_World", "5.0", "secret hello"), wheel("sec-only", "1.0", "secret"))
+
+
+def seed_groups(p, fx):
+    aa = auth_header("admin")
+    p.cli("repo", "create", "psec", "-f", "pypi", "-s", "public=false")
+    for fn, data in SEC_WHEELS:
+        hd, body = py_upload(fn, data)
+        st, _, out = request("POST", "/psec/legacy/", dict(aa, **hd), body)
+        if st != 200:
+            raise SystemExit(f"pypi upload {fn}: {st} {out[:200]}")
+    p.cli("repo", "create", "pgup", "-f", "pypi", "-k", "proxy", "-s",
+          f"upstream=http://127.0.0.1:{UP}/pypi-g/simple/", "-s", "public=true", "-s",
+          "exclude=hidden*")
+    p.cli("repo", "create", "p500", "-f", "pypi", "-k", "proxy", "-s",
+          f"upstream=http://127.0.0.1:{UP}/pypi500/simple/", "-s", "public=true")
+    for g, members in GROUPS:
+        p.cli("repo", "create", g, "-f", "pypi", "-k", "group", "-s", f"members={members}",
+              "-s", "public=true")
+
+
+# What a PyPI group is asked: its address (First); the project list
+# (PypiRoot, without the slash a redirect); a project's page and files
+# (Name, by the normalized name: the first member that has the project
+# answers alone), a name a proxy excludes; what is no project (First);
+# a label (Nothing).
+W10 = wheel("Hello_World", "1.0", "hello")[0]
+GROUP_READS = ("", "/", "/simple", "/simple/", "/simple/hello-world/", "/simple/Hello_World/",
+               "/simple/hello.world/", "/simple/hello-world", "/simple/other-pkg/",
+               "/simple/sec-only/", "/simple/up-pkg/", "/simple/hidden-pkg/", "/simple/nope/",
+               f"/files/hello-world/{W10}", f"/files/hello-world/{W10}.metadata",
+               f"/files/hello-world/{SEC_WHEELS[0][0]}", f"/files/hello-world/{UP_PY_G_WHEEL[0]}",
+               f"/files/hello-world/{UP_PY_G_WHEEL[0]}.metadata",
+               "/files/hello-world/hello_world-1.1.tar.gz", "/files/", "/legacy/",
+               "/simple/index.json", "/@first/simple/hello-world/", "/@first/", "/@first")
+# Of those, what the corpus asks pgroup already.
+PGROUP_ASKED = {"/simple/", "/simple/hello-world/", "/simple/nope/", f"/files/hello-world/{W10}",
+                "/"}
+
+
+def group_reads(c, who):
+    add = c.add
+    pyjson = {"Accept": "application/vnd.pypi.simple.v1+json"}
+    for g in ["pgroup"] + [g for g, _ in GROUPS]:
+        b = f"/{g}"
+        for rel in GROUP_READS:
+            if g != "pgroup" or rel not in PGROUP_ASKED:
+                add(f"pypi group {g}{rel} {who}", who, "GET", b + rel)
+        page = f"pypi {g}/simple/hello-world/ {who}" if g == "pgroup" else \
+            f"pypi group {g}/simple/hello-world/ {who}"
+        for name, h in (("json", pyjson), ("html", {"Accept": "text/html"}),
+                        ("inm", {"If-None-Match": "{%s.etag}" % page}),
+                        ("ims", {"If-Modified-Since": "Fri, 01 Jan 2100 00:00:00 GMT"})):
+            add(f"pypi group {g} page {name} {who}", who, "GET", f"{b}/simple/hello-world/", h)
+        add(f"pypi group {g} HEAD page {who}", who, "HEAD", f"{b}/simple/hello-world/", pyjson)
+        add(f"pypi group {g} root json {who}", who, "GET", f"{b}/simple/", pyjson)
+        add(f"pypi group {g} root json without the slash {who}", who, "GET", f"{b}/simple",
+            pyjson)
+        add(f"pypi group {g} HEAD root {who}", who, "HEAD", f"{b}/simple/")
+        add(f"pypi group {g} HEAD root json {who}", who, "HEAD", f"{b}/simple/", pyjson)
+        add(f"pypi group {g} range {who}", who, "GET", f"{b}/files/hello-world/{W10}",
+            {"Range": "bytes=0-9"})
+
+
+def group_writes(c, who):
+    octet = {"Content-Type": "application/octet-stream"}
+    # Writes to each group, read back: refused (405 naming its first
+    # member, or as the caller may not read the group).
+    for g in ["pgroup"] + [g for g, _ in GROUPS]:
+        b = f"/{g}"
+        fn, data = wheel(f"wg-{who}", "1.0")
+        c.seq(f"pypi group {g} writes {who}", who, [
+            ("POST", f"{b}/legacy/") + py_upload(fn, data),
+            ("GET", f"{b}/simple/wg-{who}/", {}, None),
+            ("POST", f"{b}/") + py_upload(fn, data),
+            ("POST", f"{b}/simple/") + py_upload(fn, data),
+            ("PUT", f"{b}/files/wg-{who}/{fn}", octet, data),
+            ("GET", f"{b}/files/wg-{who}/{fn}", {}, None),
+            ("DELETE", f"{b}/files/hello-world/{W10}", {}, None),
+            ("GET", f"{b}/files/hello-world/{W10}", {}, None),
+            ("PATCH", f"{b}/simple/hello-world/", octet, b"x")])
+
+
+def group_after(c, who):
+    # What PyPI's writes left in the members, through each group: the
+    # project list, the projects uploaded.
+    for g in ["pgroup"] + [g for g, _ in GROUPS]:
+        for rel in ("/simple/", "/simple/w-writer/", "/simple/r-writer/", "/simple/hello-world/"):
+            c.add(f"after pypi group {g}{rel} {who}", who, "GET", f"/{g}{rel}")
+
+
 FUZZ = (["ppub", "ppriv", "pproxy", "pgroup"],
         ["simple", "files", "hello-world", "Hello_World", "legacy", "index.json",
          "other-pkg", "up-pkg", "hello_world-1.0-py3-none-any.whl",
@@ -228,6 +354,13 @@ PARTS = [
     ("reads", 60, reads),
     ("writes", 50, writes),
     ("writes", 90, limits),
+    # Groups: noone reads pgmix by its grant on the group alone.
+    ("seed", 160, seed_groups),
+    ("grants", 150, {"writer": {"pgmix": "write"}, "noone": {"pgmix": "read"}}),
+    ("stub", 100, group_stub),
+    ("reads", 170, group_reads),
+    ("writes", 270, group_writes),
+    ("after", 120, group_after),
     ("fuzz sample", 40, wheel("fz", "1.0")[1]),
     ("fuzz sample", 50, py_upload(*wheel("fz", "1.0"))[1]),
 ]
