@@ -87,6 +87,22 @@ NUM_YAML = chart_yaml("num", "1.0.0", (
 # version: written over where they are; text not ASCII.
 KEYED_YAML = (b"digest: mine\nurls: [x]\ncreated: then\napiVersion: v2\nname: keyed\n"
               b"version: 0.1.0\ndescription: \"h\xc3\xa9llo, w\xc3\xb6rld: \xe4\xb8\x96\xe7\x95\x8c\"\n")
+
+
+def values_yaml(name):
+    """A Chart.yaml of `name` 1.0.0 with values of each YAML kind: in the
+    fields helm reads as text (kept text, but for what is no scalar),
+    elsewhere (kept as they are: numbers, a float past f64's range as
+    text, null, booleans), keys that are numbers, booleans or no scalar
+    at all (left out)."""
+    return chart_yaml(name, "1.0.0", (
+        "appVersion: 1.10\nkubeVersion: 1e3\nkeywords: [web, 2, true, ~, [x]]\n"
+        "annotations:\n  build: 42\n  ok: true\n  7: seven\n  nested: [1]\n"
+        "dependencies:\n  - name: db\n    version: 1.0\n    tags: [3, x]\n"
+        "extra:\n  int: 7\n  neg: -3\n  float: 1.5\n  huge: 1e400\n  none: ~\n  t: true\n"
+        "  1: one\n  true: yes\n  ? [a, b]\n  : not a key\n  list: [1, 2.5, ~, x]\n"))
+
+
 # What the seed pushes to each hosted repository (after the first, the
 # label): (how, chart), how a POST of the API as raw bytes (with its
 # Content-Type), a form, or a PUT to the tree.
@@ -290,6 +306,14 @@ def writes(c, who):
             ("GET", f"/{repo}/api/charts/{t}", {}, None),
             ("GET", f"/{repo}/@first/api/charts/{t}", {}, None),
             ("GET", f"/{repo}/charts/{t}-0.3.0.tgz", {}, None)])
+    # A Chart.yaml of values of each kind, read back as the API and
+    # index.yaml give it.
+    n = f"n-{who}"
+    seq(f"helm push of values {who}", who, [
+        ("POST", "/hpub/api/charts", o, helm_chart(n, "1.0.0", values_yaml(n))),
+        ("GET", f"/hpub/api/charts/{n}", {}, None),
+        ("GET", f"/hpub/api/charts/{n}/1.0.0", {}, None),
+        ("GET", "/hpub/index.yaml", {}, None)])
     # What a push refuses, each the input that reaches it; what is
     # taken though it might not be. Raw: no gzip, no tar, no
     # <name>/Chart.yaml (none, at the top, too deep, under ./), a
