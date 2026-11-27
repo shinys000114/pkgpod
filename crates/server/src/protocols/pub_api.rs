@@ -16,9 +16,9 @@ use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Upload, Version};
+use pkgpod_proto::host::Host;
 use serde_json::{Value, json};
 
-use crate::App;
 use crate::auth::{Caller, Role};
 
 const V2: &str = "application/vnd.pub.v2+json";
@@ -48,7 +48,7 @@ pub struct Ask {
     pub role: Option<Role>,
 }
 
-pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
+pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
     if a.role.is_none() {
         if a.caller.user.is_none() {
             let mut r = error(StatusCode::UNAUTHORIZED, "authentication required");
@@ -94,7 +94,7 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
             upload(&app, &a, req).await
         }
         (&Method::GET, ["api", "packages", "versions", "finalize"]) => {
-            let q = crate::serving::query_params(req.uri().query().unwrap_or(""));
+            let q = pkgpod_proto::query::params(req.uri().query().unwrap_or(""));
             if let Some(e) = q.get("error").and_then(Value::as_str) {
                 return error(StatusCode::BAD_REQUEST, e);
             }
@@ -123,23 +123,22 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
                 return error(StatusCode::NOT_FOUND, "not found");
             };
             match app
-                .engine
+                .engine()
                 .objects()
                 .resolve(&v.root, &format!("{name}/{file}"))
             {
                 Ok(Some(Entry::Blob { sha256, .. })) => {
-                    crate::serving::serve_counted(
-                        &app,
+                    let req = req.map(pkgpod_proto::body::boxed);
+                    app.serve_counted(
                         &a.repo.name,
                         "",
-                        &a.repo.store().path(&sha256),
-                        &sha256,
+                        a.repo.store().path(&sha256),
+                        sha256,
                         file,
-                        None,
-                        false,
                         req,
                     )
                     .await
+                    .map(axum::body::Body::new)
                 }
                 _ => error(StatusCode::NOT_FOUND, "not found"),
             }
@@ -150,7 +149,7 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
 
 /// The versions of `name`: (version, sha256, metadata).
 async fn versions(
-    app: &Arc<App>,
+    app: &Arc<dyn Host>,
     a: &Ask,
     name: &str,
 ) -> Vec<(String, pkgpod_base::Digest, Value)> {
@@ -164,7 +163,7 @@ async fn versions(
     tokio::task::spawn_blocking(move || {
         let mut out: BTreeMap<String, (pkgpod_base::Digest, Value)> = BTreeMap::new();
         for (_, e) in app2
-            .engine
+            .engine()
             .objects()
             .walk(&v.root, &name)
             .unwrap_or_default()
@@ -181,7 +180,7 @@ async fn versions(
     .unwrap_or_default()
 }
 
-async fn upload(app: &Arc<App>, a: &Ask, req: Request) -> Response {
+async fn upload(app: &Arc<dyn Host>, a: &Ask, req: Request) -> Response {
     let mut m = match Multipart::from_request(req, &()).await {
         Ok(m) => m,
         Err(e) => return error(StatusCode::BAD_REQUEST, format!("not an upload: {e}")),
@@ -211,9 +210,9 @@ async fn upload(app: &Arc<App>, a: &Ask, req: Request) -> Response {
         a.caller.name().to_string(),
     );
     let res = tokio::task::spawn_blocking(move || {
-        app2.engine
+        app2.engine()
             .upload(&name, &up, &json!({}), &actor)
-            .inspect(|o| app2.auth.audit(&actor, "publish", &name, &o.summary))
+            .inspect(|o| app2.audit(&actor, "publish", &name, &o.summary))
     })
     .await;
     // Errors too are told at the finalizing URL, where dart pub reads
