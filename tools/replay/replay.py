@@ -425,6 +425,12 @@ def built(binary):
 def run(root, binary, out_path, profdir=None):
     core.need_ports()
     s = os.path.join(root, "seed")
+    held = s + ".held"
+    if os.path.exists(held):
+        # A run stopped before it put the seed back (killed, out of
+        # time): the seed is held, and in its place is that run's copy.
+        shutil.rmtree(s, ignore_errors=True)
+        os.rename(held, s)
     # Before anything is copied or moved: a seed is run at its own ports.
     seed_info = json.load(open(os.path.join(s, "SEED.json")))
     if "port_base" not in seed_info:
@@ -449,7 +455,6 @@ def run(root, binary, out_path, profdir=None):
     TOKENS.update(json.load(open(os.path.join(s, "tokens.json"))))
     # The seed's paths are its own: the live copy takes its place.
     p = Pkgpod(binary, s)
-    held = s + ".held"
     os.rename(s, held)
     os.rename(live, s)
     mask = Masker(seed_info["made"], RULES, parts("mask"), TIMES)
