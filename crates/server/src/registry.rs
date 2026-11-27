@@ -445,6 +445,51 @@ mod tests {
         }
     }
 
+    /// Each row holds its own crate's rules, not another format's: the
+    /// union the server builds would not tell two swapped rows apart, the
+    /// rows scoped to their formats would.
+    #[test]
+    fn every_row_holds_its_own_crates_tree() {
+        let own: &[(&str, TreeRules)] = &[
+            ("deb", pkgpod_deb::TREE),
+            ("files", pkgpod_files::TREE),
+            ("apk", pkgpod_apk::TREE),
+            ("rpm", pkgpod_rpm::TREE),
+            ("helm", pkgpod_helm::TREE),
+            ("maven", pkgpod_maven::TREE),
+            ("gems", pkgpod_gems::TREE),
+            ("arch", pkgpod_arch::TREE),
+            ("conda", pkgpod_conda::TREE),
+            ("cran", pkgpod_cran::TREE),
+            ("ipk", pkgpod_ipk::TREE),
+        ];
+        let paths = [
+            "dists/noble/by-hash/SHA256/ab",
+            "el/repodata/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef-primary.xml.gz",
+            "Packages",
+            "Release",
+            "pool/main/h/hello/hello_1.0_all.deb",
+            "hello.ipk",
+        ];
+        for (id, t) in own {
+            let row = &get().row(id).unwrap().tree;
+            assert_eq!(row.cache, t.cache, "{id}");
+            assert_eq!((row.put_path, row.plain), (t.put_path, t.plain), "{id}");
+            for p in paths {
+                assert_eq!(
+                    row.content_named.map(|f| f(p)),
+                    t.content_named.map(|f| f(p)),
+                    "{id} {p}"
+                );
+                assert_eq!(
+                    row.content_type.map(|f| f(p)),
+                    t.content_type.map(|f| f(p)),
+                    "{id} {p}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn what_the_partial_entries_claim() {
         let r = get();
