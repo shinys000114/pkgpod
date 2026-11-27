@@ -156,7 +156,7 @@ pub(crate) fn client_base(
 }
 
 /// The dnf repository file of an RPM repository's group.
-fn rpm_repo_file(repo: &pkgpod_engine::RepoInfo, base: &str, group: &str) -> String {
+pub(crate) fn rpm_repo_file(repo: &pkgpod_engine::RepoInfo, base: &str, group: &str) -> String {
     let public = repo.setting_bool("public");
     let sign = repo
         .settings
@@ -623,66 +623,6 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
             raw_path,
         };
         return protocol.serve(app, at, req).await;
-    }
-    // A dnf repository file per RPM group: <address><group>.repo.
-    if served.repo.format == "rpm"
-        && matches!(method, Method::GET | Method::HEAD)
-        && let Some(last) = rel.last()
-        && let Some(group) = last.strip_suffix(".repo")
-        && (rel.len() == 1 || (rel.len() == 2 && rel[0].starts_with('@')))
-    {
-        if role.is_none() {
-            return deny(&caller);
-        }
-        let mut base_url = client_base(route.as_ref(), &host, &base, &req);
-        let version = match rel
-            .first()
-            .and_then(|f| f.strip_prefix('@'))
-            .filter(|_| rel.len() == 2)
-        {
-            Some(label) => {
-                base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
-                app.labelled(&served.repo.name, label).ok()
-            }
-            None => served.current.clone(),
-        };
-        let there = version.is_some_and(|v| {
-            matches!(
-                app.engine
-                    .objects()
-                    .resolve(&v.served(), &format!("{group}/repodata/repomd.xml")),
-                Ok(Some(Entry::Blob { .. }))
-            )
-        });
-        if !there {
-            return status(StatusCode::NOT_FOUND);
-        }
-        return client_note(
-            StatusCode::OK,
-            rpm_repo_file(&served.repo, &base_url, group),
-        );
-    }
-    if served.repo.format == "helm" && crate::protocols::helm::is_api(&rel) {
-        let ask = crate::protocols::helm::Ask {
-            repo: served.repo,
-            current: served.current,
-            rel,
-            caller: crate::protocols::who(&app, &caller),
-            role: role.map(Into::into),
-        };
-        return crate::protocols::helm::handle(app, ask, req.map(pkgpod_proto::body::boxed))
-            .await
-            .map(axum::body::Body::new);
-    }
-    if served.repo.format == "gems" && crate::protocols::gems::is_api(&method, &rel) {
-        let ask = crate::protocols::gems::Ask {
-            repo: served.repo,
-            caller: crate::protocols::who(&app, &caller),
-            role: role.map(Into::into),
-        };
-        return crate::protocols::gems::handle(app, ask, req.map(pkgpod_proto::body::boxed))
-            .await
-            .map(axum::body::Body::new);
     }
     if served.repo.format == "swift" {
         if role.is_none() && caller.user.is_some() {

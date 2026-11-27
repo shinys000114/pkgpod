@@ -16,6 +16,7 @@ pub mod nuget;
 pub mod oci;
 pub mod pub_api;
 pub mod pypi;
+pub mod rpm;
 pub mod swift;
 pub mod terraform;
 
