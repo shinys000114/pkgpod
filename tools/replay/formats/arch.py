@@ -917,6 +917,12 @@ def mask(masker):
     return answer
 
 
+FUZZ = (["archpub", "archpriv", "archnosign", "archempty"],
+        ["archpub", "archpriv", "archnosign", "extra", "x86_64", "aarch64", "armv7h", "i686",
+         "any", "archpub.db", "archpub.files", "archpub.db.sig", "archpub.db.tar.gz",
+         "archpriv.db", "archnosign.db", "extra.db", F10, F10 + ".sig", F11, FT, FL, "key.asc",
+         "_sigs", "@first", "@second", "upload", "by-hash", "nope"])
+
 PARTS = [
     ("seed", 140, seed),
     ("grants", 130, {"reader": {"archpriv": "read"},
@@ -969,4 +975,5 @@ PARTS = [
                                                     "time of the run, and the directory's "
                                                     "total")),
     ("mask", 110, mask),
+    ("fuzz sample", 180, package("fz", "1.0-1")),
 ]
