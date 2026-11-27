@@ -205,6 +205,113 @@ def seed(p, fx):
         json.dump({"key": names[0].decode()}, f)
 
 
+_KEY = {}
+
+
+def key(c):
+    """The name of the key the seed's indexes are signed with."""
+    if c.fx not in _KEY:
+        path = os.path.join(c.fx, KEYS)
+        try:
+            with open(path) as f:
+                _KEY[c.fx] = json.load(f)["key"]
+        except (OSError, ValueError, KeyError) as e:
+            raise SystemExit(f"apk: the seed's key name ({path}): {e}")
+    return _KEY[c.fx]
+
+
+MAIN = "/v3.22/main/x86_64/"
+INDEX = MAIN + "APKINDEX.tar.gz"
+PKG = MAIN + file_name("hello", "1.0-r0")
+# What each of the public and private repositories is asked: its
+# address and the tree's directories (with and without the slash, a
+# listing sorted each way), what is not served (a place's inputs, a
+# noarch directory, mis-cased, escaped, not there), each place's
+# indexes (an architecture of the defaults with no package of its own,
+# one outside them) and packages (a noarch one in each architecture's
+# directory, not in its own); a label's version, one not there; what
+# is no address of the tree (the upload address, a path through ..).
+PATHS = [
+    "", "/", "/v3.22", "/v3.22/", "/v3.22/main", "/v3.22/main/", "/v3.22/main/x86_64",
+    MAIN, MAIN + "?sort=size", MAIN + "?sort=size&order=desc", MAIN + "?sort=time",
+    "/?sort=name&order=desc", INDEX, INDEX + "/", "/v3.22/main/aarch64/",
+    "/v3.22/main/aarch64/APKINDEX.tar.gz", PKG, MAIN + file_name("hello", "1.1-r0"),
+    MAIN + file_name("motd", "2-r0"), "/v3.22/main/aarch64/" + file_name("motd", "2-r0"),
+    "/v3.22/main/noarch/", "/v3.22/main/noarch/" + file_name("motd", "2-r0"), MAIN + "_inputs",
+    "/v3.22/main/riscv64/APKINDEX.tar.gz", "/v3.22/community/",
+    "/v3.22/community/aarch64/", "/v3.22/community/aarch64/APKINDEX.tar.gz",
+    "/v3.22/community/aarch64/" + file_name("tool", "0.1_alpha-r1"),
+    "/v3.22/community/armv7/", "/v3.22/community/armv7/APKINDEX.tar.gz",
+    "/v3.22/community/armv7/" + file_name("blink", "1.0-r0"),
+    "/v3.22/community/armv7/" + file_name("motd", "2-r0"),
+    "/v3.22/community/x86_64/APKINDEX.tar.gz", "/v3.20/", "/v3.20/main/x86_64/APKINDEX.tar.gz",
+    "/v3.20/main/aarch64/APKINDEX.tar.gz", "/v3.20/main/x86_64/" + file_name("hello", "1.0-r0"),
+    "/V3.22/main/x86_64/APKINDEX.tar.gz", "/v3.22/main/X86_64/APKINDEX.tar.gz",
+    MAIN + "apkindex.tar.gz", MAIN + "APKINDEX.tar", MAIN + "APKINDEX",
+    MAIN + "APKINDEX.tar.gz.sig",
+    MAIN + file_name("nope", "1.0-r0"), MAIN + "hello-1.0-r0%2eapk", "/v3.22%2fmain/x86_64/",
+    "/v3.22/main/../main/x86_64/APKINDEX.tar.gz", PKG + "/", "/v3.22/nope/x86_64/APKINDEX.tar.gz",
+    "/@first", "/@first/", "/@first/v3.22/main/x86_64/", "/@first" + INDEX,
+    "/@first/v3.22/main/aarch64/APKINDEX.tar.gz", "/@first" + PKG,
+    "/@first" + MAIN + file_name("hello", "1.1-r0"), "/@first/v3.22/community/",
+    "/@second" + INDEX, "/@second/v3.22/community/armv7/APKINDEX.tar.gz",
+    "/@second/v3.22/community/x86_64/APKINDEX.tar.gz",
+    "/@second" + MAIN + file_name("hello", "1.1-r0"),
+    "/@second/v3.20/", "/@nope/", "/@nope" + INDEX, "/upload", "/upload?branch=v3.22",
+]
+# A date after every time the seed holds (the files have none).
+LATER = "Fri, 01 Jan 2100 00:00:00 GMT"
+
+
+def reads(c, who):
+    add = c.add
+    k = "/" + key(c)
+    for repo in ("apkpub", "apkpriv"):
+        b = f"/{repo}"
+        for rel in PATHS:
+            add(f"apk {repo}{rel} {who}", who, "GET", b + rel)
+        # The key, by its name (the seed's: not in the requests' names),
+        # at a label's version, mis-cased.
+        for name, rel in (("<key>", k), ("@first/<key>", "/@first" + k),
+                          ("<KEY>", k.upper()), ("<key>/", k + "/")):
+            add(f"apk {repo}/{name} {who}", who, "GET", b + rel)
+        # HEAD, conditions (an ETag of an earlier answer, any, another, a
+        # date: the files keep none, so it is never met), ranges (one,
+        # two, one past the end, one only if the ETag is still the
+        # file's).
+        for name, rel in ((PKG, PKG), (INDEX, INDEX), ("/<key>", k), (MAIN, MAIN), ("/", "/")):
+            add(f"apk {repo} HEAD {name} {who}", who, "HEAD", b + rel)
+        for name, rel in ((PKG, PKG), (INDEX, INDEX), ("/<key>", k)):
+            add(f"apk {repo} inm {name} {who}", who, "GET", b + rel,
+                {"If-None-Match": "{apk %s%s %s.etag}" % (repo, name, who)})
+        add(f"apk {repo} inm any {who}", who, "GET", b + INDEX, {"If-None-Match": "*"})
+        add(f"apk {repo} inm other {who}", who, "GET", b + INDEX, {"If-None-Match": '"other"'})
+        add(f"apk {repo} HEAD inm {who}", who, "HEAD", b + INDEX,
+            {"If-None-Match": "{apk %s%s %s.etag}" % (repo, INDEX, who)})
+        for rel in (PKG, INDEX):
+            add(f"apk {repo} ims {rel} {who}", who, "GET", b + rel, {"If-Modified-Since": LATER})
+        add(f"apk {repo} range {who}", who, "GET", b + PKG, {"Range": "bytes=0-99"})
+        add(f"apk {repo} range index {who}", who, "GET", b + INDEX, {"Range": "bytes=10-"})
+        add(f"apk {repo} ranges {who}", who, "GET", b + PKG, {"Range": "bytes=0-1,100-200"})
+        add(f"apk {repo} bad range {who}", who, "GET", b + PKG, {"Range": "bytes=999999-"})
+        add(f"apk {repo} if-range etag {who}", who, "GET", b + PKG,
+            {"Range": "bytes=0-9", "If-Range": "{apk %s%s %s.etag}" % (repo, PKG, who)})
+        add(f"apk {repo} if-range stale {who}", who, "GET", b + PKG,
+            {"Range": "bytes=0-9", "If-Range": '"stale"'})
+        add(f"apk {repo} if-range date {who}", who, "GET", b + PKG,
+            {"Range": "bytes=0-9", "If-Range": LATER})
+    # Its architectures named: x86_64 and riscv64 indexed, and aarch64
+    # for the package of its own; its description in each index.
+    for rel in ("/", "/v3.22/main/", "/v3.22/main/x86_64/APKINDEX.tar.gz",
+                "/v3.22/main/riscv64/", "/v3.22/main/riscv64/APKINDEX.tar.gz",
+                "/v3.22/main/riscv64/" + file_name("motd", "2-r0"),
+                "/v3.22/main/aarch64/APKINDEX.tar.gz", "/v3.22/main/armv7/APKINDEX.tar.gz"):
+        add(f"apk apkriscv{rel} {who}", who, "GET", "/apkriscv" + rel)
+    # Nothing uploaded: its key alone.
+    for name, rel in (("", ""), ("/", "/"), ("/<key>", k), (INDEX, INDEX), ("/v3.22/", "/v3.22/")):
+        add(f"apk apkempty{name} {who}", who, "GET", "/apkempty" + rel)
+
+
 PARTS = [
     ("seed", 130, seed),
     ("grants", 120, {"reader": {"apkpriv": "read"},
@@ -212,4 +319,5 @@ PARTS = [
     ("wtoken", 110, ["apkpub"]),
     ("rtoken", 110, ["apkpriv"]),
     ("publisher", 100, ["apkpub"]),
+    ("reads", 140, reads),
 ]
