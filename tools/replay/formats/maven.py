@@ -383,8 +383,8 @@ TREE_READS = (
     + [f"/{P100}" + s for s in ("", ".sha1", ".sha512")]
     + [f"/{HELLO}/1.0.0/hello-1.0.0-sources.jar", f"/{HELLO}/1.1.0/hello-1.1.0-javadoc.jar",
        f"/{HELLO}/1.1.0/hello-1.1.0.jar.sha256",
-       f"/{HELLO}/0.9.0-SNAPSHOT/hello-0.9.0-SNAPSHOT.jar", f"{B2}.jar", f"{B2}.jar.sha1",
-       f"{B2}-sources.jar", f"/{SNAP}/hello-1.2.0-SNAPSHOT.jar",
+       f"/{HELLO}/0.9.0-SNAPSHOT/hello-0.9.0-SNAPSHOT.jar", f"/{B2}.jar", f"/{B2}.jar.sha1",
+       f"/{B2}-sources.jar", f"/{SNAP}/hello-1.2.0-SNAPSHOT.jar",
        f"/{SNAP}/hello-1.2.0-20260103.100000-3", f"/{SNAP}/hello-1.2.0-20260103.100000-3.sha1"]
     + ["/org/acme/greet/1.0.0/greet-1.0.0" + e
        for e in (".pom", ".war", ".aar", ".ear", ".module", "-dist.zip", "-bin.tar.gz", ".txt",
