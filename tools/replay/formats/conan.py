@@ -2,10 +2,10 @@
 """Conan: hosted public and private (hello/1.0 of two recipe revisions,
 a label after the first; the first with a binary package, the second
 with two, one of them in two package revisions; hello/1.0@team/stable;
-other/2.0; gap/1.0, of packages a removal by path left broken), one
-with nothing in it, one at a host's root, and ktrust, the one the trust
-rule writes (see FUZZ). Conan repositories are hosted only: no proxy,
-no group, no stub."""
+other/2.0; gap/1.0, of packages a removal by path left broken and one
+whose conaninfo.txt is not UTF-8), one with nothing in it, one at a
+host's root, and ktrust, the one the trust rule writes (see FUZZ).
+Conan repositories are hosted only: no proxy, no group, no stub."""
 
 import calendar
 import gzip
@@ -76,8 +76,9 @@ def recipe(name, version, note, sources=True):
 
 def package(info, note):
     """A package revision's files in the order conan uploads them: its
-    conaninfo.txt (`info`), the package, its manifest last."""
-    files = {"conaninfo.txt": info.encode(),
+    conaninfo.txt (`info`, text or bytes), the package, its manifest
+    last."""
+    files = {"conaninfo.txt": info if isinstance(info, bytes) else info.encode(),
              "conan_package.tgz": tgz({"include/hello.h": f"// {note}\n".encode()})}
     files[MANIFEST] = manifest(files)
     return files
@@ -96,6 +97,9 @@ INFO_B = ("[settings]\n    arch = armv8 \n    os=Linux\n    no equals sign\n\n[o
           "shared=True\nfPIC = True\n[requires]\nzlib/1.3.Z\nfmt/10.2.Z\n[conf]\n"
           "tools.build:jobs=2\n")
 INFO_WIN = "[settings]\nos=Windows\n"
+# One not UTF-8 (0xff is in no UTF-8 text), of settings a lossy reading
+# would still give back: the package search gives back none of them.
+INFO_BAD = b"[settings]\nos=Linux\narch=\xff\n"
 
 REF = "/v2/conans/hello/1.0/_/_"
 TEAM = "/v2/conans/hello/1.0/team/stable"
@@ -132,21 +136,24 @@ SEED = [
 SEED_LABEL_AFTER = 2
 
 # gap/1.0, uploaded after SEED (not in the label): one recipe revision,
-# three packages. Removing by path (pkgpod rm, which the format points
+# four packages. Removing by path (pkgpod rm, which the format points
 # to for what conan remove does not) then leaves two broken in ways no
 # Conan request leaves one: P1's latest package revision (Q2) without
 # its conaninfo.txt (Q1, before it, keeps its own), P2's only revision
-# without its manifest. The package search leaves both out; P3 is found.
-P3 = "3c" * 20
+# without its manifest. The package search leaves both out; P3 is found,
+# and P4, whose conaninfo.txt is not UTF-8 (taken: its bytes are not
+# looked at), with nothing of it.
+P3, P4 = "3c" * 20, "4d" * 20
 GAP = "/v2/conans/gap/1.0/_/_"
 GAP_RV = rv(R1, GAP)
-GPK1, GPK2, GPK3 = (pk(R1, p, GAP) for p in (P1, P2, P3))
+GPK1, GPK2, GPK3, GPK4 = (pk(R1, p, GAP) for p in (P1, P2, P3, P4))
 GAP_SEED = [
     (GAP_RV, recipe("gap", "1.0", "gap", sources=False)),
     (f"{GPK1}/revisions/{Q1}", package(INFO_A, "gap P1 Q1")),
     (f"{GPK1}/revisions/{Q2}", package(INFO_B, "gap P1 Q2")),
     (f"{GPK2}/revisions/{Q1}", package(INFO_A, "gap P2 Q1")),
     (f"{GPK3}/revisions/{Q1}", package(INFO_WIN, "gap P3 Q1")),
+    (f"{GPK4}/revisions/{Q1}", package(INFO_BAD, "gap P4 Q1")),
 ]
 # The paths removed, as the repository's tree has them.
 GAP_RM = (f"gap/1.0/_/_/{R1}/packages/{P1}/{Q2}/conaninfo.txt",
@@ -275,10 +282,11 @@ PACKAGES = (f"{RV1}/search", f"{RV2}/search", f"{rv(R3, TEAM)}/search",
             f"{pk(R3, P1, TEAM)}/latest", "/@first" + f"{PK1}/revisions",
             "/@first" + f"{PK}/revisions", "/@first" + f"{RV1}/search",
             "/@first" + f"{RV2}/search")
-# gap/1.0's packages (see GAP_SEED): the search (P3 alone), each one's
-# revisions and latest, each package revision's files (listed and served
-# without the conaninfo.txt removed; none of the one whose manifest is
-# removed); found by the search of references; at the label, not there.
+# gap/1.0's packages (see GAP_SEED): the search (P3, and P4 with nothing
+# of its conaninfo.txt), each one's revisions and latest, each package
+# revision's files (listed and served without the conaninfo.txt
+# removed; none of the one whose manifest is removed; P4's as put);
+# found by the search of references; at the label, not there.
 GAPS = (f"{GAP}/revisions", f"{GAP}/latest", f"{GAP_RV}/files", f"{GAP_RV}/search",
         f"{GPK1}/revisions", f"{GPK1}/latest", f"{GPK1}/revisions/{Q2}/files",
         f"{GPK1}/revisions/{Q2}/files/conaninfo.txt",
@@ -289,7 +297,9 @@ GAPS = (f"{GAP}/revisions", f"{GAP}/latest", f"{GAP_RV}/files", f"{GAP_RV}/searc
         f"{GPK2}/revisions/{Q1}/files/conaninfo.txt",
         f"{GPK2}/revisions/{Q1}/files/conan_package.tgz",
         f"{GPK2}/revisions/{Q1}/files/{MANIFEST}", f"{GPK3}/latest",
-        f"{GPK3}/revisions/{Q1}/files/conaninfo.txt", "/v2/conans/search?q=gap*",
+        f"{GPK3}/revisions/{Q1}/files/conaninfo.txt", f"{GPK4}/latest",
+        f"{GPK4}/revisions/{Q1}/files", f"{GPK4}/revisions/{Q1}/files/conaninfo.txt",
+        "/v2/conans/search?q=gap*",
         "/@first" + f"{GAP_RV}/search", "/@first" + f"{GPK3}/latest")
 # What only GET (ping, logging in, search) and GET and HEAD (the rest)
 # answer, asked with HEAD.
