@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -16,7 +17,16 @@ use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Version};
 use serde_json::{Value, json};
 
-use crate::App;
+/// What Terraform's registry asks of the server it runs in, besides what
+/// every format does.
+pub trait Host: pkgpod_proto::host::Host {
+    /// The secret signed URLs are made with (`None`: there is none, and
+    /// no URL is signed).
+    fn url_secret(&self) -> Option<Vec<u8>>;
+    /// The keys repositories sign with: their public keys and
+    /// fingerprints, for the clients to check the sums' signatures.
+    fn signer(&self) -> &dyn pkgpod_engine::Signer;
+}
 
 fn reply(st: StatusCode, v: Value) -> Response {
     let mut r = (st, serde_json::to_string(&v).expect("json")).into_response();
@@ -53,8 +63,8 @@ fn hmac_sha256(key: &[u8], msg: &[u8]) -> Vec<u8> {
         .to_vec()
 }
 
-fn mac(app: &App, repo: &str, path: &str, until: i64) -> Option<String> {
-    let secret = app.keys.url_secret().ok()?;
+fn mac(app: &dyn Host, repo: &str, path: &str, until: i64) -> Option<String> {
+    let secret = app.url_secret()?;
     Some(
         hmac_sha256(&secret, format!("{repo}\n{path}\n{until}").as_bytes())
             .iter()
@@ -66,7 +76,7 @@ fn mac(app: &App, repo: &str, path: &str, until: i64) -> Option<String> {
 /// A query that lets `path` of `repo` be fetched without credentials for
 /// a few minutes: module archives are fetched by go-getter, which sends
 /// no token (as registries hand out signed storage URLs).
-pub fn signed_query(app: &App, repo: &str, path: &str) -> String {
+pub fn signed_query(app: &dyn Host, repo: &str, path: &str) -> String {
     let until = pkgpod_base::now() + SIGNED_FOR;
     match mac(app, repo, path, until) {
         Some(m) => format!("?sig={until}.{m}"),
@@ -75,7 +85,7 @@ pub fn signed_query(app: &App, repo: &str, path: &str) -> String {
 }
 
 /// Whether `query` holds a signature, still good, for `path` of `repo`.
-pub fn signed_ok(app: &App, repo: &str, path: &str, query: &str) -> bool {
+pub fn signed_ok(app: &dyn Host, repo: &str, path: &str, query: &str) -> bool {
     let Some(sig) = query.split('&').find_map(|kv| kv.strip_prefix("sig=")) else {
         return false;
     };
@@ -121,7 +131,7 @@ pub fn discovery(prefix: &str) -> Response {
 }
 
 pub async fn read(
-    app: &Arc<App>,
+    app: Arc<dyn Host>,
     repo: &RepoInfo,
     version: Option<Version>,
     rel: &[String],
@@ -137,7 +147,7 @@ pub async fn read(
         let app2 = app2.clone();
         async move {
             tokio::task::spawn_blocking(move || {
-                app2.engine
+                app2.engine()
                     .objects()
                     .walk(&root, &prefix)
                     .unwrap_or_default()
@@ -188,14 +198,13 @@ pub async fn read(
             let signed = |p: &str| {
                 format!(
                     "{base}{p}{}",
-                    signed_query(app, &repo.name, &format!("{}{p}", label_of(base)))
+                    signed_query(&*app, &repo.name, &format!("{}{p}", label_of(base)))
                 )
             };
             let key = Some(repo.setting_str("key")).filter(|k| !k.is_empty());
-            let (armor, key_id) = match app.keys.public_key(key) {
+            let (armor, key_id) = match app.signer().public_key(key) {
                 Ok(a) => {
-                    let fpr =
-                        pkgpod_engine::Signer::key_id(app.keys.as_ref(), key).unwrap_or_default();
+                    let fpr = app.signer().key_id(key).unwrap_or_default();
                     let id = fpr[fpr.len().saturating_sub(16)..].to_ascii_uppercase();
                     (String::from_utf8_lossy(&a).into_owned(), id)
                 }
@@ -241,7 +250,7 @@ pub async fn read(
             }
             // go-getter takes the archive's type from its extension; it
             // sends no token: a signed URL.
-            let q = signed_query(app, &repo.name, &format!("{}{path}", label_of(base)));
+            let q = signed_query(&*app, &repo.name, &format!("{}{path}", label_of(base)));
             let mut r = StatusCode::NO_CONTENT.into_response();
             if let Ok(h) = HeaderValue::from_str(&format!("{base}{path}{q}")) {
                 r.headers_mut().insert("X-Terraform-Get", h);
@@ -253,7 +262,7 @@ pub async fn read(
             let path = rel.join("/");
             let (app2, view) = (app.clone(), v.served());
             let found =
-                tokio::task::spawn_blocking(move || app2.engine.objects().resolve(&view, &path))
+                tokio::task::spawn_blocking(move || app2.engine().objects().resolve(&view, &path))
                     .await
                     .ok()
                     .and_then(|x| x.ok())
@@ -261,22 +270,31 @@ pub async fn read(
             match found {
                 Some(Entry::Blob { sha256, .. }) if !rel.iter().any(|x| x.starts_with('_')) => {
                     let name = rel.last().cloned().unwrap_or_default();
-                    crate::serving::serve_counted(
-                        app,
+                    let req = req.map(pkgpod_proto::body::boxed);
+                    app.serve_counted(
                         &repo.name,
                         "",
-                        &repo.store().path(&sha256),
-                        &sha256,
+                        repo.store().path(&sha256),
+                        sha256,
                         &name,
-                        None,
-                        false,
                         req,
                     )
                     .await
+                    .map(Body::new)
                 }
                 _ => not_found(),
             }
         }
+    }
+}
+
+impl Host for crate::App {
+    fn url_secret(&self) -> Option<Vec<u8>> {
+        self.keys.url_secret().ok()
+    }
+
+    fn signer(&self) -> &dyn pkgpod_engine::Signer {
+        self.keys.as_ref()
     }
 }
 

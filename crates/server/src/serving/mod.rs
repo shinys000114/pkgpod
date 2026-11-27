@@ -639,7 +639,7 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
         // A module archive through a signed URL needs no token.
         if role.is_none()
             && !crate::protocols::terraform::signed_ok(
-                &app,
+                &*app,
                 &served.repo.name,
                 &rel.join("/"),
                 req.uri().query().unwrap_or(""),
@@ -667,15 +667,8 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
                 ),
             );
         }
-        return crate::protocols::terraform::read(
-            &app,
-            &served.repo,
-            version,
-            &rel,
-            &base_url,
-            req,
-        )
-        .await;
+        return crate::protocols::terraform::read(app, &served.repo, version, &rel, &base_url, req)
+            .await;
     }
     if served.repo.format == "composer" && matches!(method, Method::GET | Method::HEAD) {
         if role.is_none() {
