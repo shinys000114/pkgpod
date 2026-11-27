@@ -29,6 +29,8 @@ use pkgpod_engine::{Cx, Error, Format, Item, Kind, Result, Upload};
 use serde_json::{Map, Value, json};
 use yaml_rust2::Yaml;
 
+pub mod protocol;
+
 pub struct Helm;
 
 /// Largest chart taken in, and largest Chart.yaml.

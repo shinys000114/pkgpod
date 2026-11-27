@@ -2514,12 +2514,15 @@ name = "pkgpod-helm"
 version = "0.0.0"
 dependencies = [
  "flate2",
+ "http",
  "jiff",
  "pkgpod-base",
  "pkgpod-engine",
+ "pkgpod-proto",
  "semver",
  "serde_json",
  "tar",
+ "tokio",
  "yaml-rust2",
 ]
 
