@@ -15,9 +15,8 @@ use axum::response::{IntoResponse, Response};
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Upload, Version};
 use pkgpod_nuget::{Kept, versions};
+use pkgpod_proto::{Caller, Role};
 use serde_json::{Value, json};
-
-use crate::auth::{Caller, Role};
 
 fn reply(st: StatusCode, v: Value) -> Response {
     let mut r = (st, axum::Json(v)).into_response();
@@ -54,9 +53,7 @@ pub trait Host: pkgpod_proto::host::Host {
     /// The caller whose token `key` is (nuget push and delete send it in
     /// X-NuGet-ApiKey); a key refused is counted as a failed login.
     /// Blocks.
-    fn key(&self, key: &str) -> Option<Caller>;
-    /// `c`'s role on `repo` (a public one is read by anyone).
-    fn role(&self, c: &Caller, repo: &str, public: bool) -> Option<Role>;
+    fn key(self: Arc<Self>, key: &str) -> Option<Caller>;
 }
 
 pub struct Ask {
@@ -84,11 +81,11 @@ pub async fn handle(app: Arc<dyn Host>, mut a: Ask, req: Request) -> Response {
         let Ok(Some(c)) = c else {
             return text(StatusCode::FORBIDDEN, "the API key is not valid");
         };
-        a.role = app.role(&c, &a.repo.name, a.repo.setting_bool("public"));
+        a.role = c.role(&a.repo.name, a.repo.setting_bool("public"));
         a.caller = c;
     }
     if a.role.is_none() {
-        return if a.caller.user.is_none() {
+        return if a.caller.anonymous() {
             unauthorized()
         } else {
             not_found()
@@ -413,11 +410,9 @@ async fn push(app: &Arc<dyn Host>, a: &Ask, req: Request, symbols: bool) -> Resp
 }
 
 impl Host for crate::App {
-    fn key(&self, key: &str) -> Option<Caller> {
-        self.auth.token_at(key, "serving")
-    }
-
-    fn role(&self, c: &Caller, repo: &str, public: bool) -> Option<Role> {
-        self.auth.role(c, repo, public)
+    fn key(self: Arc<Self>, key: &str) -> Option<Caller> {
+        self.auth
+            .token_at(key, "serving")
+            .map(|c| crate::protocols::who(&self, &c))
     }
 }
