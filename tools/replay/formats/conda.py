@@ -515,6 +515,15 @@ def after(c, who):
     c.add(f"after conda condaempty{RD} {who}", who, "GET", f"/condaempty{RD}")
 
 
+FUZZ = (["condapub", "condapriv", "condaempty"],
+        ["noarch", "linux-64", "linux-ppc64le", "osx-arm64", "repodata.json",
+         "hello-pk-1.0-0.conda", "hello-pk-1.1-0.tar.bz2", "tool-pk-0.1-0.conda", "upload",
+         "@first", "@2", "by-hash", "current_repodata.json", "channeldata.json", "nope"])
+# An upload the fuzz makes is kept with no time but those the core's
+# rules mask (the version's, the audit's, the catalog's); and nothing
+# a channel's address takes removes a file, so no download is lost.
+FUZZ_WRITABLE = True
+
 PARTS = [
     ("seed", 120, seed),
     ("grants", 110, {"reader": {"condapriv": "read"},
@@ -526,4 +535,6 @@ PARTS = [
     ("writes", 210, writes),
     ("writes", 220, limits),
     ("after", 80, after),
+    ("fuzz sample", 150, conda("fz-pk", "1.0")),
+    ("fuzz sample", 160, tarbz2("fz-pk", "1.0", subdir="linux-64")),
 ]
