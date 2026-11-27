@@ -271,6 +271,9 @@ UP_SNAP_META = (b'<?xml version="1.0" encoding="UTF-8"?>\n<metadata modelVersion
                 b"      <buildNumber>1</buildNumber>\n    </snapshot>\n  </versioning>\n"
                 b"  <version>1.1.0-SNAPSHOT</version>\n</metadata>\n")
 UA = "/maven/org/acme/up/1.0.0/up-1.0.0"
+# Files first asked for by HEAD and by a range (see proxy_reads).
+UP_HEAD = jar("up", "1.0.0", " head")
+UP_RANGE = jar("up", "1.0.0", " range")
 # The stub's Maven repository: path -> (status, Content-Type or None,
 # body). Of the files whose .sha1 the proxy asks first: right (lower
 # case alone, upper case with the file's name), none, an error, no
@@ -288,6 +291,10 @@ UP_MAVEN = {
     f"{UA}.jar.sha512": (200, None, sums(UP_JAR)["sha512"].encode()),
     f"{UA}.jar.asc": (200, "application/pgp-signature", b"up's signature\n"),
     f"{UA}-sources.jar": (200, "application/java-archive", jar("up", "1.0.0", " sources")),
+    f"{UA}-head.jar": (200, "application/java-archive", UP_HEAD),
+    f"{UA}-head.jar.sha1": (200, "text/plain", sums(UP_HEAD)["sha1"].encode()),
+    f"{UA}-range.jar": (200, "application/java-archive", UP_RANGE),
+    f"{UA}-range.jar.sha1": (200, "text/plain", sums(UP_RANGE)["sha1"].encode()),
     f"{UA}.war": (200, None, jar("up", "1.0.0", " war")),
     f"{UA}.war.sha1": (200, "text/plain",
                        sums(jar("up", "1.0.0", " war"))["sha1"].upper().encode()
@@ -485,7 +492,8 @@ def proxy_gone(c):
     for who in ("anon", "writer"):
         for rel in ("/org/acme/up/1.0.0/up-1.0.0.jar", "/org/acme/up/maven-metadata.xml",
                     "/org/acme/up/1.0.0/up-1.0.0-nope.jar", "/org/acme/up/1.0.0/up-1.0.0-tests.jar",
-                    "/org/acme/up/2.0.0/maven-metadata.xml"):
+                    "/org/acme/up/2.0.0/maven-metadata.xml", "/org/acme/up/1.0.0/up-1.0.0-head.jar",
+                    "/org/acme/up/1.0.0/up-1.0.0-range.jar"):
             c.add(f"maven gone mvnproxy{rel} {who}", who, "GET", f"/mvnproxy{rel}")
     c.seq("maven stub open starts", "anon", [("STUB", "start open", {}, None)])
 
@@ -501,6 +509,18 @@ def proxy_reads(c, who):
     add(f"maven mvnproxy jar range {who}", who, "GET", j, {"Range": "bytes=0-9"})
     add(f"maven mvnproxy jar inm {who}", who, "GET", j,
         {"If-None-Match": "{maven mvnproxy/org/acme/up/1.0.0/up-1.0.0.jar %s.etag}" % who})
+    # If-Modified-Since of a kept file: the stub's Last-Modified, and a
+    # time before it.
+    for name, since in (("ims", "Mon, 02 Nov 2026 10:00:00 GMT"),
+                        ("ims before", "Thu, 01 Jan 2026 00:00:00 GMT")):
+        add(f"maven mvnproxy jar {name} {who}", who, "GET", j, {"If-Modified-Since": since})
+    # Files not kept yet when first asked for, by HEAD and by a range
+    # (by the first identity; the later ones find them kept), each then
+    # read whole (and while the stub is stopped: see proxy_gone).
+    for f, how, h in (("head", "HEAD", {}), ("range", "GET", {"Range": "bytes=0-9"})):
+        p = f"/mvnproxy/org/acme/up/1.0.0/up-1.0.0-{f}.jar"
+        add(f"maven mvnproxy {f} first {who}", who, how, p, h)
+        add(f"maven mvnproxy {f} then {who}", who, "GET", p)
 
 
 # ---- writes ---------------------------------------------------------------
