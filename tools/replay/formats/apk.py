@@ -458,6 +458,21 @@ def writes(c, who):
                   ("GET", f"{b}{INDEX}", {}, None),
                   ("GET", f"{b}/{w}/", {}, None)]
         seq(f"apk puts refused {repo} {who}", who, steps)
+    # Its architectures named (x86_64 and riscv64): a package of the
+    # one and a noarch one to a place of its own, read back (aarch64 is
+    # not indexed, its description is in each index). The first's
+    # .PKGINFO has a line that is no key = value.
+    w = f"w-{who}"
+    at = run_place("/apkriscv", who)
+    c.seq(f"apk put apkriscv {who}", who, [
+        ("PUT", f"/apkriscv/upload?branch={w}", {},
+         package(f"r-{who}", "1.0-r0", "x86_64", fields=["a line without an equals sign"])),
+        ("PUT", f"/apkriscv/upload?branch={w}", {}, package(f"m-{who}", "1.0-r0", "noarch")),
+        ("GET", f"{at}/x86_64/APKINDEX.tar.gz", {}, None),
+        ("GET", f"{at}/riscv64/APKINDEX.tar.gz", {}, None),
+        ("GET", f"{at}/aarch64/APKINDEX.tar.gz", {}, None),
+        ("GET", f"{at}/riscv64/{file_name(f'm-{who}', '1.0-r0')}", {}, None),
+        ("GET", f"{at}/", {}, None)])
     # A repository with nothing in it, which no one but admin may write.
     c.add(f"apk put apkempty {who}", who, "PUT", "/apkempty/upload", {}, b"not an apk")
     if who == "writer":
@@ -554,6 +569,9 @@ def after(c, who):
                       ("GET", f"{b}/w-{w}/community/armv7/APKINDEX.tar.gz", {}, None),
                       ("GET", f"{at}/", {}, None)]
         c.seq(f"after apk {repo} {who}", who, steps)
+    c.seq(f"after apk apkriscv {who}", who, [
+        ("GET", f"{run_place('/apkriscv', w)}/{arch}/APKINDEX.tar.gz", {}, None)
+        for w in ("writer", "admin") for arch in ("x86_64", "riscv64")])
 
 
 # An APKINDEX.tar.gz of an apk repository, as served.
@@ -657,7 +675,7 @@ FUZZ = (["apkpub", "apkpriv", "apkriscv", "apkempty"],
 PARTS = [
     ("seed", 130, seed),
     ("grants", 120, {"reader": {"apkpriv": "read"},
-                     "writer": {"apkpub": "write", "apkpriv": "write"}}),
+                     "writer": {"apkpub": "write", "apkpriv": "write", "apkriscv": "write"}}),
     ("wtoken", 110, ["apkpub"]),
     ("rtoken", 110, ["apkpriv"]),
     ("publisher", 100, ["apkpub"]),
