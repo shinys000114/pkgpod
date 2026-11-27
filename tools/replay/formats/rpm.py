@@ -744,41 +744,109 @@ PRIMARY_DERIVED = re.compile(
 ARMOR = re.compile(rb"-----BEGIN PGP SIGNATURE-----\r?\n(.*?)-----END PGP SIGNATURE-----", re.S)
 
 
-def signed_at(body):
-    """When an armored OpenPGP signature (v4) says it was made: its
-    hashed creation time subpacket; None if it says none."""
+def armored(line):
+    """Whether a line (stripped) inside an armor is of its data: not a
+    header line, the blank line after them, or the checksum."""
+    return bool(line) and b":" not in line and not line.startswith(b"=")
+
+
+def read_signature(body):
+    """The armored OpenPGP signature in `body`, read if it is one v4
+    signature packet: (its hashed creation time, None if it gives none;
+    the packet's fields as text, without what is of the second it was
+    made: that time, the hash's first two bytes, and the numbers, whose
+    lengths are of their values, and so the packet's); None if there is
+    none or it reads otherwise."""
     m = ARMOR.search(body)
     if not m:
         return None
-    lines = [x.strip() for x in m.group(1).split(b"\n")]
-    b64 = b"".join(x for x in lines if x and b":" not in x and not x.startswith(b"="))
+    b64 = b"".join(x for x in (y.strip() for y in m.group(1).split(b"\n")) if armored(x))
     try:
-        data = base64.b64decode(b64)
+        data = base64.b64decode(b64, validate=True)
         tag = data[0]
         if tag & 0x40:
-            n = data[1]
-            at = 2 if n < 192 else 3 if n < 224 else 6
-        else:
-            at = 1 + {0: 1, 1: 2, 2: 4}[tag & 3]
-        pkt = data[at:]
-        if pkt[0] != 4:
-            return None
-        sub = pkt[6:6 + int.from_bytes(pkt[4:6], "big")]
-        i = 0
-        while i < len(sub):
-            n = sub[i]
+            kind, n = tag & 0x3f, data[1]
             if n < 192:
-                i += 1
-            elif n < 255:
-                n, i = ((n - 192) << 8) + sub[i + 1] + 192, i + 2
+                at = 2
+            elif n < 224:
+                n, at = ((n - 192) << 8) + data[2] + 192, 3
+            elif n == 255:
+                n, at = int.from_bytes(data[2:6], "big"), 6
             else:
-                n, i = int.from_bytes(sub[i + 1:i + 5], "big"), i + 5
-            if sub[i] & 0x7f == 2:
-                return int.from_bytes(sub[i + 1:i + 5], "big")
-            i += n
+                return None
+        else:
+            kind, w = (tag >> 2) & 0xf, {0: 1, 1: 2, 2: 4}[tag & 3]
+            n, at = int.from_bytes(data[1:1 + w], "big"), 1 + w
+        pkt = data[at:at + n]
+        if kind != 2 or len(pkt) != n or len(data) != at + n or pkt[0] != 4:
+            return None
+        fields = [b"v4 type %d key %d hash %d" % (pkt[1], pkt[2], pkt[3])]
+        created = None
+        i = 4
+        for area in (b"hashed", b"unhashed"):
+            n = int.from_bytes(pkt[i:i + 2], "big")
+            sub, i = pkt[i + 2:i + 2 + n], i + 2 + n
+            if len(sub) != n:
+                return None
+            items, j = [], 0
+            while j < len(sub):
+                k = sub[j]
+                if k < 192:
+                    j += 1
+                elif k < 255:
+                    k, j = ((k - 192) << 8) + sub[j + 1] + 192, j + 2
+                else:
+                    k, j = int.from_bytes(sub[j + 1:j + 5], "big"), j + 5
+                one, j = sub[j:j + k], j + k
+                if not one or len(one) != k:
+                    return None
+                if area == b"hashed" and one[0] & 0x7f == 2 and k == 5:
+                    created = int.from_bytes(one[1:], "big")
+                    items.append(b"%d XXXXXXXX" % one[0])
+                else:
+                    items.append(b"%d %s" % (one[0], one[1:].hex().encode()))
+            fields.append(area + b" " + b", ".join(items))
+        # The hash's first two bytes, then the numbers: each its length
+        # in bits, then its bytes.
+        if len(pkt) < i + 2:
+            return None
+        rest, count = pkt[i + 2:], 0
+        while rest:
+            size = (int.from_bytes(rest[:2], "big") + 7) // 8
+            if len(rest) < 2 + size:
+                return None
+            rest, count = rest[2 + size:], count + 1
+        fields.append(b"check XXXX, %d numbers" % count)
+        return created, b"; ".join(fields)
     except (ValueError, IndexError, KeyError):
         return None
-    return None
+
+
+def signed_at(body):
+    """When an armored OpenPGP signature (v4) says it was made (see
+    read_signature); None if it says none."""
+    sig = read_signature(body)
+    return sig and sig[0]
+
+
+def run_signature(body):
+    """`body`, whose armored signature reads (see read_signature), with
+    that signature's data as one line of its fields (the armor's header
+    lines kept) and its checksum X'd."""
+    m = ARMOR.search(body)
+    fields = read_signature(body)[1]
+    out, put = [], False
+    for line in m.group(1).split(b"\n"):
+        x = line.strip()
+        if armored(x):
+            if not put:
+                out.append(b"<" + fields + b">")
+                put = True
+        elif x.startswith(b"="):
+            out.append(b"=XXXX")
+        else:
+            out.append(line)
+    return body[:m.start(1)] + b"\n".join(out) + body[m.end(1):]
 
 
 def mask(masker):
@@ -802,7 +870,7 @@ def mask(masker):
         elif after_writes and (signed_at(body) or 0) >= masker.seed_time:
             hit = True
             masker.counts["rpm signatures of the run"] += 1
-            body = b"<a signature of the run>"
+            body = run_signature(body)
             hd = [[k, "*" if k in ("etag", "content-length") else v] for k, v in hd]
         # Whole answers' etags noted, so that a HEAD or a 304 of one is
         # not asked again whole (see core.Masker.part).
@@ -842,10 +910,14 @@ PARTS = [
                                               "upload times (same length); the etag")),
     # ... and its repomd.xml signed then: an Ed25519 signature of that
     # second, whose numbers' leading zero bytes are left out (its length
-    # is of its value too).
-    ("rule", 200, ("rpm signatures of the run", "the body, content-length and etag of an RPM "
-                                                "group's repomd.xml.asc whose signature was made "
-                                                "at or after the seed")),
+    # is of its value too). Its packet's other fields are kept: the
+    # armor, the key, the algorithms, the subpackets.
+    ("rule", 200, ("rpm signatures of the run", "in an RPM group's repomd.xml.asc whose "
+                                                "signature was made at or after the seed: the "
+                                                "armor's data, as the packet's fields without its "
+                                                "creation time, the hash's first two bytes and the "
+                                                "numbers; the armor's checksum; the "
+                                                "content-length and etag")),
     ("rule", 210, ("rpm times", "the root of an RPM version made in the run (its packages' "
                                 "repodata parts hold their upload time)")),
     ("mask", 110, mask),
