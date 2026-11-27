@@ -2690,6 +2690,7 @@ dependencies = [
  "futures-util",
  "glob",
  "http",
+ "http-body-util",
  "httpdate",
  "hyper-util",
  "jiff",

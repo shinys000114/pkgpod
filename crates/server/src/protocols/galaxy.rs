@@ -9,25 +9,21 @@
 
 use std::sync::Arc;
 
-use axum::extract::multipart::Field;
-use axum::extract::{FromRequest, Multipart, Request};
-use axum::http::{HeaderValue, Method, StatusCode, header};
-use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
+use futures_util::StreamExt;
+use http::{HeaderValue, Method, StatusCode, header};
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Upload, Version};
+use pkgpod_proto::body::{self, Body, Request, Response};
+use pkgpod_proto::form::{Field, Form};
 use pkgpod_proto::host::Host;
 use pkgpod_proto::{Caller, Role};
 use serde_json::{Value, json};
 
 fn reply(st: StatusCode, v: Value) -> Response {
-    let mut r = (st, serde_json::to_string(&v).expect("json")).into_response();
-    let h = r.headers_mut();
-    h.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    let mut r = pkgpod_proto::reply::json(st, &v);
+    r.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     r
 }
 
@@ -217,7 +213,6 @@ pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
                 .resolve(&v.root, &format!("{ns}/{name}/{file}"))
             {
                 Ok(Some(Entry::Blob { sha256, .. })) => {
-                    let req = req.map(pkgpod_proto::body::boxed);
                     app.serve_counted(
                         &a.repo.name,
                         "",
@@ -227,7 +222,6 @@ pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
                         req,
                     )
                     .await
-                    .map(axum::body::Body::new)
                 }
                 _ => error(StatusCode::NOT_FOUND, "not found"),
             }
@@ -298,16 +292,14 @@ impl Base64Pieces {
     }
 }
 
-/// The file part sent in base64, decoded into the store as it comes.
-async fn base64_to_store(
-    store: pkgpod_base::store::Store,
-    field: Field<'_>,
-) -> Result<(pkgpod_base::Digest, u64), crate::Error> {
+/// The file part sent in base64, decoded as it comes (into the store).
+fn base64_body(field: Field<'_>) -> Body {
     // Four bytes for three, and line breaks a few more.
     const MAX_SENT: u64 = pkgpod_galaxy::MAX_ARTIFACT / 2 * 3;
-    let start = (field, Base64Pieces::default(), 0u64);
+    let chunks = http_body_util::BodyExt::into_data_stream(field.into_body());
+    let start = (chunks, Base64Pieces::default(), 0u64);
     let decoded = futures_util::stream::unfold(start, |(mut f, mut b64, mut sent)| async move {
-        let out = match f.chunk().await {
+        let out = match f.next().await.transpose() {
             Err(e) => Err(e.to_string()),
             Ok(None) => match b64.finish() {
                 Ok(()) => return None,
@@ -324,11 +316,11 @@ async fn base64_to_store(
         };
         Some((out, (f, b64, sent)))
     });
-    crate::serving::stream_to_store(store, decoded, pkgpod_galaxy::MAX_ARTIFACT).await
+    body::from_stream(decoded)
 }
 
 async fn upload(app: &Arc<dyn Host>, a: &Ask, req: Request) -> Response {
-    let mut m = match Multipart::from_request(req, &()).await {
+    let mut m = match Form::of(req, body::MAX_UPLOAD) {
         Ok(m) => m,
         Err(e) => return error(StatusCode::BAD_REQUEST, format!("not an upload: {e}")),
     };
@@ -347,22 +339,19 @@ async fn upload(app: &Arc<dyn Host>, a: &Ask, req: Request) -> Response {
                 // comes, so it is never held whole.
                 match f.name().unwrap_or("") {
                     "file" => {
-                        let store = a.repo.store();
-                        let stored = if b64 {
-                            base64_to_store(store, f).await
-                        } else {
-                            crate::serving::stream_to_store(store, f, pkgpod_galaxy::MAX_ARTIFACT)
-                                .await
-                        };
+                        let part = if b64 { base64_body(f) } else { f.into_body() };
+                        let stored = app
+                            .store_body(a.repo.store(), part, pkgpod_galaxy::MAX_ARTIFACT)
+                            .await;
                         match stored {
                             Ok(x) => file = Some(x),
-                            Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
+                            Err(e) => return error(StatusCode::BAD_REQUEST, e),
                         }
                     }
                     "sha256" => {
-                        let bytes = match crate::serving::field_capped(f, 128).await {
+                        let bytes = match f.capped(128).await {
                             Ok(b) => b,
-                            Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
+                            Err(e) => return error(StatusCode::BAD_REQUEST, e),
                         };
                         let bytes = if b64 {
                             let clean: Vec<u8> = bytes
@@ -469,5 +458,41 @@ mod tests {
         assert_eq!(b.decode(b"QUJDRA").unwrap(), b"ABC");
         assert!(b.finish().is_err());
         assert!(Base64Pieces::default().decode(b"QU*D").is_err());
+    }
+
+    /// A file part in base64 decoded as its form is read, and refused in
+    /// the words its upload is (after "reading the upload: ").
+    #[tokio::test]
+    async fn base64_body_decoded_or_refused() {
+        let part = |data: &str, end: &str| {
+            format!(
+                "--b\r\nContent-Disposition: form-data; name=\"file\"\r\n\
+                 Content-Transfer-Encoding: base64\r\n\r\n{data}{end}"
+            )
+        };
+        let closed = "\r\n--b--\r\n";
+        for (sent, got) in [
+            (part("QUJD\r\nRA==", closed), Ok("ABCD")),
+            (
+                part("QU*D", closed),
+                Err("file: Invalid symbol 42, offset 2."),
+            ),
+            (part("QUJDRA", closed), Err("file: the base64 is cut short")),
+            (part("QUJD", ""), Err(pkgpod_proto::form::UNREADABLE)),
+        ] {
+            let req = http::Request::post("/")
+                .header(header::CONTENT_TYPE, "multipart/form-data; boundary=b")
+                .body(body::full(sent.clone()))
+                .unwrap();
+            let mut form = Form::of(req, 1 << 20).unwrap();
+            let f = form.next_field().await.unwrap().unwrap();
+            let decoded = body::to_bytes(base64_body(f), 1 << 20).await;
+            let decoded = decoded.as_deref().map_err(|e| e.to_string());
+            assert_eq!(
+                decoded,
+                got.map(str::as_bytes).map_err(String::from),
+                "{sent}"
+            );
+        }
     }
 }

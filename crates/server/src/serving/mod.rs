@@ -40,9 +40,10 @@ use crate::{App, Error};
 pub fn router(app: Arc<App>) -> Router {
     Router::new()
         .fallback(handle)
-        // Forms read with axum's Multipart (Galaxy) as large as PUT
-        // uploads; PyPI's, pub's, NuGet's, Swift's and helm's are held to
-        // their limit by pkgpod_proto::form.
+        // axum's extractors as large as PUT uploads, though no format
+        // reads its forms with axum's Multipart now: PyPI's, pub's,
+        // NuGet's, Swift's, helm's and Galaxy's are held to their limit
+        // by pkgpod_proto::form.
         .layer(axum::extract::DefaultBodyLimit::max(MAX_UPLOAD as usize))
         .with_state(app)
 }
@@ -896,7 +897,9 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
             caller: crate::protocols::who(&app, &caller),
             role: role.map(Into::into),
         };
-        return crate::protocols::galaxy::handle(app, ask, req).await;
+        return crate::protocols::galaxy::handle(app, ask, req.map(pkgpod_proto::body::boxed))
+            .await
+            .map(axum::body::Body::new);
     }
     if served.repo.format == "pub" {
         let mut base_url = client_base(route.as_ref(), &host, &base, &req);
@@ -2332,7 +2335,7 @@ th, td {{ text-align:left; padding:.45rem .6rem; border-bottom:1px solid var(--l
 mod tests {
     use super::*;
 
-    /// axum's Multipart, as Galaxy and the API read forms, and
+    /// axum's Multipart, as the API reads forms, and
     /// pkgpod-proto's, as the moved formats do, refuse a field in the
     /// same words.
     #[tokio::test]
