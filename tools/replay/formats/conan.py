@@ -407,21 +407,26 @@ def writes(c, who):
     for repo in ("kpub", "kpriv", "ktrust"):
         upload(c, repo, who)
     # Two revisions of a recipe, the second with two package revisions:
-    # listed newest first.
+    # listed newest first; each one's files read back but the manifests,
+    # whose bytes the catalog's rows hold: neither they nor the lists
+    # show the bytes of any other file.
     ref = f"/kpub/v2/conans/s-{who}/1.0/_/_"
     s1, s2 = "1" * 32, "2" * 32
-    steps = []
+    steps, back = [], []
     for rrev in (s1, s2):
         r = recipe(f"s-{who}", "1.0", f"{rrev[0]} by {who}", sources=False)
         steps += [("PUT", f"{ref}/revisions/{rrev}/files/{n}", {}, d) for n, d in r.items()]
+        back += [("GET", f"{ref}/revisions/{rrev}/files/{n}", {}, None)
+                 for n in r if n != MANIFEST]
     for prev in (s1, s2):
         p = package(INFO_WIN, f"s-{who} {prev[0]}")
-        steps += [("PUT", f"{ref}/revisions/{s2}/packages/{P1}/revisions/{prev}/files/{n}", {}, d)
-                  for n, d in p.items()]
+        pdir = f"{ref}/revisions/{s2}/packages/{P1}/revisions/{prev}"
+        steps += [("PUT", f"{pdir}/files/{n}", {}, d) for n, d in p.items()]
+        back += [("GET", f"{pdir}/files/{n}", {}, None) for n in p if n != MANIFEST]
     steps += [("GET", f"{ref}/revisions", {}, None), ("GET", f"{ref}/latest", {}, None),
               ("GET", f"{ref}/revisions/{s2}/packages/{P1}/revisions", {}, None),
               ("GET", f"{ref}/revisions/{s2}/packages/{P1}/latest", {}, None),
-              ("GET", f"{ref}/revisions/{s2}/search", {}, None)]
+              ("GET", f"{ref}/revisions/{s2}/search", {}, None)] + back
     seq(f"conan two revisions {who}", who, steps)
     # Removing: a package revision, a revision's packages, a revision,
     # each again (not there); read back by the lists only (a download
@@ -463,6 +468,7 @@ def writes(c, who):
            ("GET", f"{rdir}/search", {}, None),
            ("GET", f"{rdir}/packages/{P1}/latest", {}, None),
            ("GET", f"{pdir}/files/conaninfo.txt", {}, None),
+           ("GET", f"{pdir}/files/conan_package.tgz", {}, None),
            ("GET", f"/kpub/v2/conans/search?q=o-{who}*", {}, None)])
     # What uploading refuses, each with the input that reaches it: a
     # manifest alone (a recipe's, a package's: its conaninfo.txt not
@@ -533,6 +539,8 @@ def writes(c, who):
         ("PUT", f"{pf}/files/packages", {}, b"not a directory"),
         ("PUT", f"{pf}/files/{MANIFEST}", {}, r[MANIFEST]),
         ("GET", f"{pf}/files", {}, None),
+        ("GET", f"{pf}/files/conanfile.py", {}, None),
+        ("GET", f"{pf}/files/packages", {}, None),
         ("PUT", f"{pf}/packages/{P1}/revisions/{lone}/files/conaninfo.txt", {},
          p["conaninfo.txt"]),
         ("PUT", f"{pf}/packages/{P1}/revisions/{lone}/files/{MANIFEST}", {}, p[MANIFEST]),
@@ -604,8 +612,8 @@ def limits(c, who):
 def shared(c):
     # Files put by one caller, the manifest by another: it brings in
     # what the first put (the files waiting are the repository's, not a
-    # caller's); a manifest refused (by who sends it) leaves them
-    # waiting.
+    # caller's), read back; a manifest refused (by who sends it) leaves
+    # them waiting.
     for stager, refused, committer in (("writer", None, "admin"),
                                        ("wtoken", "reader", "wbearer")):
         name = f"x-{stager}"
@@ -620,9 +628,10 @@ def shared(c):
         c.add(f"conan manifest of {stager}'s by {committer}", committer, "PUT",
               f"{rdir}/files/{MANIFEST}", {}, r[MANIFEST])
         c.seq(f"conan staged by {stager} read back", "anon", [
-            ("GET", f"{ref}/revisions", {}, None), ("GET", f"{rdir}/files", {}, None)])
+            ("GET", f"{ref}/revisions", {}, None), ("GET", f"{rdir}/files", {}, None),
+            ("GET", f"{rdir}/files/conanfile.py", {}, None)])
     # They wait in their repository: a file put to kpub is not brought
-    # in by the same revision's manifest in kpriv.
+    # in by the same revision's manifest in kpriv (nor served there).
     y = f"/v2/conans/y-writer/1.0/_/_/revisions/{md5('y-writer')}"
     r = recipe("y-writer", "1.0", "staged in kpub", sources=False)
     c.seq("conan staged in another repository writer", "writer", [
@@ -630,18 +639,23 @@ def shared(c):
         ("PUT", f"/kpriv{y}/files/{MANIFEST}", {}, r[MANIFEST]),
         ("PUT", f"/kpub{y}/files/{MANIFEST}", {}, r[MANIFEST]),
         ("GET", f"/kpriv{y}/files", {}, None),
-        ("GET", f"/kpub{y}/files", {}, None)])
+        ("GET", f"/kpub{y}/files", {}, None),
+        ("GET", f"/kpriv{y}/files/conanfile.py", {}, None),
+        ("GET", f"/kpub{y}/files/conanfile.py", {}, None)])
     # Two revisions of the same files (so of the same manifest), each
     # one's manifest downloaded: a download is named by the catalog row
     # of the path asked for (by its bytes only if no row has the path),
     # so each counts as its own revision's. Never removed (see writes).
+    # Their other files read back too.
     ref = "/kpub/v2/conans/twin/1.0/_/_"
     r = recipe("twin", "1.0", "a twin", sources=False)
     twins = ("3" * 32, "4" * 32)
     c.seq("conan twin revisions downloaded writer", "writer",
           [("PUT", f"{ref}/revisions/{t}/files/{n}", {}, d) for t in twins for n, d in r.items()]
           + [("GET", f"{ref}/revisions/{t}/files/{MANIFEST}", {}, None) for t in twins]
-          + [("GET", f"{ref}/revisions", {}, None)])
+          + [("GET", f"{ref}/revisions", {}, None)]
+          + [("GET", f"{ref}/revisions/{t}/files/{n}", {}, None)
+             for t in twins for n in r if n != MANIFEST])
 
 
 def after(c, who):
