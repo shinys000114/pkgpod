@@ -30,11 +30,13 @@ Every version made after them does: each version's databases are its
 own, dated by it (their entries' tar headers) and signed then, with
 those of every pacman repository and architecture of the repository,
 written or not; a package put in the run is signed then too, and its
-signature is in the databases. The rules below mask those times, and
-no more: what holds them is told by its content (a gzipped tar of
-entries dated at or after the seed, a signature made then), and a
-part of an answer (a HEAD, a 304, a range) by the etag of a whole one
-(see the rules)."""
+signature is in the databases. The rules below mask those times: what
+holds them is told by its content (a gzipped tar of entries dated at
+or after the seed, a signature made then), and a part of an answer (a
+HEAD, a 304, a range) by the etag of a whole one. Where that cannot
+tell (a part of a database or a signature whose etag no whole answer
+had, a listing's size of one not read whole since the writes), they
+mask it as if it held them (see the rules)."""
 
 import base64
 import bz2
@@ -388,7 +390,8 @@ def reads(c, who):
     for rel in NOSIGN_TREE:
         add(f"arch archnosign{rel} {who}", who, "GET", f"/archnosign{rel}")
     add(f"arch archnosign HEAD {who}", who, "HEAD", "/archnosign/archnosign/x86_64/archnosign.db")
-    # A repository with nothing in it yet: no version at all.
+    # A repository with nothing in it: only its creation's version
+    # (key.asc, no pacman repository).
     for rel in EMPTY:
         add(f"arch archempty{rel} {who}", who, "GET", f"/archempty{rel}")
     add(f"arch archempty HEAD {who}", who, "HEAD", "/archempty/")
@@ -930,9 +933,34 @@ ROW = re.compile(rb'(<tr><td><a href="[^"]*">(?:\xf0\x9f\x93\x81 )?)([^<]*)'
 TOTAL = re.compile(rb'(<div class="meta">\d+ director(?:y|ies), \d+ files?, )([^<]*)(</div>)')
 
 
+# A range's Content-Range.
+RANGE = re.compile(r"bytes (\d+)-(\d+)/(\d+)")
+
+
+def run_part(hd, body):
+    """A part of an answer of the run's time (see the rule "arch parts
+    of the run"): its etag and the whole's length masked; a range that
+    ends before the whole's end keeps its ends and length, its bytes X'd
+    (same length); any other part (one that runs to the end, a 416, a
+    HEAD) has its range, length and bytes masked."""
+    m = RANGE.fullmatch(dict(hd).get("content-range", ""))
+    closed = bool(m) and int(m.group(2)) != int(m.group(3)) - 1
+    out = []
+    for k, v in hd:
+        if k == "etag" or k == "content-length" and not closed:
+            v = "*"
+        elif k == "content-range":
+            v = f"bytes {m.group(1)}-{m.group(2)}/*" if closed else "*"
+        out.append([k, v])
+    if body:
+        body = b"X" * len(body) if closed else b"<a part of an answer of the run>"
+    return out, body
+
+
 def mask(masker):
-    # The etags of whole answers after writes, of the run's time and
-    # not; whether a path's last whole answer held it.
+    # The etags of whole answers, of the run's time and not (all before
+    # the writes are not); whether a path's last whole answer after the
+    # writes held it.
     timed, plain, held = set(), set(), {}
 
     def listing(p, body):
@@ -952,7 +980,13 @@ def mask(masker):
         return body, hit
 
     def answer(path, hd, body, after_writes, etag):
-        if not after_writes or not PATHS.match(path):
+        if not PATHS.match(path):
+            return hd, body
+        if not after_writes:
+            # The seed's: a part after the writes with an etag of one of
+            # these is of its bytes, which hold no time of the run.
+            if body and etag is not None and "content-range" not in dict(hd):
+                plain.add(etag)
             return hd, body
         p = urllib.parse.unquote(path.split("?")[0])
         h = dict(hd)
@@ -973,10 +1007,7 @@ def mask(masker):
             return hd, body
         if etag is not None and etag not in plain and (etag in timed or TIMED_NAME.search(p)):
             masker.counts["arch parts of the run"] += 1
-            hd = [[k, "*" if k in ("etag", "content-length", "content-range") else v]
-                  for k, v in hd]
-            # A range's length may be of the whole's (bytes=5-).
-            body = b"<a part of an answer of the run>" if body else body
+            hd, body = run_part(hd, body)
         return hd, body
     return answer
 
@@ -1021,16 +1052,21 @@ PARTS = [
                                                  "and content-length")),
     # A HEAD, a 304, a range (or a 416) has no whole body to look in:
     # masked where a whole answer after the writes with its etag held
-    # the run's time, or, of a database or a signature, where none had
-    # its etag (whether it holds the run's time is not known; the
-    # corpus reads each whole first, after the writes). A range's
-    # bytes, and its length where it is of the whole's (bytes=5-).
-    ("rule", 210, ("arch parts of the run", "after writes, the etag, content-length, "
-                                            "content-range and bytes of an arch answer with no "
-                                            "body or a range, if a whole answer of the run's "
-                                            "time had that etag, or if it is of a database or "
-                                            "signature and no whole answer after writes had "
-                                            "it")),
+    # the run's time, or, of a database or a signature, where no whole
+    # answer had its etag (whether it holds the run's time is not
+    # known; the corpus reads each whole first, after the writes). The
+    # whole's length, in the range's total; a range that runs to the
+    # whole's end (bytes=5-, bytes=-5) is of it in its ends and length
+    # too; a range's bytes, X'd to the same length where it ends
+    # before.
+    ("rule", 210, ("arch parts of the run", "after writes, of an arch answer with no body or "
+                                            "a range, if a whole answer of the run's time had "
+                                            "its etag, or if it is of a database or signature "
+                                            "and no whole answer had it: the etag, the "
+                                            "content-range's total, the bytes (same length "
+                                            "where the range ends before the whole's end; "
+                                            "else also the range's ends and the "
+                                            "content-length)")),
     # A listing shows each file's size, and the directory's total: a
     # signature's and a database's are of the run's time when they are,
     # and so is the length of what shows them (99 B, 100 B).
