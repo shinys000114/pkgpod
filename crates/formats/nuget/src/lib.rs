@@ -30,6 +30,8 @@ use pkgpod_engine::{Cx, Error, Format, Item, Kind, Result, Upload};
 use quick_xml::events::Event;
 use serde_json::{Value, json};
 
+pub mod protocol;
+
 pub struct Nuget;
 
 /// Largest package taken in, and largest .nuspec.

@@ -2594,11 +2594,14 @@ dependencies = [
 name = "pkgpod-nuget"
 version = "0.0.0"
 dependencies = [
+ "http",
  "pkgpod-base",
  "pkgpod-engine",
+ "pkgpod-proto",
  "quick-xml",
  "semver",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
