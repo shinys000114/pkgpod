@@ -13,7 +13,9 @@ are hosted (or mirrors, which are jobs): no proxy, no stub."""
 
 import gzip
 import hashlib
+import json
 import os
+import re
 import struct
 
 from core import auth_header, request
@@ -332,6 +334,12 @@ SEED = [
     ("fc43.1", "/fc43.1/?group=fc43.1", LONE),
     ("el9", "/upload?group=el9&replace=true", NOTED_2),
 ]
+# The packages in each group of the signed repositories, as served.
+EL9 = [file_name("hello", "1.0"), file_name("hello", "1.1"),
+       file_name("tool", "0.1", arch="x86_64"), file_name("hello", "1.1", arch="src"),
+       file_name("epochy", "3.0", arch="x86_64"), file_name("noted", "1.0")]
+FC43 = [file_name("hello", "1.0"), file_name("odd", "1.0"), file_name("lone", "1.0", arch="src")]
+REPODATA = "rpm-repodata.json"
 ROUTE_HOST = "rpm.localhost"
 
 
@@ -369,6 +377,131 @@ def seed(p, fx):
     p.cli("repo", "create", "rroute", "-f", "rpm", "-s", "public=true", "-s",
           f"urls=http://{ROUTE_HOST}/dnf/")
     put("/dnf/upload?group=el9", HELLO_1, {"Host": ROUTE_HOST})
+    # The repodata's file names (of the seed's times), for the reads.
+    names = {}
+    for repo, base, host in (("rpub", "/rpub", None), ("rpriv", "/rpriv", None),
+                             ("rnosign", "/rnosign", None), ("rroute", "/dnf", ROUTE_HOST)):
+        for at in ("", "@first/", "@second/"):
+            for group in ("el9", "fc43.1"):
+                st, _, body = request("GET", f"{base}/{at}{group}/repodata/repomd.xml",
+                                      dict(aa, **({"Host": host} if host else {})))
+                if st == 200:
+                    names.setdefault(repo, {})[at + group] = {
+                        kind.decode(): f.decode() for f, kind in re.findall(
+                            rb'href="repodata/([0-9a-f]{64}-(\w+)\.xml\.gz)"', body)}
+    with open(os.path.join(fx, REPODATA), "w") as f:
+        json.dump(names, f, indent=1, sort_keys=True)
+
+
+_NAMES = {}
+
+
+def repodata(c):
+    """The repodata's file names the seed found ({repo: {[@label/]group:
+    {kind: file}}})."""
+    if c.fx not in _NAMES:
+        path = os.path.join(c.fx, REPODATA)
+        try:
+            with open(path) as f:
+                _NAMES[c.fx] = json.load(f)
+        except (OSError, ValueError) as e:
+            raise SystemExit(f"rpm: the seed's repodata names ({path}): {e}")
+    return _NAMES[c.fx]
+
+
+# What each signed repository is asked: its address and the tree's
+# directories (with and without the slash, a directory listing sorted
+# each way), key.asc, what is not served (the state's paths, a group's
+# inputs, mis-cased, not there), each group's packages and repodata
+# (a blob's address with a slash); the dnf repository file of each
+# group, of a label's version, of what is none (not a group, a group
+# of another version, a label not there, a path that is no group's,
+# the suffix mis-cased); a label's version, one not there.
+PATHS = ["", "/", "/key.asc", "/el9", "/el9/", "/el9/_inputs", "/el9/Packages",
+         "/el9/Packages/", "/el9/Packages/?sort=size", "/el9/Packages/?sort=size&order=desc",
+         "/el9/Packages/?sort=time", "/?sort=name&order=desc", "/el9/repodata", "/el9/repodata/",
+         "/el9/repodata/repomd.xml", "/el9/repodata/repomd.xml.asc", "/el9/repodata/repomd.xml/",
+         "/el9/repodata/" + "0" * 64 + "-primary.xml.gz", "/el9/repodata/primary.xml.gz",
+         "/el9/Packages/" + file_name("nope", "1.0"), "/el9/" + file_name("hello", "1.0"),
+         "/EL9/repodata/repomd.xml", "/el9/packages/", "/el9/Packages/hello-1.0-1.noarch%2erpm",
+         "/el9%2fPackages/", "/fc43.1/", "/fc43.1/Packages/", "/fc43.1/repodata/repomd.xml",
+         "/fc43.1/repodata/repomd.xml.asc",
+         "/el9.repo", "/fc43.1.repo", "/nope.repo", "/@first/el9.repo", "/@first/fc43.1.repo",
+         "/@second/fc43.1.repo", "/@nope/el9.repo", "/x/el9.repo", "/el9.repo/", "/.repo",
+         "/@first.repo", "/el9.REPO", "/el9.repo?x=1",
+         "/@first", "/@first/", "/@first/el9/", "/@first/el9/Packages/",
+         "/@first/el9/repodata/repomd.xml", "/@first/el9/repodata/repomd.xml.asc",
+         "/@first/el9/Packages/" + file_name("hello", "1.0"),
+         "/@first/el9/Packages/" + file_name("hello", "1.1"), "/@first/fc43.1/",
+         "/@first/key.asc", "/@second/el9/Packages/" + file_name("noted", "1.0"),
+         "/@second/el9/repodata/repomd.xml", "/@nope/", "/@nope/el9/repodata/repomd.xml"]
+PATHS += [f"/el9/Packages/{f}" for f in EL9] + [f"/fc43.1/Packages/{f}" for f in FC43]
+PKG = "/el9/Packages/" + file_name("hello", "1.0")
+MD = "/el9/repodata/repomd.xml"
+# A date after every time the seed holds (the files have none).
+LATER = "Fri, 01 Jan 2100 00:00:00 GMT"
+
+
+def reads(c, who):
+    add = c.add
+    names = repodata(c)
+    for repo in ("rpub", "rpriv"):
+        b = f"/{repo}"
+        gz = [f"/{at}/repodata/{f}" for at, kinds in sorted(names[repo].items())
+              for f in sorted(kinds.values())]
+        for rel in PATHS + gz:
+            add(f"rpm {repo}{rel} {who}", who, "GET", b + rel)
+        primary = "/el9/repodata/" + names[repo]["el9"]["primary"]
+        # HEAD, conditions (an ETag of an earlier answer, any, a date:
+        # the files keep none, so it is never met), ranges (one, two,
+        # one past the end, one only if the ETag is still the file's).
+        for rel in (PKG, MD, primary, "/el9.repo", "/el9/", "/key.asc"):
+            add(f"rpm {repo} HEAD {rel} {who}", who, "HEAD", b + rel)
+        for rel in (PKG, MD, primary, "/el9/repodata/repomd.xml.asc", "/key.asc"):
+            add(f"rpm {repo} inm {rel} {who}", who, "GET", b + rel,
+                {"If-None-Match": "{rpm %s%s %s.etag}" % (repo, rel, who)})
+        add(f"rpm {repo} inm any {who}", who, "GET", b + MD, {"If-None-Match": "*"})
+        add(f"rpm {repo} inm other {who}", who, "GET", b + MD, {"If-None-Match": '"other"'})
+        add(f"rpm {repo} HEAD inm {who}", who, "HEAD", b + PKG,
+            {"If-None-Match": "{rpm %s%s %s.etag}" % (repo, PKG, who)})
+        for rel in (PKG, MD):
+            add(f"rpm {repo} ims {rel} {who}", who, "GET", b + rel, {"If-Modified-Since": LATER})
+        add(f"rpm {repo} range {who}", who, "GET", b + PKG, {"Range": "bytes=0-95"})
+        add(f"rpm {repo} range primary {who}", who, "GET", b + primary, {"Range": "bytes=10-"})
+        add(f"rpm {repo} ranges {who}", who, "GET", b + PKG, {"Range": "bytes=0-1,100-200"})
+        add(f"rpm {repo} bad range {who}", who, "GET", b + PKG, {"Range": "bytes=999999-"})
+        add(f"rpm {repo} if-range etag {who}", who, "GET", b + PKG,
+            {"Range": "bytes=0-9", "If-Range": "{rpm %s%s %s.etag}" % (repo, PKG, who)})
+        add(f"rpm {repo} if-range stale {who}", who, "GET", b + PKG,
+            {"Range": "bytes=0-9", "If-Range": '"stale"'})
+        add(f"rpm {repo} if-range date {who}", who, "GET", b + PKG,
+            {"Range": "bytes=0-9", "If-Range": LATER})
+        # The repository file as behind a proxy that says it is https
+        # (or says what is no scheme).
+        for proto in ("https", "ftp"):
+            add(f"rpm {repo} el9.repo {proto} {who}", who, "GET", b + "/el9.repo",
+                {"X-Forwarded-Proto": proto})
+    # Unsigned: no signature, no key; its repository file says so.
+    for rel in ["/", "/key.asc", "/el9.repo", "/el9/Packages/", MD,
+                "/el9/repodata/repomd.xml.asc"] + [
+            f"/el9/repodata/{f}" for f in sorted(names["rnosign"]["el9"].values())]:
+        add(f"rpm rnosign{rel} {who}", who, "GET", "/rnosign" + rel)
+    # Nothing uploaded: its first version has key.asc alone.
+    for rel in ("", "/", "/key.asc", "/el9.repo", MD, "/el9/"):
+        add(f"rpm rempty{rel} {who}", who, "GET", "/rempty" + rel)
+    # At rpm.localhost's /dnf/: the repository file names its address,
+    # with the port asked (an address without one), not what a proxy
+    # says; not at the default host's /rroute/.
+    for host, rel, h in (
+            (ROUTE_HOST, "/dnf/el9.repo", {}),
+            (ROUTE_HOST + ":8080", "/dnf/el9.repo", {}),
+            (ROUTE_HOST, "/dnf/el9.repo", {"X-Forwarded-Proto": "https"}),
+            (ROUTE_HOST, "/dnf/", {}), (ROUTE_HOST, "/dnf/el9/Packages/", {}),
+            (ROUTE_HOST, "/dnf" + MD, {}), (ROUTE_HOST, "/", {}), (None, "/rroute/el9.repo", {})):
+        hd = dict(h, Host=host) if host else dict(h)
+        add(f"rpm route {host or 'default'}{rel}{' https' if h else ''} {who}", who, "GET", rel, hd)
+    for f in sorted(names["rroute"]["el9"].values()):
+        add(f"rpm route el9 {f} {who}", who, "GET", f"/dnf/el9/repodata/{f}", {"Host": ROUTE_HOST})
 
 
 PARTS = [
@@ -378,4 +511,5 @@ PARTS = [
     ("wtoken", 100, ["rpub"]),
     ("rtoken", 100, ["rpriv"]),
     ("publisher", 90, ["rpub"]),
+    ("reads", 130, reads),
 ]
