@@ -534,6 +534,16 @@ def after(c, who):
               {"Range": "bytes=0-9"})
 
 
+FUZZ = (["ipkpub", "ipkpriv", "ipkempty"],
+        ["main", "x86_64", "aarch64_generic", "by-hash", "repodata", "Packages", "Packages.gz",
+         "Packages.sig", "key.pub", "hello_1.1-1_all.ipk", "hello_1.0-1_all.ipk", "upload",
+         "@first", "@1", "big", "nope"])
+# The tree keeps no times of ipk's (no mtime, no date in its indexes;
+# the signature is Ed25519's, of the seed's key), and the versions a
+# write makes are masked by the core's rules: a fuzzed write leaves both
+# runs alike.
+FUZZ_WRITABLE = True
+
 PARTS = [
     ("seed", 130, seed),
     ("grants", 120, {"reader": {"ipkpriv": "read"},
@@ -546,4 +556,6 @@ PARTS = [
     ("writes", 220, limits),
     ("writes end", 40, writes_end),
     ("after", 90, after),
+    ("fuzz sample", 160, openwrt(control("fz", "1.0", "all"))),
+    ("fuzz sample", 160, yocto(control("fz-yocto", "1.0", "all"), "gz")),
 ]
