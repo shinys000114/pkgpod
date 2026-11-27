@@ -2746,11 +2746,15 @@ dependencies = [
 name = "pkgpod-swift"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
+ "http",
  "jiff",
  "pkgpod-base",
  "pkgpod-engine",
+ "pkgpod-proto",
  "semver",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

@@ -27,6 +27,8 @@ use pkgpod_engine::tree::{Edit, Entry};
 use pkgpod_engine::{Cx, Error, Format, Item, Kind, Result, Upload};
 use serde_json::{Value, json};
 
+pub mod protocol;
+
 pub struct Swift;
 
 /// Largest archive taken in, and largest manifest.
