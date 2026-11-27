@@ -470,8 +470,8 @@ def end_state(data, seed_time, counts, times):
 def fill(path, headers, loc, last_body, seen):
     """A step's path and headers with their templates filled from what
     the run answered before: (path, headers, None), or (None, None, the
-    template) when one cannot be filled (no such answer, header or key):
-    such a step is not sent."""
+    template) when one cannot be filled (no such answer, header, key or
+    match): such a step is not sent."""
     m = re.fullmatch(r"\{loc\|([^=]*)=([^}]*)\}", path)
     if m:
         if not loc:
@@ -493,6 +493,11 @@ def fill(path, headers, loc, last_body, seen):
         if not isinstance(prev, dict) or key not in prev:
             return None, None, "{json:%s}" % key
         path = path.replace("{json:%s}" % key, str(prev[key]))
+    for pat in re.findall(r"\{re:([^}]+)\}", path):
+        m = re.search(pat.encode(), last_body)
+        if not m or not m.groups() or m.group(1) is None:
+            return None, None, "{re:%s}" % pat
+        path = path.replace("{re:%s}" % pat, m.group(1).decode("latin-1"))
     out = {}
     for k, v in headers.items():
         m = re.fullmatch(r"\{(.+)\.([a-z-]+)\}", v)

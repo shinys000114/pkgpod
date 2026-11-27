@@ -361,8 +361,10 @@ def fuzz_mutants(base, n=FUZZ_N):
 def corpus(fx):
     """The requests, in order: each a sequence of steps (most one), as
     one identity. A step's path may hold {loc}, the last Location of the
-    sequence, or {json:KEY}, a key of the previous answer's JSON; a
-    header may be {<id>.<header>}, from an earlier answer of the same
+    sequence, {json:KEY}, a key of the previous answer's JSON, or
+    {re:PATTERN} (no closing brace in it), the first group of PATTERN's
+    first match in the previous answer's body (as sent); a header may
+    be {<id>.<header>}, from an earlier answer of the same
     run. A step whose template cannot be filled is not sent, and its
     answer says so. Reads first, then writes, then reads of what they
     made: as each identity, the formats' parts in order of their places
