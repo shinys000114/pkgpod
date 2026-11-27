@@ -609,8 +609,20 @@ def after(c, who):
         for w in ("writer", "admin") for arch in ("x86_64", "riscv64")])
 
 
-# An APKINDEX.tar.gz of an apk repository, as served.
+# An APKINDEX.tar.gz of an apk repository, as served; the key at a
+# repository's root.
 INDEX_PATH = re.compile(r"/apk(pub|priv|riscv|empty)/(?:[^?]*/)?APKINDEX\.tar\.gz(\?|$)")
+KEY_PATH = re.compile(r"/apk(?:pub|priv|riscv|empty)/(pkgpod-[0-9a-f]{8}\.rsa\.pub)$")
+# The digest of a PKCS#1 v1.5 signature and what it is wrapped in, by
+# the kind apk's name of a signature file says (.SIGN.<kind>.<key>).
+DIGESTS = {b"RSA256": (hashlib.sha256, bytes.fromhex("3031300d060960864801650304020105000420")),
+           b"RSA": (lambda d: hashlib.sha1(d, usedforsecurity=False),
+                    bytes.fromhex("3021300906052b0e03021a05000414"))}
+# rsaEncryption, the algorithm of a SubjectPublicKeyInfo.
+RSA_OID = bytes.fromhex("06092a864886f70d010101")
+# What a signature file's bytes in an index of the run are masked to
+# (padded with X to their length): whether they verify.
+SIGNED = {True: b"valid", False: b"invalid", None: b"unchecked"}
 
 
 def members(body):
@@ -649,14 +661,81 @@ def tar_heads(t):
     return heads if i == len(t) else None
 
 
-def run_index(body, seed_time):
+def sums_right(h):
+    """Whether tar header `h`'s checksum is the sum of its bytes (its own
+    field taken as spaces), as tar checks it."""
+    try:
+        said = int(bytes(h[148:156]).strip(b"\0 ") or b"x", 8)
+    except ValueError:
+        return False
+    return said == sum(h[:148]) + 8 * 32 + sum(h[156:512])
+
+
+def der(b, i):
+    """The DER element at `i` of `b`: its tag, its contents and where the
+    next one starts."""
+    tag, n, i = b[i], b[i + 1], i + 2
+    if n & 0x80:
+        k = n & 0x7f
+        n, i = int.from_bytes(b[i:i + k], "big"), i + k
+    if i + n > len(b):
+        raise ValueError("cut short")
+    return tag, b[i:i + n], i + n
+
+
+def rsa_key(pem):
+    """The (n, e) of an RSA public key in PEM (a SubjectPublicKeyInfo, as
+    the server serves its key); None if `pem` is none."""
+    m = re.fullmatch(rb"-----BEGIN PUBLIC KEY-----\n([A-Za-z0-9+/=\n]+)"
+                     rb"-----END PUBLIC KEY-----\n?", pem)
+    if not m:
+        return None
+    try:
+        _, spki, _ = der(base64.b64decode(m.group(1)), 0)
+        _, alg, i = der(spki, 0)
+        _, bits, _ = der(spki, i)
+        # A BIT STRING's first byte is the count of its unused bits.
+        _, key, _ = der(bits, 1)
+        _, n, i = der(key, 0)
+        _, e, _ = der(key, i)
+    except (IndexError, ValueError):
+        return None
+    n, e = int.from_bytes(n, "big"), int.from_bytes(e, "big")
+    return (n, e) if alg.startswith(RSA_OID) and n > 0 else None
+
+
+def signed(keys, name, sig, data):
+    """Whether `sig`, the bytes of the signature file `name`
+    (.SIGN.<kind>.<key>), is the PKCS#1 v1.5 signature of `data` by
+    that key of `keys`; None if no key of that name was served."""
+    kind, _, of = name[len(b".SIGN."):].partition(b".")
+    key = keys.get(of.decode("ascii", "replace"))
+    if key is None:
+        return None
+    if kind not in DIGESTS or data is None:
+        return False
+    n, e = key
+    k = (n.bit_length() + 7) // 8
+    digest, prefix = DIGESTS[kind]
+    t = prefix + digest(data).digest()
+    if len(sig) != k or k < len(t) + 11:
+        return False
+    return pow(int.from_bytes(sig, "big"), e, n).to_bytes(k, "big") == (
+        b"\0\1" + b"\xff" * (k - len(t) - 3) + b"\0" + t)
+
+
+def run_index(body, seed_time, keys):
     """An APKINDEX.tar.gz made in the run (a header of its tars dated at
     or after the seed), member by member: a line of the gzip member's
     header (its 10 bytes, as sent: no time in them) and the length of
-    its tar, then that tar unpacked, each header's mtime and checksum
-    and the signature's bytes X'd (same length); None if it is none or
-    does not read as one. The members stay apart: apk takes the
-    signature's for the first and checks it over the second's bytes."""
+    its tar, then that tar unpacked, masked to the same length: the
+    digits of each header's mtime of the seed's time or later X'd,
+    those of its checksum X'd if it sums right, ? if not; the bytes of
+    a signature file, whether they verify (see SIGNED) as a signature
+    of the next member's bytes by the key of its name in `keys`. None
+    if it is none or does not read as one. The members stay apart: apk
+    takes the signature's for the first and checks it over the
+    second's bytes."""
     parts = members(body) if body[:2] == b"\x1f\x8b" else None
     if not parts:
         return None
@@ -665,27 +744,40 @@ def run_index(body, seed_time):
                                                 for _, _, _, m in hs):
         return None
     out = bytearray()
-    for (raw, t), hs in zip(parts, heads):
+    for i, ((raw, t), hs) in enumerate(zip(parts, heads)):
         t = bytearray(t)
-        for at, name, size, _ in hs:
-            t[at + 136:at + 156] = b"X" * 20
+        for at, name, size, mtime in hs:
+            ok = sums_right(t[at:at + 512])
+            if mtime >= seed_time:
+                t[at + 136:at + 148] = re.sub(rb"[0-7]", b"X", t[at + 136:at + 148])
+            t[at + 148:at + 156] = re.sub(rb"[0-7]", b"X" if ok else b"?", t[at + 148:at + 156])
             if name.startswith(b".SIGN."):
-                t[at + 512:at + 512 + size] = b"X" * size
+                data = parts[i + 1][0] if i + 1 < len(parts) else None
+                v = signed(keys, name, bytes(t[at + 512:at + 512 + size]), data)
+                t[at + 512:at + 512 + size] = SIGNED[v].ljust(size, b"X")[:size]
         out += b"gzip member %s, %d bytes unpacked\n" % (raw[:10].hex().encode(), len(t))
         out += t
     return bytes(out)
 
 
 def mask(masker):
-    # Etags of whole indexes of the run, as sent.
+    # Etags of whole indexes of the run, as sent; the keys served at the
+    # repositories' roots (the reads ask for them before the writes), by
+    # name, the indexes' signatures are checked with.
     run = set()
+    keys = {}
 
     def answer(path, hd, body, after_writes, etag):
+        m = KEY_PATH.match(path)
+        if m and m.group(1) not in keys:
+            key = rsa_key(body)
+            if key:
+                keys[m.group(1)] = key
         if not after_writes or not INDEX_PATH.match(path):
             return hd, body
         h = dict(hd)
         if body and "content-range" not in h:
-            plain = run_index(body, masker.seed_time)
+            plain = run_index(body, masker.seed_time, keys)
             if plain is None:
                 return hd, body
             masker.counts["apk indexes of the run"] += 1
@@ -730,15 +822,21 @@ PARTS = [
     # signature is of those bytes, and the gzip's length moves with
     # them. Compared unpacked, member by member (each gzip member's
     # header and its tar's length kept: the split is apk's), those
-    # fields masked to the same length; DESCRIPTION and APKINDEX, the
-    # names, sizes, modes and owners stay.
+    # fields masked to the same length: the times' digits X'd, the
+    # checksums and the signature to whether they are right (the
+    # signature checked with the key the repositories served before);
+    # DESCRIPTION and APKINDEX, the names, sizes, modes and owners stay.
     ("rule", 230, ("apk indexes of the run", "of an apk APKINDEX.tar.gz after writes whose tars "
                                              "hold a header dated at or after the seed: the "
                                              "body, compared unpacked member by member (each "
                                              "gzip member's header and its tar's length kept), "
-                                             "each tar header's mtime and checksum and the "
-                                             ".SIGN file's bytes masked (same length); the "
-                                             "content-length and etag")),
+                                             "the digits of each tar header's mtime of the "
+                                             "seed's time or later X'd, those of its checksum "
+                                             "X'd if it sums right (? if not), the .SIGN "
+                                             "file's bytes to valid, invalid or unchecked (no "
+                                             "key of its name served) as a PKCS#1 v1.5 "
+                                             "signature of the next member, padded with X to "
+                                             "their length; the content-length and etag")),
     # ... and a HEAD, a 304 or a range of one (of an etag such an index
     # had): its length, and the bytes of a range, are of that second.
     ("rule", 240, ("apk index parts of the run", "after writes, of an apk APKINDEX.tar.gz with no "
