@@ -22,6 +22,7 @@ or a range of one is asked only after a whole GET of it in the run,
 and their architectures' directories are not listed (a listing shows
 the index's size, which moves with that time)."""
 
+import base64
 import gzip
 import hashlib
 import json
@@ -352,6 +353,20 @@ def reads(c, who):
     # Nothing uploaded: its key alone.
     for name, rel in (("", ""), ("/", "/"), ("/<key>", k), (INDEX, INDEX), ("/v3.22/", "/v3.22/")):
         add(f"apk apkempty{name} {who}", who, "GET", "/apkempty" + rel)
+
+
+def credentials(c):
+    # Credentials that are none, once: a wrong password, a Bearer token
+    # and a bare token (as cargo sends one) that are no token's (both
+    # refused as no one), an Authorization that is not text (taken for
+    # none: the public repository answers, its answer kept private).
+    for name, auth in (("wrong password", "Basic " + base64.b64encode(
+                            b"writer:not the password").decode()),
+                       ("bearer", "Bearer pkgpod_not-a-token"),
+                       ("bare token", "pkgpod_not-a-token"), ("not text", "Basic \xe9")):
+        for repo in ("apkpub", "apkpriv"):
+            c.add(f"apk credentials {name} {repo}", "anon", "GET", f"/{repo}{INDEX}",
+                  {"Authorization": auth})
 
 
 # Who may write (the others are refused before their bodies are read).
@@ -698,6 +713,7 @@ PARTS = [
     ("rtoken", 110, ["apkpriv"]),
     ("publisher", 100, ["apkpub"]),
     ("reads", 140, reads),
+    ("reads end", 30, credentials),
     ("writes", 230, writes),
     ("writes", 240, limits),
     ("after", 90, after),
