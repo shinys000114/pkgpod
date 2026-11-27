@@ -1,17 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """ipk: opkg feeds, hosted public and private (OpenWrt's packages, a
 gzip'd tar, and Yocto's, an ar archive with its control.tar plain, gz or
-xz; several versions of a name, compared as dpkg does: ~, 1.9 and 1.10,
-an epoch, two that compare equal; several architectures in one feed,
-feeds named by architecture; controls with a long Description, none,
-and fields the index makes itself; feeds the content-named rules know,
-by-hash and repodata; two labels; a package removed after the second),
-one with nothing in it. ipk has no protocol module of its own: its
-repositories are the server's tree, read by path, written by PUT
-anywhere in it (the feed from ?feed=); the format makes each feed's
-Packages, Packages.gz and Packages.sig (usign, with the server's key:
-the seed makes it, so each run signs with the same) and the key's
-key.pub."""
+xz, and the writes' zstd's, its members named as dpkg-deb, GNU ar and
+BSD ar name them; several versions of a name, compared as dpkg does: ~,
+1.9 and 1.10, an epoch, two that compare equal; several architectures
+in one feed, feeds named by architecture; controls with a long
+Description, none, and fields the index makes itself; feeds the
+content-named rules know, by-hash and repodata; two labels; a package
+removed after the second), one with nothing in it. ipk has no protocol
+module of its own: its repositories are the server's tree, read by
+path, written by PUT anywhere in it (the feed from ?feed=); the format
+makes each feed's Packages, Packages.gz and Packages.sig (usign, with
+the server's key: the seed makes it, so each run signs with the same)
+and the key's key.pub."""
 
 import gzip
 import hashlib
@@ -156,13 +157,60 @@ def ar(members):
     return out
 
 
+def ar_raw(members):
+    """An ar archive of `members` (name field, name, data), the name
+    field as given: GNU ar's "name/", "//" (the long names' table) and
+    "/<offset>" into it, or BSD's "#1/<length>" with `name`, that long,
+    at the start of the member. Each member is padded to an even size
+    of its data after the name, as ar reads it (even names keep BSD's
+    own padding the same)."""
+    out = b"!<arch>\n"
+    for field, name, data in members:
+        size = len(name) + len(data)
+        out += (f"{field:<16}{0:<12}{0:<6}{0:<6}{100644:<8}{size:<10}`\n".encode()
+                + name + data + b"\n" * (len(data) % 2))
+    return out
+
+
+def zstd_raw(data):
+    """A zstd frame of `data` in raw blocks (stored as it is, as zstd
+    reads any frame): one segment, its size in the header, no
+    checksum."""
+    out = b"\x28\xb5\x2f\xfd\xa0" + struct.pack("<I", len(data))
+    piece = 128 << 10
+    blocks = [data[i:i + piece] for i in range(0, len(data), piece)] or [b""]
+    for i, b in enumerate(blocks):
+        out += struct.pack("<I", len(b) << 3 | (i == len(blocks) - 1))[:3] + b
+    return out
+
+
+def yocto_names(ctl, names):
+    """Yocto's ipk of control `ctl`, its members named as `names` says:
+    "slash" (GNU ar's short names, ending in /), "gnu" (each in a //
+    table, after the symbol table GNU ar puts first; a member named by
+    its offset) or "bsd" (#1/<length>, the name first in the member,
+    NUL-padded to an even length)."""
+    parts = [(b"debian-binary", b"2.0\n"),
+             (b"control.tar.gz", gzip.compress(tar([("./control", ctl)]), mtime=0)),
+             (b"data.tar.gz", data_tgz("hello"))]
+    if names == "slash":
+        return ar_raw([(n.decode() + "/", b"", d) for n, d in parts])
+    if names == "gnu":
+        table = b"".join(n + b"/\n" for n, _ in parts)
+        at = [sum(len(n) + 2 for n, _ in parts[:i]) for i in range(len(parts))]
+        return ar_raw([("/", b"", bytes(4)), ("//", b"", table)]
+                      + [(f"/{a}", b"", d) for a, (_, d) in zip(at, parts)])
+    named = [n + bytes(len(n) % 2) for n, _ in parts]
+    return ar_raw([(f"#1/{len(n)}", n, d) for n, (_, d) in zip(named, parts)])
+
+
 def yocto(ctl, comp="gz", note="hello", members=None):
     """Yocto's ipk: an ar archive of debian-binary, control.tar (plain,
-    "gz" or "xz") and data.tar.gz (or `members`, as they are)."""
+    "gz", "xz" or "zst") and data.tar.gz (or `members`, as they are)."""
     if members is None:
         plain = tar([("./control", ctl)])
         packed = {"": plain, "gz": gzip.compress(plain, mtime=0),
-                  "xz": lzma.compress(plain, format=lzma.FORMAT_XZ)}[comp]
+                  "xz": lzma.compress(plain, format=lzma.FORMAT_XZ), "zst": zstd_raw(plain)}[comp]
         members = [("debian-binary", b"2.0\n"), ("control.tar" + (f".{comp}" if comp else ""),
                                                    packed), ("data.tar.gz", data_tgz(note))]
     return ar(members)
@@ -491,6 +539,33 @@ def writes(c, who):
         [("PUT", f"{base}/upload?feed=main", {}, b) for _, b in refused()]
         + [("PUT", f"{base}/upload?feed=x86_64", {}, HELLO11)]
         + gets(base, ["main/Packages", "x86_64/Packages", "main/hello_1.1-1_all.ipk"]))
+    # Yocto's archives of the kinds the seed has none of, read by this
+    # build too (the seed's are the old build's): control.tar plain and
+    # zstd's, members named as GNU ar names them (ending in /, long ones
+    # in a // table) and as BSD ar does (#1/<length>); and those it
+    # refuses: a control.tar with no control, a long name past the end
+    # of the table, a BSD name of no length and one longer than its
+    # member.
+    data = data_tgz("hello")
+    ctl = gzip.compress(tar([("./control", control("ybad", "1.0", "all"))]), mtime=0)
+    seq(f"ipk yocto archives {who}", who,
+        [("PUT", f"{base}/upload?feed=main", {}, b) for b in (
+            yocto(control(f"y-plain-{who}", "1.0", "all"), ""),
+            yocto(control(f"y-zst-{who}", "1.0", "all"), "zst"),
+            yocto_names(control(f"y-slash-{who}", "1.0", "all"), "slash"),
+            yocto_names(control(f"y-gnu-{who}", "1.0", "all"), "gnu"),
+            yocto_names(control(f"y-bsd-{who}", "1.0", "all"), "bsd"),
+            yocto(None, members=[("debian-binary", b"2.0\n"),
+                                 ("control.tar.gz", tgz([("./conffiles", b"")])),
+                                 ("data.tar.gz", data)]),
+            ar_raw([("//", b"", b"debian-binary/\n\n"), ("/99", b"", b"2.0\n"),
+                    ("control.tar.gz/", b"", ctl), ("data.tar.gz/", b"", data)]),
+            ar_raw([("#1/x", b"", b"2.0\n"), ("#1/14", b"control.tar.gz", ctl),
+                    ("#1/12", b"data.tar.gz\0", data)]),
+            ar_raw([("#1/64", b"debian-binary\0", b"2.0\n"), ("#1/14", b"control.tar.gz", ctl),
+                    ("#1/12", b"data.tar.gz\0", data)]))]
+        + gets(base, ["main/Packages"] + [f"main/y-{k}-{who}_1.0_all.ipk"
+                                          for k in ("plain", "zst", "slash", "gnu", "bsd")]))
     # What the tree takes from no one: DELETE and POST (of a file, of
     # the address, of twine's), methods the server takes for no
     # repository, writes from another site's page (by its Origin, by
