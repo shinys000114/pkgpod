@@ -608,132 +608,21 @@ pub(crate) async fn serve_repo(app: Arc<App>, at: At, req: Request) -> Response 
         };
         return crate::serving::proxy::serve(app, at, req).await;
     }
-    if served.repo.format == "npm" {
-        // Tarball URLs are absolute: the address the request
-        // came in on (behind a proxy, its scheme).
-        let base_url = client_base(route.as_ref(), &host, &base, &req);
-        if rel.is_empty() && matches!(method, Method::GET | Method::HEAD) {
-            if role.is_none() {
-                return deny(&caller);
-            }
-            let r = &served.repo.name;
-            return client_note(
-                StatusCode::OK,
-                format!(
-                    "{r}: an npm registry.\n\n  npm install --registry {base_url} <package>\n  npm publish --registry {base_url}\n\nIts packages are listed in pkgpod's console.\n"
-                ),
-            );
-        }
-        let ask = crate::protocols::npm::Ask {
-            repo: served.repo,
-            current: served.current,
+    // The format's client protocol, for the requests that are its.
+    if let Some(protocol) = app.registry.serving(&served.repo.format)
+        && protocol.claims(&method, &rel)
+    {
+        let at = At {
+            served,
+            role,
+            caller,
             rel,
-            base: base_url,
-            caller: crate::protocols::who(&app, &caller),
-            role: role.map(Into::into),
+            base,
+            route,
+            host,
+            raw_path,
         };
-        return crate::protocols::npm::handle(app, ask, req.map(pkgpod_proto::body::boxed))
-            .await
-            .map(axum::body::Body::new);
-    }
-    if served.repo.format == "terraform" && matches!(method, Method::GET | Method::HEAD) {
-        // A module archive through a signed URL needs no token.
-        if role.is_none()
-            && !crate::protocols::terraform::signed_ok(
-                &*app,
-                &served.repo.name,
-                &rel.join("/"),
-                req.uri().query().unwrap_or(""),
-            )
-        {
-            return deny(&caller);
-        }
-        let mut base_url = client_base(route.as_ref(), &host, &base, &req);
-        let mut rel = rel;
-        let mut version = served.current.clone();
-        if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
-            let Ok(v) = app.labelled(&served.repo.name, label) else {
-                return status(StatusCode::NOT_FOUND);
-            };
-            base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
-            version = Some(v);
-            rel.remove(0);
-        }
-        if rel.is_empty() {
-            return client_note(
-                StatusCode::OK,
-                format!(
-                    "{}: a Terraform/OpenTofu registry.\n\n  source = \"<host>/<namespace>/<type>\"\n\nIts providers and modules are listed in pkgpod's console.\n",
-                    served.repo.name
-                ),
-            );
-        }
-        let req = req.map(pkgpod_proto::body::boxed);
-        return crate::protocols::terraform::read(app, &served.repo, version, &rel, &base_url, req)
-            .await
-            .map(axum::body::Body::new);
-    }
-    if served.repo.format == "composer" && matches!(method, Method::GET | Method::HEAD) {
-        if role.is_none() {
-            return deny(&caller);
-        }
-        let mut base_url = client_base(route.as_ref(), &host, &base, &req);
-        let mut rel = rel;
-        let mut version = served.current.clone();
-        if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@')) {
-            let Ok(v) = app.labelled(&served.repo.name, label) else {
-                return status(StatusCode::NOT_FOUND);
-            };
-            base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
-            version = Some(v);
-            rel.remove(0);
-        }
-        if rel.is_empty() {
-            return client_note(
-                StatusCode::OK,
-                format!(
-                    "{}: a Composer repository.\n\n  composer config repositories.{} composer {base_url}\n\nIts packages are listed in pkgpod's console.\n",
-                    served.repo.name, served.repo.name
-                ),
-            );
-        }
-        let req = req.map(pkgpod_proto::body::boxed);
-        return crate::protocols::composer::read(app, &served.repo, version, &rel, &base_url, req)
-            .await
-            .map(axum::body::Body::new);
-    }
-    if served.repo.format == "go" && matches!(method, Method::GET | Method::HEAD) {
-        if role.is_none() {
-            return deny(&caller);
-        }
-        let mut base_url = client_base(route.as_ref(), &host, &base, &req);
-        let mut rel = rel;
-        let mut version = served.current.clone();
-        if let Some(label) = rel.first().and_then(|f| f.strip_prefix('@'))
-            && rel.len() > 1
-            && rel[0] != "@v"
-            && rel[0] != "@latest"
-        {
-            let Ok(v) = app.labelled(&served.repo.name, label) else {
-                return status(StatusCode::NOT_FOUND);
-            };
-            base_url.push_str(&format!("{}/", percent_encode(&rel[0])));
-            version = Some(v);
-            rel.remove(0);
-        }
-        if rel.is_empty() {
-            return client_note(
-                StatusCode::OK,
-                format!(
-                    "{}: a Go module proxy.\n\n  GOPROXY={base_url},https://proxy.golang.org,direct\n  GONOSUMDB=<your module prefix>\n\nIts modules are listed in pkgpod's console.\n",
-                    served.repo.name
-                ),
-            );
-        }
-        let req = req.map(pkgpod_proto::body::boxed);
-        return crate::protocols::go::read(app, &served.repo, version, &rel, req)
-            .await
-            .map(axum::body::Body::new);
+        return protocol.serve(app, at, req).await;
     }
     // A dnf repository file per RPM group: <address><group>.repo.
     if served.repo.format == "rpm"
