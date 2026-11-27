@@ -14,9 +14,9 @@ use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
 use pkgpod_engine::tree::Entry;
 use pkgpod_engine::{RepoInfo, Upload, Version};
+use pkgpod_proto::host::Host;
 use serde_json::{Value, json};
 
-use crate::App;
 use crate::auth::{Caller, Role};
 
 fn versioned(mut r: Response) -> Response {
@@ -62,7 +62,7 @@ pub struct Ask {
 /// The releases of `scope/name` (lower case): (version, sha256, size,
 /// metadata), oldest first.
 async fn releases(
-    app: &Arc<App>,
+    app: &Arc<dyn Host>,
     v: &Option<Version>,
     scope: &str,
     name: &str,
@@ -75,7 +75,7 @@ async fn releases(
     }
     let (app2, prefix) = (app.clone(), format!("{scope}/{name}"));
     let mut out = tokio::task::spawn_blocking(move || {
-        app2.engine
+        app2.engine()
             .objects()
             .walk(&v.root, &prefix)
             .unwrap_or_default()
@@ -97,7 +97,7 @@ async fn releases(
     out
 }
 
-pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
+pub async fn handle(app: Arc<dyn Host>, a: Ask, req: Request) -> Response {
     let method = req.method().clone();
     if a.role.is_none() {
         let mut r = problem(StatusCode::UNAUTHORIZED, "authentication required");
@@ -128,7 +128,7 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
         // Logging in: the token works.
         (&Method::POST, [] | ["login"]) => versioned(StatusCode::OK.into_response()),
         (_, ["identifiers"]) if get => {
-            let q = crate::serving::query_params(req.uri().query().unwrap_or(""));
+            let q = pkgpod_proto::query::params(req.uri().query().unwrap_or(""));
             let want = q
                 .get("url")
                 .and_then(Value::as_str)
@@ -147,7 +147,12 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
             let app2 = app.clone();
             let ids: Vec<String> = tokio::task::spawn_blocking(move || {
                 let mut ids = Vec::new();
-                for (_, e) in app2.engine.objects().walk(&v.root, "").unwrap_or_default() {
+                for (_, e) in app2
+                    .engine()
+                    .objects()
+                    .walk(&v.root, "")
+                    .unwrap_or_default()
+                {
                     if let Entry::Blob { meta, .. } = e
                         && meta["metadata"]["repositoryURLs"]
                             .as_array()
@@ -201,18 +206,11 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
                     format!("{scope}.{name} {ver} not found"),
                 );
             };
-            let mut resp = crate::serving::serve_counted(
-                &app,
-                &a.repo.name,
-                "",
-                &a.repo.store().path(sha),
-                sha,
-                file,
-                None,
-                false,
-                req,
-            )
-            .await;
+            let req = req.map(pkgpod_proto::body::boxed);
+            let mut resp = app
+                .serve_counted(&a.repo.name, "", a.repo.store().path(sha), *sha, file, req)
+                .await
+                .map(axum::body::Body::new);
             let h = resp.headers_mut();
             h.insert(
                 header::CONTENT_TYPE,
@@ -258,7 +256,7 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
                     format!("{scope}.{name} {ver} not found"),
                 );
             };
-            let q = crate::serving::query_params(req.uri().query().unwrap_or(""));
+            let q = pkgpod_proto::query::params(req.uri().query().unwrap_or(""));
             let manifests = meta["manifests"].as_object().cloned().unwrap_or_default();
             let want = q
                 .get("swift-version")
@@ -314,7 +312,7 @@ pub async fn handle(app: Arc<App>, a: Ask, req: Request) -> Response {
 }
 
 async fn publish(
-    app: &Arc<App>,
+    app: &Arc<dyn Host>,
     a: &Ask,
     scope: &str,
     name: &str,
@@ -384,9 +382,9 @@ async fn publish(
         a.caller.name().to_string(),
     );
     let res = tokio::task::spawn_blocking(move || {
-        app2.engine
+        app2.engine()
             .upload(&repo, &up, &params, &actor)
-            .inspect(|o| app2.auth.audit(&actor, "publish", &repo, &o.summary))
+            .inspect(|o| app2.audit(&actor, "publish", &repo, &o.summary))
     })
     .await;
     match res {
