@@ -13,6 +13,7 @@ import io
 import os
 import re
 import tarfile
+import time
 import urllib.parse
 import zipfile
 
@@ -24,6 +25,9 @@ REPOS = ("tpub", "tpriv", "tempty", "troot", "tkey")
 HOST = "tf.localhost"
 # Signatures the tool makes: good until 2100, and long expired.
 FUT, PAST = 4102444800, 1000000000
+# How long a URL the server signs is good for (terraform.rs's
+# SIGNED_FOR), and how much later than its signing an answer is masked.
+SIGNED_FOR, LATE = 300, 60
 # The largest package taken in (pkgpod_terraform::MAX_PKG).
 MAX_PKG = 1 << 30
 # What a provider's or a module's upload names.
@@ -236,7 +240,7 @@ def reads(c, who):
                 ("xfp module", f"/{repo}/{API_M}/1.0.0/download", {"X-Forwarded-Proto": "https"}),
                 ("xfp other", f"/{repo}/{DL}", {"X-Forwarded-Proto": "gopher"})):
             add(f"terraform {repo} {name} {who}", who, "GET", path, h)
-    # A repository with nothing in it yet: no version to answer from.
+    # A repository with nothing in it yet: its version's tree is empty.
     for rel in ("/", f"/{API_P}/versions", f"/{API_M}/1.0.0/download", "/providers/x",
                 "/@first/", f"/{Z}"):
         add(f"terraform tempty{rel} {who}", who, "GET", f"/tempty{rel}")
@@ -257,7 +261,8 @@ def reads(c, who):
     # host's root, else the first by name of those with no address.
     for name, method, path, h in (
             ("GET", "GET", DISCOVERY, {}), ("HEAD", "HEAD", DISCOVERY, {}),
-            ("slash", "GET", DISCOVERY + "/", {}), ("slashes", "GET", "//.well-known//terraform.json", {}),
+            ("slash", "GET", DISCOVERY + "/", {}),
+            ("slashes", "GET", "//.well-known//terraform.json", {}),
             ("escaped", "GET", "/.well-known%2fterraform.json", {}),
             ("host", "GET", DISCOVERY, {"Host": HOST}),
             ("host upper", "GET", DISCOVERY, {"Host": "TF.LOCALHOST"}),
@@ -310,7 +315,8 @@ def minted(c, who):
             ("versions", "GET", f"/{r}/{API_P}/versions?{s(API_P + '/versions')}"),
             ("download", "GET", f"/{r}/{DL}?{s(DL)}"),
             ("module", "GET", f"/{r}/{MOD}?{s(MOD)}"),
-            ("module download", "GET", f"/{r}/{API_M}/1.0.0/download?{s(API_M + '/1.0.0/download')}"),
+            ("module download", "GET",
+             f"/{r}/{API_M}/1.0.0/download?{s(API_M + '/1.0.0/download')}"),
             ("escaped", "GET", f"/{r}/{esc}?{good}"),
             ("trailing slash", "GET", f"/{r}/{Z}/?{good}"),
             ("plus", "GET", f"/{r}/{Z}?sig=+{FUT}.{m}"),
@@ -493,8 +499,8 @@ def refused(c, who):
         ("GET", f"{r}/v1/providers/team/{t}/versions", {}, None),
         ("GET", f"{r}/v1/modules/team/{t}/null/versions", {}, None)]
     c.seq(f"terraform uploads refused {who}", who, steps)
-    # Not the repository's: one at a host's root is not reached by name;
-    # from another site's page; with a signature, which only reads take.
+    # Not a repository's: one at a host's root is not reached by name,
+    # nor one that is not there; and from another site's page.
     c.seq(f"terraform uploads elsewhere {who}", who, [
         ("PUT", pput("/troot", f"e-{who}", "1.0.0"), OCTET, tf_zip(f"e-{who}", "1.0.0")),
         ("PUT", pput("/tpub", f"e-{who}", "1.0.0"), dict(OCTET, Origin="http://elsewhere.example"),
@@ -636,11 +642,12 @@ def mask_sig(b, fields, mpis):
 
 def mask(masker):
     def verdict(m):
-        """A signed URL of the run: its time and signature as X, the
-        signature's place saying whether it is the one the seed's secret
-        makes for the URL's repository and path."""
+        """A signed URL of the run, good for SIGNED_FOR from when it was
+        signed (at most LATE before now): its time and signature as X,
+        the signature's place saying whether it is the one the seed's
+        secret makes for the URL's repository and path."""
         until = int(m.group(4))
-        if not masker.seed_time <= until < FUT:
+        if not 0 <= int(time.time()) + SIGNED_FOR - until <= LATE:
             return m.group(0)
         host = m.group(2).decode().lower().split(":")[0]
         path = m.group(3).decode()[1:]
@@ -699,13 +706,15 @@ PARTS = [
     ("writes", 150, writes),
     ("writes", 160, limits),
     ("after", 60, after),
-    # The registry's download URLs are signed for a few minutes from the
+    # The registry's download URLs are signed for five minutes from the
     # request (?sig=<until>.<HMAC-SHA256 of the repository, the path and
     # until>): of the run's time. Each is masked, same length, with its
     # signature checked against the seed's secret (the server's, made in
-    # the seed), so that one signed wrong still shows.
+    # the seed), so that one signed wrong still shows; one good for
+    # another while is not masked, so that it shows too.
     ("rule", 160, ("terraform signed URLs", "in Terraform answers' bodies and X-Terraform-Get, "
-                                            "a signed URL's time at or after the seed and its "
+                                            "a signed URL's time, if it is 300 seconds after "
+                                            "one at most 60 before the answer, and its "
                                             "signature, as good or BAD! by the seed's secret "
                                             "(same length)")),
     # A provider version's SHA256SUMS.sig is signed when the version is
