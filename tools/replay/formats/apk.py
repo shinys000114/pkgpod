@@ -3,8 +3,9 @@
 two repositories: x86_64, aarch64 and noarch ones, one of an
 architecture outside the defaults, one with a signature part, one
 without a datahash, one with an install script, one replaced, one at a
-path the tree takes for named by its content, one whose name the tree
-takes for a checksum list's; a label after the first, another later),
+path the tree takes for named by its content (and so in three branches
+more, and three of other names so), one whose name the tree takes for a
+checksum list's; a label after the first, another later),
 one whose settings name its architectures and description, one with
 nothing in it, one at apktop.localhost's root.
 Each is served as the server's generic tree: the packages under
@@ -164,6 +165,16 @@ HEXNAME = "0123456789abcdef" * 4
 HEXY = package(HEXNAME, "1.0-r0", "repodata")
 HEXY_FILE = file_name(HEXNAME, "1.0-r0")
 HEXY_AT = "/v3.22/community/repodata/" + HEXY_FILE
+# The same, of a branch (and repository) the tree's Cache-Control rows
+# name (dists, pool, project/trace), and others named so after the
+# digits (SUMS, .db., .files.): the tree keeps what is named by its
+# content as its first row that matches says, there revalidated.
+HEXY_PLACES = ["dists/main", "pool/main", "project/trace"]
+HEXY_AFTER = ("-SUMS", "-a.db.b", "-a.files.b")
+HEXY_NAMED = [package(HEXNAME + s, "1.0-r0", "repodata") for s in HEXY_AFTER]
+CONTENT_NAMED = ([HEXY_AT] + [f"/{at}/repodata/{HEXY_FILE}" for at in HEXY_PLACES]
+                 + ["/v3.22/community/repodata/" + file_name(HEXNAME + s, "1.0-r0")
+                    for s in HEXY_AFTER])
 # A name with SUMS in it: the tree takes the file for a checksum list
 # (SHA256SUMS, MD5SUMS) by its name, as text, before any extension it
 # does not know (apk is none it knows).
@@ -188,7 +199,7 @@ SEED = [
     ("/upload?branch=v3.22&repository=main&replace=true", None, HELLO_11B),
     ("cli", "v3.22/community", [HEXY]),
     ("cli", "v3.22/main", [SUMS]),
-]
+] + [("cli", at, [HEXY]) for at in HEXY_PLACES] + [("cli", "v3.22/community", HEXY_NAMED)]
 
 
 def seed(p, fx):
@@ -285,7 +296,7 @@ PATHS = [
     "/v3.22/community/armv7/" + file_name("blink", "1.0-r0"),
     "/v3.22/community/armv7/" + file_name("motd", "2-r0"),
     "/v3.22/community/x86_64/APKINDEX.tar.gz", "/v3.22/community/repodata/",
-    "/v3.22/community/repodata/APKINDEX.tar.gz", HEXY_AT,
+    "/v3.22/community/repodata/APKINDEX.tar.gz", *CONTENT_NAMED,
     "/v3.22/community/repodata/" + file_name("motd", "2-r0"),
     "/v3.20/", "/v3.20/main/x86_64/APKINDEX.tar.gz",
     "/v3.20/main/aarch64/APKINDEX.tar.gz", "/v3.20/main/x86_64/" + file_name("hello", "1.0-r0"),
@@ -322,8 +333,8 @@ def reads(c, who):
         # date: the files keep none, so it is never met), ranges (one,
         # two, one past the end, one only if the ETag is still the
         # file's).
-        for name, rel in ((PKG, PKG), (INDEX, INDEX), ("/<key>", k), (MAIN, MAIN), ("/", "/"),
-                          (HEXY_AT, HEXY_AT), (MAIN + SUMS_FILE, MAIN + SUMS_FILE)):
+        heads = [(PKG, PKG), (INDEX, INDEX), ("/<key>", k), (MAIN, MAIN), ("/", "/")]
+        for name, rel in heads + [(rel, rel) for rel in CONTENT_NAMED + [MAIN + SUMS_FILE]]:
             add(f"apk {repo} HEAD {name} {who}", who, "HEAD", b + rel)
         for name, rel in ((PKG, PKG), (INDEX, INDEX), ("/<key>", k)):
             add(f"apk {repo} inm {name} {who}", who, "GET", b + rel,
@@ -812,7 +823,8 @@ FUZZ = (["apkpub", "apkpriv", "apkriscv", "apkempty"],
         ["v3.22", "v3.20", "main", "community", "x86_64", "aarch64", "armv7", "riscv64",
          "noarch", "APKINDEX.tar.gz", "_inputs", "upload", "@first", "@second",
          file_name("hello", "1.0-r0"), file_name("hello", "1.1-r0"), file_name("motd", "2-r0"),
-         file_name("tool", "0.1_alpha-r1"), file_name("blink", "1.0-r0"), SUMS_FILE])
+         file_name("tool", "0.1_alpha-r1"), file_name("blink", "1.0-r0"), SUMS_FILE,
+         "repodata", "dists", "pool", HEXY_FILE])
 
 PARTS = [
     ("seed", 130, seed),
