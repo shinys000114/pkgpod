@@ -11157,6 +11157,169 @@ fn home_for_in(s: &Server, name: &str, index: &str) -> PathBuf {
     home
 }
 
+/// A cargo proxy's index/config.json is its own, as a group's is:
+/// downloads and the api at the proxy's address (cargo logs in there;
+/// a publish there the proxy refuses), and auth required unless the
+/// proxy is public, with an upstream that cannot be reached too. Its
+/// ETag is of the body, answered 304 to an If-None-Match it matches (or
+/// any), by GET and HEAD; a HEAD has the GET's headers and no body.
+/// Callers with no role are refused as before. cargo logs in at a
+/// private proxy, again with the token it keeps (it then reads the
+/// config with that token, and needs its api).
+#[test]
+fn cargo_proxy_answers_its_own_config() {
+    let s = Server::start();
+    let c = reqwest::blocking::Client::new();
+    let gone = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    for (p, public) in [("cpopen", "true"), ("cpclosed", "false")] {
+        s.cli(&[
+            "repo",
+            "create",
+            p,
+            "-f",
+            "cargo",
+            "-k",
+            "proxy",
+            "-s",
+            &format!("upstream=http://127.0.0.1:{gone}/index/"),
+            "-s",
+            &format!("public={public}"),
+        ])
+        .unwrap();
+    }
+    let token = |repos: &str| {
+        s.cli(&["token", "create", repos, "--repos", repos])
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    let (closed, other) = (token("cpclosed"), token("cpopen"));
+    let h = |r: &reqwest::blocking::Response, k: &str| {
+        r.headers()
+            .get(k)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    };
+    for (p, auth, ts) in [
+        ("cpopen", false, vec![None, Some(&other)]),
+        ("cpclosed", true, vec![Some(&closed)]),
+    ] {
+        let path = format!("/{p}/index/config.json");
+        let want = json!({
+            "dl": s.url(&format!("/{p}/api/v1/crates")),
+            "api": s.url(&format!("/{p}")),
+            "auth-required": auth,
+        });
+        for t in &ts {
+            let with = |b: reqwest::blocking::RequestBuilder| match t {
+                Some(t) => b.bearer_auth(t),
+                None => b,
+            };
+            // Kept by shared caches only where every caller reads the
+            // same: anonymously, at a public proxy.
+            let cc = if t.is_none() {
+                "no-cache"
+            } else {
+                "private, no-cache"
+            };
+            let r = with(c.get(s.url(&path))).send().unwrap();
+            let st = r.status().as_u16();
+            let (ty, got_cc, etag) = (h(&r, "content-type"), h(&r, "cache-control"), h(&r, "etag"));
+            let body = r.text().unwrap();
+            let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+            let of_body = format!("\"{}\"", pkgpod_base::Digest::of(body.as_bytes()).hex());
+            assert_eq!(
+                (st, ty.as_str(), got_cc.as_str(), &v, etag.as_str()),
+                (200, "application/json", cc, &want, of_body.as_str()),
+                "GET {path} {t:?}: {body}"
+            );
+            let r = with(c.head(s.url(&path))).send().unwrap();
+            let (st, ty, got_cc, got_etag, len) = (
+                r.status().as_u16(),
+                h(&r, "content-type"),
+                h(&r, "cache-control"),
+                h(&r, "etag"),
+                h(&r, "content-length"),
+            );
+            let rest = r.text().unwrap();
+            assert_eq!(
+                (
+                    st,
+                    ty.as_str(),
+                    got_cc.as_str(),
+                    len,
+                    rest.as_str(),
+                    got_etag
+                ),
+                (
+                    200,
+                    "application/json",
+                    cc,
+                    body.len().to_string(),
+                    "",
+                    etag.clone()
+                ),
+                "HEAD {path} {t:?}"
+            );
+            // Its own ETag, or any: not modified; another's: the
+            // document again.
+            for (inm, want_st) in [(etag.as_str(), 304), ("*", 304), ("\"other\"", 200)] {
+                for head in [false, true] {
+                    let b = if head {
+                        c.head(s.url(&path))
+                    } else {
+                        c.get(s.url(&path))
+                    };
+                    let r = with(b.header("if-none-match", inm)).send().unwrap();
+                    let (st, got_etag) = (r.status().as_u16(), h(&r, "etag"));
+                    let rest = r.text().unwrap();
+                    let want_body = if want_st == 200 && !head { &body } else { "" };
+                    assert_eq!(
+                        (st, got_etag.as_str(), rest.as_str()),
+                        (want_st, etag.as_str(), want_body),
+                        "If-None-Match {inm} {path} {t:?} head {head}"
+                    );
+                }
+            }
+        }
+    }
+    // Refused as before: anonymously (401), and by a token for another
+    // repository (404).
+    let path = "/cpclosed/index/config.json";
+    for (t, want) in [(None, 401), (Some(&other), 404)] {
+        for head in [false, true] {
+            let b = if head {
+                c.head(s.url(path))
+            } else {
+                c.get(s.url(path))
+            };
+            let b = match t {
+                Some(t) => b.bearer_auth(t),
+                None => b,
+            };
+            let st = b.send().unwrap().status().as_u16();
+            assert_eq!(st, want, "{path} {t:?} head {head}");
+        }
+    }
+    if have("cargo") {
+        let home = home_for_in(&s, "home-login", &s.url("/cpclosed/index/"));
+        for n in ["first", "again"] {
+            let (ok, out) = cargo_with(
+                &home,
+                &home,
+                &["login", "--registry", "crates"],
+                None,
+                Some(&format!("{closed}\n")),
+            );
+            assert!(ok, "cargo login at the proxy, {n}: {out}");
+        }
+    }
+}
+
 /// An OCI proxy of another pkgpod's registry, and a group of a hosted
 /// registry and the proxy, with docker.
 #[test]

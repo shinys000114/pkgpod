@@ -1272,14 +1272,15 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
         );
     }
     if r.format == "cargo" && at.rel == ["index", "config.json"] {
-        // Its own: crates through here.
+        // Its own, as a group's: crates through here, and the api here
+        // (cargo logs in there; a publish there is refused above).
         let base = crate::serving::client_base(at.route.as_ref(), &at.host, &at.base, &req);
-        return axum::Json(json!({
-            "dl": format!("{base}api/v1/crates"),
-            "api": base.trim_end_matches('/'),
-            "auth-required": !r.setting_bool("public"),
-        }))
-        .into_response();
+        return crate::serving::group::cargo_config(
+            &base,
+            !r.setting_bool("public"),
+            req.headers(),
+            method == Method::HEAD,
+        );
     }
     let Some(mut a) = classify(&r.format, &at.rel) else {
         return status(StatusCode::NOT_FOUND);

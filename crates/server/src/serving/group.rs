@@ -280,15 +280,16 @@ fn note(g: &pkgpod_engine::RepoInfo, base: &str) -> Option<String> {
     ))
 }
 
-/// cargo's index/config.json at the group's address `base`, for the
-/// request's headers `h`: crates are downloaded through the group, and
-/// its api is the group's own address, as a hosted registry's is its
-/// own: cargo search and cargo login need one (cargo refuses both at a
-/// registry without), and a publish there the group refuses in its own
-/// words. `auth` (required) unless the group and every member it lists
-/// are public: else an anonymous caller is refused, or reads the public
-/// members only, and cargo is to send its token.
-fn cargo_config(base: &str, auth: bool, h: &HeaderMap, head: bool) -> Response {
+/// cargo's index/config.json of a group or a proxy at its address
+/// `base`, for the request's headers `h`: crates are downloaded through
+/// it, and its api is its own address, as a hosted registry's is its
+/// own: cargo login needs one (cargo refuses it at a registry without
+/// once it reads the config), as does cargo search, which a group
+/// answers (a proxy has none); a publish there each refuses in its own
+/// words. `auth` (required) unless it is public, and a group every
+/// member it lists too: else an anonymous caller is refused, or reads a
+/// group's public members only, and cargo is to send its token.
+pub(crate) fn cargo_config(base: &str, auth: bool, h: &HeaderMap, head: bool) -> Response {
     let doc = json!({
         "dl": format!("{base}api/v1/crates"),
         "api": base.trim_end_matches('/'),
@@ -297,10 +298,11 @@ fn cargo_config(base: &str, auth: bool, h: &HeaderMap, head: bool) -> Response {
     own_document(h, head, "application/json", doc.to_string())
 }
 
-/// A document the group makes itself, `body` of type `ct`, answering a
-/// request with headers `h`: revalidated, with an ETag of the body (a
-/// 304 to an If-None-Match it matches, with the ETag and Cache-Control
-/// the document has), and a HEAD has the GET's headers.
+/// A document a group (or a proxy, its cargo config) makes itself,
+/// `body` of type `ct`, answering a request with headers `h`:
+/// revalidated, with an ETag of the body (a 304 to an If-None-Match it
+/// matches, with the ETag and Cache-Control the document has), and a
+/// HEAD has the GET's headers.
 fn own_document(h: &HeaderMap, head: bool, ct: &'static str, body: String) -> Response {
     let (etag, fresh) = tag_of(body.as_bytes(), h);
     let r = if fresh {
