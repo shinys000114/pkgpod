@@ -8152,6 +8152,10 @@ fn group_address_shows_no_proxy_note() {
     let d = s.dir.path().join("dists");
     std::fs::create_dir_all(&d).unwrap();
     for (f, p) in [("pypi", "p"), ("maven", "m")] {
+        // The pypi member's wheel is made with python3.
+        if f == "pypi" && !have("python3") {
+            continue;
+        }
         let (up, publ) = (format!("{p}up"), format!("{p}pub"));
         s.cli(&["repo", "create", &publ, "-f", f, "-s", "public=true"])
             .unwrap();
