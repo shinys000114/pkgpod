@@ -223,7 +223,8 @@ curl -fLO https://pkg.example.org/debian-cloud/images/cloud/trixie/latest/debian
   once it is all in, so a large image starts at once; a download that
   breaks off keeps nothing. Clients asking for it while it arrives read
   the same download as it is written: the upstream is asked once. A
-  part (`Range`) of a file not kept yet is fetched whole first.
+  part (`Range`) of a file not kept yet is fetched whole first, and a
+  HEAD of one says the length the upstream's HEAD gives, if any.
 - A kept file is asked for again, with its validators, once it is older
   than `metadata_minutes`: a file replaced upstream under the same name
   (`latest/`) is fetched again, and one the upstream dropped answers
@@ -233,8 +234,9 @@ curl -fLO https://pkg.example.org/debian-cloud/images/cloud/trixie/latest/debian
 - `max_mib` bounds what is kept (the least recently used unpinned files
   go first); `pkgpod cache <name>` lists, pins, evicts and prefetches.
 - As a group's last member it answers what the members before it do
-  not have, and its upstream's entries show in the group's listings. It
-  takes no uploads.
+  not have, and its upstream's entries show in the group's listings;
+  while its upstream cannot be listed, a listing of the group's other
+  members says it is incomplete. It takes no uploads.
 
 ## Groups
 

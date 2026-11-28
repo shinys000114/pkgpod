@@ -155,7 +155,8 @@ names the tarballs at the proxy's address; a package's dist-tags
 (`npm dist-tag ls`) are the document's. Documents are asked for again
 when older than `metadata_minutes`; while the upstream cannot be
 reached, the document kept is served. Tarballs are checked against the
-integrity the document gives.
+integrity the document gives. A lone `@scope` names no package: it is
+a 404, and the upstream is not asked for it.
 
 | Setting | Default | |
 |---------|---------|-|
@@ -194,7 +195,10 @@ A group reads its members in order. For each package, the first member
 that has it answers alone: a later member's versions of the same name
 are not added, so a hosted repository before a proxy of npmjs keeps your
 names from being taken by public ones. Search lists each package once,
-the first member's that has it.
+the first member's that has it. A package's dist-tags (`npm dist-tag
+ls`) are those of the member that has it, as its document and tarballs
+are. A lone `@scope` names no package: it is a 404, and no member is
+asked for it.
 
 | Setting | Default | |
 |---------|---------|-|
@@ -215,8 +219,8 @@ registry=https://pkg.example.org/npm-all/
 The group is the one registry: no `@scope:registry` line sends a scope
 elsewhere. A token for the group reads its members through it.
 Publishing goes to a member (with
-`--registry https://pkg.example.org/js/` and that registry's token),
-not to the group.
+`--registry https://pkg.example.org/js/` and that registry's token);
+the group refuses it (405, `npm-all is a group: it is read only`).
 
 ## Example
 

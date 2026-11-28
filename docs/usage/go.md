@@ -139,7 +139,10 @@ A proxy fetches a module's files from its upstream when they are first
 asked for, and keeps them. Version lists and `@latest` are asked for
 again when older than `metadata_minutes`; while the upstream cannot be
 reached, what was kept is served. A module whose name is excluded, or
-that the upstream does not have, is a 404, so go moves on.
+that the upstream does not have, is a 404, so go moves on. So is a
+path with a label in its module part (a segment starting with `@`
+before `@v` or `@latest`; a module path holds no `@`), and the
+upstream is not asked for it.
 
 | Setting | Default | |
 |---------|---------|-|
@@ -189,7 +192,9 @@ go env -w 'GONOSUMDB=example.com/team/*'
 
 The group is the one proxy: with nothing after it in `GOPROXY`, go
 fetches no module from proxy.golang.org or directly, so what the group
-does not have is not found. A token for the group reads its members
+does not have is not found. A group has no labels: a path with a
+segment starting with `@` before `@v` or `@latest` is a 404, and no
+member is asked for it. A token for the group reads its members
 through it. Uploads go to a member, not to the group.
 
 ## Example

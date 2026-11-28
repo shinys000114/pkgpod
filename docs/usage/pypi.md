@@ -199,7 +199,10 @@ that has it answers alone: a later member's versions of the same name
 are not added, so a hosted repository before a proxy of pypi.org keeps
 your names from being taken by public ones. The project list at
 `simple/` names each project once, and its page is the first member's
-that has it.
+that has it. The list is the group's own, HTML or JSON as `Accept`
+weighs them, as a hosted index's (it says `Vary: Accept`), with an
+ETag of what it sends: an `If-None-Match` that names it (pip's
+revalidation) is answered 304.
 
 | Setting | Default | |
 |---------|---------|-|

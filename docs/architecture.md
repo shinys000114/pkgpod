@@ -335,9 +335,14 @@ under the same name), lists directories from the upstream's HTML
 listings, and streams a file not kept yet to the client while it is
 stored. A fetched row is kept (`proxy::keep`) only if the proxy's
 upstream is still the one the fetch began with, under a lock that
-forgetting the cache for a new upstream holds too.
+forgetting the cache for a new upstream holds too. A path the
+classifier makes nothing of (a go module path with an `@` segment, a
+lone npm `@scope`) is answered 404, and the upstream is not asked. A
+cargo proxy's `index/config.json` is its own, made as a cargo group's
+is (`group::cargo_config`).
 `pkgpod cache` lists, pins, unpins, evicts and prefetches. Proxies take
-no uploads and have no versions.
+no uploads, refusing a write in their own words, which name no
+upstream, and have no versions.
 
 ## Group repositories
 
@@ -348,13 +353,25 @@ package, the first member that has it answers alone: versions are not
 merged, so a public package of the same name further down never adds
 to or outranks yours. A proxy member whose upstream fails while it
 keeps nothing for the name ends the search with a 502, rather than let
-a later member answer for it. Listings and search name each entry
-once, the first member's that has it. A group is read through: its
-readers read the members through it (anonymous readers of a public
-group only its public members, so a public group with a member that is
-not public answers as a private repository does, for caches:
+a later member answer for it. A group is read through: its readers
+read the members through it (anonymous readers of a public group only
+its public members, so a public group with a member that is not public
+answers as a private repository does, for caches:
 `group::all_public`), downloads count on the member, and writes are
-refused with the member to publish to.
+refused in the group's own words, which name no member.
+
+In `serving/group.rs`, a member's 5xx for what names no package ends
+the search with a 502 too; the 502 is the group's own and names no
+member, which the log names, once a while per group (`member_failed`).
+Listings, pypi's project list and search name each entry once, the
+first member's that has it, of the members they ask (hosted and mirror
+members, and in a listing a files proxy: `unioned`); one that could
+not be read is left out, and while others were read the answer says
+how many (`Pkgpod-Incomplete`). What a group makes itself names no
+member: its note at the address of an npm, pypi, cargo or go group
+(`group::note`), cargo's `config.json` (`group::cargo_config`), and
+its listings and pypi's project list; all but the note have an ETag of
+what they send (`own_document`, `union_listing`).
 
 ## Jobs
 

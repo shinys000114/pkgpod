@@ -130,6 +130,10 @@ cargo search --registry crates hello
 cargo owner --list hello_pod --registry crates
 ```
 
+The search (`api/v1/crates?q=<words>`) pages as crates.io's does:
+`per_page` hits (10 unless given, 1 to 100) of page `page` (from 1),
+with `meta.total` counting every hit; a page past the end is empty.
+
 Or as pkgpod operations:
 
 | Operation | Parameters | What it does |
@@ -155,12 +159,16 @@ curl -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
 ## Proxy of crates.io
 
 A proxy fetches a crate's index file and `.crate` files from its
-upstream when they are first asked for, and keeps them. Index files are
-asked for again when older than `metadata_minutes`; while the upstream
-cannot be reached, the index file kept is served. A `.crate` is fetched
-from where the upstream's `config.json` says, and checked against the
-index's checksum. The proxy's own `config.json` names its own download
-address.
+upstream when they are first asked for, and keeps them. Index files
+are asked for again when older than `metadata_minutes`; while the
+upstream cannot be reached, the index file kept is served. A `.crate`
+is fetched from where the upstream's `config.json` says, and checked
+against the index's checksum. The proxy's own `config.json` names its
+own address for downloads and for cargo's API, says `auth-required`
+unless the proxy is public, and has an ETag (answered 304 to
+`If-None-Match`). `cargo login --registry crates-public` works there;
+a publish is refused (405, `crates-public is a proxy: it is read
+only`), and `cargo search` fails, as a proxy has no search.
 
 | Setting | Default | |
 |---------|---------|-|
@@ -203,7 +211,8 @@ A group reads its members in order. For each crate, the first member
 that has it answers alone: a later member's versions of the same name
 are not added, so a hosted repository before a proxy of crates.io keeps
 your names from being taken by public ones. Search lists each crate
-once, the first member's that has it.
+once, the first member's that has it, paged as a hosted registry's
+search is.
 
 | Setting | Default | |
 |---------|---------|-|
@@ -221,8 +230,16 @@ pkgpod token create build --repos crates-all
 index = "sparse+https://pkg.example.org/crates-all/index/"
 ```
 
+The group's `config.json` is its own: crates are downloaded through
+the group and cargo's API is at its address, so `cargo search
+--registry crates-all` and `cargo login --registry crates-all` work
+through it. It says `auth-required` unless the group and every member
+it lists are public, and has an ETag (answered 304 to
+`If-None-Match`).
+
 A token for the group reads its members through it. Publishing goes to
-a member (`cargo publish --registry crates`), not to the group.
+a member (`cargo publish --registry crates`), not to the group, which
+refuses it (405, `crates-all is a group: it is read only`).
 
 ## Example
 

@@ -236,13 +236,14 @@ implement `publish` for that, and return `Ok(None)`.
    `.tree(pkgpod_<id>::TREE)` for its rules on its trees' files
    (`pkgpod_proto::tree::TreeRules`: Cache-Control rows, names by
    content, content types, PUT to a path, plain files),
-   `.protocol(..)` and `.unlisted()` for a protocol module (below),
-   `.hooks(..)` for answers of its own in its trees, `.host(..)` for
-   what it answers at a host's root. The registry's tests name the
-   formats that have each; add yours there. `pkgpod_server::formats()`
-   gives the engine the registry's formats: from then on it accepts
-   `-f <id>`, the API lists it at `GET /api/v1/formats`, and the
-   console offers its settings, operations and upload form.
+   `.protocol(..)` for a protocol module and `.unlisted()` for an
+   address that is an API (below), `.hooks(..)` for answers of its own
+   in its trees, `.host(..)` for what it answers at a host's root. The
+   registry's tests name the formats that have each; add yours there.
+   `pkgpod_server::formats()` gives the engine the registry's formats:
+   from then on it accepts `-f <id>`, the API lists it at
+   `GET /api/v1/formats`, and the console offers its settings,
+   operations and upload form.
 4. In `crates/server/src/console/`: the line describing the format
    when a repository is made (the `blurb` in `new_repo_page`), the
    words for its catalog (`catalog_words`), and its "How to use" lines
@@ -338,8 +339,13 @@ of those kinds; serving them is the server's:
 
 - Groups: teach `group::ask` which requests name a package (the
   state-tree directory whose first member wins), which are listings and
-  which are searches. `groups()` alone puts the format in the list a
-  refusal of another format's group names.
+  which are searches, which are the group's own (the note at its
+  address, cargo's `index/config.json`) and which name nothing through
+  a group (a member's label: 404). A format whose address answers a
+  client note needs its lines in `group::note` too, as npm, pypi, cargo
+  and go have; cargo's `config.json` is `group::cargo_config`, which a
+  cargo proxy answers with as well. `groups()` alone puts the format in
+  the list a refusal of another format's group names.
 - Proxies: add the id to `proxy::LISTED`, the list a refusal of
   another format's proxy names (a test holds it to `proxy()`), a
   classifier to `proxy::classify` (what a path is: a file kept for

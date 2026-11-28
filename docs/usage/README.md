@@ -62,17 +62,41 @@ so a package of the same name further down (a public registry's,
 through a proxy) never adds to or outranks it. A proxy member whose
 upstream fails (not there, or an error) and that keeps nothing for the
 name ends the search: the group answers 502 for it, rather than serve
-a later member's package of the same name. What names no package
-(a file of a files repository) comes from the first member that has it;
-a directory listing names each entry once, the first member's that has
-it. Its readers read the members through it (a token for the group
-alone is enough; anonymous readers of a public group read only its
-public members, so while it has a member that is not public, its
-answers vary by Authorization and caches in front do not keep them for
-others), and downloads count on the member. Nothing is uploaded to a
-group: publish to a member. A group cannot be a member, and whoever
-sets the members must be able to read them (one they may not read is
-refused as a name there is not).
+a later member's package of the same name. What names no package (a
+file of a files repository) comes from the first member that has it,
+and a member that answers it with a server error ends the search the
+same way. An npm, pypi, cargo, go, maven or files group's 502 is its
+own, `<group>: a member could not be asked`: it names neither the
+member nor its upstream (the server's log does). A directory listing
+names each entry once, the first member's that has it, and so do
+pypi's project list and npm's and cargo's search. They read the hosted
+and mirror members, and a listing reads a files proxy's upstream
+listing too (other proxies are not asked); when some of those, not
+all, could not be read, the answer has the others' entries and says
+so, naming none: a `Pkgpod-Incomplete` header (`1 of 2 members could
+not be read`) and, in an HTML listing or project list, a line. Its
+readers read the members through it (a token for the group alone is
+enough; anonymous readers of a public group read only its public
+members, so while it has a member that is not public, its answers vary
+by Authorization and caches in front do not keep them for others), and
+downloads count on the member.
+
+The address of an npm, pypi, cargo or go group answers the group's own
+note: what it is, how many members it lists and the client lines that
+read through it, the same to every caller who may read the group and
+naming no member. A files or maven group's address redirects to the
+address with its slash, the group's listing. What a group makes itself
+(its listings, pypi's project list, cargo's `config.json`) has an ETag
+of what it sends, answered 304 to an `If-None-Match` that names it,
+and a HEAD has the GET's headers, `Content-Length` too. Nothing is
+uploaded to a group: a write is answered 405, `<group> is a group: it
+is read only` (an OCI group's: `<group> is read through: push to a
+hosted repository`), which names no member, and npm's own endpoints
+(`npm audit`'s) answer 404 as a hosted registry's do; publish to a
+member. A group cannot be a member. Whoever adds a member must be able
+to read it: one they may not read is refused as a name there is not
+(404, `no repository <name>`); members the change keeps, moves or
+takes out are not checked again.
 
 A **proxy** fetches a file the first time it is asked for and keeps it
 until it is evicted (by hand, or for the size limit `max_mib`, unless
@@ -84,7 +108,11 @@ a minute, or until its late answer comes, which is kept all the same
 when it is in whole within that minute and nothing newer was kept
 meanwhile). Names in `exclude` are never asked for upstream, so your
 own packages' names are not looked up in a public registry. A proxy is
-usable as the last member of a group.
+usable as the last member of a group. Nothing is uploaded to a proxy:
+a write is answered 405, `<proxy> is a proxy: it is read only` (an OCI
+proxy's: `<proxy> is read through: push to a hosted repository`),
+which names no upstream, and npm's own endpoints answer 404. A HEAD
+has the GET's headers, `Content-Length` too.
 `pkgpod cache <repo> [list|pin|unpin|evict|prefetch] [paths]` and the
 console's Cache tab manage what is kept.
 
