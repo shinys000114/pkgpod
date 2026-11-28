@@ -832,6 +832,14 @@ def group_after(c, who):
                       f"{b}/{art}/maven-metadata.xml{s}")
         for rel in ("/", "/org/acme/", "/org/acme/w-writer/1.0.0/w-writer-1.0.0.jar"):
             c.add(f"after maven group {g}{rel} {who}", who, "GET", b + rel)
+    if who == "writer":
+        # hello's metadata checksums at mvngmix as anon again, now that
+        # writer's whole metadata there (mvnsec's, of the seed) is the
+        # latest: anon's are of mvnpub's, of a time of the run, and only
+        # the group's rule ("maven group checksums of times") masks them.
+        for s in SUMS:
+            c.add(f"after maven group mvngmix hello metadata{s} anon after writer", "anon",
+                  "GET", f"/mvngmix/{HELLO}/maven-metadata.xml{s}")
 
 
 def group_kept_reads(c, who):
