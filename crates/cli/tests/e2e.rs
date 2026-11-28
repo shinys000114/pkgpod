@@ -8226,6 +8226,163 @@ fn group_listing_says_a_member_could_not_be_read() {
     assert_eq!((st, said.as_deref()), (404, None), "/g0/: {body}");
 }
 
+/// A group's listing has an ETag of the page a GET sends, a HEAD's too,
+/// and answers 304 to an If-None-Match that names it (weakly too) or is
+/// `*`, by GET and by HEAD, with the tag and no-cache: a client or a
+/// cache in front revalidates the merged page as it does a member's
+/// file. Another tag gets the page; the page sorted another way, or
+/// once a member has another file, has another tag. A page that says
+/// it is incomplete is tagged too, and its 304 says so as well; a
+/// directory no member has is not found, untagged. A Maven group's
+/// listing alike.
+#[test]
+fn group_listing_has_an_etag_of_its_page() {
+    use sha2::Digest as _;
+    let s = Server::start();
+    for (r, f) in [("h", "files"), ("mh", "maven")] {
+        s.cli(&["repo", "create", r, "-f", f, "-s", "public=true"])
+            .unwrap();
+    }
+    let upload = |name: &str| {
+        let f = s.dir.path().join(name);
+        std::fs::write(&f, format!("{name}\n")).unwrap();
+        s.cli(&[
+            "upload",
+            "h",
+            f.to_str().unwrap(),
+            "-s",
+            &format!("path=a/{name}"),
+        ])
+        .unwrap();
+    };
+    upload("own.txt");
+    s.cli(&[
+        "repo",
+        "create",
+        "fdown",
+        "-f",
+        "files",
+        "-k",
+        "proxy",
+        "-s",
+        &format!("upstream=http://127.0.0.1:{}/", dead_port()),
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    for (g, f, members) in [
+        ("g", "files", "h"),
+        ("gdown", "files", "fdown,h"),
+        ("mg", "maven", "mh"),
+    ] {
+        s.cli(&[
+            "repo",
+            "create",
+            g,
+            "-f",
+            f,
+            "-k",
+            "group",
+            "-s",
+            &format!("members={members}"),
+            "-s",
+            "public=true",
+        ])
+        .unwrap();
+    }
+    let c = reqwest::blocking::Client::new();
+    let pw = std::fs::read_to_string(s.dir.path().join("data/admin-password")).unwrap();
+    let dir = "org/acme/hello/1.0.0";
+    let pom = "<project><modelVersion>4.0.0</modelVersion><groupId>org.acme</groupId>\
+               <artifactId>hello</artifactId><version>1.0.0</version></project>";
+    for (file, body) in [("hello-1.0.0.pom", pom), ("hello-1.0.0.jar", "hello jar")] {
+        let r = c
+            .put(s.url(&format!("/mh/{dir}/{file}")))
+            .basic_auth("admin", Some(pw.trim()))
+            .body(body)
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 201, "{file}");
+    }
+    // Status, ETag, Cache-Control, Pkgpod-Incomplete and body.
+    let ask = |head: bool, p: &str, inm: Option<&str>| {
+        let mut r = if head {
+            c.head(s.url(p))
+        } else {
+            c.get(s.url(p))
+        };
+        if let Some(t) = inm {
+            r = r.header("if-none-match", t);
+        }
+        let r = r.send().unwrap();
+        let h = |k: &str| {
+            r.headers()
+                .get(k)
+                .map_or(String::new(), |v| v.to_str().unwrap().to_string())
+        };
+        let (etag, cache, said) = (h("etag"), h("cache-control"), h("pkgpod-incomplete"));
+        let st = r.status().as_u16();
+        (st, etag, cache, said, r.bytes().unwrap().to_vec())
+    };
+    let tag = |b: &[u8]| {
+        let hex: String = sha2::Sha256::digest(b)
+            .iter()
+            .map(|x| format!("{x:02x}"))
+            .collect();
+        format!("\"{hex}\"")
+    };
+    for p in ["/g/", "/g/a/", "/gdown/", "/mg/org/acme/"] {
+        let said = if p == "/gdown/" {
+            "1 of 2 members could not be read"
+        } else {
+            ""
+        };
+        let (st, etag, cache, inc, body) = ask(false, p, None);
+        assert_eq!(
+            (st, etag.clone(), cache.as_str(), inc.as_str()),
+            (200, tag(&body), "no-cache", said),
+            "GET {p}"
+        );
+        let (st, e, _, inc, b) = ask(true, p, None);
+        assert_eq!(
+            (st, e.as_str(), inc.as_str(), b.len()),
+            (200, etag.as_str(), said, 0),
+            "HEAD {p}"
+        );
+        let weak = format!("W/{etag}");
+        let listed = format!("\"other\", {etag}");
+        for inm in [etag.as_str(), "*", weak.as_str(), listed.as_str()] {
+            for head in [false, true] {
+                let (st, e, cache, inc, b) = ask(head, p, Some(inm));
+                assert_eq!(
+                    (st, e.as_str(), cache.as_str(), inc.as_str(), b.len()),
+                    (304, etag.as_str(), "no-cache", said, 0),
+                    "If-None-Match {inm} {p} (HEAD {head})"
+                );
+            }
+        }
+        let (st, e, _, _, b) = ask(false, p, Some("\"other\""));
+        assert_eq!(
+            (st, e.as_str(), b == body),
+            (200, etag.as_str(), true),
+            "{p}"
+        );
+    }
+    let (_, by_name, ..) = ask(false, "/g/a/", None);
+    let (st, by_size, _, _, b) = ask(false, "/g/a/?sort=size&order=desc", None);
+    assert_eq!((st, by_size.clone()), (200, tag(&b)));
+    assert_ne!(by_size, by_name, "sorted by size");
+    upload("two.txt");
+    let (st, now, _, _, b) = ask(false, "/g/a/", Some(&by_name));
+    assert_eq!((st, now.clone()), (200, tag(&b)), "after an upload");
+    assert_ne!(now, by_name, "after an upload");
+    assert!(String::from_utf8_lossy(&b).contains("two.txt"));
+    for inm in [None, Some("*")] {
+        let (st, e, ..) = ask(false, "/g/nothere/", inm);
+        assert_eq!((st, e.as_str()), (404, ""), "/g/nothere/ {inm:?}");
+    }
+}
+
 /// A group's write refusal names no member: every caller who may read
 /// the group (an anonymous one at a public group whose first member is
 /// private among them) is told it is read only, with the methods it

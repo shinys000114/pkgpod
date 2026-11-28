@@ -8,11 +8,13 @@
 //! same name further down (a public registry's, through a proxy cache)
 //! never adds to or outranks it. What names no package (a file of a
 //! files repository) comes from the first member that has it; directory
-//! listings, pypi's project list and npm's and cargo's search show every
-//! member's, the first one's entry for a name, and say how many members
-//! could not be read. Where the member asked could not answer (a proxy
-//! whose upstream fails, a member answering 5xx), the group answers 502
-//! in its own words, which name neither the member nor its upstream.
+//! listings, pypi's project list and npm's and cargo's search show the
+//! entries of the members they ask (hosted and mirror members, and a
+//! files proxy's upstream listing), the first one's for a name, and say
+//! how many of those could not be read. Where the member asked could
+//! not answer (a proxy whose upstream fails, a member answering 5xx),
+//! the group answers 502 in its own words, which name neither the
+//! member nor its upstream.
 //!
 //! A group is read through: its readers read its members through it
 //! (anonymous readers of a public group only its public members), and
@@ -46,13 +48,13 @@ enum Ask {
     Note,
     /// cargo's index/config.json: the group's own.
     CargoConfig,
-    /// A directory listing: every member's entries.
+    /// A directory listing: the entries of the members it asks.
     Listing,
     /// The address without its slash: the redirect to the listing.
     Slash,
     /// pypi's list of projects.
     PypiRoot,
-    /// npm's or cargo's search: every member's hits.
+    /// npm's or cargo's search: the hits of the members it asks.
     Search,
     /// Not through a group (a member's label).
     Nothing,
@@ -388,10 +390,11 @@ fn text(st: StatusCode, m: String) -> Response {
 }
 
 /// Of the members a union asked (a listing, pypi's project list, a
-/// search), how many could not be read: `failed` of the `of` the caller
-/// reads through the group. A failing member leaves the others' entries
-/// in an answer that says it is incomplete, naming none; when none
-/// could be read, the answer is as it was.
+/// search), how many could not be read: `failed` of the `of` it asked
+/// of those the caller reads through the group (see [`unioned`]). A
+/// failing member leaves the others' entries in an answer that says it
+/// is incomplete, naming none; when none could be read, the answer is
+/// as it was.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Unread {
     failed: usize,
@@ -422,6 +425,21 @@ impl Unread {
         }
         r
     }
+}
+
+/// The members of `ms` that union `a` asks, and its count of those it
+/// could not read, of them alone: its hosted and mirror members, and in
+/// a listing a files proxy, whose upstream's listing is read. A proxy
+/// of another format has no tree to list and takes no search: it is
+/// not asked, so a group of a hosted member that fails and such a proxy
+/// read no member, and does not say that one of two could not be read.
+fn unioned(a: &Ask, ms: Vec<Served>) -> (Vec<Served>, Unread) {
+    let ms: Vec<Served> = ms
+        .into_iter()
+        .filter(|m| m.repo.kind != Kind::Proxy || (*a == Ask::Listing && m.repo.format == "files"))
+        .collect();
+    let n = ms.len();
+    (ms, Unread::of(n))
 }
 
 /// A member's answer to a search: its hits, a document of them; none
@@ -588,11 +606,11 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
             crate::serving::status(StatusCode::NOT_FOUND)
         }
         Ask::Listing => {
-            // Every member's entries, in order; a files proxy's from its
-            // upstream.
+            // The entries of the members asked, in order; a files
+            // proxy's from its upstream.
             let mut out: Vec<ListEntry> = Vec::new();
             let mut any = false;
-            let mut unread = Unread::of(ms.len());
+            let (ms, mut unread) = unioned(&Ask::Listing, ms);
             for m in &ms {
                 let es = if m.repo.kind == Kind::Proxy && m.repo.format == "files" {
                     crate::serving::proxy::group_entries(&app, m, &at.rel).await
@@ -630,14 +648,8 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
             // incomplete as a listing is when some member failed.
             let r = if any {
                 let line = unread.line();
-                crate::serving::listing(
-                    &at.raw_path,
-                    out,
-                    &query,
-                    head,
-                    &Default::default(),
-                    line.as_deref(),
-                )
+                let asked = req.headers();
+                union_listing(&at.raw_path, out, &query, asked, head, line.as_deref()).await
             } else {
                 crate::serving::status(StatusCode::NOT_FOUND)
             };
@@ -649,7 +661,7 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
                     .into_response();
             }
             let (app2, rel) = (app.clone(), at.rel.clone());
-            let mut unread = Unread::of(ms.len());
+            let (ms, mut unread) = unioned(&Ask::PypiRoot, ms);
             let read = tokio::task::spawn_blocking(move || {
                 ms.iter()
                     .map(|m| {
@@ -701,7 +713,7 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
                 headers: again.headers.clone(),
             };
             let mut hits: Vec<Value> = Vec::new();
-            let mut unread = Unread::of(ms.len());
+            let (ms, mut unread) = unioned(&Ask::Search, ms);
             for m in ms {
                 let member = m.repo.name.clone();
                 let v = match searched(from(&app, &at, m, &asked).await).await {
@@ -766,11 +778,7 @@ fn pypi_root(names: &[String], h: &HeaderMap, head: bool, incomplete: Option<&st
         s.push_str("</body></html>\n");
         ("text/html; charset=utf-8", s)
     };
-    let etag = format!("\"{}\"", pkgpod_base::Digest::of(body.as_bytes()).hex());
-    let fresh = h
-        .get(header::IF_NONE_MATCH)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| crate::serving::inm_matches(v, &etag));
+    let (etag, fresh) = tag_of(body.as_bytes(), h);
     let mut r = if fresh {
         StatusCode::NOT_MODIFIED.into_response()
     } else {
@@ -786,10 +794,74 @@ fn pypi_root(names: &[String], h: &HeaderMap, head: bool, incomplete: Option<&st
             .insert(header::CONTENT_LENGTH, HeaderValue::from(len));
         r
     };
+    r.headers_mut()
+        .insert(header::VARY, HeaderValue::from_static("Accept"));
+    tagged(r, &etag)
+}
+
+/// A union's directory listing (see [`crate::serving::listing`]) with
+/// an ETag of the page a GET sends, a HEAD's too, answered 304 to an
+/// If-None-Match that names it (see [`tag_of`]): the page is merged from
+/// the members anew for each request, so a client or a cache in front
+/// revalidates it by its tag, as pypi's project list. A HEAD is the
+/// listing's own, with that tag.
+async fn union_listing(
+    path: &str,
+    entries: Vec<ListEntry>,
+    query: &str,
+    h: &HeaderMap,
+    head: bool,
+    incomplete: Option<&str>,
+) -> Response {
+    let listed = |es: Vec<ListEntry>, head: bool| {
+        crate::serving::listing(path, es, query, head, &Default::default(), incomplete)
+    };
+    // The page a GET sends, for its tag; a HEAD is listed again.
+    let again: Vec<ListEntry> = if head {
+        entries
+            .iter()
+            .map(|e| ListEntry {
+                name: e.name.clone(),
+                dir: e.dir,
+                size: e.size,
+                modified: e.modified,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let (parts, body) = listed(entries, false).into_parts();
+    let page = axum::body::to_bytes(body, usize::MAX)
+        .await
+        .unwrap_or_default();
+    let (etag, fresh) = tag_of(&page, h);
+    let r = if fresh {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else if head {
+        listed(again, true)
+    } else {
+        Response::from_parts(parts, Body::from(page))
+    };
+    tagged(r, &etag)
+}
+
+/// The ETag of a document a group builds, of the `body` it sends, and
+/// whether the request (its headers `h`) names it in If-None-Match,
+/// weakly too, or asks with `*`: then it is answered 304.
+fn tag_of(body: &[u8], h: &HeaderMap) -> (String, bool) {
+    let etag = format!("\"{}\"", pkgpod_base::Digest::of(body).hex());
+    let fresh = h
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| crate::serving::inm_matches(v, &etag));
+    (etag, fresh)
+}
+
+/// `r`, a document a group builds or its 304, revalidated by `etag`.
+fn tagged(mut r: Response, etag: &str) -> Response {
     let hd = r.headers_mut();
     hd.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    hd.insert(header::VARY, HeaderValue::from_static("Accept"));
-    if let Ok(v) = HeaderValue::from_str(&etag) {
+    if let Ok(v) = HeaderValue::from_str(etag) {
         hd.insert(header::ETAG, v);
     }
     r
@@ -1293,6 +1365,46 @@ mod tests {
             );
             assert_eq!(got[1].1.contains(&line), html, "{accept}");
             assert_eq!(got[0].0 != got[1].0, html, "{accept}");
+        }
+    }
+
+    /// A group's union asks, and counts among the members it could not
+    /// read, its hosted members and in a listing a files proxy (whose
+    /// upstream's listing it reads); a proxy of another format has no
+    /// tree to list and takes no search, and is not asked. A group of a
+    /// hosted member that fails and such a proxy then read no member:
+    /// its answer says nothing of being incomplete, as when no member
+    /// could be read.
+    #[test]
+    fn a_group_s_union_counts_the_members_it_asks() {
+        use crate::serving::proxy::tests::{app, proxy_repo};
+        let (_d, app) = app();
+        for (f, a) in [
+            ("files", Ask::Listing),
+            ("maven", Ask::Listing),
+            ("pypi", Ask::PypiRoot),
+            ("npm", Ask::Search),
+            ("cargo", Ask::Search),
+        ] {
+            let (p, h) = (format!("grpu-{f}-up"), format!("grpu-{f}"));
+            proxy_repo(&app, &p, f, "http://127.0.0.1:9/");
+            made(&app, &h, f, true, None);
+            let ms = [&p, &h].map(|n| app.served(n).unwrap()).to_vec();
+            let (asked, mut unread) = unioned(&a, ms);
+            let names: Vec<&str> = asked.iter().map(|m| m.repo.name.as_str()).collect();
+            let files = f == "files";
+            let want = if files {
+                vec![&p[..], &h]
+            } else {
+                vec![&h[..]]
+            };
+            let n = want.len();
+            assert_eq!((names, unread), (want, Unread::of(n)), "{f}");
+            // The member asked first fails: the files proxy, or the
+            // hosted member, the only one asked.
+            unread.failed = 1;
+            let words = files.then(|| "1 of 2 members could not be read".to_string());
+            assert_eq!(unread.words(), words, "{f}");
         }
     }
 
