@@ -803,7 +803,7 @@ async fn get(
                     _ => None,
                 })
                 .collect();
-            let notes = tree_notes(&s.repo, &t, head).await;
+            let notes = tree_notes(&s.repo, &t).await;
             listing(raw_path, entries, &query, head, &notes, None)
         }
         Entry::Blob { sha256, meta, .. } => {
@@ -1174,18 +1174,35 @@ async fn serve_mirror(
         if !raw_path.ends_with('/') {
             return Redirect::permanent(&format!("{raw_path}/")).into_response();
         }
-        let tree2 = tree.clone();
-        let (entries, notes) = tokio::task::spawn_blocking(move || {
-            let notes = if files && !head {
-                fs_notes(&tree2, &full)
+        let (tree2, full2) = (tree.clone(), full.clone());
+        let read = tokio::task::spawn_blocking(move || {
+            let entries = fs_entries(&tree2, &full2, hidden)?;
+            // A HEAD's too: its length is the GET's.
+            let notes = if files {
+                fs_notes(&tree2, &full2)
             } else {
                 Default::default()
             };
-            (fs_entries(&tree2, &full, hidden).unwrap_or_default(), notes)
+            Ok((entries, notes))
         })
         .await
-        .unwrap_or_default();
-        return listing(raw_path, entries, &query, head, &notes, None);
+        .unwrap_or_else(|e| Err(std::io::Error::other(e)));
+        return match read {
+            Ok((entries, notes)) => listing(raw_path, entries, &query, head, &notes, None),
+            // Gone since it was looked at (a sync replacing it): as a
+            // directory that is not there.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => status(StatusCode::NOT_FOUND),
+            // Not an empty directory: an error, the operator's to see
+            // (the answer names no path of the server's).
+            Err(e) => {
+                tracing::warn!("{}: could not be read: {e}", full.display());
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "this directory of the mirror could not be read\n",
+                )
+                    .into_response()
+            }
+        };
     }
     let uri: Uri = match format!(
         "/{}",
@@ -1605,7 +1622,8 @@ pub struct ListEntry {
 }
 
 /// A directory listing; `incomplete`, a line under its header saying
-/// what it may lack (a group's, of members that could not be read).
+/// what it may lack (a group's, of members that could not be read). A
+/// HEAD has the GET's headers, its Content-Length too, and no body.
 pub(crate) fn listing(
     path: &str,
     mut entries: Vec<ListEntry>,
@@ -1628,12 +1646,9 @@ pub(crate) fn listing(
         },
         q("order") == Some("desc"),
     );
-    let body = if head {
-        String::new()
-    } else {
-        listing_html(path, entries, sort, notes, incomplete)
-    };
-    (
+    let page = listing_html(path, entries, sort, notes, incomplete);
+    let len = page.len();
+    let mut r = (
         [
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
             (header::CACHE_CONTROL, "no-cache"),
@@ -1641,23 +1656,30 @@ pub(crate) fn listing(
             (header::CONTENT_SECURITY_POLICY, LISTING_CSP),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
         ],
-        body,
+        if head {
+            Body::empty()
+        } else {
+            Body::from(page)
+        },
     )
-        .into_response()
+        .into_response();
+    r.headers_mut()
+        .insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+    r
 }
 
 pub(crate) const LISTING_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; \
     img-src 'self' https: data:; base-uri 'none'; form-action 'none'";
 
 /// A plain tree's notes (a files repository's) in a directory of it,
-/// read from the store; nothing for other formats or on HEAD.
+/// read from the store; nothing for other formats. A HEAD reads them
+/// too: its length is the GET's.
 pub(crate) async fn tree_notes(
     repo: &pkgpod_engine::RepoInfo,
     t: &pkgpod_engine::tree::Tree,
-    head: bool,
 ) -> crate::ops::notes::Notes {
     use crate::ops::notes::{FOOTER, HEADER, MAX, Notes};
-    if !crate::registry::get().tree(&repo.format).plain || head {
+    if !crate::registry::get().tree(&repo.format).plain {
         return Notes::default();
     }
     let blobs: Vec<(String, pkgpod_base::Digest)> = [HEADER, FOOTER]

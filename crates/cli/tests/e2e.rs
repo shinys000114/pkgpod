@@ -16132,9 +16132,11 @@ fn files_directory_notes() {
     assert!(h.contains(">tool.tar.gz<"), "{h}");
     let (st, raw) = get(&s.url("/f/.FOOTER.md"), None);
     assert_eq!((st, raw.as_str()), (200, "Questions: *the team*"));
-    // HEAD reads nothing and sends no body.
+    // HEAD sends no body, and the length of the GET's page, notes and
+    // all.
     let r = c.head(s.url("/f/")).send().unwrap();
     assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(r.headers()["content-length"], h.len().to_string());
 
     // A directory's own notes; another directory's are not inherited.
     put("docs/.HEADER.md", b"## Docs".to_vec());
@@ -16374,6 +16376,195 @@ fn files_mirror_and_import_over_http_listings() {
             .contains("left out 1 symbolic link(s)"),
         "{log}"
     );
+}
+
+/// A HEAD of a directory listing says the length of the GET's page and
+/// sends none of it: a hosted tree's (with its notes, sorted too), a
+/// files proxy's, a mirror's received tree (with its notes) and a
+/// group's of them.
+#[test]
+fn listing_head_says_the_get_length() {
+    let s = Server::start();
+    s.cli(&["repo", "create", "h", "-f", "files", "-s", "public=true"])
+        .unwrap();
+    let f = s.dir.path().join("hello.txt");
+    std::fs::write(&f, "hello").unwrap();
+    let note = s.dir.path().join("note.md");
+    std::fs::write(&note, "# Acme files\n\nThe *team's* builds.\n").unwrap();
+    for (file, path) in [
+        (&f, "hello.txt"),
+        (&f, "a/hello.txt"),
+        (&note, ".HEADER.md"),
+    ] {
+        s.cli(&[
+            "upload",
+            "h",
+            file.to_str().unwrap(),
+            "-s",
+            &format!("path={path}"),
+        ])
+        .unwrap();
+    }
+    let up = stub_upstream_on(
+        0,
+        vec![(
+            "/".into(),
+            b"<html><body><a href=\"up.txt\">up.txt</a></body></html>\n".to_vec(),
+        )],
+    );
+    s.cli(&[
+        "repo",
+        "create",
+        "p",
+        "-f",
+        "files",
+        "-k",
+        "proxy",
+        "-s",
+        &format!("upstream=http://127.0.0.1:{up}/"),
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    s.cli(&[
+        "repo",
+        "create",
+        "m",
+        "-f",
+        "files",
+        "-k",
+        "mirror",
+        "-s",
+        &format!("source={}", s.url("/h/")),
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let out = s.cli(&["sync", "m", "--wait"]).unwrap();
+    assert!(out.contains("2 file(s) transferred"), "{out}");
+    let tree = s.dir.path().join("data/storages/main/trees/m");
+    std::fs::write(tree.join(".HEADER.md"), "# Mirrored *files*").unwrap();
+    s.cli(&[
+        "repo",
+        "create",
+        "g",
+        "-f",
+        "files",
+        "-k",
+        "group",
+        "-s",
+        "members=h,m,p",
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let c = reqwest::blocking::Client::new();
+    let same = |path: &str| {
+        let r = c.get(s.url(path)).send().unwrap();
+        assert_eq!(r.status().as_u16(), 200, "GET {path}");
+        let page = r.text().unwrap();
+        let r = c.head(s.url(path)).send().unwrap();
+        assert_eq!(r.status().as_u16(), 200, "HEAD {path}");
+        let len = r
+            .headers()
+            .get("content-length")
+            .map(|v| v.to_str().unwrap().to_string());
+        assert_eq!(
+            len,
+            Some(page.len().to_string()),
+            "HEAD {path}: the GET's length"
+        );
+        assert!(r.bytes().unwrap().is_empty(), "HEAD {path}: no body");
+        page
+    };
+    let page = same("/h/");
+    assert!(
+        page.contains("<h1>Acme files</h1>") && !page.contains(">.HEADER.md<"),
+        "{page}"
+    );
+    same("/h/?sort=size&order=desc");
+    same("/h/a/");
+    assert!(same("/p/").contains("up.txt"));
+    let page = same("/m/");
+    assert!(
+        page.contains("<h1>Mirrored <em>files</em></h1>") && page.contains("hello.txt"),
+        "{page}"
+    );
+    same("/m/a/");
+    let page = same("/g/");
+    assert!(
+        page.contains("up.txt") && page.contains("href=\"a/\""),
+        "{page}"
+    );
+    same("/g/a/");
+}
+
+/// A mirror's directory that cannot be read is an error, not an empty
+/// listing: 500, with a text that names no path of the server's (its
+/// log does). Readable again, it is listed; one that is not there is
+/// not found, as before.
+#[test]
+fn mirror_listing_that_cannot_be_read_says_so() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = Server::start();
+    s.cli(&["repo", "create", "src", "-f", "files", "-s", "public=true"])
+        .unwrap();
+    let f = s.dir.path().join("hello.txt");
+    std::fs::write(&f, "hello").unwrap();
+    s.cli(&[
+        "upload",
+        "src",
+        f.to_str().unwrap(),
+        "-s",
+        "path=iso/hello.txt",
+    ])
+    .unwrap();
+    s.cli(&[
+        "repo",
+        "create",
+        "m",
+        "-f",
+        "files",
+        "-k",
+        "mirror",
+        "-s",
+        &format!("source={}", s.url("/src/")),
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let out = s.cli(&["sync", "m", "--wait"]).unwrap();
+    assert!(out.contains("1 file(s) transferred"), "{out}");
+    let (st, page) = get(&s.url("/m/iso/"), None);
+    assert!(st == 200 && page.contains("hello.txt"), "{st}: {page}");
+    let iso = s.dir.path().join("data/storages/main/trees/m/iso");
+    let c = reqwest::blocking::Client::new();
+    std::fs::set_permissions(&iso, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let stopped = std::fs::read_dir(&iso).is_err();
+    let r = c.get(s.url("/m/iso/")).send().unwrap();
+    let head = c.head(s.url("/m/iso/")).send().unwrap();
+    // Readable again before anything is asserted, for the directory to
+    // be removed whatever the outcome.
+    std::fs::set_permissions(&iso, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(stopped, "the tests run as a user whom mode 000 stops");
+    let st = r.status().as_u16();
+    let ct = r.headers().get("content-type").cloned();
+    let body = r.text().unwrap();
+    assert_eq!(st, 500, "{body}");
+    assert_eq!(
+        ct.as_ref().map(|v| v.to_str().unwrap()),
+        Some("text/plain; charset=utf-8"),
+        "{body}"
+    );
+    let dir = s.dir.path().to_str().unwrap();
+    assert!(
+        !body.contains(dir) && !body.contains("storages") && !body.contains("trees"),
+        "{body}"
+    );
+    assert_eq!(head.status().as_u16(), 500);
+    let (st, page) = get(&s.url("/m/iso/"), None);
+    assert!(st == 200 && page.contains("hello.txt"), "{st}: {page}");
+    assert_eq!(get(&s.url("/m/nothere/"), None).0, 404);
 }
 
 /// A registry client for the tests: Basic auth with a token.
