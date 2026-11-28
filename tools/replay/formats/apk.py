@@ -389,6 +389,20 @@ def credentials(c):
                   {"Authorization": auth})
 
 
+def hosts(c):
+    # A Host that is not text, once: taken for none (the request's
+    # address names no host either), so a repository is found by its
+    # path, as at the default host: at apktop.localhost too, whose
+    # repository is then at neither its root nor /apkroot/. An index, a
+    # listing, a directory without the slash (redirected by its path).
+    for name, host, rel in (("index", "localhost\xe9", "/apkpub" + INDEX),
+                            ("listing", "localhost\xe9", "/apkpub/"),
+                            ("directory", "localhost\xe9", "/apkpub/v3.22"),
+                            ("top index", TOP_HOST + "\xe9", INDEX),
+                            ("top repository", TOP_HOST + "\xe9", "/apkroot" + INDEX)):
+        c.add(f"apk host not text {name}", "anon", "GET", rel, {"Host": host})
+
+
 # Who may write (the others are refused before their bodies are read).
 WRITERS = ("writer", "wtoken", "wbearer", "admin", "ptoken")
 
@@ -835,6 +849,7 @@ PARTS = [
     ("publisher", 100, ["apkpub"]),
     ("reads", 140, reads),
     ("reads end", 30, credentials),
+    ("reads end", 30, hosts),
     ("writes", 230, writes),
     ("writes", 240, limits),
     ("after", 90, after),
