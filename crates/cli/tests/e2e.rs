@@ -8577,6 +8577,98 @@ fn group_refusals_name_no_member() {
     assert_eq!(r.status().as_u16(), 404);
 }
 
+/// A proxy's write refusal does not show its upstream: every caller
+/// who may read the proxy is told it is read only, with the methods it
+/// takes, as a group's are. Callers who may not read it are refused as
+/// before, and npm's own endpoints answer as a hosted registry's do.
+#[test]
+fn proxy_refusals_name_no_upstream() {
+    let s = Server::start();
+    let up = format!("http://127.0.0.1:{}/", dead_port());
+    for (name, format, public) in [
+        ("np", "npm", "true"),
+        ("fp", "files", "true"),
+        ("npriv", "npm", "false"),
+    ] {
+        s.cli(&[
+            "repo",
+            "create",
+            name,
+            "-f",
+            format,
+            "-k",
+            "proxy",
+            "-s",
+            &format!("upstream={up}"),
+            "-s",
+            &format!("public={public}"),
+        ])
+        .unwrap();
+    }
+    s.cli(&["repo", "create", "other", "-f", "npm"]).unwrap();
+    let w = s
+        .cli(&["token", "create", "pw", "--repos", "np,fp,npriv", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let o = s
+        .cli(&["token", "create", "po", "--repos", "other", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let c = reqwest::blocking::Client::new();
+    let ask = |m: reqwest::Method, p: &str, t: Option<&str>| {
+        let mut b = c.request(m, s.url(p)).body("{\"name\":\"hello\"}");
+        if let Some(t) = t {
+            b = b.bearer_auth(t);
+        }
+        let r = b.send().unwrap();
+        let st = r.status().as_u16();
+        let allow = r
+            .headers()
+            .get("allow")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        (st, r.text().unwrap(), allow)
+    };
+    for (m, p, t) in [
+        (reqwest::Method::PUT, "/np/hello", None),
+        (reqwest::Method::PUT, "/np/hello", Some(w.as_str())),
+        (
+            reqwest::Method::DELETE,
+            "/np/hello/-rev/1-x",
+            Some(w.as_str()),
+        ),
+        (reqwest::Method::POST, "/np/hello", None),
+        (reqwest::Method::PUT, "/fp/a.txt", None),
+        (reqwest::Method::PUT, "/fp/a.txt", Some(w.as_str())),
+        (reqwest::Method::PUT, "/npriv/hello", Some(w.as_str())),
+    ] {
+        let repo = p.split('/').nth(1).unwrap();
+        let (st, body, allow) = ask(m.clone(), p, t);
+        assert_eq!(
+            (st, body.as_str(), allow.as_deref()),
+            (
+                405,
+                format!("{repo} is a proxy: it is read only\n").as_str(),
+                Some("GET, HEAD")
+            ),
+            "{m} {p} {t:?}"
+        );
+    }
+    // Who may not read the proxy is refused before it says anything.
+    let (st, _, _) = ask(reqwest::Method::PUT, "/npriv/hello", None);
+    assert_eq!(st, 401);
+    let (st, _, _) = ask(reqwest::Method::PUT, "/npriv/hello", Some(&o));
+    assert_eq!(st, 404);
+    let (st, _, _) = ask(
+        reqwest::Method::POST,
+        "/np/-/npm/v1/security/audits/quick",
+        None,
+    );
+    assert_eq!(st, 404);
+}
+
 /// An npm group or proxy is not asked for a lone scope ("@first"),
 /// which names no package: it answers 404, asking no member and no
 /// upstream (a hosted member holding the scope's packages, or a proxy

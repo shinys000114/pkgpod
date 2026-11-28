@@ -1266,14 +1266,15 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
         if r.format == "npm" && at.rel.first().map(String::as_str) == Some("-") {
             return status(StatusCode::NOT_FOUND);
         }
-        return text(
+        // The proxy's own words, the same to every caller, as a group's:
+        // its upstream's address is not told to all who may read it.
+        let mut res = text(
             StatusCode::METHOD_NOT_ALLOWED,
-            format!(
-                "{} is a proxy of {}: publish to a hosted repository",
-                r.name,
-                r.setting_str("upstream")
-            ),
+            format!("{} is a proxy: it is read only", r.name),
         );
+        res.headers_mut()
+            .insert(header::ALLOW, HeaderValue::from_static("GET, HEAD"));
+        return res;
     }
     if r.format == "files" {
         return files_serve(app, at, req).await;
