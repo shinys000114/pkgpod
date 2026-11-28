@@ -7509,7 +7509,7 @@ fn group_of_files_repositories() {
     // Read through, downloads count on the member.
     assert_eq!(s.json(&["downloads", "a"])["total"], 1);
     assert_eq!(s.json(&["downloads", "g"])["total"], 0);
-    // Publishing goes to a member.
+    // Publishing goes to a member: the group is read only.
     let r = c
         .put(s.url("/g/new.txt"))
         .basic_auth("token", Some(&gt))
@@ -7517,7 +7517,7 @@ fn group_of_files_repositories() {
         .send()
         .unwrap();
     assert_eq!(r.status().as_u16(), 405);
-    assert!(r.text().unwrap().contains("publish to its member a"));
+    assert_eq!(r.text().unwrap(), "g is a group: it is read only\n");
     // A public group: anonymous readers see its public members only.
     s.cli(&["repo", "set", "g", "public=true"]).unwrap();
     assert_eq!(get("/g/shared.txt", None), (200, "from b".into()));
@@ -7781,8 +7781,10 @@ fn group_of_pypi_repositories() {
         .trim()
         .to_string();
     let (st, body) = twine_upload(&s.url("/pyg/"), Some(("__token__", &gt2)), &f);
-    assert_eq!(st, 405, "{body}");
-    assert!(body.contains("publish to its member"), "{body}");
+    assert_eq!(
+        (st, body.as_str()),
+        (405, "pyg is a group: it is read only\n")
+    );
 }
 
 /// A port nothing listens on.
@@ -7893,7 +7895,8 @@ fn group_with_a_proxy_member() {
 
 /// A proxy member whose upstream fails stops a group's search for that
 /// name: a later member's package of the same name is not served in
-/// its place.
+/// its place, and the group's 502 names neither the member nor its
+/// upstream.
 #[test]
 fn group_stops_at_a_failing_proxy_member() {
     let s = Server::start();
@@ -7943,12 +7946,77 @@ fn group_stops_at_a_failing_proxy_member() {
     assert_eq!(get("/pup/simple/shared-pkg/").0, 200);
     for g in ["pg", "pg1"] {
         let (st, body) = get(&format!("/{g}/simple/shared-pkg/"));
-        assert_eq!(st, 502, "{g}: {body}");
-        assert!(
-            body.contains("pdown") && !body.contains("shared_pkg-9.9"),
-            "{g}: {body}"
+        assert_eq!(
+            (st, body.as_str()),
+            (502, format!("{g}: a member could not be asked\n").as_str())
         );
     }
+}
+
+/// A group's write refusal names no member: every caller who may read
+/// the group (an anonymous one at a public group whose first member is
+/// private among them) is told it is read only, with the methods it
+/// takes. npm's own endpoints answer as a hosted registry's do.
+#[test]
+fn group_refusals_name_no_member() {
+    let s = Server::start();
+    s.cli(&["repo", "create", "sec", "-f", "npm", "-s", "public=false"])
+        .unwrap();
+    s.cli(&["repo", "create", "pub", "-f", "npm", "-s", "public=true"])
+        .unwrap();
+    s.cli(&[
+        "repo",
+        "create",
+        "g",
+        "-f",
+        "npm",
+        "-k",
+        "group",
+        "-s",
+        "members=sec,pub",
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let w = s
+        .cli(&["token", "create", "gw", "--repos", "g", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let c = reqwest::blocking::Client::new();
+    let doc = json!({"name": "hello", "versions": {}}).to_string();
+    for (m, p) in [
+        (reqwest::Method::PUT, "/g/hello"),
+        (reqwest::Method::PUT, "/g/@team%2fhello"),
+        (reqwest::Method::DELETE, "/g/hello/-rev/1-x"),
+        (reqwest::Method::POST, "/g/hello"),
+    ] {
+        for t in [None, Some(w.as_str())] {
+            let mut b = c.request(m.clone(), s.url(p)).body(doc.clone());
+            if let Some(t) = t {
+                b = b.bearer_auth(t);
+            }
+            let r = b.send().unwrap();
+            let st = r.status().as_u16();
+            let allow = r
+                .headers()
+                .get("allow")
+                .and_then(|v| v.to_str().ok())
+                .map(String::from);
+            let body = r.text().unwrap();
+            assert_eq!(
+                (st, body.as_str(), allow.as_deref()),
+                (405, "g is a group: it is read only\n", Some("GET, HEAD")),
+                "{m} {p} {t:?}"
+            );
+        }
+    }
+    let r = c
+        .post(s.url("/g/-/npm/v1/security/audits/quick"))
+        .body("{}")
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 404);
 }
 
 /// A Maven group does not ask a proxy member's upstream for an

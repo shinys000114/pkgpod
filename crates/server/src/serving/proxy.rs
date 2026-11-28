@@ -1179,8 +1179,8 @@ pub enum Has {
     Yes,
     No,
     /// The upstream could not say (not there, or an error): the group
-    /// answers with this rather than ask a later member, whose package
-    /// of the same name is not the one meant.
+    /// answers 502 (and logs this) rather than ask a later member, whose
+    /// package of the same name is not the one meant.
     Failed(String),
 }
 

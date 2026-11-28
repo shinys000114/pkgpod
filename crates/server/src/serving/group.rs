@@ -257,21 +257,17 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
         if g.format == "npm" && at.rel.first().map(String::as_str) == Some("-") {
             return crate::serving::status(StatusCode::NOT_FOUND);
         }
-        let to = g
-            .setting_list("members")
-            .into_iter()
-            .find(|m| app.engine.repo(m).is_ok_and(|r| r.kind.versioned()));
         crate::serving::drain(req).await;
-        return text(
+        // The group's own words, the same to every caller: a member's
+        // name would tell an anonymous writer at a public group of a
+        // member it may not read.
+        let mut r = text(
             StatusCode::METHOD_NOT_ALLOWED,
-            format!(
-                "{} is a group, read through: publish to {}",
-                g.name,
-                to.map_or("one of its members".to_string(), |m| format!(
-                    "its member {m}"
-                ))
-            ),
+            format!("{} is a group: it is read only", g.name),
         );
+        r.headers_mut()
+            .insert(header::ALLOW, HeaderValue::from_static("GET, HEAD"));
+        return r;
     }
     let query = req.uri().query().unwrap_or("").to_string();
     let a = ask(&g.format, &at.rel, at.raw_path.ends_with('/'), &query);
@@ -294,7 +290,17 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
                         Has::Yes => true,
                         Has::No => false,
                         Has::Failed(e) => {
-                            return text(StatusCode::BAD_GATEWAY, format!("{}: {e}", m.repo.name));
+                            // Which member, and its error (which may
+                            // name its upstream), are the operator's.
+                            tracing::warn!(
+                                "{}: its member {} could not be asked for {key}: {e}",
+                                g.name,
+                                m.repo.name
+                            );
+                            return text(
+                                StatusCode::BAD_GATEWAY,
+                                format!("{}: a member could not be asked", g.name),
+                            );
                         }
                     }
                 } else {
