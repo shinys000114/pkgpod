@@ -360,8 +360,14 @@ fn run(
     let mut protect: HashSet<String> = clashed.into_iter().collect();
 
     // New pool files and staged indices must be on disk before any dist
-    // points at them (and before the hash cache vouches for them).
-    if let Err(e) = sync_fs(ctx.dest) {
+    // points at them (and before the hash cache vouches for them). With
+    // no dist staged there are none (the pool files fetched are those
+    // the staged dists name) and nothing switches: no flush, which is
+    // of the whole filesystem and waits for every other writer's data
+    // on it as well.
+    if !staged.is_empty()
+        && let Err(e) = sync_fs(ctx.dest)
+    {
         remove_staging(&staged, Path::new(""));
         return Err(e);
     }
