@@ -769,12 +769,16 @@ fn pypi_root(names: &[String], h: &HeaderMap, head: bool, incomplete: Option<&st
 }
 
 /// Checks a group's members as `who` sets them: repositories of the
-/// group's format that are not groups, which `who` may read.
+/// group's format that are not groups, which `who` may read. Only the
+/// members the change adds are checked: one in `stored`, the group's
+/// list before the change (none at create), was checked when it was
+/// added, so keeping, moving or taking it out needs no right on it.
 pub fn check_members(
     app: &App,
     who: &crate::auth::Caller,
     group: &str,
     format: &str,
+    stored: &[String],
     settings: &Value,
 ) -> crate::Result<()> {
     let list: Vec<String> = match settings.get("members") {
@@ -796,7 +800,7 @@ pub fn check_members(
             LISTED.join(", ")
         )));
     }
-    for m in &list {
+    for m in list.iter().filter(|m| !stored.contains(m)) {
         if m == group {
             return Err(crate::Error::Invalid(format!(
                 "{group} cannot be its own member"

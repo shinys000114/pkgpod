@@ -458,7 +458,15 @@ pub(crate) async fn repo_create(
     blocking(&app, move |app| {
         app.check_urls(&req.name, &req.settings)?;
         if req.kind == "group" {
-            crate::serving::group::check_members(app, &c, &req.name, &req.format, &req.settings)?;
+            // Every member is added at create.
+            crate::serving::group::check_members(
+                app,
+                &c,
+                &req.name,
+                &req.format,
+                &[],
+                &req.settings,
+            )?;
         }
         if req.kind == "proxy" {
             crate::serving::proxy::check_settings(&req.format, &req.settings)?;
@@ -874,7 +882,16 @@ pub(crate) async fn repo_patch(
             ));
         }
         if r0.kind == Kind::Group {
-            crate::serving::group::check_members(app, &c, &repo, &r0.format, &req.settings)?;
+            // Checked where the change adds members (the console sends
+            // the list with every save).
+            crate::serving::group::check_members(
+                app,
+                &c,
+                &repo,
+                &r0.format,
+                &r0.setting_list("members"),
+                &req.settings,
+            )?;
         }
         if r0.kind == Kind::Proxy {
             crate::serving::proxy::check_settings(&r0.format, &req.settings)?;

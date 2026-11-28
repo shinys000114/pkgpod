@@ -7548,17 +7548,18 @@ fn group_of_files_repositories() {
         .cli(&["repo", "create", "dg", "-f", "deb", "-k", "group"])
         .unwrap_err();
     assert!(e.contains("cannot be of kind group"), "{e}");
+    s.cli(&["repo", "create", "p", "-f", "files"]).unwrap();
     s.cli_in(&["user", "add", "u", "--password-stdin"], "u-password")
         .unwrap();
     s.cli(&["grant", "set", "g", "user:u", "admin"]).unwrap();
     let r = c
         .patch(format!("{}/api/v1/repos/g", s.api))
         .basic_auth("u", Some("u-password"))
-        .json(&serde_json::json!({"settings": {"members": ["b", "a"]}}))
+        .json(&serde_json::json!({"settings": {"members": ["a", "b", "p"]}}))
         .send()
         .unwrap();
     assert_eq!(r.status().as_u16(), 403);
-    assert!(r.text().unwrap().contains("may not read a"));
+    assert!(r.text().unwrap().contains("may not read p"));
     // The console's pages of a group.
     let (cc, sid, _) = console_session(&s, "gc", "gc-password");
     let page = |p: &str| {
@@ -7602,6 +7603,88 @@ fn group_of_files_repositories() {
     let g = s.json(&["repo", "show", "g"]);
     assert_eq!(g["settings"]["members"], serde_json::json!(["b"]), "{g}");
     assert_eq!(get("/g/shared.txt", Some(&gt)), (200, "from b".into()));
+}
+
+/// A group's members are checked where a change adds them: its admin,
+/// who may read one member and not the other, still saves the group's
+/// settings with both listed (as the console sends them) and may take
+/// the other out, but adds none it may not read.
+#[test]
+fn group_members_are_checked_where_added() {
+    let s = Server::start();
+    for r in ["a", "b", "c"] {
+        s.cli(&["repo", "create", r, "-f", "files"]).unwrap();
+    }
+    s.cli(&[
+        "repo",
+        "create",
+        "g",
+        "-f",
+        "files",
+        "-k",
+        "group",
+        "-s",
+        "members=a,b",
+    ])
+    .unwrap();
+    s.cli_in(&["user", "add", "u", "--password-stdin"], "u-password")
+        .unwrap();
+    s.cli(&["grant", "set", "g", "user:u", "admin"]).unwrap();
+    s.cli(&["grant", "set", "a", "user:u", "read"]).unwrap();
+    let c = reqwest::blocking::Client::new();
+    let patch = |settings: Value| {
+        let r = c
+            .patch(format!("{}/api/v1/repos/g", s.api))
+            .basic_auth("u", Some("u-password"))
+            .json(&json!({ "settings": settings }))
+            .send()
+            .unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    let stored = |k: &str| s.json(&["repo", "show", "g"])["settings"][k].clone();
+    // Another setting, the members as they are: b is kept, not checked.
+    let (st, body) = patch(json!({"description": "api", "members": ["a", "b"]}));
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(stored("description"), json!("api"));
+    assert_eq!(stored("members"), json!(["a", "b"]));
+    // An added member u may not read is refused, as before.
+    let (st, body) = patch(json!({"members": ["a", "b", "c"]}));
+    assert_eq!(st, 403, "{body}");
+    assert!(
+        body.contains("you may not read c, so you may not make it a member"),
+        "{body}"
+    );
+    assert_eq!(stored("members"), json!(["a", "b"]));
+    // The console's save sends every field, the members too.
+    let (cc, sid, csrf) = console_login(&s, "u", "u-password");
+    let save = |form: &[(&str, &str)]| {
+        cc.post(format!("{}/c/r/g/settings", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .header("x-csrf-token", &csrf)
+            .form(form)
+            .send()
+            .unwrap()
+            .text()
+            .unwrap()
+    };
+    let saved = save(&[("description", "console"), ("members", "a, b")]);
+    assert!(saved.contains("Saved."), "{saved}");
+    assert_eq!(stored("description"), json!("console"));
+    let saved = save(&[("description", "console"), ("members", "a, b, c")]);
+    assert!(saved.contains("you may not read c"), "{saved}");
+    assert_eq!(stored("members"), json!(["a", "b"]));
+    // b taken out: a member removed is not checked either.
+    let (st, body) = patch(json!({"members": ["a"]}));
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(stored("members"), json!(["a"]));
+    // Out of the list, b is added again if put back.
+    let (st, body) = patch(json!({"members": ["a", "b"]}));
+    assert_eq!(st, 403, "{body}");
+    assert!(
+        body.contains("you may not read b, so you may not make it a member"),
+        "{body}"
+    );
+    assert_eq!(stored("members"), json!(["a"]));
 }
 
 /// A group of npm registries with npm: a package from the first member
