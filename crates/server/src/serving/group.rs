@@ -46,6 +46,8 @@ enum Ask {
     Note,
     /// A directory listing: every member's entries.
     Listing,
+    /// The address without its slash: the redirect to the listing.
+    Slash,
     /// pypi's list of projects.
     PypiRoot,
     /// npm's or cargo's search: every member's hits.
@@ -82,6 +84,7 @@ fn ask(format: &str, rel: &[String], dir_url: bool, query: &str) -> Ask {
         "files" => Ask::First,
         "maven" if label => Ask::Nothing,
         "maven" if dir_url => Ask::Listing,
+        "maven" if rel.is_empty() => Ask::Slash,
         "maven" => maven_key(rel).map_or(Ask::First, Ask::Name),
         "npm" => match rel {
             [] => Ask::Note,
@@ -236,11 +239,13 @@ fn revalidated(mut r: Response) -> Response {
 /// note named it, a hosted member's told npm users to publish where a
 /// group refuses writes, a proxy's showed its upstream). Its go line
 /// names nothing after the group: go would ask the public proxy, then
-/// the source, for any module the group does not have.
+/// the source, for any module the group does not have. pypi's is the
+/// answer only where a proxy member would answer its own note.
 fn note(g: &pkgpod_engine::RepoInfo, base: &str) -> Option<String> {
     let n = g.setting_list("members").len();
     let lines = match g.format.as_str() {
         "npm" => format!("  npm install --registry {base} <package>\n"),
+        "pypi" => format!("  pip install --index-url {base}simple/ <project>\n"),
         "cargo" => format!(
             "  # .cargo/config.toml\n  [registries.{}]\n  index = \"sparse+{base}index/\"\n",
             g.name.replace('.', "-")
@@ -309,6 +314,11 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
     let head = method == Method::HEAD;
     match a {
         Ask::Nothing => crate::serving::status(StatusCode::NOT_FOUND),
+        // As a hosted repository answers there; a proxy member would
+        // answer its own note, naming its upstream.
+        Ask::Slash => {
+            axum::response::Redirect::permanent(&format!("{}/", at.raw_path)).into_response()
+        }
         Ask::Note => {
             let base = crate::serving::client_base(at.route.as_ref(), &at.host, &at.base, &req);
             match note(&g, &base) {
@@ -355,6 +365,16 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
         Ask::First => {
             let config = g.format == "cargo" && at.rel == ["index", "config.json"];
             for m in ms {
+                if at.rel.is_empty() && m.repo.kind == Kind::Proxy {
+                    // A proxy answers at its address with its own note,
+                    // which names it and its upstream: at the group's,
+                    // the group answers with its own.
+                    let base =
+                        crate::serving::client_base(at.route.as_ref(), &at.host, &at.base, &req);
+                    if let Some(t) = note(&g, &base) {
+                        return crate::serving::client_note(StatusCode::OK, t);
+                    }
+                }
                 let r = from(&app, &at, m, &again).await;
                 if r.status() == StatusCode::NOT_FOUND {
                     continue;
@@ -635,16 +655,19 @@ mod tests {
         );
         assert_eq!(ask("files", &v(&["a", "b"]), true, ""), Ask::Listing);
         // The address: the group's own note where a repository's is a
-        // client note; pypi's is the first member's, files' and maven's
-        // a listing.
+        // client note; pypi's is the first member's (but a proxy's),
+        // files' and maven's a listing, maven's without the slash the
+        // redirect to it.
         for f in ["npm", "cargo", "go"] {
             for dir_url in [false, true] {
                 assert_eq!(ask(f, &[], dir_url, ""), Ask::Note, "{f}");
             }
         }
         assert_eq!(ask("pypi", &[], true, ""), Ask::First);
+        assert_eq!(ask("pypi", &[], false, ""), Ask::First);
         assert_eq!(ask("files", &[], true, ""), Ask::Listing);
         assert_eq!(ask("maven", &[], true, ""), Ask::Listing);
+        assert_eq!(ask("maven", &[], false, ""), Ask::Slash);
         assert_eq!(ask("files", &v(&["@first", "b"]), false, ""), Ask::Nothing);
     }
 

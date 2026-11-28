@@ -8133,6 +8133,151 @@ fn group_answers_its_own_note() {
     }
 }
 
+/// A pypi or maven group whose first member is a proxy answers its
+/// address with its own words, not with the proxy's note (the proxy's
+/// name and upstream): pypi with the group's note, the same to every
+/// caller who may read it, and maven, without the slash, with the
+/// redirect to its listing. With a hosted member first, both answer as
+/// before: the redirect, then the listing.
+#[test]
+fn group_address_shows_no_proxy_note() {
+    let s = Server::start();
+    // The proxy members' upstream: nothing listens there.
+    let dead = format!("127.0.0.1:{}/", dead_port());
+    let c = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let pw = std::fs::read_to_string(s.dir.path().join("data/admin-password")).unwrap();
+    let d = s.dir.path().join("dists");
+    std::fs::create_dir_all(&d).unwrap();
+    for (f, p) in [("pypi", "p"), ("maven", "m")] {
+        let (up, publ) = (format!("{p}up"), format!("{p}pub"));
+        s.cli(&["repo", "create", &publ, "-f", f, "-s", "public=true"])
+            .unwrap();
+        s.cli(&[
+            "repo",
+            "create",
+            &up,
+            "-f",
+            f,
+            "-k",
+            "proxy",
+            "-s",
+            &format!("upstream=http://{dead}"),
+            "-s",
+            "public=true",
+        ])
+        .unwrap();
+        if f == "pypi" {
+            let w = make_dist(&d, "hello", "1.0", "wheel", "", 0);
+            s.cli(&["upload", &publ, w.to_str().unwrap()]).unwrap();
+        } else {
+            let dir = "org/acme/hello/1.0.0";
+            let pom = "<project><modelVersion>4.0.0</modelVersion><groupId>org.acme</groupId>\
+                       <artifactId>hello</artifactId><version>1.0.0</version></project>";
+            for (file, body) in [("hello-1.0.0.pom", pom), ("hello-1.0.0.jar", "hello")] {
+                let r = c
+                    .put(s.url(&format!("/{publ}/{dir}/{file}")))
+                    .basic_auth("admin", Some(pw.trim()))
+                    .body(body)
+                    .send()
+                    .unwrap();
+                assert_eq!(r.status().as_u16(), 201, "{file}");
+            }
+        }
+        // The proxy first, and the hosted member first.
+        let (g, mix) = (format!("{p}g"), format!("{p}mix"));
+        for (name, members) in [(&g, format!("{up},{publ}")), (&mix, format!("{publ},{up}"))] {
+            s.cli(&[
+                "repo",
+                "create",
+                name,
+                "-f",
+                f,
+                "-k",
+                "group",
+                "-s",
+                &format!("members={members}"),
+                "-s",
+                "public=true",
+            ])
+            .unwrap();
+        }
+        let token = s
+            .cli(&["token", "create", &g, "--repos", &format!("{g},{mix}")])
+            .unwrap()
+            .trim()
+            .to_string();
+        for t in [None, Some(&token)] {
+            // Status, Location, Content-Type, Content-Length, body.
+            let ask = |head: bool, path: &str| {
+                let b = if head {
+                    c.head(s.url(path))
+                } else {
+                    c.get(s.url(path))
+                };
+                let b = match t {
+                    Some(t) => b.bearer_auth(t),
+                    None => b,
+                };
+                let r = b.send().unwrap();
+                let h = |n: &str| {
+                    r.headers()
+                        .get(n)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string()
+                };
+                let (loc, ty, len) = (h("location"), h("content-type"), h("content-length"));
+                (r.status().as_u16(), loc, ty, len, r.text().unwrap())
+            };
+            if f == "pypi" {
+                let base = s.url(&format!("/{g}/"));
+                let note = format!(
+                    "{g}: a group of 2 pypi repositories, read through: for each package the first of them that has it answers.\n\n  pip install --index-url {base}simple/ <project>\n\nPublish to a hosted repository.\n"
+                );
+                for path in [format!("/{g}"), format!("/{g}/")] {
+                    let (st, _, _, _, body) = ask(false, &path);
+                    assert_eq!((st, body.as_str()), (200, note.as_str()), "{path} {t:?}");
+                    for m in [&up, &dead] {
+                        assert!(!body.contains(m.as_str()), "{path}: names {m}: {body}");
+                    }
+                    let (st, _, _, len, _) = ask(true, &path);
+                    assert_eq!(
+                        (st, len),
+                        (200, note.len().to_string()),
+                        "HEAD {path} {t:?}"
+                    );
+                }
+            } else {
+                for head in [false, true] {
+                    let (st, loc, _, _, body) = ask(head, &format!("/{g}"));
+                    assert_eq!(
+                        (st, loc.as_str(), body.as_str()),
+                        (308, format!("/{g}/").as_str(), ""),
+                        "/{g} head {head} {t:?}"
+                    );
+                }
+                let (st, _, ty, _, _) = ask(false, &format!("/{g}/"));
+                assert_eq!(
+                    (st, ty.as_str()),
+                    (200, "text/html; charset=utf-8"),
+                    "/{g}/"
+                );
+            }
+            let (st, loc, _, _, _) = ask(false, &format!("/{mix}"));
+            assert_eq!((st, loc), (308, format!("/{mix}/")), "/{mix} {t:?}");
+            let (st, _, ty, _, _) = ask(false, &format!("/{mix}/"));
+            assert_eq!(
+                (st, ty.as_str()),
+                (200, "text/html; charset=utf-8"),
+                "/{mix}/"
+            );
+        }
+    }
+}
+
 /// A Maven group does not ask a proxy member's upstream for an
 /// artifact the proxy excludes (`groupId:artifactId`).
 #[test]
