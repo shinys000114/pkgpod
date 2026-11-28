@@ -3,9 +3,10 @@
 two repositories: x86_64, aarch64 and noarch ones, one of an
 architecture outside the defaults, one with a signature part, one
 without a datahash, one with an install script, one replaced, one at a
-path the tree takes for named by its content; a label after the first,
-another later), one whose settings name its architectures and
-description, one with nothing in it, one at apktop.localhost's root.
+path the tree takes for named by its content, one whose name the tree
+takes for a checksum list's; a label after the first, another later),
+one whose settings name its architectures and description, one with
+nothing in it, one at apktop.localhost's root.
 Each is served as the server's generic tree: the packages under
 <branch>/<repository>/<arch>/ (a noarch one in every architecture's),
 the APKINDEX.tar.gz the format makes per version, branch, repository
@@ -163,6 +164,11 @@ HEXNAME = "0123456789abcdef" * 4
 HEXY = package(HEXNAME, "1.0-r0", "repodata")
 HEXY_FILE = file_name(HEXNAME, "1.0-r0")
 HEXY_AT = "/v3.22/community/repodata/" + HEXY_FILE
+# A name with SUMS in it: the tree takes the file for a checksum list
+# (SHA256SUMS, MD5SUMS) by its name, as text, before any extension it
+# does not know (apk is none it knows).
+SUMS = package("SHA256SUMS", "1.0-r0", "x86_64")
+SUMS_FILE = file_name("SHA256SUMS", "1.0-r0")
 
 # What the seed does to each of the public and private repositories,
 # in order, as (how, place or label, packages): uploads by the CLI
@@ -181,6 +187,7 @@ SEED = [
     ("/" + file_name("hello", "1.0-r0") + "?branch=v3.20&repository=main", None, HELLO_10),
     ("/upload?branch=v3.22&repository=main&replace=true", None, HELLO_11B),
     ("cli", "v3.22/community", [HEXY]),
+    ("cli", "v3.22/main", [SUMS]),
 ]
 
 
@@ -260,13 +267,15 @@ PKG = MAIN + file_name("hello", "1.0-r0")
 # indexes (an architecture of the defaults with no package of its own,
 # one outside them) and packages (a noarch one in each architecture's
 # directory, not in its own; one the tree takes for named by its
-# content); a label's version, one not there; what is no address of
-# the tree (the upload address, a path through ..).
+# content; one it takes for a checksum list); a label's version, one
+# not there; what is no address of the tree (the upload address, a path
+# through ..).
 PATHS = [
     "", "/", "/v3.22", "/v3.22/", "/v3.22/main", "/v3.22/main/", "/v3.22/main/x86_64",
     MAIN, MAIN + "?sort=size", MAIN + "?sort=size&order=desc", MAIN + "?sort=time",
     "/?sort=name&order=desc", INDEX, INDEX + "/", "/v3.22/main/aarch64/",
     "/v3.22/main/aarch64/APKINDEX.tar.gz", PKG, MAIN + file_name("hello", "1.1-r0"),
+    MAIN + SUMS_FILE,
     MAIN + file_name("motd", "2-r0"), "/v3.22/main/aarch64/" + file_name("motd", "2-r0"),
     "/v3.22/main/noarch/", "/v3.22/main/noarch/" + file_name("motd", "2-r0"), MAIN + "_inputs",
     "/v3.22/main/riscv64/APKINDEX.tar.gz", "/v3.22/community/",
@@ -314,7 +323,7 @@ def reads(c, who):
         # two, one past the end, one only if the ETag is still the
         # file's).
         for name, rel in ((PKG, PKG), (INDEX, INDEX), ("/<key>", k), (MAIN, MAIN), ("/", "/"),
-                          (HEXY_AT, HEXY_AT)):
+                          (HEXY_AT, HEXY_AT), (MAIN + SUMS_FILE, MAIN + SUMS_FILE)):
             add(f"apk {repo} HEAD {name} {who}", who, "HEAD", b + rel)
         for name, rel in ((PKG, PKG), (INDEX, INDEX), ("/<key>", k)):
             add(f"apk {repo} inm {name} {who}", who, "GET", b + rel,
@@ -803,7 +812,7 @@ FUZZ = (["apkpub", "apkpriv", "apkriscv", "apkempty"],
         ["v3.22", "v3.20", "main", "community", "x86_64", "aarch64", "armv7", "riscv64",
          "noarch", "APKINDEX.tar.gz", "_inputs", "upload", "@first", "@second",
          file_name("hello", "1.0-r0"), file_name("hello", "1.1-r0"), file_name("motd", "2-r0"),
-         file_name("tool", "0.1_alpha-r1"), file_name("blink", "1.0-r0")])
+         file_name("tool", "0.1_alpha-r1"), file_name("blink", "1.0-r0"), SUMS_FILE])
 
 PARTS = [
     ("seed", 130, seed),
