@@ -79,7 +79,7 @@ fn maven_key(rel: &[String]) -> Option<String> {
         .filter(|_| !version.is_empty())
 }
 
-fn ask(format: &str, rel: &[String], dir_url: bool, query: &str) -> Ask {
+fn ask(format: &str, rel: &[String], dir_url: bool) -> Ask {
     let first = rel.first().map(String::as_str);
     let label = first.is_some_and(|f| f.starts_with('@'));
     match format {
@@ -119,9 +119,9 @@ fn ask(format: &str, rel: &[String], dir_url: bool, query: &str) -> Ask {
             [] => Ask::Note,
             [i, c] if i == "index" && c == "config.json" => Ask::CargoConfig,
             [i, .., name] if i == "index" => Ask::Name(name.to_ascii_lowercase()),
-            [a, v1, c] if a == "api" && v1 == "v1" && c == "crates" && !query.is_empty() => {
-                Ask::Search
-            }
+            // With no query too: the hosted search then lists every
+            // crate, and the group's every member's.
+            [a, v1, c] if a == "api" && v1 == "v1" && c == "crates" => Ask::Search,
             [a, v1, c, name, ..] if a == "api" && v1 == "v1" && c == "crates" => {
                 Ask::Name(name.to_ascii_lowercase())
             }
@@ -280,24 +280,45 @@ fn note(g: &pkgpod_engine::RepoInfo, base: &str) -> Option<String> {
     ))
 }
 
-/// cargo's index/config.json at the group's address `base`: crates are
-/// downloaded through the group, and there is no api, as a group takes
-/// no publish. `auth` (required) unless the group and every member it
-/// lists are public: else an anonymous caller is refused, or reads the
-/// public members only, and cargo is to send its token. A HEAD has the
-/// same headers.
-fn cargo_config(base: &str, auth: bool, head: bool) -> Response {
-    let doc = json!({"dl": format!("{base}api/v1/crates"), "auth-required": auth}).to_string();
-    let len = doc.len();
-    let mut r = Response::new(if head { Body::empty() } else { Body::from(doc) });
-    let h = r.headers_mut();
-    h.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-    h.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
-    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    r
+/// cargo's index/config.json at the group's address `base`, for the
+/// request's headers `h`: crates are downloaded through the group, and
+/// its api is the group's own address, as a hosted registry's is its
+/// own: cargo search and cargo login need one (cargo refuses both at a
+/// registry without), and a publish there the group refuses in its own
+/// words. `auth` (required) unless the group and every member it lists
+/// are public: else an anonymous caller is refused, or reads the public
+/// members only, and cargo is to send its token.
+fn cargo_config(base: &str, auth: bool, h: &HeaderMap, head: bool) -> Response {
+    let doc = json!({
+        "dl": format!("{base}api/v1/crates"),
+        "api": base.trim_end_matches('/'),
+        "auth-required": auth,
+    });
+    own_document(h, head, "application/json", doc.to_string())
+}
+
+/// A document the group makes itself, `body` of type `ct`, answering a
+/// request with headers `h`: revalidated, with an ETag of the body (a
+/// 304 to an If-None-Match it matches, with the ETag and Cache-Control
+/// the document has), and a HEAD has the GET's headers.
+fn own_document(h: &HeaderMap, head: bool, ct: &'static str, body: String) -> Response {
+    let (etag, fresh) = tag_of(body.as_bytes(), h);
+    let r = if fresh {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else {
+        let len = body.len();
+        let mut r = Response::new(if head {
+            Body::empty()
+        } else {
+            Body::from(body)
+        });
+        r.headers_mut()
+            .insert(header::CONTENT_TYPE, HeaderValue::from_static(ct));
+        r.headers_mut()
+            .insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+        r
+    };
+    tagged(r, &etag)
 }
 
 /// The most hits a group asks each member of its search for: the
@@ -518,7 +539,7 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
         return r;
     }
     let query = req.uri().query().unwrap_or("").to_string();
-    let a = ask(&g.format, &at.rel, at.raw_path.ends_with('/'), &query);
+    let a = ask(&g.format, &at.rel, at.raw_path.ends_with('/'));
     let (app2, at2) = (app.clone(), at.clone());
     let ms = tokio::task::spawn_blocking(move || members(&app2, &at2))
         .await
@@ -540,13 +561,13 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
                 None => crate::serving::status(StatusCode::NOT_FOUND),
             }
         }
-        // The group's own, asked of no member: a hosted member answers
-        // a HEAD with no body to read, and a member's api would point
-        // cargo's publish at the group, which refuses it.
+        // The group's own, asked of no member (a hosted member answers
+        // a HEAD with no body to read): its api is the group's address,
+        // where cargo searches and logs in, and a publish is refused.
         Ask::CargoConfig => {
             let base = crate::serving::client_base(at.route.as_ref(), &at.host, &at.base, &req);
             let open = g.setting_bool("public") && all_public(&app, &g);
-            cargo_config(&base, !open, head)
+            cargo_config(&base, !open, req.headers(), head)
         }
         Ask::Name(key) => {
             for m in ms {
@@ -778,25 +799,10 @@ fn pypi_root(names: &[String], h: &HeaderMap, head: bool, incomplete: Option<&st
         s.push_str("</body></html>\n");
         ("text/html; charset=utf-8", s)
     };
-    let (etag, fresh) = tag_of(body.as_bytes(), h);
-    let mut r = if fresh {
-        StatusCode::NOT_MODIFIED.into_response()
-    } else {
-        let len = body.len();
-        let mut r = Response::new(if head {
-            Body::empty()
-        } else {
-            Body::from(body)
-        });
-        r.headers_mut()
-            .insert(header::CONTENT_TYPE, HeaderValue::from_static(ct));
-        r.headers_mut()
-            .insert(header::CONTENT_LENGTH, HeaderValue::from(len));
-        r
-    };
+    let mut r = own_document(h, head, ct, body);
     r.headers_mut()
         .insert(header::VARY, HeaderValue::from_static("Accept"));
-    tagged(r, &etag)
+    r
 }
 
 /// A union's directory listing (see [`crate::serving::listing`]) with
@@ -950,50 +956,56 @@ mod tests {
     #[test]
     fn what_requests_ask() {
         assert_eq!(
-            ask("npm", &v(&["@team", "lib"]), false, ""),
+            ask("npm", &v(&["@team", "lib"]), false),
             Ask::Name("@team/lib".into())
         );
         assert_eq!(
-            ask("npm", &v(&["hello", "-", "hello-1.0.0.tgz"]), false, ""),
+            ask("npm", &v(&["hello", "-", "hello-1.0.0.tgz"]), false),
             Ask::Name("hello".into())
         );
+        assert_eq!(ask("npm", &v(&["-", "v1", "search"]), false), Ask::Search);
         assert_eq!(
-            ask("npm", &v(&["-", "v1", "search"]), false, "text=x"),
-            Ask::Search
-        );
-        assert_eq!(
-            ask("npm", &v(&["-", "label", "x", "hello"]), false, ""),
+            ask("npm", &v(&["-", "label", "x", "hello"]), false),
             Ask::Nothing
         );
         assert_eq!(
-            ask("pypi", &v(&["simple", "Hello_World"]), true, ""),
+            ask("pypi", &v(&["simple", "Hello_World"]), true),
             Ask::Name("hello-world".into())
         );
-        assert_eq!(ask("pypi", &v(&["simple"]), true, ""), Ask::PypiRoot);
+        assert_eq!(ask("pypi", &v(&["simple"]), true), Ask::PypiRoot);
         assert_eq!(
-            ask("cargo", &v(&["index", "he", "ll", "Hello_pod"]), false, ""),
+            ask("cargo", &v(&["index", "he", "ll", "Hello_pod"]), false),
             Ask::Name("hello_pod".into())
         );
         assert_eq!(
-            ask("cargo", &v(&["index", "config.json"]), false, ""),
+            ask("cargo", &v(&["index", "config.json"]), false),
             Ask::CargoConfig
         );
         // A label's, or another file's that is not config.json, is not
         // the group's.
         assert_eq!(
-            ask("cargo", &v(&["@first", "index", "config.json"]), false, ""),
+            ask("cargo", &v(&["@first", "index", "config.json"]), false),
             Ask::Nothing
         );
         assert_eq!(
-            ask("cargo", &v(&["index", "CONFIG.JSON"]), false, ""),
+            ask("cargo", &v(&["index", "CONFIG.JSON"]), false),
             Ask::Name("config.json".into())
         );
+        // cargo's search, whatever its query (with none the hosted
+        // search lists every crate), with its slash or without: every
+        // member's hits.
+        for dir_url in [false, true] {
+            assert_eq!(
+                ask("cargo", &v(&["api", "v1", "crates"]), dir_url),
+                Ask::Search,
+                "cargo search, slash {dir_url}"
+            );
+        }
         assert_eq!(
             ask(
                 "go",
                 &v(&["example.com", "greet", "@v", "v1.0.0.info"]),
                 false,
-                ""
             ),
             Ask::Name("example.com/greet".into())
         );
@@ -1002,7 +1014,6 @@ mod tests {
                 "maven",
                 &v(&["org", "ex", "app", "1.0", "app-1.0.jar"]),
                 false,
-                ""
             ),
             Ask::Name("org/ex/app".into())
         );
@@ -1011,7 +1022,6 @@ mod tests {
                 "maven",
                 &v(&["org", "ex", "app", "maven-metadata.xml"]),
                 false,
-                ""
             ),
             Ask::Name("org/ex/app".into())
         );
@@ -1026,24 +1036,23 @@ mod tests {
                     "maven-metadata.xml.sha1"
                 ]),
                 false,
-                ""
             ),
             Ask::Name("org/ex/app".into())
         );
-        assert_eq!(ask("files", &v(&["a", "b"]), true, ""), Ask::Listing);
+        assert_eq!(ask("files", &v(&["a", "b"]), true), Ask::Listing);
         // The address: the group's own note where a client is told how
         // to read through it; files' and maven's a listing, without the
         // slash the redirect to it.
         for f in ["npm", "pypi", "cargo", "go"] {
             for dir_url in [false, true] {
-                assert_eq!(ask(f, &[], dir_url, ""), Ask::Note, "{f}");
+                assert_eq!(ask(f, &[], dir_url), Ask::Note, "{f}");
             }
         }
         for f in ["files", "maven"] {
-            assert_eq!(ask(f, &[], true, ""), Ask::Listing, "{f}");
-            assert_eq!(ask(f, &[], false, ""), Ask::Slash, "{f}");
+            assert_eq!(ask(f, &[], true), Ask::Listing, "{f}");
+            assert_eq!(ask(f, &[], false), Ask::Slash, "{f}");
         }
-        assert_eq!(ask("files", &v(&["@first", "b"]), false, ""), Ask::Nothing);
+        assert_eq!(ask("files", &v(&["@first", "b"]), false), Ask::Nothing);
     }
 
     /// A go module path holds no '@': a label before @v or @latest, at
@@ -1062,24 +1071,14 @@ mod tests {
             "@v/list",
         ] {
             let rel: Vec<&str> = p.split('/').collect();
-            assert_eq!(ask("go", &v(&rel), false, ""), Ask::Nothing, "{p}");
+            assert_eq!(ask("go", &v(&rel), false), Ask::Nothing, "{p}");
         }
         assert_eq!(
-            ask(
-                "go",
-                &v(&["example.com", "hello", "@v", "@first"]),
-                false,
-                ""
-            ),
+            ask("go", &v(&["example.com", "hello", "@v", "@first"]), false),
             Ask::Name("example.com/hello".into())
         );
         assert_eq!(
-            ask(
-                "npm",
-                &v(&["-", "package", "hello", "dist-tags"]),
-                false,
-                ""
-            ),
+            ask("npm", &v(&["-", "package", "hello", "dist-tags"]), false),
             Ask::Name("hello".into())
         );
         // @scope%2fname arrives as two segments, as @scope/name does.
@@ -1088,16 +1087,15 @@ mod tests {
                 "npm",
                 &v(&["-", "package", "@team", "lib", "dist-tags"]),
                 false,
-                ""
             ),
             Ask::Name("@team/lib".into())
         );
-        assert_eq!(ask("npm", &v(&["-", "package"]), false, ""), Ask::Nothing);
+        assert_eq!(ask("npm", &v(&["-", "package"]), false), Ask::Nothing);
         assert_eq!(
-            ask("npm", &v(&["-", "package", "@team"]), false, ""),
+            ask("npm", &v(&["-", "package", "@team"]), false),
             Ask::Nothing
         );
-        assert_eq!(ask("npm", &v(&["-", "ping"]), false, ""), Ask::First);
+        assert_eq!(ask("npm", &v(&["-", "ping"]), false), Ask::First);
     }
 
     /// A member's lifetime is dropped at the group's address, but for
@@ -1125,31 +1123,80 @@ mod tests {
         }
     }
 
-    /// cargo's config.json at a group: downloads through it, no api,
-    /// and the same headers by HEAD, with no body.
+    /// cargo's config.json at a group: downloads and the api at the
+    /// group's address, as a hosted registry's are at its own (cargo
+    /// searches and logs in there; a publish there the group refuses).
+    /// Its ETag is of the body, answered 304 to an If-None-Match it
+    /// matches (or any); a HEAD has the GET's headers and no body.
     #[tokio::test]
     async fn a_group_s_cargo_config() {
-        let doc = "{\"dl\":\"http://h/cg/api/v1/crates\",\"auth-required\":true}";
+        let doc =
+            "{\"dl\":\"http://h/cg/api/v1/crates\",\"api\":\"http://h/cg\",\"auth-required\":true}";
+        let etag = format!("\"{}\"", pkgpod_base::Digest::of(doc.as_bytes()).hex());
+        let asked = |inm: Option<&str>| {
+            let mut m = HeaderMap::new();
+            if let Some(t) = inm {
+                m.insert(header::IF_NONE_MATCH, HeaderValue::from_str(t).unwrap());
+            }
+            m
+        };
+        let h = |r: &Response, k: header::HeaderName| {
+            r.headers()
+                .get(k)
+                .map(|v| v.to_str().unwrap().to_string())
+                .unwrap_or_default()
+        };
         for head in [false, true] {
-            let r = cargo_config("http://h/cg/", true, head);
-            let h = |k| r.headers()[k].to_str().unwrap().to_string();
+            let r = cargo_config("http://h/cg/", true, &asked(None), head);
+            let got = (
+                r.status(),
+                h(&r, header::CONTENT_TYPE),
+                h(&r, header::CACHE_CONTROL),
+                h(&r, header::CONTENT_LENGTH),
+                h(&r, header::ETAG),
+            );
+            let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
             assert_eq!(
+                (got, String::from_utf8(b.to_vec()).unwrap()),
                 (
-                    h(header::CONTENT_TYPE),
-                    h(header::CACHE_CONTROL),
-                    h(header::CONTENT_LENGTH)
-                ),
-                (
-                    "application/json".into(),
-                    "no-cache".into(),
-                    doc.len().to_string()
+                    (
+                        StatusCode::OK,
+                        "application/json".into(),
+                        "no-cache".into(),
+                        doc.len().to_string(),
+                        etag.clone()
+                    ),
+                    if head { "" } else { doc }.to_string()
                 ),
                 "head {head}"
             );
-            let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
-            assert_eq!(b, if head { "" } else { doc }, "head {head}");
+            // Its own ETag, or any: not modified; another's: the
+            // document.
+            for (inm, st) in [
+                (etag.as_str(), StatusCode::NOT_MODIFIED),
+                ("*", StatusCode::NOT_MODIFIED),
+                ("\"other\"", StatusCode::OK),
+            ] {
+                let r = cargo_config("http://h/cg/", true, &asked(Some(inm)), head);
+                let got = (
+                    r.status(),
+                    h(&r, header::ETAG),
+                    h(&r, header::CACHE_CONTROL),
+                );
+                let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+                let len = if st == StatusCode::OK && !head {
+                    doc.len()
+                } else {
+                    0
+                };
+                assert_eq!(
+                    (got, b.len()),
+                    ((st, etag.clone(), "no-cache".into()), len),
+                    "If-None-Match {inm} head {head}"
+                );
+            }
         }
-        let r = cargo_config("http://h/cg/", false, false);
+        let r = cargo_config("http://h/cg/", false, &HeaderMap::new(), false);
         let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
         let v: Value = serde_json::from_slice(&b).unwrap();
         assert_eq!(v["auth-required"], false);

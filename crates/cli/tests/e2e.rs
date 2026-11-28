@@ -8715,11 +8715,13 @@ fn group_address_shows_no_proxy_note() {
     }
 }
 
-/// A cargo group's index/config.json is its own: downloads at the
-/// group's address, no api (a group takes no publish), and auth
-/// required unless the group and every member it lists are public. A
-/// HEAD answers the same headers with no body, with a hosted member
-/// first too. Callers with no role are refused as before.
+/// A cargo group's index/config.json is its own: downloads and the api
+/// at the group's address (cargo searches and logs in there; a publish
+/// there the group refuses), and auth required unless the group and
+/// every member it lists are public. Its ETag is of the body, answered
+/// 304 to an If-None-Match it matches (or any), by GET and HEAD. A HEAD
+/// answers the same headers with no body, with a hosted member first
+/// too. Callers with no role are refused as before.
 #[test]
 fn group_answers_its_own_cargo_config() {
     let s = Server::start();
@@ -8771,7 +8773,11 @@ fn group_answers_its_own_cargo_config() {
         ("cgclosed", true, vec![Some(&closed)]),
     ] {
         let path = format!("/{g}/index/config.json");
-        let want = json!({"dl": s.url(&format!("/{g}/api/v1/crates")), "auth-required": auth});
+        let want = json!({
+            "dl": s.url(&format!("/{g}/api/v1/crates")),
+            "api": s.url(&format!("/{g}")),
+            "auth-required": auth,
+        });
         for t in &ts {
             let with = |b: reqwest::blocking::RequestBuilder| match t {
                 Some(t) => b.bearer_auth(t),
@@ -8794,26 +8800,63 @@ fn group_answers_its_own_cargo_config() {
                     .to_string()
             };
             let (ty, got_cc) = (h(&r, "content-type"), h(&r, "cache-control"));
+            let etag = h(&r, "etag");
             let body = r.text().unwrap();
             let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+            let of_body = format!("\"{}\"", pkgpod_base::Digest::of(body.as_bytes()).hex());
             assert_eq!(
-                (st, ty.as_str(), got_cc.as_str(), &v),
-                (200, "application/json", cc, &want),
+                (st, ty.as_str(), got_cc.as_str(), &v, etag.as_str()),
+                (200, "application/json", cc, &want, of_body.as_str()),
                 "GET {path} {t:?}: {body}"
             );
             let r = with(c.head(s.url(&path))).send().unwrap();
-            let (st, ty, got_cc) = (
+            let (st, ty, got_cc, got_etag) = (
                 r.status().as_u16(),
                 h(&r, "content-type"),
                 h(&r, "cache-control"),
+                h(&r, "etag"),
             );
             let len = h(&r, "content-length");
             let rest = r.text().unwrap();
             assert_eq!(
-                (st, ty.as_str(), got_cc.as_str(), len, rest.as_str()),
-                (200, "application/json", cc, body.len().to_string(), ""),
+                (
+                    st,
+                    ty.as_str(),
+                    got_cc.as_str(),
+                    len,
+                    rest.as_str(),
+                    got_etag
+                ),
+                (
+                    200,
+                    "application/json",
+                    cc,
+                    body.len().to_string(),
+                    "",
+                    etag.clone()
+                ),
                 "HEAD {path} {t:?}"
             );
+            // Its own ETag, or any: not modified; another's: the
+            // document again.
+            for (inm, want_st) in [(etag.as_str(), 304), ("*", 304), ("\"other\"", 200)] {
+                for head in [false, true] {
+                    let b = if head {
+                        c.head(s.url(&path))
+                    } else {
+                        c.get(s.url(&path))
+                    };
+                    let r = with(b.header("if-none-match", inm)).send().unwrap();
+                    let (st, got_etag) = (r.status().as_u16(), h(&r, "etag"));
+                    let rest = r.text().unwrap();
+                    let want_body = if want_st == 200 && !head { &body } else { "" };
+                    assert_eq!(
+                        (st, got_etag.as_str(), rest.as_str()),
+                        (want_st, etag.as_str(), want_body),
+                        "If-None-Match {inm} {path} {t:?} head {head}"
+                    );
+                }
+            }
         }
     }
     // Refused as before: anonymously (401), and by a token for another
@@ -9020,16 +9063,22 @@ fn group_search_pages_after_the_merge() {
         "beta_crate@1.0.0",
         "gamma_crate@1.0.0",
     ];
+    // With no query (none, an empty one, the address with its slash),
+    // the hosted search lists every crate: so does the merge.
     for (q, want) in [
-        ("q=crate", &all[..]),
-        ("q=crate&per_page=2&page=2", &all[2..]),
-        ("q=crate&per_page=3", &all[..3]),
-        ("q=crate&per_page=0", &all[..1]),
-        ("q=crate&per_page=2&page=3", &all[..0]),
-        ("q=crate&page=0", &all[..]),
+        ("?q=crate", &all[..]),
+        ("?q=crate&per_page=2&page=2", &all[2..]),
+        ("?q=crate&per_page=3", &all[..3]),
+        ("?q=crate&per_page=0", &all[..1]),
+        ("?q=crate&per_page=2&page=3", &all[..0]),
+        ("?q=crate&page=0", &all[..]),
+        ("", &all[..]),
+        ("?", &all[..]),
+        ("/", &all[..]),
+        ("?per_page=2&page=2", &all[2..]),
     ] {
         for head in [false, true] {
-            let u = s.url(&format!("/cg/api/v1/crates?{q}"));
+            let u = s.url(&format!("/cg/api/v1/crates{q}"));
             let r = if head { c.head(u) } else { c.get(u) }.send().unwrap();
             let (st, cc) = (r.status().as_u16(), cache(&r));
             if head {
@@ -9693,7 +9742,10 @@ fn deb_mirror_of_an_upstream_that_is_behind() {
     );
 }
 
-/// A group of cargo registries with cargo.
+/// A group of cargo registries with cargo: each crate from the first
+/// member that has it; cargo search and cargo login through the group,
+/// whose config names its own address as the api; a publish there
+/// refused in the group's words.
 #[test]
 fn group_of_cargo_registries() {
     if !have("cargo") {
@@ -9800,7 +9852,37 @@ fn group_of_cargo_registries() {
         .unwrap();
     assert_eq!(cfg["auth-required"], true, "{cfg}");
     assert!(cfg["dl"].as_str().unwrap().contains("/cg/"), "{cfg}");
-    // Publishing goes to a member.
+    // cargo search through the group: every member's crates, a name
+    // the first member's (o is in both names).
+    let search = |token: Option<&str>| {
+        cargo_with(
+            &home,
+            &home,
+            &["search", "--registry", "crates", "o"],
+            token,
+            None,
+        )
+    };
+    let found = |out: &str| {
+        out.contains("hello_pod = \"0.1.0\"")
+            && out.contains("only_two = \"1.0.0\"")
+            && !out.contains("0.2.0")
+    };
+    let (ok, out) = search(Some(&gt));
+    assert!(ok && found(&out), "cargo search: {out}");
+    // cargo login as How to use says (a token pasted, here on stdin),
+    // into cargo's own credentials: its search then sends that token.
+    let (ok, out) = cargo_with(
+        &home,
+        &home,
+        &["login", "--registry", "crates"],
+        None,
+        Some(&format!("{gt}\n")),
+    );
+    assert!(ok, "cargo login: {out}");
+    let (ok, out) = search(None);
+    assert!(ok && found(&out), "cargo search after login: {out}");
+    // Publishing goes to a member: the group refuses it, in its words.
     let d = cargo_crate(
         &s.dir.path().join("src-g"),
         "new_one",
@@ -9814,7 +9896,41 @@ fn group_of_cargo_registries() {
         &["publish", "--registry", "crates", "--no-verify"],
         &gt,
     );
-    assert!(!ok, "{out}");
+    assert!(
+        !ok && out.contains("cg is a group: it is read only"),
+        "{out}"
+    );
+    // A public group of public members: cargo reads the config with no
+    // token, and logs in only where it names an api.
+    for r in ["c1", "c2", "cg"] {
+        s.cli(&["repo", "set", r, "public=true"]).unwrap();
+    }
+    let open = s.dir.path().join("home-open");
+    std::fs::create_dir_all(open.join("cargo")).unwrap();
+    std::fs::write(
+        open.join("cargo").join("config.toml"),
+        format!(
+            "[registries.crates]\nindex = \"sparse+{}index/\"\n",
+            s.url("/cg/")
+        ),
+    )
+    .unwrap();
+    let (ok, out) = cargo_with(
+        &open,
+        &open,
+        &["login", "--registry", "crates"],
+        None,
+        Some(&format!("{gt}\n")),
+    );
+    assert!(ok, "cargo login at the public group: {out}");
+    let (ok, out) = cargo_with(
+        &open,
+        &open,
+        &["search", "--registry", "crates", "o"],
+        None,
+        None,
+    );
+    assert!(ok && found(&out), "cargo search at the public group: {out}");
 }
 
 /// A group of Go module proxies with go.
@@ -18034,14 +18150,30 @@ fn serving_root_links_trees_and_names_registries() {
 /// Runs cargo with its own home (config, credentials, caches) in `home`;
 /// nothing of the user's cargo is read or written.
 fn cargo(home: &Path, cwd: &Path, args: &[&str], token: &str) -> (bool, String) {
+    cargo_with(home, cwd, args, Some(token), None)
+}
+
+/// [`cargo`], with the token of registry `crates` in its environment or
+/// not (cargo then reads the one its credentials keep), and `stdin`
+/// written to it.
+fn cargo_with(
+    home: &Path,
+    cwd: &Path,
+    args: &[&str],
+    token: Option<&str>,
+    stdin: Option<&str>,
+) -> (bool, String) {
+    use std::io::Write;
     let mut c = Command::new("cargo");
     c.env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", home)
         .env("CARGO_HOME", home.join("cargo"))
         .env("CARGO_TARGET_DIR", home.join("target"))
-        .env("CARGO_TERM_COLOR", "never")
-        .env("CARGO_REGISTRIES_CRATES_TOKEN", token);
+        .env("CARGO_TERM_COLOR", "never");
+    if let Some(t) = token {
+        c.env("CARGO_REGISTRIES_CRATES_TOKEN", t);
+    }
     let rustup = std::env::var_os("RUSTUP_HOME").or_else(|| {
         std::env::var_os("HOME").map(|h| Path::new(&h).join(".rustup").into_os_string())
     });
@@ -18051,7 +18183,20 @@ fn cargo(home: &Path, cwd: &Path, args: &[&str], token: &str) -> (bool, String) 
     if let Some(t) = std::env::var_os("RUSTUP_TOOLCHAIN") {
         c.env("RUSTUP_TOOLCHAIN", t);
     }
-    let o = c.args(args).current_dir(cwd).output().unwrap();
+    c.args(args).current_dir(cwd);
+    let o = match stdin {
+        Some(input) => {
+            c.stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let mut ch = c.spawn().unwrap();
+            // One that reads nothing may be gone before this is written
+            // (a broken pipe, then): its output says how it went.
+            let _ = ch.stdin.take().unwrap().write_all(input.as_bytes());
+            ch.wait_with_output().unwrap()
+        }
+        None => c.output().unwrap(),
+    };
     (
         o.status.success(),
         format!(
