@@ -838,7 +838,7 @@ FUZZ = (["apkpub", "apkpriv", "apkriscv", "apkempty"],
          "noarch", "APKINDEX.tar.gz", "_inputs", "upload", "@first", "@second",
          file_name("hello", "1.0-r0"), file_name("hello", "1.1-r0"), file_name("motd", "2-r0"),
          file_name("tool", "0.1_alpha-r1"), file_name("blink", "1.0-r0"), SUMS_FILE,
-         "repodata", "dists", "pool", HEXY_FILE])
+         "repodata", "dists", "pool", "project", "trace", HEXY_FILE])
 
 PARTS = [
     ("seed", 130, seed),
