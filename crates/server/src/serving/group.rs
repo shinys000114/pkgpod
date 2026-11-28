@@ -10,7 +10,9 @@
 //! files repository) comes from the first member that has it; directory
 //! listings, pypi's project list and npm's and cargo's search show every
 //! member's, the first one's entry for a name, and say how many members
-//! could not be read.
+//! could not be read. Where the member asked could not answer (a proxy
+//! whose upstream fails, a member answering 5xx), the group answers 502
+//! in its own words, which name neither the member nor its upstream.
 //!
 //! A group is read through: its readers read its members through it
 //! (anonymous readers of a public group only its public members), and
@@ -36,10 +38,11 @@ use crate::{App, Served};
 enum Ask {
     /// Answered by the first member that has this state-tree directory.
     Name(String),
-    /// By the first member that answers it (not with 404).
+    /// By the first member that answers it (not with 404); one that
+    /// fails it (5xx) is answered with the group's own 502.
     First,
-    /// The group's own note: the address of a format whose repository
-    /// answers a client note there.
+    /// The group's own note: the address of a format whose clients are
+    /// told there how to read through it (npm, pypi, cargo, go).
     Note,
     /// cargo's index/config.json: the group's own.
     CargoConfig,
@@ -80,6 +83,7 @@ fn ask(format: &str, rel: &[String], dir_url: bool, query: &str) -> Ask {
     match format {
         "files" if label => Ask::Nothing,
         "files" if dir_url => Ask::Listing,
+        "files" if rel.is_empty() => Ask::Slash,
         "files" => Ask::First,
         "maven" if label => Ask::Nothing,
         "maven" if dir_url => Ask::Listing,
@@ -101,6 +105,7 @@ fn ask(format: &str, rel: &[String], dir_url: bool, query: &str) -> Ask {
             [name, ..] => Ask::Name(name.clone()),
         },
         "pypi" => match rel {
+            [] => Ask::Note,
             [s] if s == "simple" => Ask::PypiRoot,
             [s, p, ..] if s == "simple" || s == "files" => {
                 Ask::Name(pkgpod_pypi::dist::normalize(p))
@@ -251,8 +256,9 @@ fn revalidated(mut r: Response) -> Response {
 /// note named it, a hosted member's told npm users to publish where a
 /// group refuses writes, a proxy's showed its upstream). Its go line
 /// names nothing after the group: go would ask the public proxy, then
-/// the source, for any module the group does not have. pypi's is the
-/// answer only where a proxy member would answer its own note.
+/// the source, for any module the group does not have. pypi's too,
+/// whatever member is first: a hosted member answers its address with
+/// a redirect to its own project list, which the group's is not.
 fn note(g: &pkgpod_engine::RepoInfo, base: &str) -> Option<String> {
     let n = g.setting_list("members").len();
     let lines = match g.format.as_str() {
@@ -504,7 +510,8 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
     match a {
         Ask::Nothing => crate::serving::status(StatusCode::NOT_FOUND),
         // As a hosted repository answers there; a proxy member would
-        // answer its own note, naming its upstream.
+        // answer its own note, naming its upstream (maven's), or its
+        // upstream's listing or failure (files').
         Ask::Slash => {
             axum::response::Redirect::permanent(&format!("{}/", at.raw_path)).into_response()
         }
@@ -555,19 +562,26 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
         }
         Ask::First => {
             for m in ms {
-                if at.rel.is_empty() && m.repo.kind == Kind::Proxy {
-                    // A proxy answers at its address with its own note,
-                    // which names it and its upstream: at the group's,
-                    // the group answers with its own.
-                    let base =
-                        crate::serving::client_base(at.route.as_ref(), &at.host, &at.base, &req);
-                    if let Some(t) = note(&g, &base) {
-                        return crate::serving::client_note(StatusCode::OK, t);
-                    }
-                }
+                let member = m.repo.name.clone();
                 let r = from(&app, &at, m, &again).await;
-                if r.status() == StatusCode::NOT_FOUND {
+                let st = r.status();
+                if st == StatusCode::NOT_FOUND {
                     continue;
+                }
+                if st.is_server_error() {
+                    // The member's own words may name it or its
+                    // upstream (a files proxy's says what it asked
+                    // where): the operator's, as the Name arm's.
+                    member_failed(
+                        &g.name,
+                        &member,
+                        &at.rel.join("/"),
+                        &format!("it answered {st}"),
+                    );
+                    return text(
+                        StatusCode::BAD_GATEWAY,
+                        format!("{}: a member could not be asked", g.name),
+                    );
                 }
                 return revalidated(r);
             }
@@ -945,20 +959,18 @@ mod tests {
             Ask::Name("org/ex/app".into())
         );
         assert_eq!(ask("files", &v(&["a", "b"]), true, ""), Ask::Listing);
-        // The address: the group's own note where a repository's is a
-        // client note; pypi's is the first member's (but a proxy's),
-        // files' and maven's a listing, maven's without the slash the
-        // redirect to it.
-        for f in ["npm", "cargo", "go"] {
+        // The address: the group's own note where a client is told how
+        // to read through it; files' and maven's a listing, without the
+        // slash the redirect to it.
+        for f in ["npm", "pypi", "cargo", "go"] {
             for dir_url in [false, true] {
                 assert_eq!(ask(f, &[], dir_url, ""), Ask::Note, "{f}");
             }
         }
-        assert_eq!(ask("pypi", &[], true, ""), Ask::First);
-        assert_eq!(ask("pypi", &[], false, ""), Ask::First);
-        assert_eq!(ask("files", &[], true, ""), Ask::Listing);
-        assert_eq!(ask("maven", &[], true, ""), Ask::Listing);
-        assert_eq!(ask("maven", &[], false, ""), Ask::Slash);
+        for f in ["files", "maven"] {
+            assert_eq!(ask(f, &[], true, ""), Ask::Listing, "{f}");
+            assert_eq!(ask(f, &[], false, ""), Ask::Slash, "{f}");
+        }
         assert_eq!(ask("files", &v(&["@first", "b"]), false, ""), Ask::Nothing);
     }
 
@@ -1399,5 +1411,152 @@ mod tests {
         assert!(!told("g", last), "renewed at {}", 1000 + q / 2);
         assert!(!told("g", last + 2 * q - 1));
         assert!(told("g", last + 4 * q - 1));
+    }
+
+    /// Makes public or private repository `name` of `format`: a group
+    /// of `members`, or a hosted one.
+    fn made(app: &App, name: &str, format: &str, public: bool, members: Option<&[&str]>) {
+        let (kind, settings) = match members {
+            Some(ms) => (Kind::Group, json!({"members": ms, "public": public})),
+            None => (Kind::Hosted, json!({"public": public})),
+        };
+        let n = pkgpod_engine::NewRepo {
+            name: name.into(),
+            format: format.into(),
+            kind,
+            storage: None,
+            settings,
+        };
+        app.engine.create_repo(n, "test").unwrap();
+    }
+
+    /// What the server answers an anonymous `method` of `path`: its
+    /// status, Location, Content-Length and body.
+    async fn answer(app: &Arc<App>, method: Method, path: &str) -> (u16, String, String, String) {
+        use tower::ServiceExt;
+        let req = axum::http::Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::HOST, "localhost")
+            .body(Body::empty())
+            .unwrap();
+        let r = crate::serving::router(app.clone())
+            .oneshot(req)
+            .await
+            .unwrap();
+        let st = r.status().as_u16();
+        let h = |k| {
+            r.headers()
+                .get(k)
+                .map_or(String::new(), |v| v.to_str().unwrap().to_string())
+        };
+        let (loc, len) = (h(header::LOCATION), h(header::CONTENT_LENGTH));
+        let b = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (st, loc, len, String::from_utf8(b.to_vec()).unwrap())
+    }
+
+    /// A member that fails what the group asks it first answers no
+    /// reader of the group: a files proxy whose upstream answers 500 is
+    /// not relayed with its upstream's address, the group answers 502
+    /// in its own words (a HEAD too), and logs the member, once a while.
+    #[tokio::test]
+    async fn a_group_answers_a_failed_member_in_its_own_words() {
+        use crate::serving::proxy::tests::{app, proxy_repo, reply, stub};
+        use tracing_subscriber::layer::SubscriberExt;
+        let w = Warned::default();
+        let _log = tracing::subscriber::set_default(tracing_subscriber::registry().with(w.clone()));
+        let (_d, app) = app();
+        let up = stub(|_, p, c| reply(c, "500 Internal Server Error", p.as_bytes()));
+        proxy_repo(&app, "grpfirst-up", "files", &up);
+        made(&app, "grpfirst-pub", "files", true, None);
+        made(
+            &app,
+            "grpfirst",
+            "files",
+            true,
+            Some(&["grpfirst-up", "grpfirst-pub"]),
+        );
+        let own = "grpfirst: a member could not be asked\n";
+        for m in [Method::GET, Method::HEAD, Method::GET] {
+            let (st, _, len, body) = answer(&app, m.clone(), "/grpfirst/dir/a.txt").await;
+            let body_sent = if m == Method::HEAD { "" } else { own };
+            assert_eq!(
+                (st, len, body.as_str()),
+                (502, own.len().to_string(), body_sent),
+                "{m}"
+            );
+        }
+        let warned: Vec<String> =
+            w.0.lock()
+                .unwrap()
+                .iter()
+                .filter(|m| m.starts_with("grpfirst: "))
+                .cloned()
+                .collect();
+        assert_eq!(
+            warned,
+            [
+                r#"grpfirst: its member grpfirst-up could not be asked for "dir/a.txt": it answered 502 Bad Gateway"#
+            ],
+        );
+    }
+
+    /// A files group's address without its slash redirects to its
+    /// listing, as a maven group's does, whatever its first member: a
+    /// proxy's listing or failure is not answered there, nor is a group
+    /// of no members not found there.
+    #[tokio::test]
+    async fn a_files_group_s_address_redirects_to_its_listing() {
+        use crate::serving::proxy::tests::{app, proxy_repo, reply, stub};
+        let (_d, app) = app();
+        let up = stub(|_, p, c| reply(c, "500 Internal Server Error", p.as_bytes()));
+        proxy_repo(&app, "grpslash-up", "files", &up);
+        made(&app, "grpslash-pub", "files", true, None);
+        made(
+            &app,
+            "grpslash",
+            "files",
+            true,
+            Some(&["grpslash-up", "grpslash-pub"]),
+        );
+        made(&app, "grpslash-none", "files", true, Some(&[]));
+        for (path, to) in [
+            ("/grpslash", "/grpslash/"),
+            ("/grpslash?sort=size", "/grpslash/"),
+            ("/grpslash-none", "/grpslash-none/"),
+        ] {
+            for m in [Method::GET, Method::HEAD] {
+                let got = answer(&app, m.clone(), path).await;
+                let want = (308, to.into(), "0".into(), String::new());
+                assert_eq!(got, want, "{m} {path}");
+            }
+        }
+    }
+
+    /// A pypi group's address is its own note whatever member is first:
+    /// a hosted member's redirect and page are not answered there, as a
+    /// proxy member's note is not. A caller who may not read the group
+    /// is refused as before.
+    #[tokio::test]
+    async fn a_pypi_group_s_address_is_its_own_note() {
+        use crate::serving::proxy::tests::app;
+        let (_d, app) = app();
+        made(&app, "grpnote-pub", "pypi", true, None);
+        made(&app, "grpnote", "pypi", true, Some(&["grpnote-pub"]));
+        made(&app, "grpnote-priv", "pypi", false, Some(&["grpnote-pub"]));
+        let note = "grpnote: a group of 1 pypi repository, read through: for each package the first of them that has it answers.\n\n  pip install --index-url http://localhost/grpnote/simple/ <project>\n\nPublish to a hosted repository.\n";
+        for path in ["/grpnote", "/grpnote/"] {
+            for m in [Method::GET, Method::HEAD] {
+                let got = answer(&app, m.clone(), path).await;
+                let body = if m == Method::HEAD { "" } else { note };
+                let want = (200, String::new(), note.len().to_string(), body.into());
+                assert_eq!(got, want, "{m} {path}");
+            }
+        }
+        for path in ["/grpnote-priv", "/grpnote-priv/"] {
+            assert_eq!(answer(&app, Method::GET, path).await.0, 401, "{path}");
+        }
     }
 }

@@ -8410,8 +8410,9 @@ fn group_answers_its_own_note() {
 /// address with its own words, not with the proxy's note (the proxy's
 /// name and upstream): pypi with the group's note, the same to every
 /// caller who may read it, and maven, without the slash, with the
-/// redirect to its listing. With a hosted member first, both answer as
-/// before: the redirect, then the listing.
+/// redirect to its listing. With a hosted member first, pypi answers
+/// its note too, not the member's redirect and project list; maven
+/// the redirect, then the listing.
 #[test]
 fn group_address_shows_no_proxy_note() {
     let s = Server::start();
@@ -8510,39 +8511,41 @@ fn group_address_shows_no_proxy_note() {
                 (r.status().as_u16(), loc, ty, len, r.text().unwrap())
             };
             if f == "pypi" {
-                let base = s.url(&format!("/{g}/"));
-                let note = format!(
-                    "{g}: a group of 2 pypi repositories, read through: for each package the first of them that has it answers.\n\n  pip install --index-url {base}simple/ <project>\n\nPublish to a hosted repository.\n"
-                );
-                for path in [format!("/{g}"), format!("/{g}/")] {
-                    let (st, _, _, _, body) = ask(false, &path);
-                    assert_eq!((st, body.as_str()), (200, note.as_str()), "{path} {t:?}");
-                    for m in [&up, &dead] {
-                        assert!(!body.contains(m.as_str()), "{path}: names {m}: {body}");
+                for g in [&g, &mix] {
+                    let base = s.url(&format!("/{g}/"));
+                    let note = format!(
+                        "{g}: a group of 2 pypi repositories, read through: for each package the first of them that has it answers.\n\n  pip install --index-url {base}simple/ <project>\n\nPublish to a hosted repository.\n"
+                    );
+                    for path in [format!("/{g}"), format!("/{g}/")] {
+                        let (st, _, _, _, body) = ask(false, &path);
+                        assert_eq!((st, body.as_str()), (200, note.as_str()), "{path} {t:?}");
+                        for m in [&up, &publ, &dead] {
+                            assert!(!body.contains(m.as_str()), "{path}: names {m}: {body}");
+                        }
+                        let (st, _, _, len, _) = ask(true, &path);
+                        assert_eq!(
+                            (st, len),
+                            (200, note.len().to_string()),
+                            "HEAD {path} {t:?}"
+                        );
                     }
-                    let (st, _, _, len, _) = ask(true, &path);
-                    assert_eq!(
-                        (st, len),
-                        (200, note.len().to_string()),
-                        "HEAD {path} {t:?}"
-                    );
                 }
-            } else {
-                for head in [false, true] {
-                    let (st, loc, _, _, body) = ask(head, &format!("/{g}"));
-                    assert_eq!(
-                        (st, loc.as_str(), body.as_str()),
-                        (308, format!("/{g}/").as_str(), ""),
-                        "/{g} head {head} {t:?}"
-                    );
-                }
-                let (st, _, ty, _, _) = ask(false, &format!("/{g}/"));
+                continue;
+            }
+            for head in [false, true] {
+                let (st, loc, _, _, body) = ask(head, &format!("/{g}"));
                 assert_eq!(
-                    (st, ty.as_str()),
-                    (200, "text/html; charset=utf-8"),
-                    "/{g}/"
+                    (st, loc.as_str(), body.as_str()),
+                    (308, format!("/{g}/").as_str(), ""),
+                    "/{g} head {head} {t:?}"
                 );
             }
+            let (st, _, ty, _, _) = ask(false, &format!("/{g}/"));
+            assert_eq!(
+                (st, ty.as_str()),
+                (200, "text/html; charset=utf-8"),
+                "/{g}/"
+            );
             let (st, loc, _, _, _) = ask(false, &format!("/{mix}"));
             assert_eq!((st, loc), (308, format!("/{mix}/")), "/{mix} {t:?}");
             let (st, _, ty, _, _) = ask(false, &format!("/{mix}/"));
