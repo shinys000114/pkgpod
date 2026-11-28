@@ -7582,8 +7582,9 @@ fn group_of_files_repositories() {
         .json(&serde_json::json!({"settings": {"members": ["a", "b", "p"]}}))
         .send()
         .unwrap();
-    assert_eq!(r.status().as_u16(), 403);
-    assert!(r.text().unwrap().contains("may not read p"));
+    // One u may not read, as one there is not.
+    assert_eq!(r.status().as_u16(), 404);
+    assert!(r.text().unwrap().contains("no repository p"));
     // The console's pages of a group.
     let (cc, sid, _) = console_session(&s, "gc", "gc-password");
     let page = |p: &str| {
@@ -7673,13 +7674,10 @@ fn group_members_are_checked_where_added() {
     assert_eq!(st, 200, "{body}");
     assert_eq!(stored("description"), json!("api"));
     assert_eq!(stored("members"), json!(["a", "b"]));
-    // An added member u may not read is refused, as before.
+    // An added member u may not read is refused, as one there is not.
     let (st, body) = patch(json!({"members": ["a", "b", "c"]}));
-    assert_eq!(st, 403, "{body}");
-    assert!(
-        body.contains("you may not read c, so you may not make it a member"),
-        "{body}"
-    );
+    assert_eq!(st, 404, "{body}");
+    assert!(body.contains("no repository c"), "{body}");
     assert_eq!(stored("members"), json!(["a", "b"]));
     // The console's save sends every field, the members too.
     let (cc, sid, csrf) = console_login(&s, "u", "u-password");
@@ -7697,7 +7695,7 @@ fn group_members_are_checked_where_added() {
     assert!(saved.contains("Saved."), "{saved}");
     assert_eq!(stored("description"), json!("console"));
     let saved = save(&[("description", "console"), ("members", "a, b, c")]);
-    assert!(saved.contains("you may not read c"), "{saved}");
+    assert!(saved.contains("no repository c"), "{saved}");
     assert_eq!(stored("members"), json!(["a", "b"]));
     // b taken out: a member removed is not checked either.
     let (st, body) = patch(json!({"members": ["a"]}));
@@ -7705,12 +7703,142 @@ fn group_members_are_checked_where_added() {
     assert_eq!(stored("members"), json!(["a"]));
     // Out of the list, b is added again if put back.
     let (st, body) = patch(json!({"members": ["a", "b"]}));
-    assert_eq!(st, 403, "{body}");
+    assert_eq!(st, 404, "{body}");
+    assert!(body.contains("no repository b"), "{body}");
+    assert_eq!(stored("members"), json!(["a"]));
+}
+
+/// A group's members given as text are the names the engine stores: a
+/// list split at commas, spaces and line ends (the CLI's `a b`, a
+/// console's one per line), each checked as the name it is.
+#[test]
+fn group_members_given_as_text_are_checked_as_stored() {
+    let s = Server::start();
+    for r in ["a", "b"] {
+        s.cli(&["repo", "create", r, "-f", "files"]).unwrap();
+    }
+    let members = |g: &str| s.json(&["repo", "show", g])["settings"]["members"].clone();
+    // One per line, at create.
+    s.cli(&[
+        "repo",
+        "create",
+        "g",
+        "-f",
+        "files",
+        "-k",
+        "group",
+        "-s",
+        "members=a\nb",
+    ])
+    .unwrap();
+    assert_eq!(members("g"), json!(["a", "b"]));
+    // Between spaces, at a change that adds one.
+    s.cli(&["repo", "set", "g", "members=b"]).unwrap();
+    s.cli(&["repo", "set", "g", "members=b a"]).unwrap();
+    assert_eq!(members("g"), json!(["b", "a"]));
+    // The console's form, one per line as a browser sends a text box.
+    s.cli(&["repo", "set", "g", "members=a"]).unwrap();
+    let (cc, sid, csrf) = console_session(&s, "gc", "gc-password");
+    let saved = cc
+        .post(format!("{}/c/r/g/settings", s.api))
+        .header("cookie", format!("pkgpod_session={sid}"))
+        .header("x-csrf-token", &csrf)
+        .form(&[("members", "a\r\nb\r\n")])
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(saved.contains("Saved."), "{saved}");
+    assert_eq!(members("g"), json!(["a", "b"]));
+    // A name there is not, among them, is refused as itself.
+    let e = s
+        .cli(&["repo", "set", "g", "members=a b nosuch"])
+        .unwrap_err();
+    assert!(e.contains("no repository nosuch"), "{e}");
+    assert_eq!(members("g"), json!(["a", "b"]));
+}
+
+/// A member a group's admin adds and may not read is refused as one
+/// there is not, with the same status and text, which name only what was
+/// given: not whether it is there, its format or that it is a group. A
+/// member the admin may read is told apart: of another format, a group.
+#[test]
+fn group_members_not_readable_are_refused_as_not_there() {
+    let s = Server::start();
+    for (r, f) in [("a", "files"), ("p", "files"), ("n", "npm"), ("rn", "npm")] {
+        s.cli(&["repo", "create", r, "-f", f]).unwrap();
+    }
+    for g in ["g", "hg", "rg"] {
+        s.cli(&[
+            "repo",
+            "create",
+            g,
+            "-f",
+            "files",
+            "-k",
+            "group",
+            "-s",
+            "members=a",
+        ])
+        .unwrap();
+    }
+    s.cli_in(&["user", "add", "u", "--password-stdin"], "u-password")
+        .unwrap();
+    s.cli(&["grant", "set", "g", "user:u", "admin"]).unwrap();
+    for r in ["a", "rn", "rg"] {
+        s.cli(&["grant", "set", r, "user:u", "read"]).unwrap();
+    }
+    let c = reqwest::blocking::Client::new();
+    let patch = |members: Value| {
+        let r = c
+            .patch(format!("{}/api/v1/repos/g", s.api))
+            .basic_auth("u", Some("u-password"))
+            .json(&json!({"settings": {"members": members}}))
+            .send()
+            .unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    // Not there; there and not readable by u: of the group's format, of
+    // another, a group. One answer, but for the name.
+    let (st, nosuch) = patch(json!(["a", "nosuch"]));
+    for m in ["p", "n", "hg"] {
+        assert_eq!(
+            patch(json!(["a", m])),
+            (st, nosuch.replace("nosuch", m)),
+            "{m}"
+        );
+    }
+    assert_eq!(st, 404, "{nosuch}");
+    assert!(nosuch.contains("no repository nosuch"), "{nosuch}");
+    // What u may read is said what it is.
+    let (st, body) = patch(json!(["a", "rn"]));
+    assert_eq!(st, 400, "{body}");
+    assert!(body.contains("rn is a npm repository, not files"), "{body}");
+    let (st, body) = patch(json!(["a", "rg"]));
+    assert_eq!(st, 400, "{body}");
     assert!(
-        body.contains("you may not read b, so you may not make it a member"),
+        body.contains("rg is a group: groups are not members"),
         "{body}"
     );
-    assert_eq!(stored("members"), json!(["a"]));
+    assert_eq!(
+        s.json(&["repo", "show", "g"])["settings"]["members"],
+        json!(["a"])
+    );
+    // The console's save answers alike.
+    let (cc, sid, csrf) = console_login(&s, "u", "u-password");
+    let save = |members: &str| {
+        cc.post(format!("{}/c/r/g/settings", s.api))
+            .header("cookie", format!("pkgpod_session={sid}"))
+            .header("x-csrf-token", &csrf)
+            .form(&[("members", members)])
+            .send()
+            .unwrap()
+            .text()
+            .unwrap()
+    };
+    let nosuch = save("a, nosuch");
+    assert!(nosuch.contains("no repository nosuch"), "{nosuch}");
+    assert_eq!(save("a, p"), nosuch.replace("nosuch", "p"));
 }
 
 /// A group of a format that has no groups is refused with one text,

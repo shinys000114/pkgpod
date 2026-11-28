@@ -71,7 +71,8 @@ public members, so while it has a member that is not public, its
 answers vary by Authorization and caches in front do not keep them for
 others), and downloads count on the member. Nothing is uploaded to a
 group: publish to a member. A group cannot be a member, and whoever
-sets the members must be able to read them.
+sets the members must be able to read them (one they may not read is
+refused as a name there is not).
 
 A **proxy** fetches a file the first time it is asked for and keeps it
 until it is evicted (by hand, or for the size limit `max_mib`, unless

@@ -444,6 +444,16 @@ pub fn check_params(what: &str, fields: &[Field], extra: &[&str], v: &Value) -> 
     Ok(())
 }
 
+/// The items of a list setting given as text, as a list is stored: a
+/// CLI's `a,b` or `a b`, a form's one per line. Split at commas, line
+/// ends and spaces; empty items are left out.
+pub fn list_items(s: &str) -> Vec<&str> {
+    s.split([',', '\n', ' '])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 fn coerce(f: &Field, x: &Value) -> Result<Value> {
     let bad = |want: &str| Error::Invalid(format!("setting {}: expected {want}, got {x}", f.name));
     Ok(match (&f.kind, x) {
@@ -467,12 +477,7 @@ fn coerce(f: &Field, x: &Value) -> Result<Value> {
                 return Err(bad("a list of strings"));
             }
         }
-        (FieldKind::List, Value::String(s)) => json!(
-            s.split([',', '\n', ' '])
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-        ),
+        (FieldKind::List, Value::String(s)) => json!(list_items(s)),
         (FieldKind::Multi { .. }, Value::Array(_) | Value::String(_)) => {
             let list = coerce(
                 &Field {
@@ -564,6 +569,18 @@ mod tests {
         assert_eq!(v["keep_days"], json!(30));
         assert!(check(&f, &json!({"nope": 1})).is_err());
         assert!(check(&f, &json!({"public": "maybe"})).is_err());
+    }
+
+    /// A list given as text, however it is separated, is the items a
+    /// check stores.
+    #[test]
+    fn lists_given_as_text() {
+        assert_eq!(list_items("a, b\nc d\r\n,,e "), ["a", "b", "c", "d", "e"]);
+        assert!(list_items(" ,\r\n").is_empty());
+        let f = common(crate::Kind::Group);
+        let v = check(&f, &json!({"members": "a b\r\nc,d"})).unwrap();
+        assert_eq!(v["members"], json!(list_items("a b\r\nc,d")));
+        assert_eq!(v["members"], json!(["a", "b", "c", "d"]));
     }
 
     #[test]

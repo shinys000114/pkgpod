@@ -876,12 +876,13 @@ fn tagged(mut r: Response, etag: &str) -> Response {
 }
 
 /// Checks a group as `who` makes or changes it: its format has groups
-/// (whether or not the change names members), and its members are
-/// repositories of the group's format that are not groups, which `who`
-/// may read. Only the members the change adds are checked: one in
-/// `stored`, the group's list before the change (none at create), was
-/// checked when it was added, so keeping, moving or taking it out needs
-/// no right on it.
+/// (whether or not the change names members), and its members, read as
+/// the engine stores the list, are repositories `who` may read, of the
+/// group's format and not groups. One `who` may not read is refused as
+/// one there is not, before anything is said of what it is. Only the
+/// members the change adds are checked: one in `stored`, the group's
+/// list before the change (none at create), was checked when it was
+/// added, so keeping, moving or taking it out needs no right on it.
 pub fn check_members(
     app: &App,
     who: &crate::auth::Caller,
@@ -904,29 +905,23 @@ pub fn check_members(
             listed.join(", ")
         )));
     }
-    let list: Vec<String> = match settings.get("members") {
-        Some(Value::Array(a)) => a
-            .iter()
-            .filter_map(Value::as_str)
-            .map(String::from)
-            .collect(),
-        Some(Value::String(s)) => s
-            .split(',')
-            .map(|x| x.trim().to_string())
-            .filter(|x| !x.is_empty())
-            .collect(),
+    // Text is split as the engine splits any list it stores (the CLI's
+    // `a b`, the console's one per line); a value that is no list is
+    // the engine's to refuse.
+    let list: Vec<&str> = match settings.get("members") {
+        Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).collect(),
+        Some(Value::String(s)) => pkgpod_engine::settings::list_items(s),
         _ => return Ok(()),
     };
-    for m in list.iter().filter(|m| !stored.contains(m)) {
+    for m in list.into_iter().filter(|m| !stored.iter().any(|s| s == m)) {
         if m == group {
             return Err(crate::Error::Invalid(format!(
                 "{group} cannot be its own member"
             )));
         }
-        let r = app
-            .engine
-            .repo(m)
-            .map_err(|_| crate::Error::Invalid(format!("no repository {m}")))?;
+        // "no repository <m>", as everywhere a name is not there or who
+        // asks may not read it: what it is is told only to its readers.
+        let r = app.repo_for(who, m, Role::Read)?;
         if r.format != format {
             return Err(crate::Error::Invalid(format!(
                 "{m} is a {} repository, not {format}",
@@ -936,11 +931,6 @@ pub fn check_members(
         if r.kind == Kind::Group {
             return Err(crate::Error::Invalid(format!(
                 "{m} is a group: groups are not members"
-            )));
-        }
-        if app.auth.role(who, m, r.setting_bool("public")).is_none() {
-            return Err(crate::Error::Forbidden(format!(
-                "you may not read {m}, so you may not make it a member"
             )));
         }
     }
