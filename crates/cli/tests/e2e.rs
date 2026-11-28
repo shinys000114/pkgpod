@@ -8019,6 +8019,120 @@ fn group_refusals_name_no_member() {
     assert_eq!(r.status().as_u16(), 404);
 }
 
+/// An npm, cargo or go group's address answers the group's own note:
+/// how many members it lists and how a client reads through it, the
+/// same to every caller who may read it, with no member's name, no
+/// publish line and no proxy's upstream. Callers who may not read the
+/// group are refused as before.
+#[test]
+fn group_answers_its_own_note() {
+    let s = Server::start();
+    // The proxy members' upstream: nothing listens there.
+    let dead = format!("127.0.0.1:{}/", dead_port());
+    let c = reqwest::blocking::Client::new();
+    for (f, p) in [("npm", "n"), ("cargo", "c"), ("go", "g")] {
+        let (sec, publ, up) = (format!("{p}sec"), format!("{p}pub"), format!("{p}up"));
+        s.cli(&["repo", "create", &sec, "-f", f, "-s", "public=false"])
+            .unwrap();
+        s.cli(&["repo", "create", &publ, "-f", f, "-s", "public=true"])
+            .unwrap();
+        s.cli(&[
+            "repo",
+            "create",
+            &up,
+            "-f",
+            f,
+            "-k",
+            "proxy",
+            "-s",
+            &format!("upstream=http://{dead}"),
+            "-s",
+            "public=true",
+        ])
+        .unwrap();
+        // A public group whose first member is private, and a private
+        // group of one member.
+        let (g, one) = (format!("{p}g"), format!("{p}one"));
+        for (name, members, public) in [
+            (&g, format!("{sec},{publ},{up}"), "true"),
+            (&one, publ.clone(), "false"),
+        ] {
+            s.cli(&[
+                "repo",
+                "create",
+                name,
+                "-f",
+                f,
+                "-k",
+                "group",
+                "-s",
+                &format!("members={members}"),
+                "-s",
+                &format!("public={public}"),
+            ])
+            .unwrap();
+        }
+        let token = |repos: &str| {
+            s.cli(&["token", "create", repos, "--repos", repos])
+                .unwrap()
+                .trim()
+                .to_string()
+        };
+        let (gt, onet, other) = (token(&g), token(&one), token(&publ));
+        for (g, n, ts) in [
+            (&g, "3 repositories", vec![None, Some(&gt)]),
+            (&one, "1 repository", vec![Some(&onet)]),
+        ] {
+            let base = s.url(&format!("/{g}/"));
+            let lines = match f {
+                "npm" => format!("  npm install --registry {base} <package>\n"),
+                "cargo" => format!(
+                    "  # .cargo/config.toml\n  [registries.{g}]\n  index = \"sparse+{base}index/\"\n"
+                ),
+                _ => format!("  GOPROXY={base}\n  GONOSUMDB=<your module prefix>\n"),
+            };
+            let (n, what) = n.split_once(' ').unwrap();
+            let note = format!(
+                "{g}: a group of {n} {f} {what}, read through: for each package the first of them that has it answers.\n\n{lines}\nPublish to a hosted repository.\n"
+            );
+            for path in [format!("/{g}"), format!("/{g}/")] {
+                for t in &ts {
+                    let auth = |b: reqwest::blocking::RequestBuilder| match t {
+                        Some(t) => b.bearer_auth(t),
+                        None => b,
+                    };
+                    let r = auth(c.get(s.url(&path))).send().unwrap();
+                    let st = r.status().as_u16();
+                    let body = r.text().unwrap();
+                    assert_eq!((st, body.as_str()), (200, note.as_str()), "{path} {t:?}");
+                    for m in [&sec, &publ, &up, &dead] {
+                        assert!(!body.contains(m.as_str()), "{path}: names {m}: {body}");
+                    }
+                    let r = auth(c.head(s.url(&path))).send().unwrap();
+                    let len = r
+                        .headers()
+                        .get("content-length")
+                        .and_then(|v| v.to_str().ok())
+                        .map(String::from);
+                    assert_eq!(
+                        (r.status().as_u16(), len),
+                        (200, Some(note.len().to_string())),
+                        "HEAD {path} {t:?}"
+                    );
+                }
+            }
+        }
+        // Refused as before: anonymously (401), and by a token for
+        // another repository (404).
+        for path in [format!("/{one}"), format!("/{one}/")] {
+            let r = c.get(s.url(&path)).send().unwrap();
+            assert_eq!(r.status().as_u16(), 401, "{path}");
+            let r = c.get(s.url(&path)).bearer_auth(&other).send().unwrap();
+            assert_eq!(r.status().as_u16(), 404, "{path}");
+        }
+    }
+}
+
 /// A Maven group does not ask a proxy member's upstream for an
 /// artifact the proxy excludes (`groupId:artifactId`).
 #[test]

@@ -41,6 +41,9 @@ enum Ask {
     Name(String),
     /// By the first member that answers it (not with 404).
     First,
+    /// The group's own note: the address of a format whose repository
+    /// answers a client note there.
+    Note,
     /// A directory listing: every member's entries.
     Listing,
     /// pypi's list of projects.
@@ -81,7 +84,7 @@ fn ask(format: &str, rel: &[String], dir_url: bool, query: &str) -> Ask {
         "maven" if dir_url => Ask::Listing,
         "maven" => maven_key(rel).map_or(Ask::First, Ask::Name),
         "npm" => match rel {
-            [] => Ask::First,
+            [] => Ask::Note,
             [d, v1, s] if d == "-" && v1 == "v1" && s == "search" => Ask::Search,
             [d, l, ..] if d == "-" && l == "label" => Ask::Nothing,
             [d, ..] if d == "-" => Ask::First,
@@ -97,6 +100,7 @@ fn ask(format: &str, rel: &[String], dir_url: bool, query: &str) -> Ask {
             _ => Ask::First,
         },
         "cargo" => match rel {
+            [] => Ask::Note,
             [i, c] if i == "index" && c == "config.json" => Ask::First,
             [i, .., name] if i == "index" => Ask::Name(name.to_ascii_lowercase()),
             [a, v1, c] if a == "api" && v1 == "v1" && c == "crates" && !query.is_empty() => {
@@ -108,6 +112,7 @@ fn ask(format: &str, rel: &[String], dir_url: bool, query: &str) -> Ask {
             _ if label => Ask::Nothing,
             _ => Ask::First,
         },
+        "go" if rel.is_empty() => Ask::Note,
         "go" => match rel.iter().position(|s| s == "@v" || s == "@latest") {
             Some(0) | None if label => Ask::Nothing,
             Some(i) if i > 0 => Ask::Name(rel[..i].join("/")),
@@ -225,6 +230,31 @@ fn revalidated(mut r: Response) -> Response {
     r
 }
 
+/// The group's own note at its address `base`: what it is, how many
+/// members it lists, and how a client reads through it. The same to
+/// every caller who may read the group, it names no member (a member's
+/// note named it, a hosted member's told npm users to publish where a
+/// group refuses writes, a proxy's showed its upstream). Its go line
+/// names nothing after the group: go would ask the public proxy, then
+/// the source, for any module the group does not have.
+fn note(g: &pkgpod_engine::RepoInfo, base: &str) -> Option<String> {
+    let n = g.setting_list("members").len();
+    let lines = match g.format.as_str() {
+        "npm" => format!("  npm install --registry {base} <package>\n"),
+        "cargo" => format!(
+            "  # .cargo/config.toml\n  [registries.{}]\n  index = \"sparse+{base}index/\"\n",
+            g.name.replace('.', "-")
+        ),
+        "go" => format!("  GOPROXY={base}\n  GONOSUMDB=<your module prefix>\n"),
+        _ => return None,
+    };
+    let what = if n == 1 { "repository" } else { "repositories" };
+    Some(format!(
+        "{}: a group of {n} {} {what}, read through: for each package the first of them that has it answers.\n\n{lines}\nPublish to a hosted repository.\n",
+        g.name, g.format
+    ))
+}
+
 fn text(st: StatusCode, m: String) -> Response {
     let mut r = Response::new(Body::from(format!("{m}\n")));
     *r.status_mut() = st;
@@ -279,6 +309,13 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
     let head = method == Method::HEAD;
     match a {
         Ask::Nothing => crate::serving::status(StatusCode::NOT_FOUND),
+        Ask::Note => {
+            let base = crate::serving::client_base(at.route.as_ref(), &at.host, &at.base, &req);
+            match note(&g, &base) {
+                Some(t) => crate::serving::client_note(StatusCode::OK, t),
+                None => crate::serving::status(StatusCode::NOT_FOUND),
+            }
+        }
         Ask::Name(key) => {
             for m in ms {
                 let found = if m.repo.kind == Kind::Proxy {
@@ -597,6 +634,17 @@ mod tests {
             Ask::Name("org/ex/app".into())
         );
         assert_eq!(ask("files", &v(&["a", "b"]), true, ""), Ask::Listing);
+        // The address: the group's own note where a repository's is a
+        // client note; pypi's is the first member's, files' and maven's
+        // a listing.
+        for f in ["npm", "cargo", "go"] {
+            for dir_url in [false, true] {
+                assert_eq!(ask(f, &[], dir_url, ""), Ask::Note, "{f}");
+            }
+        }
+        assert_eq!(ask("pypi", &[], true, ""), Ask::First);
+        assert_eq!(ask("files", &[], true, ""), Ask::Listing);
+        assert_eq!(ask("maven", &[], true, ""), Ask::Listing);
         assert_eq!(ask("files", &v(&["@first", "b"]), false, ""), Ask::Nothing);
     }
 
