@@ -318,6 +318,15 @@ def group_kept_reads(c, who):
           {"If-None-Match": "{cargo group cgall%s %s.etag}" % (d[len("/cgall"):], who)})
 
 
+def group_config_heads(c, who):
+    # The config by HEAD: the group reads its first member's answer as
+    # JSON to put its own rights in, and a hosted member answers a HEAD
+    # with no body (cgroup's cpub, cgmix's csec), a proxy with its own
+    # config whole (cgall's cgup, cgfail's c500).
+    for g in ["cgroup"] + [g for g, _ in GROUPS]:
+        c.add(f"cargo group {g} HEAD config {who}", who, "HEAD", f"/{g}/index/config.json")
+
+
 def mask(masker):
     def answer(path, hd, body, after_writes, etag):
         if re.match(TIMES, path):
@@ -351,6 +360,7 @@ PARTS = [
     ("writes", 280, group_writes),
     ("after", 130, group_after),
     ("reads", 220, group_kept_reads),
+    ("reads", 230, group_config_heads),
     # cargo keeps when each version was published (pubtime in its index
     # entry, in the tree too).
     ("rule", 60, ("cargo times", "pubtimes at or after the seed in cargo answers (same length), "
