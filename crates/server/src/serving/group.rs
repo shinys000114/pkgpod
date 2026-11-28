@@ -38,7 +38,8 @@ use crate::{App, Served};
 /// What a request through a group asks for.
 #[derive(Debug, PartialEq)]
 enum Ask {
-    /// Answered by the first member that has this state-tree directory.
+    /// Answered by the first member that has this state-tree directory;
+    /// one that then fails it (5xx) is answered with the group's own 502.
     Name(String),
     /// By the first member that answers it (not with 404); one that
     /// fails it (5xx) is answered with the group's own 502.
@@ -500,20 +501,39 @@ fn failing() -> &'static Mutex<HashMap<String, i64>> {
     F.get_or_init(Default::default)
 }
 
-/// Logs that group `g`'s member `member` could not be asked for
-/// `asked`, and why (`e`, which may name its upstream): the operator's,
-/// as the answer names no member. Once a while per group, as a proxy's
-/// slow upstream is told (a caller may send such requests as fast as it
-/// likes); `asked` comes from the request's path, decoded, and `e` may
-/// quote it, so both are written with their control characters escaped:
-/// a newline in them does not start a line of the log.
-fn member_failed(g: &str, member: &str, asked: &str, e: &str) {
+/// Group `g`'s answer where its member `member` could not be asked for
+/// `asked`: its own 502, which names neither the member nor its
+/// upstream, the same to every reader. Why (`e`, which may name its
+/// upstream) is logged, the operator's. Once a while per group, as a
+/// proxy's slow upstream is told (a caller may send such requests as
+/// fast as it likes); `asked` comes from the request's path, decoded,
+/// and `e` may quote it, so both are written with their control
+/// characters escaped: a newline in them does not start a line of the
+/// log.
+fn member_failed(g: &str, member: &str, asked: &str, e: &str) -> Response {
     if crate::serving::proxy::once_a_while(failing(), g, pkgpod_base::now()) {
         tracing::warn!(
             "{g}: its member {member} could not be asked for {asked:?}: {}",
             e.escape_debug()
         );
     }
+    text(
+        StatusCode::BAD_GATEWAY,
+        format!("{g}: a member could not be asked"),
+    )
+}
+
+/// Member `member`'s answer `r` to `asked`, the request's path, as
+/// group `g`'s: a 5xx is the group's own 502 (see [`member_failed`]),
+/// as the member's own words may name it or its upstream (a proxy's
+/// say what it asked where); any other answer is the member's,
+/// revalidated.
+fn relayed(g: &str, member: &str, asked: &str, r: Response) -> Response {
+    let st = r.status();
+    if st.is_server_error() {
+        return member_failed(g, member, asked, &format!("it answered {st}"));
+    }
+    revalidated(r)
 }
 
 pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
@@ -585,13 +605,7 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
                     match crate::serving::proxy::has_name(&app, &m, &key).await {
                         Has::Yes => true,
                         Has::No => false,
-                        Has::Failed(e) => {
-                            member_failed(&g.name, &m.repo.name, &key, &e);
-                            return text(
-                                StatusCode::BAD_GATEWAY,
-                                format!("{}: a member could not be asked", g.name),
-                            );
-                        }
+                        Has::Failed(e) => return member_failed(&g.name, &m.repo.name, &key, &e),
                     }
                 } else {
                     let (app2, m2, key2) = (app.clone(), m.clone(), key.clone());
@@ -600,7 +614,11 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
                         .unwrap_or(false)
                 };
                 if found {
-                    return revalidated(from(&app, &at, m, &again).await);
+                    // Its answer alone, a failure too: a later member's
+                    // package of the same name is not served instead.
+                    let member = m.repo.name.clone();
+                    let r = from(&app, &at, m, &again).await;
+                    return relayed(&g.name, &member, &at.rel.join("/"), r);
                 }
             }
             crate::serving::status(StatusCode::NOT_FOUND)
@@ -609,26 +627,10 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
             for m in ms {
                 let member = m.repo.name.clone();
                 let r = from(&app, &at, m, &again).await;
-                let st = r.status();
-                if st == StatusCode::NOT_FOUND {
+                if r.status() == StatusCode::NOT_FOUND {
                     continue;
                 }
-                if st.is_server_error() {
-                    // The member's own words may name it or its
-                    // upstream (a files proxy's says what it asked
-                    // where): the operator's, as the Name arm's.
-                    member_failed(
-                        &g.name,
-                        &member,
-                        &at.rel.join("/"),
-                        &format!("it answered {st}"),
-                    );
-                    return text(
-                        StatusCode::BAD_GATEWAY,
-                        format!("{}: a member could not be asked", g.name),
-                    );
-                }
-                return revalidated(r);
+                return relayed(&g.name, &member, &at.rel.join("/"), r);
             }
             crate::serving::status(StatusCode::NOT_FOUND)
         }
@@ -1710,6 +1712,73 @@ mod tests {
             warned,
             [
                 r#"grpfirst: its member grpfirst-up could not be asked for "dir/a.txt": it answered 502 Bad Gateway"#
+            ],
+        );
+    }
+
+    /// A member that has the name and then fails what it is asked for
+    /// answers no reader of the group either: a maven proxy whose
+    /// upstream has the artifact's metadata and answers 500 for its jar
+    /// is not relayed with its upstream's address, the group answers
+    /// 502 in its own words (a HEAD too), and logs the member, once a
+    /// while. The member's other answers for the name, its 200 and its
+    /// 404, are the group's as they are.
+    #[tokio::test]
+    async fn a_group_answers_a_found_member_s_failure_in_its_own_words() {
+        use crate::serving::proxy::tests::{app, proxy_repo, reply, stub};
+        use tracing_subscriber::layer::SubscriberExt;
+        let w = Warned::default();
+        let _log = tracing::subscriber::set_default(tracing_subscriber::registry().with(w.clone()));
+        let (_d, app) = app();
+        let meta: &[u8] =
+            b"<metadata><groupId>org.acme</groupId><artifactId>hello</artifactId></metadata>\n";
+        let up = stub(move |_, p, c| match p {
+            "/org/acme/hello/maven-metadata.xml" => reply(c, "200 OK", meta),
+            "/org/acme/hello/1.0.0/hello-1.0.0.jar" => {
+                reply(c, "500 Internal Server Error", p.as_bytes())
+            }
+            _ => reply(c, "404 Not Found", b""),
+        });
+        proxy_repo(&app, "grpname-up", "maven", &up);
+        made(&app, "grpname", "maven", true, Some(&["grpname-up"]));
+        let rel = "org/acme/hello/1.0.0/hello-1.0.0.jar";
+        // Asked of the member that has the name, not of the first that
+        // answers.
+        let segs: Vec<&str> = rel.split('/').collect();
+        assert_eq!(
+            ask("maven", &v(&segs), false),
+            Ask::Name("org/acme/hello".into())
+        );
+        let own = "grpname: a member could not be asked\n";
+        for m in [Method::GET, Method::HEAD, Method::GET] {
+            let (st, _, len, body) = answer(&app, m.clone(), &format!("/grpname/{rel}")).await;
+            assert!(
+                !body.contains("127.0.0.1") && !body.contains("grpname-up"),
+                "{m}: {body}"
+            );
+            let body_sent = if m == Method::HEAD { "" } else { own };
+            assert_eq!(
+                (st, len, body.as_str()),
+                (502, own.len().to_string(), body_sent),
+                "{m}"
+            );
+        }
+        let path = "/grpname/org/acme/hello/maven-metadata.xml";
+        let (st, _, _, body) = answer(&app, Method::GET, path).await;
+        assert_eq!((st, body.as_bytes()), (200, meta));
+        let path = "/grpname/org/acme/hello/1.0.0/hello-1.0.0.pom";
+        assert_eq!(answer(&app, Method::GET, path).await.0, 404);
+        let warned: Vec<String> =
+            w.0.lock()
+                .unwrap()
+                .iter()
+                .filter(|m| m.starts_with("grpname: "))
+                .cloned()
+                .collect();
+        assert_eq!(
+            warned,
+            [
+                r#"grpname: its member grpname-up could not be asked for "org/acme/hello/1.0.0/hello-1.0.0.jar": it answered 502 Bad Gateway"#
             ],
         );
     }
