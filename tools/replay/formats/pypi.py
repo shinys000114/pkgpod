@@ -286,54 +286,66 @@ PGROUP_ASKED = {"/simple/", "/simple/hello-world/", "/simple/nope/", f"/files/he
                 "/"}
 
 
-def group_reads(c, who):
+def group_asked(c, who, g, asked, inm):
+    """What a PyPI group is asked (but `asked`, asked already), its page
+    again with If-None-Match `inm` among others."""
     add = c.add
     pyjson = {"Accept": "application/vnd.pypi.simple.v1+json"}
+    b = f"/{g}"
+    for rel in GROUP_READS:
+        if rel not in asked:
+            add(f"pypi group {g}{rel} {who}", who, "GET", b + rel)
+    for name, h in (("json", pyjson), ("html", {"Accept": "text/html"}),
+                    ("inm", {"If-None-Match": inm}),
+                    ("ims", {"If-Modified-Since": "Fri, 01 Jan 2100 00:00:00 GMT"})):
+        add(f"pypi group {g} page {name} {who}", who, "GET", f"{b}/simple/hello-world/", h)
+    add(f"pypi group {g} HEAD page {who}", who, "HEAD", f"{b}/simple/hello-world/", pyjson)
+    add(f"pypi group {g} root json {who}", who, "GET", f"{b}/simple/", pyjson)
+    add(f"pypi group {g} root json without the slash {who}", who, "GET", f"{b}/simple", pyjson)
+    add(f"pypi group {g} HEAD root {who}", who, "HEAD", f"{b}/simple/")
+    add(f"pypi group {g} HEAD root json {who}", who, "HEAD", f"{b}/simple/", pyjson)
+    add(f"pypi group {g} range {who}", who, "GET", f"{b}/files/hello-world/{W10}",
+        {"Range": "bytes=0-9"})
+
+
+def group_reads(c, who):
     for g in ["pgroup"] + [g for g, _ in GROUPS]:
-        b = f"/{g}"
-        for rel in GROUP_READS:
-            if g != "pgroup" or rel not in PGROUP_ASKED:
-                add(f"pypi group {g}{rel} {who}", who, "GET", b + rel)
         page = f"pypi {g}/simple/hello-world/ {who}" if g == "pgroup" else \
             f"pypi group {g}/simple/hello-world/ {who}"
-        for name, h in (("json", pyjson), ("html", {"Accept": "text/html"}),
-                        ("inm", {"If-None-Match": "{%s.etag}" % page}),
-                        ("ims", {"If-Modified-Since": "Fri, 01 Jan 2100 00:00:00 GMT"})):
-            add(f"pypi group {g} page {name} {who}", who, "GET", f"{b}/simple/hello-world/", h)
-        add(f"pypi group {g} HEAD page {who}", who, "HEAD", f"{b}/simple/hello-world/", pyjson)
-        add(f"pypi group {g} root json {who}", who, "GET", f"{b}/simple/", pyjson)
-        add(f"pypi group {g} root json without the slash {who}", who, "GET", f"{b}/simple",
-            pyjson)
-        add(f"pypi group {g} HEAD root {who}", who, "HEAD", f"{b}/simple/")
-        add(f"pypi group {g} HEAD root json {who}", who, "HEAD", f"{b}/simple/", pyjson)
-        add(f"pypi group {g} range {who}", who, "GET", f"{b}/files/hello-world/{W10}",
-            {"Range": "bytes=0-9"})
+        group_asked(c, who, g, PGROUP_ASKED if g == "pgroup" else (), "{%s.etag}" % page)
+
+
+def group_writes_of(c, who, g):
+    octet = {"Content-Type": "application/octet-stream"}
+    b = f"/{g}"
+    fn, data = wheel(f"wg-{who}", "1.0")
+    c.seq(f"pypi group {g} writes {who}", who, [
+        ("POST", f"{b}/legacy/") + py_upload(fn, data),
+        ("GET", f"{b}/simple/wg-{who}/", {}, None),
+        ("POST", f"{b}/") + py_upload(fn, data),
+        ("POST", f"{b}/simple/") + py_upload(fn, data),
+        ("PUT", f"{b}/files/wg-{who}/{fn}", octet, data),
+        ("GET", f"{b}/files/wg-{who}/{fn}", {}, None),
+        ("DELETE", f"{b}/files/hello-world/{W10}", {}, None),
+        ("GET", f"{b}/files/hello-world/{W10}", {}, None),
+        ("PATCH", f"{b}/simple/hello-world/", octet, b"x")])
 
 
 def group_writes(c, who):
-    octet = {"Content-Type": "application/octet-stream"}
     # Writes to each group, read back: refused (405 naming its first
     # member, or as the caller may not read the group).
     for g in ["pgroup"] + [g for g, _ in GROUPS]:
-        b = f"/{g}"
-        fn, data = wheel(f"wg-{who}", "1.0")
-        c.seq(f"pypi group {g} writes {who}", who, [
-            ("POST", f"{b}/legacy/") + py_upload(fn, data),
-            ("GET", f"{b}/simple/wg-{who}/", {}, None),
-            ("POST", f"{b}/") + py_upload(fn, data),
-            ("POST", f"{b}/simple/") + py_upload(fn, data),
-            ("PUT", f"{b}/files/wg-{who}/{fn}", octet, data),
-            ("GET", f"{b}/files/wg-{who}/{fn}", {}, None),
-            ("DELETE", f"{b}/files/hello-world/{W10}", {}, None),
-            ("GET", f"{b}/files/hello-world/{W10}", {}, None),
-            ("PATCH", f"{b}/simple/hello-world/", octet, b"x")])
+        group_writes_of(c, who, g)
+
+
+# What PyPI's writes left in the members, through a group: the project
+# list, the projects uploaded.
+AFTER = ("/simple/", "/simple/w-writer/", "/simple/r-writer/", "/simple/hello-world/")
 
 
 def group_after(c, who):
-    # What PyPI's writes left in the members, through each group: the
-    # project list, the projects uploaded.
     for g in ["pgroup"] + [g for g, _ in GROUPS]:
-        for rel in ("/simple/", "/simple/w-writer/", "/simple/r-writer/", "/simple/hello-world/"):
+        for rel in AFTER:
             c.add(f"after pypi group {g}{rel} {who}", who, "GET", f"/{g}{rel}")
 
 
@@ -360,7 +372,35 @@ def group_kept_reads(c, who):
         c.add(f"pypi group pgbad{rel} {who}", who, "GET", f"/pgbad{rel}")
 
 
-FUZZ = (["ppub", "ppriv", "pproxy", "pgroup", "pgall", "pgmix", "pgfail"],
+# Of GROUP_READS, what group_kept_reads asks pgbad already.
+PGBAD_ASKED = {"/", "/simple/", "/simple/hello-world/", f"/files/hello-world/{W10}"}
+
+
+def bad_group_reads(c, who):
+    # pgbad as the other groups are asked; its page again with the ETag
+    # of ppub's, which it would answer were pnone not first (pgbad's
+    # gives none). Every group's project list (made of its members',
+    # with no ETag) again with ppub's list's ETag and with a later time.
+    group_asked(c, who, "pgbad", PGBAD_ASKED, "{pypi ppub/simple/hello-world/ %s.etag}" % who)
+    for g in ["pgroup"] + [g for g, _ in GROUPS] + ["pgbad"]:
+        for name, h in (("inm", {"If-None-Match": "{pypi ppub/simple/ %s.etag}" % who}),
+                        ("ims", {"If-Modified-Since": "Fri, 01 Jan 2100 00:00:00 GMT"})):
+            c.add(f"pypi group {g} root {name} {who}", who, "GET", f"/{g}/simple/", h)
+
+
+def bad_group_writes(c, who):
+    # Writes to pgbad, read back: refused (405 naming ppub, the first
+    # member that keeps versions).
+    group_writes_of(c, who, "pgbad")
+
+
+def bad_group_after(c, who):
+    for rel in AFTER:
+        c.add(f"after pypi group pgbad{rel} {who}", who, "GET", f"/pgbad{rel}")
+
+
+FUZZ = (["ppub", "ppriv", "pproxy", "pgroup", "pgall", "pgmix", "pgfail", "pnone",
+         "pgbad"],
         ["simple", "files", "hello-world", "Hello_World", "legacy", "index.json",
          "other-pkg", "up-pkg", "hello_world-1.0-py3-none-any.whl",
          "hello_world-1.0-py3-none-any.whl.metadata", "@first", "x", "sec-only",
@@ -387,6 +427,9 @@ PARTS = [
     ("after", 120, group_after),
     ("seed", 210, seed_bad_group),
     ("reads", 220, group_kept_reads),
+    ("reads", 240, bad_group_reads),
+    ("writes", 320, bad_group_writes),
+    ("after", 170, bad_group_after),
     ("fuzz sample", 40, wheel("fz", "1.0")[1]),
     ("fuzz sample", 50, py_upload(*wheel("fz", "1.0"))[1]),
 ]
