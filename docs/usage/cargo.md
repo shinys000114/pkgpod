@@ -211,8 +211,12 @@ A group reads its members in order. For each crate, the first member
 that has it answers alone: a later member's versions of the same name
 are not added, so a hosted repository before a proxy of crates.io keeps
 your names from being taken by public ones. Search lists each crate
-once, the first member's that has it, paged as a hosted registry's
-search is.
+once, the first member's that has it, and pages the list by `page`
+and `per_page` as a hosted registry's search is paged. Each hosted
+member is asked once, for its first 100 hits, the most a hosted
+registry gives on a page (a proxy is not asked): `meta.total` counts
+the hits merged from those, and a member's hits past its first 100
+are on no page of the group's.
 
 | Setting | Default | |
 |---------|---------|-|

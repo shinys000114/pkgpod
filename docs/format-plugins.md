@@ -257,14 +257,16 @@ implement `publish` for that, and return `Ok(None)`.
 
 ## When a format needs a protocol module
 
-A format whose clients only download files (apt, apk, pacman, conda,
-R, opkg; dnf, helm and gem read static files too) needs nothing in
-the server: `publish` builds
-the files, and the generic serving code answers `GET` from the served
-tree, `PUT <address>/<path>/<file>?<params>` as an upload (the last
-segment is the file name), and the API's
-`POST /api/v1/repos/<repo>/upload` (used by `pkgpod upload` and the
-console).
+A format whose clients only download files (apk, pacman, conda, R,
+opkg) needs nothing in the server: `publish` builds the files, and the
+generic serving code answers `GET` from the served tree,
+`PUT <address>/<path>/<file>?<params>` as an upload (the last segment
+is the file name), and the API's `POST /api/v1/repos/<repo>/upload`
+(used by `pkgpod upload` and the console). apt's clients only download
+files too, but deb has tree hooks in the server, for a re-signing
+mirror's Release files and key (`protocols/deb.rs`); dnf, helm and gem
+read static files too, and rpm, helm and gems each have a `Serving`
+beside the tree (below).
 
 A protocol module is needed when clients speak an API: publishing in
 their own protocol (npm's JSON with a base64 tarball, NuGet's
@@ -277,15 +279,19 @@ on `pkgpod-proto` (bodies, replies, forms, queries, the rights rule)
 and asking the server through `pkgpod_proto::host::Host` and, for what
 only it needs, a `Host` trait of its own (npm's labelled versions,
 cargo's writers). In the server, `crates/server/src/protocols/<id>.rs`
-(`pub_api.rs` for pub, `oci/` for OCI) implements that `Host` for the
-`App`, and a `Serving` that implements `registry::Serve`: `claims`
-says which requests of a repository's address are the protocol's, by
+(`pub_api.rs` for pub, `oci/` for OCI) implements the format's own
+`Host` for the `App` where it has one (npm, cargo, nuget, conan,
+terraform and OCI do; `pkgpod_proto::host::Host` is implemented for
+the `App` once, for every protocol, in `protocols/host.rs`), and a
+`Serving` that implements `registry::Serve`: `claims` says which
+requests of a repository's address are the protocol's, by
 method and path, and `serve` answers them; the format's row has
 `.protocol(&p::<id>::Serving)`. A module may also only add to a static
 served tree: helm (ChartMuseum's push), gems (`gem push` and yank),
 pypi (twine's upload, which `serving::serve_repo` hands it, and its
 index pages, as tree hooks), rpm (the dnf repository file of each
-group). The others claim every request of their repositories (npm,
+group), deb (a re-signing mirror's Release files and key, as tree
+hooks). The others claim every request of their repositories (npm,
 cargo, nuget, conan, galaxy, swift, pub, oci) or every read (go,
 composer, terraform, whose uploads are PUTs), and share a shape:
 
@@ -311,7 +317,9 @@ composer, terraform, whose uploads are PUTs), and share a shape:
   text saying how clients use it (`serving::client_note`, in the
   server's module).
 - A format whose address is an API rather than a tree to browse has
-  `.unlisted()` in its row, so it is left out of host listings.
+  `.unlisted()` in its row: a host's page (`serving::hosts`) lists its
+  repositories with their How to use, but their names link nowhere,
+  as they have no tree to look into.
 
 ## The console's "How to use"
 

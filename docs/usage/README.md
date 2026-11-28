@@ -62,12 +62,14 @@ so a package of the same name further down (a public registry's,
 through a proxy) never adds to or outranks it. A proxy member whose
 upstream fails (not there, or an error) and that keeps nothing for the
 name ends the search: the group answers 502 for it, rather than serve
-a later member's package of the same name. What names no package (a
-file of a files repository) comes from the first member that has it,
-and a member that answers it with a server error ends the search the
-same way. An npm, pypi, cargo, go, maven or files group's 502 is its
-own, `<group>: a member could not be asked`: it names neither the
-member nor its upstream (the server's log does). A directory listing
+a later member's package of the same name. A server error of the
+member that has the package is answered with that 502 too, and no
+later member is asked. What names no package (a file of a files
+repository) comes from the first member that has it, and a member that
+answers it with a server error ends the search the same way. An npm,
+pypi, cargo, go, maven or files group's 502 is its own, `<group>: a
+member could not be asked`: it names neither the member nor its
+upstream (the server's log does). A directory listing
 names each entry once, the first member's that has it, and so do
 pypi's project list and npm's and cargo's search. They read the hosted
 and mirror members, and a listing reads a files proxy's upstream
@@ -90,13 +92,18 @@ address with its slash, the group's listing. What a group makes itself
 of what it sends, answered 304 to an `If-None-Match` that names it,
 and a HEAD has the GET's headers, `Content-Length` too. Nothing is
 uploaded to a group: a write is answered 405, `<group> is a group: it
-is read only` (an OCI group's: `<group> is read through: push to a
-hosted repository`), which names no member, and npm's own endpoints
-(`npm audit`'s) answer 404 as a hosted registry's do; publish to a
-member. A group cannot be a member. Whoever adds a member must be able
-to read it: one they may not read is refused as a name there is not
-(404, `no repository <name>`); members the change keeps, moves or
-takes out are not checked again.
+is read only`, which names no member, and a write to npm's own
+endpoints, under `-/`, is answered 404, each of them: `npm audit`'s,
+as a hosted registry answers it, and `npm dist-tag add` and `rm` (a
+`PUT` or `DELETE` of `-/package/<name>/dist-tags/<tag>`), which a
+hosted registry takes. An OCI group refuses a write in the registry
+API's words, by the rights first: a caller who may only read the
+group gets 403 `no write access to <group>` (401 if anonymous), one
+who may write it 405 `<group> is read through: push to a hosted
+repository`. Publish to a member. A group cannot be a member.
+Whoever adds a member must be able to read it: one they may not read
+is refused as a name there is not (404, `no repository <name>`);
+members the change keeps, moves or takes out are not checked again.
 
 A **proxy** fetches a file the first time it is asked for and keeps it
 until it is evicted (by hand, or for the size limit `max_mib`, unless
@@ -109,10 +116,13 @@ when it is in whole within that minute and nothing newer was kept
 meanwhile). Names in `exclude` are never asked for upstream, so your
 own packages' names are not looked up in a public registry. A proxy is
 usable as the last member of a group. Nothing is uploaded to a proxy:
-a write is answered 405, `<proxy> is a proxy: it is read only` (an OCI
-proxy's: `<proxy> is read through: push to a hosted repository`),
-which names no upstream, and npm's own endpoints answer 404. A HEAD
-has the GET's headers, `Content-Length` too.
+a write is answered 405, `<proxy> is a proxy: it is read only`, which
+names no upstream, and a write to npm's own endpoints, under `-/`, is
+answered 404, `npm dist-tag add` and `rm` too, as at a group. An OCI
+proxy refuses a write as an OCI group does: 403 `no write access to
+<proxy>` to a caller who may only read it (401 if anonymous), 405
+`<proxy> is read through: push to a hosted repository` to one who may
+write it. A HEAD has the GET's headers, `Content-Length` too.
 `pkgpod cache <repo> [list|pin|unpin|evict|prefetch] [paths]` and the
 console's Cache tab manage what is kept.
 
