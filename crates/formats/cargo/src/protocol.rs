@@ -303,23 +303,55 @@ async fn publish(app: &Arc<dyn Host>, a: &Ask, req: Request) -> Response {
     }
 }
 
+/// A search as `cargo search` asks it, paged as crates.io pages it.
+struct Search {
+    /// The words asked, lowercased.
+    q: String,
+    /// The page, from 1: 1 if not given, not a number or 0.
+    page: usize,
+    /// Hits a page: 10 if not given, 1 to 100.
+    per_page: usize,
+}
+
+impl Search {
+    fn parse(query: &str) -> Search {
+        let mut s = Search {
+            q: String::new(),
+            page: 1,
+            per_page: 10,
+        };
+        for (k, v) in query.split('&').filter_map(|p| p.split_once('=')) {
+            let v = String::from_utf8_lossy(&pkgpod_base::percent::percent_decode(
+                &v.replace('+', " "),
+            ))
+            .to_string();
+            match k {
+                "q" => s.q = v.to_ascii_lowercase(),
+                "page" => s.page = v.parse().unwrap_or(1).max(1),
+                "per_page" => s.per_page = v.parse().unwrap_or(10).clamp(1, 100),
+                _ => {}
+            }
+        }
+        s
+    }
+
+    /// The answer: the page's hits and the count of all of them, a page
+    /// past the end an empty list.
+    fn answer(&self, hits: Vec<Value>) -> Value {
+        let total = hits.len();
+        let from = (self.page - 1).saturating_mul(self.per_page);
+        let crates: Vec<Value> = hits.into_iter().skip(from).take(self.per_page).collect();
+        json!({"crates": crates, "meta": {"total": total}})
+    }
+}
+
 /// `cargo search`: crates whose name holds the words asked.
 async fn search(app: &Arc<dyn Host>, a: &Ask, query: String) -> Response {
-    let mut q = String::new();
-    let mut per_page = 10usize;
-    for (k, v) in query.split('&').filter_map(|p| p.split_once('=')) {
-        let v =
-            String::from_utf8_lossy(&pkgpod_base::percent::percent_decode(&v.replace('+', " ")))
-                .to_string();
-        match k {
-            "q" => q = v.to_ascii_lowercase(),
-            "per_page" => per_page = v.parse().unwrap_or(10).clamp(1, 100),
-            _ => {}
-        }
-    }
+    let ask = Search::parse(&query);
     let Some(v) = a.version.clone() else {
-        return reply(StatusCode::OK, json!({"crates": [], "meta": {"total": 0}}));
+        return reply(StatusCode::OK, ask.answer(Vec::new()));
     };
+    let q = ask.q.clone();
     let app2 = app.clone();
     let found = tokio::task::spawn_blocking(move || {
         let leaves = app2
@@ -357,10 +389,58 @@ async fn search(app: &Arc<dyn Host>, a: &Ask, query: String) -> Response {
     })
     .await
     .unwrap_or_default();
-    let total = found.len();
-    let crates: Vec<Value> = found.into_iter().take(per_page).collect();
-    reply(
-        StatusCode::OK,
-        json!({"crates": crates, "meta": {"total": total}}),
-    )
+    reply(StatusCode::OK, ask.answer(found))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A search's page is cut as crates.io cuts it: `per_page` hits (10
+    /// if not given, 1 to 100) from `page` (1 if not given, not a number
+    /// or 0), and the total counts every hit, a page past the end too.
+    #[test]
+    fn search_pages_its_hits() {
+        let hits: Vec<Value> = (0..25)
+            .map(|i| json!({"name": format!("c{i:02}")}))
+            .collect();
+        let huge = format!("q=c&page={}", usize::MAX);
+        for (q, want) in [
+            ("q=c", 0..10),
+            ("q=c&page=1", 0..10),
+            ("q=c&page=2", 10..20),
+            ("q=c&page=3", 20..25),
+            ("q=c&page=4", 25..25),
+            ("q=c&per_page=2&page=2", 2..4),
+            ("q=c&page=3&per_page=2", 4..6),
+            ("q=c&per_page=0&page=3", 2..3),
+            ("q=c&per_page=500", 0..25),
+            ("q=c&per_page=500&page=2", 25..25),
+            ("q=c&page=0", 0..10),
+            ("q=c&page=x", 0..10),
+            ("q=c&page=-1", 0..10),
+            (huge.as_str(), 25..25),
+        ] {
+            let v = Search::parse(q).answer(hits.clone());
+            let names: Vec<&str> = v["crates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["name"].as_str().unwrap())
+                .collect();
+            let want: Vec<String> = want.map(|i| format!("c{i:02}")).collect();
+            assert_eq!(
+                (names, &v["meta"]["total"]),
+                (want.iter().map(String::as_str).collect(), &json!(25)),
+                "{q}"
+            );
+        }
+        // One hit: its second page is empty, with the hit counted.
+        let one = vec![json!({"name": "hello_pod"})];
+        assert_eq!(
+            Search::parse("q=hello&page=2").answer(one),
+            json!({"crates": [], "meta": {"total": 1}})
+        );
+        assert_eq!(Search::parse("q=HELLO+pod&page=2").q, "hello pod");
+    }
 }
