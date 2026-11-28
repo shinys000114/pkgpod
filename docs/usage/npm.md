@@ -151,7 +151,8 @@ npm install --registry https://pkg.example.org/js/-/label/release-1/ hello-pkg
 
 A proxy fetches a package's document and tarballs from its upstream
 when they are first asked for, and keeps them. The document it serves
-names the tarballs at the proxy's address. Documents are asked for again
+names the tarballs at the proxy's address; a package's dist-tags
+(`npm dist-tag ls`) are the document's. Documents are asked for again
 when older than `metadata_minutes`; while the upstream cannot be
 reached, the document kept is served. Tarballs are checked against the
 integrity the document gives.

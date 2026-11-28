@@ -255,6 +255,20 @@ fn npm(rel: &[String]) -> Option<Asked> {
     }
 }
 
+/// npm's `-/package/<name>/dist-tags` (a scoped name as `@scope/name`,
+/// or `@scope%2fname`, which comes split the same): the segments of the
+/// name, whose packument holds the tags.
+fn npm_dist_tags(rel: &[String]) -> Option<&[String]> {
+    match rel {
+        [d, p, name @ .., t] if d == "-" && p == "package" && t == "dist-tags" => match name {
+            [_] => Some(name),
+            [s, _] if s.starts_with('@') => Some(name),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// PyPI's simple API: a project's page (metadata, asked for upstream in
 /// PEP 691 JSON; served as JSON or HTML, its files through here) and its
 /// files (`files/<project>/<file>`, with PEP 658 `.metadata`).
@@ -1285,7 +1299,12 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
             method == Method::HEAD,
         );
     }
-    let Some(mut a) = classify(&r.format, &at.rel) else {
+    // npm's dist-tags of a package are its packument's, read as that is
+    // (kept, renewed, never asked for an excluded name).
+    let tags = (r.format == "npm")
+        .then(|| npm_dist_tags(&at.rel))
+        .flatten();
+    let Some(mut a) = classify(&r.format, tags.unwrap_or(&at.rel)) else {
         return status(StatusCode::NOT_FOUND);
     };
     let up = match Upstream::of(&r) {
@@ -1317,6 +1336,12 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
                 "the upstream's document is not JSON".into(),
             );
         };
+        if tags.is_some() {
+            return match v.get("dist-tags").filter(|t| t.is_object()) {
+                Some(t) => npm_tags_reply(t),
+                None => status(StatusCode::NOT_FOUND),
+            };
+        }
         if let Some(vs) = v["versions"].as_object_mut() {
             for m in vs.values_mut() {
                 let file = m["dist"]["tarball"]
@@ -1482,6 +1507,19 @@ fn pypi_page(v: &Value, base: &str, project: &str, json: bool, head: bool) -> Re
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     // HTML or JSON at one URL, as a hosted page is.
     h.insert(header::VARY, HeaderValue::from_static("Accept"));
+    r
+}
+
+/// A package's dist-tags, as the hosted registry answers them: JSON,
+/// asked for again each time, a HEAD saying its length.
+fn npm_tags_reply(t: &Value) -> Response {
+    let mut r = Response::new(Body::from(t.to_string()));
+    let h = r.headers_mut();
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     r
 }
 
@@ -2443,6 +2481,40 @@ pub(crate) mod tests {
         );
         for rel in [&["@first"][..], &["@"], &["-", "ping"]] {
             assert!(classify("npm", &v(rel)).is_none(), "{rel:?}");
+        }
+    }
+
+    /// npm's dist-tags of a package are asked for as its packument is (a
+    /// scoped name's either way it is written: `@team%2flib` comes split
+    /// as `@team/lib`); no other path under `-/package` is a package's
+    /// tags, nor are a lone scope's or npm's own `-`.
+    #[test]
+    fn npm_dist_tags_are_a_packuments() {
+        let packument = |rel: &[&str]| {
+            let rel = v(rel);
+            npm_dist_tags(&rel)
+                .and_then(|n| classify("npm", n))
+                .map(|a| (a.kind, a.name, a.path))
+        };
+        assert_eq!(
+            packument(&["-", "package", "hello", "dist-tags"]),
+            Some((CacheKind::Meta, "hello".into(), "hello".into()))
+        );
+        assert_eq!(
+            packument(&["-", "package", "@team", "lib", "dist-tags"]),
+            Some((CacheKind::Meta, "@team/lib".into(), "@team%2Flib".into()))
+        );
+        for rel in [
+            &["-", "package", "hello"][..],
+            &["-", "package", "dist-tags"],
+            &["-", "package", "hello", "dist-tags", "latest"],
+            &["-", "package", "hello", "x", "dist-tags"],
+            &["-", "package", "@team", "dist-tags"],
+            &["-", "package", "-", "dist-tags"],
+            &["-", "-", "package", "hello", "dist-tags"],
+            &["hello", "dist-tags"],
+        ] {
+            assert_eq!(packument(rel), None, "{rel:?}");
         }
     }
 

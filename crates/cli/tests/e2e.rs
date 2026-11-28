@@ -8732,6 +8732,161 @@ fn group_and_proxy_read_a_refused_npm_body() {
     }
 }
 
+/// An npm proxy answers a package's dist-tags
+/// (`-/package/<name>/dist-tags`, a scoped name's as `@scope%2fname` or
+/// `@scope/name`) from its packument of the name, read as the packument
+/// is (asked of the upstream once and kept, never for an excluded
+/// name), and as a hosted registry answers them. Through a group, the
+/// proxy that has the name answers, not a later member with tags of its
+/// own. npm's other endpoints of a proxy stay 404.
+#[test]
+fn npm_proxy_answers_dist_tags_from_its_packument() {
+    let s = Server::start();
+    let doc = |name: &str| {
+        json!({
+            "name": name,
+            "versions": {
+                "1.0.0": {"name": name, "version": "1.0.0"},
+                "1.1.0": {"name": name, "version": "1.1.0"},
+            },
+            "dist-tags": {"latest": "1.0.0", "beta": "1.1.0"},
+        })
+        .to_string()
+        .into_bytes()
+    };
+    let (port, log) = stub_upstream_log(
+        0,
+        vec![
+            ("/hello".into(), doc("hello")),
+            ("/@team%2Flib".into(), doc("@team/lib")),
+            ("/hidden-pkg".into(), doc("hidden-pkg")),
+        ],
+    );
+    s.cli(&[
+        "repo",
+        "create",
+        "np",
+        "-f",
+        "npm",
+        "-k",
+        "proxy",
+        "-s",
+        &format!("upstream=http://127.0.0.1:{port}/"),
+        "-s",
+        "exclude=hidden*",
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    s.cli(&["repo", "create", "nh", "-f", "npm", "-s", "public=true"])
+        .unwrap();
+    s.cli(&[
+        "repo",
+        "create",
+        "ng",
+        "-f",
+        "npm",
+        "-k",
+        "group",
+        "-s",
+        "members=np,nh",
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let w = s
+        .cli(&["token", "create", "w", "--repos", "nh", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let c = reqwest::blocking::Client::new();
+    // The hosted registry's hello, of tags of its own.
+    let tgz = b"hello 2.0.0".to_vec();
+    let hosted = json!({
+        "name": "hello",
+        "versions": {"2.0.0": {"name": "hello", "version": "2.0.0"}},
+        "dist-tags": {"latest": "2.0.0"},
+        "_attachments": {"hello-2.0.0.tgz": {"data": b64(&tgz), "length": tgz.len()}},
+    });
+    let r = c
+        .put(s.url("/nh/hello"))
+        .bearer_auth(&w)
+        .json(&hosted)
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 201, "{}", r.text().unwrap());
+    // Status, (content-type, cache-control, etag, content-length), body.
+    let ask = |m: reqwest::Method, p: &str| {
+        let r = c.request(m, s.url(p)).send().unwrap();
+        let st = r.status().as_u16();
+        let h = |k: &str| r.headers().get(k).map(|v| v.to_str().unwrap().to_string());
+        let hs = [
+            h("content-type"),
+            h("cache-control"),
+            h("etag"),
+            h("content-length"),
+        ];
+        (st, hs, r.text().unwrap())
+    };
+    let get = |p: &str| ask(reqwest::Method::GET, p);
+    let tags = json!({"beta": "1.1.0", "latest": "1.0.0"});
+    let (st, hs, body) = get("/np/-/package/hello/dist-tags");
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap(),
+        tags,
+        "{body}"
+    );
+    // As the hosted registry answers its own: its type, no-cache, no
+    // ETag, the JSON's length (a HEAD's too, with no body).
+    let (hst, hhs, hbody) = get("/nh/-/package/hello/dist-tags");
+    assert_eq!(hst, 200, "{hbody}");
+    assert_eq!(hs[..3], hhs[..3], "{hs:?} {hhs:?}");
+    assert_eq!(hs[3], Some(body.len().to_string()));
+    let (st, head, b) = ask(reqwest::Method::HEAD, "/np/-/package/hello/dist-tags");
+    assert_eq!((st, &head, b.as_str()), (200, &hs, ""));
+    let (st, hhead, _) = ask(reqwest::Method::HEAD, "/nh/-/package/hello/dist-tags");
+    assert_eq!((st, hhead[..3].to_vec()), (200, hs[..3].to_vec()));
+    for p in [
+        "/np/-/package/@team%2flib/dist-tags",
+        "/np/-/package/@team/lib/dist-tags",
+    ] {
+        let (st, _, body) = get(p);
+        assert_eq!(st, 200, "{p}: {body}");
+        assert_eq!(serde_json::from_str::<Value>(&body).unwrap(), tags, "{p}");
+    }
+    // Through the group, the proxy's tags: it has hello.
+    let (st, _, body) = get("/ng/-/package/hello/dist-tags");
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap(),
+        tags,
+        "{body}"
+    );
+    // An excluded name, a missing one (twice: its miss is kept), a lone
+    // scope and npm's other endpoints: 404, as before.
+    for p in [
+        "/np/-/package/hidden-pkg/dist-tags",
+        "/np/-/package/nope/dist-tags",
+        "/np/-/package/nope/dist-tags",
+        "/np/-/package/@team/dist-tags",
+        "/np/-/package/hello/dist-tags/latest",
+        "/np/-/package/hello",
+        "/np/-/ping",
+    ] {
+        assert_eq!(get(p).0, 404, "{p}");
+    }
+    // The packument read again is the one kept: each name was asked of
+    // the upstream once, the excluded one never.
+    let (st, _, body) = get("/np/hello");
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(
+        *log.lock().unwrap(),
+        ["/hello", "/@team%2Flib", "/nope"],
+        "upstream asked"
+    );
+}
+
 /// An npm, cargo or go group's address answers the group's own note:
 /// how many members it lists and how a client reads through it, the
 /// same to every caller who may read it, with no member's name, no
