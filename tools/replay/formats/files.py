@@ -236,6 +236,17 @@ def group_kept_reads(c, who):
         c.add(f"files group fgall proxy file {name} {who}", who, "GET", "/fgall/a.txt", h)
 
 
+def group_listing_conditionals(c, who):
+    # A group's listing gives no ETag or Last-Modified to send again
+    # (the listing inm above is sent for no one): each group's listing
+    # with If-None-Match of any and of another tag, and a later time.
+    for g, _, _ in GROUPS:
+        for name, h in (("any", {"If-None-Match": "*"}),
+                        ("other", {"If-None-Match": '"0123456789abcdef"'}),
+                        ("later", {"If-Modified-Since": "Fri, 01 Jan 2100 00:00:00 GMT"})):
+            c.add(f"files group {g} listing {name} {who}", who, "GET", f"/{g}/", h)
+
+
 FUZZ = (["fpub", "fpriv", "fproxy", "fgroup", "fgall", "fgmix", "fgfail", "fgnone"],
         ["a.txt", "dir", "b.txt", "big.bin", "v2", "x.txt", "@stable", "latest", "w",
          "a.img", "c.txt", "missing", "dir_b.txt", "only", "s.txt", "up.txt"])
@@ -262,4 +273,5 @@ PARTS = [
     ("writes", 250, group_writes),
     ("after", 100, group_after),
     ("reads", 220, group_kept_reads),
+    ("reads", 250, group_listing_conditionals),
 ]

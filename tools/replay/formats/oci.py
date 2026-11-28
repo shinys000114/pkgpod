@@ -536,6 +536,30 @@ def group_kept_reads(c, who):
           f"{v}/blobs/{blob_digest(UP_LAYER)}", {"Range": "bytes=3-12"})
 
 
+def group_conditionals(c, who):
+    # Each group's manifest and blob with a later time, the blob with
+    # its ETag as a hosted member gives it (its digest's hex) and with
+    # its digest; the proxy member's manifest through ogall with its
+    # digest as the ETag (its answer gave none to send again) and with
+    # a later time.
+    later = {"If-Modified-Since": "Fri, 01 Jan 2100 00:00:00 GMT"}
+    pl, _, _ = app_image("opub")
+    for g in ["ogroup"] + [g for g, _ in GROUPS]:
+        v = f"/v2/{g}"
+        b = f"{v}/app/blobs/{blob_digest(pl)}"
+        c.add(f"oci group {g} ims {who}", who, "GET", f"{v}/app/manifests/1",
+              dict(OCI_ACCEPT, **later))
+        c.add(f"oci group {g} blob ims {who}", who, "GET", b, later)
+        c.add(f"oci group {g} blob inm {who}", who, "GET", b,
+              {"If-None-Match": '"%s"' % hashlib.sha256(pl).hexdigest()})
+        c.add(f"oci group {g} blob inm digest {who}", who, "GET", b,
+              {"If-None-Match": f'"{blob_digest(pl)}"'})
+    m = "/v2/ogall/hello/manifests/1"
+    c.add(f"oci group ogall proxy manifest inm digest {who}", who, "GET", m,
+          dict(OCI_ACCEPT, **{"If-None-Match": f'"{blob_digest(UP_MANIFEST)}"'}))
+    c.add(f"oci group ogall proxy manifest ims {who}", who, "GET", m, dict(OCI_ACCEPT, **later))
+
+
 def mask(masker):
     # Upload ids as they appear, and the number each is given.
     uploads = {}
@@ -588,6 +612,7 @@ PARTS = [
     ("writes", 310, group_writes),
     ("after", 160, group_after),
     ("reads", 220, group_kept_reads),
+    ("reads", 250, group_conditionals),
     # OCI upload ids are random: numbered in the order they appear (in
     # location and docker-upload-uuid; where a body names one of them).
     ("rule", 30, ("oci upload ids", "upload ids in location, docker-upload-uuid and bodies")),
