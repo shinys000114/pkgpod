@@ -40,6 +40,7 @@ seed, the stub, the requests and the masks (see formats/__init__.py),
 on what core.py shares; this file puts them together and runs them.
 """
 
+import fcntl
 import hashlib
 import io
 import json
@@ -110,11 +111,28 @@ def start_upstream():
 
 # ---- the seed -------------------------------------------------------------
 
+def hold(root):
+    """ROOT, held by this process until the file this returns is closed
+    (at the caller's return): a seed and a run move ROOT's seed aside and
+    back, and a second at once would take the first's for its own."""
+    os.makedirs(root, exist_ok=True)
+    f = open(os.path.join(root, ".run.lock"), "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise SystemExit(f"{root} is in use: another seed or run holds it")
+    return f
+
+
 def seed(root, binary):
     core.need_ports()
+    held_root = hold(root)  # noqa: F841 (held until the seed is made)
     s = os.path.join(root, "seed")
     if os.path.exists(s):
         shutil.rmtree(s)
+    # And the seed a stopped run held, which the next run would put back
+    # over this one.
+    shutil.rmtree(s + ".held", ignore_errors=True)
     os.makedirs(os.path.join(s, "fixtures"))
     p = Pkgpod(binary, s)
     p.write_config()
@@ -426,6 +444,7 @@ def built(binary):
 
 def run(root, binary, out_path, profdir=None):
     core.need_ports()
+    held_root = hold(root)  # noqa: F841 (held until the run is done)
     s = os.path.join(root, "seed")
     held = s + ".held"
     if os.path.exists(held):
