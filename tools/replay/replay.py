@@ -444,6 +444,10 @@ def built(binary):
 
 def run(root, binary, out_path, profdir=None):
     core.need_ports()
+    # A root that is not there (mistyped) is not made by holding it.
+    if not os.path.isdir(os.path.join(root, "seed")) and not os.path.isdir(
+            os.path.join(root, "seed.held")):
+        raise SystemExit(f"{root} has no seed: seed it first")
     held_root = hold(root)  # noqa: F841 (held until the run is done)
     s = os.path.join(root, "seed")
     held = s + ".held"
