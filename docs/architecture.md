@@ -6,7 +6,7 @@ module's doc comment for more.
 
 ## Crates
 
-One binary, `pkgpod`, built from a Rust workspace (`crates/`: `core/` the base and the engine, `formats/` one crate per format, `mirror/`, `server/`, `cli/`):
+One binary, `pkgpod`, built from a Rust workspace (`crates/`: `core/` the base, the engine and `proto`, `formats/` one crate per format, `mirror/`, `server/`, `cli/`):
 
 - **`pkgpod`**: the binary. `pkgpod serve` runs the server; every other
   command is a client of the JSON API (`--url`, `--token`, `--json`),
@@ -14,21 +14,29 @@ One binary, `pkgpod`, built from a Rust workspace (`crates/`: `core/` the base a
   (password, backup, restore, check).
 - **`pkgpod-server`**: everything that answers a request. The serving
   listeners (`serving/mod.rs`, `routes.rs`, `ops/listeners.rs`), the
-  client protocols that are more than static files (`protocols/`:
-  `npm.rs`, `cargo.rs`, `oci.rs`, `nuget.rs`, ...), proxy and group
-  repositories and host pages (`serving/proxy.rs`, `group.rs`,
-  `hosts.rs`), the management listener with the API (`api/mod.rs`,
-  `openapi.rs`) and the console (`console/`, askama templates, htmx),
-  rights, trusted publishing and signing keys (`auth/`: `mod.rs`,
-  `oidc.rs`, `keys.rs`, `rsa_key.rs`, `usign_key.rs`), jobs (`jobs/`:
-  `mod.rs`, `import.rs`, `cron.rs`, `schedules.rs`), cleanup rules,
-  backup and restore (`jobs/cleanup.rs`, `backup.rs`), download counts,
-  status and badges (`serving/stats.rs`, `status.rs`, `badge.rs`),
-  metrics, webhooks and the CLI it hands out (`ops/`).
+  formats compiled in and what it asks of each (`registry.rs`), what
+  it lends the formats' client protocols and which requests are theirs
+  (`protocols/`: `npm.rs`, `cargo.rs`, `oci/`, `nuget.rs`, ...), proxy
+  and group repositories and host pages (`serving/proxy.rs`,
+  `group.rs`, `hosts.rs`), the management listener with the API
+  (`api/mod.rs`, `openapi.rs`) and the console (`console/`, askama
+  templates, htmx), rights, trusted publishing and signing keys
+  (`auth/`: `mod.rs`, `oidc.rs`, `keys.rs`, `rsa_key.rs`,
+  `usign_key.rs`), jobs (`jobs/`: `mod.rs`, `import.rs`, `cron.rs`,
+  `schedules.rs`), cleanup rules, backup and restore
+  (`jobs/cleanup.rs`, `backup.rs`), download counts, status and badges
+  (`serving/stats.rs`, `status.rs`, `badge.rs`), metrics, webhooks and
+  the CLI it hands out (`ops/`).
 - **`pkgpod-engine`**: repositories of any format, their versions as
   state trees, labels, rollback, promotion, retention, the catalog,
   the proxy cache table, garbage collection and the consistency check.
   It defines the `Format` trait and never looks inside a blob.
+- **`pkgpod-proto`**: what a format's client protocol is held to and
+  given, whichever crate serves it: the rights rule (`gate.rs`), how
+  long an answer may be kept (`cache.rs`), request and reply bodies
+  and replies (`body.rs`, `reply.rs`), forms and queries (`form.rs`,
+  `query.rs`), what it asks of the server (`host.rs`) and what a
+  format says of its trees' files (`tree.rs`).
 - **`pkgpod-base`**: the SQLite database with per-component migrations
   (`db.rs`), the content store (`store.rs`), sha256 digests
   (`digest.rs`), a small zip reader (`zip.rs`) and a YAML loader that
@@ -47,23 +55,28 @@ One binary, `pkgpod`, built from a Rust workspace (`crates/`: `core/` the base a
   `pkgpod-gems`, `pkgpod-arch`, `pkgpod-nuget`, `pkgpod-composer`,
   `pkgpod-conda`, `pkgpod-cran`, `pkgpod-pub`, `pkgpod-ipk`,
   `pkgpod-terraform`, `pkgpod-galaxy`, `pkgpod-conan`, `pkgpod-swift`.
-  Each implements `Format`; see [format-plugins.md](format-plugins.md).
+  Each implements `Format`, and a format whose clients speak more than
+  static files has its protocol there too (`src/protocol.rs`, OCI's
+  `src/protocol/`); see [format-plugins.md](format-plugins.md).
 
 Dependencies (normal ones; tests add a few):
 
 ```text
 pkgpod ─────────────┬──> pkgpod-server ─┬──> pkgpod-mirror ──> pkgpod-deb, pkgpod-apk
                     │                   ├──> pkgpod-<format> (all 23)
+                    │                   ├──> pkgpod-proto
                     │                   ├──> pkgpod-engine
                     │                   └──> pkgpod-base
                     └──> pkgpod-deb, pkgpod-base
 
-pkgpod-<format> ──> pkgpod-engine ──> pkgpod-base
+pkgpod-<format> ──> pkgpod-proto ──> pkgpod-engine ──> pkgpod-base
+                    (and the engine and the base directly)
 pkgpod-ipk ──> pkgpod-deb            (control files, package reading, version order)
 pkgpod-mirror ──> pkgpod-base, pkgpod-deb, pkgpod-apk   (and through them the engine)
 ```
 
-The formats compiled in are listed in `pkgpod_server::formats()`; the
+The formats compiled in are the rows of the server's registry
+(`registry.rs`), whose formats `pkgpod_server::formats()` lists; the
 engine is opened with that list (`Engine::open`) and the server's keys
 as its `Signer`.
 
@@ -246,7 +259,7 @@ request (Host, path)
   ├─ at any host's root:
   │     /.well-known/terraform.json      Terraform service discovery
   │     /.well-known/pkgpod/badges/...   badges
-  │     /v2/...                          the OCI registry (protocols/oci.rs), when
+  │     /v2/...                          the OCI registry (protocols/oci/), when
   │                                      an OCI repository is reachable there
   ├─ routes::Table::route(host, path)
   │     repository whose url has this host and the longest path prefix,
@@ -256,7 +269,8 @@ request (Host, path)
   └─ serve_repo (no role: 401 or 404, whatever the method)
         group  ──> group::serve ──> serve_repo for each member (as reader)
         proxy  ──> proxy::serve ──> cache, else upstream, then kept
-        npm, cargo, go, nuget, conan, swift, ... ──> the format's protocol module
+        npm, cargo, go, nuget, conan, swift, ... ──> the format's protocol,
+                   for the requests it claims (registry::Serve)
         PUT    ──> Engine::upload (write right)
         GET    ──> mirror: the file in trees/<repo>/
                    else: current version or @<label>, its served tree,
@@ -302,9 +316,10 @@ Packages of a deb mirror can be promoted into a hosted repository
 
 ## Proxy repositories
 
-A proxy (`serving/proxy.rs`; OCI in `protocols/oci.rs`) fetches from
-its `upstream` when a client asks and keeps what it fetched, by path,
-in the engine's `cache` table and the storage's store. The format's
+A proxy (`serving/proxy.rs`; OCI's in its format crate,
+`crates/formats/oci/src/protocol/proxy.rs`) fetches from its
+`upstream` when a client asks and keeps what it fetched, by path, in
+the engine's `cache` table and the storage's store. The format's
 classifier says what a request is: a **file** (an artifact that never
 changes, kept until it is evicted by hand or for `max_mib`, unless
 pinned) or **metadata** (a version list, asked for again when older
@@ -326,18 +341,20 @@ no uploads and have no versions.
 
 ## Group repositories
 
-A group (`serving/group.rs`) reads its `members` (repositories of its
-format that are not groups) in order. For each package, the first
-member that has it answers alone: versions are not merged, so a public
-package of the same name further down never adds to or outranks yours.
-A proxy member whose upstream fails while it keeps nothing for the name
-ends the search with a 502, rather than let a later member answer for
-it. Listings and search name each entry once, the first member's that
-has it. A group is read through: its readers read the members through
-it (anonymous readers of a public group only its public members, so a
-public group with a member that is not public answers as a private
-repository does, for caches: `group::all_public`), downloads count on
-the member, and writes are refused with the member to publish to.
+A group (`serving/group.rs`; OCI's in
+`crates/formats/oci/src/protocol/group.rs`) reads its `members`
+(repositories of its format that are not groups) in order. For each
+package, the first member that has it answers alone: versions are not
+merged, so a public package of the same name further down never adds
+to or outranks yours. A proxy member whose upstream fails while it
+keeps nothing for the name ends the search with a 502, rather than let
+a later member answer for it. Listings and search name each entry
+once, the first member's that has it. A group is read through: its
+readers read the members through it (anonymous readers of a public
+group only its public members, so a public group with a member that is
+not public answers as a private repository does, for caches:
+`group::all_public`), downloads count on the member, and writes are
+refused with the member to publish to.
 
 ## Jobs
 

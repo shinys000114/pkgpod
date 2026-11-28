@@ -22,8 +22,10 @@ trees and how a change becomes a version.
 - Parsing of the package format (reading metadata out of an upload),
   index writers, and unit tests of both.
 
-Formats depend on `pkgpod-base` and `pkgpod-engine` (and `serde_json`
-for settings and metadata), plus what reading their packages needs.
+Formats depend on `pkgpod-base`, `pkgpod-engine` and `pkgpod-proto`
+(what they say of their trees' files, and what a protocol is held to
+and given), `serde_json` for settings and metadata, plus what reading
+their packages needs.
 `pkgpod-ipk` uses `pkgpod-deb`'s control-file parser, package reader
 and version order; share code that way rather than copying it.
 
@@ -72,7 +74,7 @@ files/<project>/<filename>[.metadata]
 ```
 
 `pkgpod-npm`: state only; the registry protocol answers from it per
-request (`crates/server/src/protocols/npm.rs`), since packuments carry
+request (`crates/formats/npm/src/protocol.rs`), since packuments carry
 absolute tarball URLs that follow the address asked.
 
 ```text
@@ -229,10 +231,18 @@ implement `publish` for that, and return `Ok(None)`.
 2. Add `pkgpod-<id> = { path = "crates/formats/<id>" }` to
    `[workspace.dependencies]` in the root `Cargo.toml`, and
    `pkgpod-<id>.workspace = true` to `crates/server/Cargo.toml`.
-3. Add `Arc::new(pkgpod_<id>::<Type>)` to `pkgpod_server::formats()`
-   in `crates/server/src/lib.rs`. From then on the engine
-   accepts `-f <id>`, the API lists it at `GET /api/v1/formats`, and
-   the console offers its settings, operations and upload form.
+3. Add its row, `Row::of(pkgpod_<id>::<Type>)`, to `Registry::new` in
+   `crates/server/src/registry.rs`, with what the server asks of it:
+   `.tree(pkgpod_<id>::TREE)` for its rules on its trees' files
+   (`pkgpod_proto::tree::TreeRules`: Cache-Control rows, names by
+   content, content types, PUT to a path, plain files),
+   `.protocol(..)` and `.unlisted()` for a protocol module (below),
+   `.hooks(..)` for answers of its own in its trees, `.host(..)` for
+   what it answers at a host's root. The registry's tests name the
+   formats that have each; add yours there. `pkgpod_server::formats()`
+   gives the engine the registry's formats: from then on it accepts
+   `-f <id>`, the API lists it at `GET /api/v1/formats`, and the
+   console offers its settings, operations and upload form.
 4. In `crates/server/src/console/`: the line describing the format
    when a repository is made (the `blurb` in `new_repo_page`), the
    words for its catalog (`catalog_words`), and its "How to use" lines
@@ -246,8 +256,8 @@ implement `publish` for that, and return `Ok(None)`.
 
 ## When a format needs a protocol module
 
-A format whose clients only download files (apt, dnf, apk, pacman,
-conda, R, opkg; helm and gem read static files too) needs nothing in
+A format whose clients only download files (apt, apk, pacman, conda,
+R, opkg; dnf, helm and gem read static files too) needs nothing in
 the server: `publish` builds
 the files, and the generic serving code answers `GET` from the served
 tree, `PUT <address>/<path>/<file>?<params>` as an upload (the last
@@ -255,42 +265,52 @@ segment is the file name), and the API's
 `POST /api/v1/repos/<repo>/upload` (used by `pkgpod upload` and the
 console).
 
-A module `crates/server/src/protocols/<id>.rs` is needed when clients
-speak an API: publishing in their own protocol (npm's JSON with a
-base64 tarball, NuGet's multipart push, cargo's framed body), documents
-made per request with absolute URLs (npm packuments, cargo's index
-config, NuGet's service index), logins and token exchanges (Conan),
-or content negotiation (PyPI's JSON by `Accept`). A module may also
-only add a client's write API beside a static served tree: `helm.rs`
-(ChartMuseum's push), `gems.rs` (`gem push` and yank), `pypi.rs`
-(twine's upload). The others (`npm.rs`, `cargo.rs`, `nuget.rs`,
-`go.rs`, `composer.rs`, `conan.rs`, `galaxy.rs`, `swift.rs`,
-`pub_api.rs`, `terraform.rs`, `oci.rs`) answer every request of their
-repositories, and share a shape:
+A protocol module is needed when clients speak an API: publishing in
+their own protocol (npm's JSON with a base64 tarball, NuGet's
+multipart push, cargo's framed body), documents made per request with
+absolute URLs (npm packuments, cargo's index config, NuGet's service
+index), logins and token exchanges (Conan), or content negotiation
+(PyPI's JSON by `Accept`). The protocol is the format crate's,
+`crates/formats/<id>/src/protocol.rs` (OCI's `src/protocol/`), built
+on `pkgpod-proto` (bodies, replies, forms, queries, the rights rule)
+and asking the server through `pkgpod_proto::host::Host` and, for what
+only it needs, a `Host` trait of its own (npm's labelled versions,
+cargo's writers). In the server, `crates/server/src/protocols/<id>.rs`
+(`pub_api.rs` for pub, `oci/` for OCI) implements that `Host` for the
+`App`, and a `Serving` that implements `registry::Serve`: `claims`
+says which requests of a repository's address are the protocol's, by
+method and path, and `serve` answers them; the format's row has
+`.protocol(&p::<id>::Serving)`. A module may also only add to a static
+served tree: helm (ChartMuseum's push), gems (`gem push` and yank),
+pypi (twine's upload, which `serving::serve_repo` hands it, and its
+index pages, as tree hooks), rpm (the dnf repository file of each
+group). The others claim every request of their repositories (npm,
+cargo, nuget, conan, galaxy, swift, pub, oci) or every read (go,
+composer, terraform, whose uploads are PUTs), and share a shape:
 
-- `serving::serve_repo` hands the request over when
-  `served.repo.format == "<id>"`, usually after taking a leading
-  `@<label>` off `rel` and resolving it with `app.labelled` (a label's
-  version is read-only). Most pass an `Ask` (repository, version,
-  `labelled`, `rel`, `base`, caller, role) to
+- `serving::serve_repo` hands a request its format's `Serving` claims
+  to `serve` (a group's and a proxy's go to `group::serve` and
+  `proxy::serve` first), which usually takes a leading `@<label>` off
+  `rel` and resolves it (`serving::take_label`; a label's version is
+  read-only). Most pass an `Ask` (repository, version, `labelled`,
+  `rel`, `base`, caller, role) to the format's
   `pub async fn handle(app, ask, req)`.
 - `serving::client_base` gives the repository's URL as the request
   reached it, for absolute URLs in answers.
-- Reads need `role.is_some()`, writes `Role::Write`; `serving::deny`
-  answers 401 to anonymous callers (so clients send credentials) and
-  404 to others.
-- Uploads go to the store with `serving::body_to_store` or
-  `serving::stream_to_store` (with a size limit), then into a version
-  with `app.engine.upload`, `upload_batch` or `change`, inside
-  `tokio::task::spawn_blocking`, and are recorded with
-  `app.auth.audit`. Keep the parsing and the tree changes in the format
-  crate (as `pkgpod_cargo::Cargo::add`) and only the protocol in the
-  server.
+- Reads need a role, writes `Role::Write`; `serving::deny` answers 401
+  to anonymous callers (so clients send credentials) and 404 to
+  others. `pkgpod_proto::gate::decide` is the one rule of who may, in
+  its order (npm, cargo and OCI ask it).
+- Uploads go to the store with `Host::store_body` (with a size limit),
+  then into a version with `engine().upload`, `upload_batch` or
+  `change`, inside `tokio::task::spawn_blocking`, and are recorded with
+  `Host::audit`. Keep the parsing and the tree changes apart from the
+  protocol (as `pkgpod_cargo::Cargo::add`).
 - The repository's bare address, opened in a browser, answers a short
-  text saying how clients use it (`serving::client_note`).
-- A format whose address is an API rather than a tree to browse is
-  added to `serving::browsable`'s list, so it is left out of host
-  listings.
+  text saying how clients use it (`serving::client_note`, in the
+  server's module).
+- A format whose address is an API rather than a tree to browse has
+  `.unlisted()` in its row, so it is left out of host listings.
 
 ## The console's "How to use"
 
@@ -307,8 +327,9 @@ are read by the code around it:
   install" or "Repository", or contains "depend", get a real package
   name from the repository's catalog (`with_names`).
 - For proxies and groups, lines whose label starts with "Upload", "A
-  labelled" or "Push", is "Publish", or contains "deploy", are dropped,
-  and a note on what the repository reads from is added (`use_render`).
+  labelled", "Publish" or "Push", or contains "deploy", whatever the
+  case, are dropped (`for_publishing`), and a note on what the
+  repository reads from is added (`use_lines`).
 
 ## Groups and proxies
 
@@ -319,12 +340,13 @@ of those kinds; serving them is the server's:
   state-tree directory whose first member wins), which are listings and
   which are searches. `groups()` alone puts the format in the list a
   refusal of another format's group names.
-- Proxies: add the id to `proxy::FORMATS`, a classifier to
-  `proxy::classify` (what a path is: a file kept for good, or metadata
-  asked for again after `metadata_minutes`; the package name for
-  `exclude`; the version for pins), and `proxy_upstream()`. OCI does
-  its groups and proxies in its format crate,
-  `crates/formats/oci/src/protocol/group.rs` and `proxy.rs`.
+- Proxies: add the id to `proxy::LISTED`, the list a refusal of
+  another format's proxy names (a test holds it to `proxy()`), a
+  classifier to `proxy::classify` (what a path is: a file kept for
+  good, or metadata asked for again after `metadata_minutes`; the
+  package name for `exclude`; the version for pins), and
+  `proxy_upstream()`. OCI does its groups and proxies in its format
+  crate, `crates/formats/oci/src/protocol/group.rs` and `proxy.rs`.
 - The console's `blurb` for `(<id>, Kind::Proxy)`, if the generic one
   does not fit.
 

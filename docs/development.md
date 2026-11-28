@@ -28,9 +28,13 @@ The workspace, in brief:
 - `crates/cli` (the crate `pkgpod`): the binary, both the server (`pkgpod serve`,
   `pkgpod admin`) and the client of its API (every other command).
 - `crates/server`: the listeners, the API, the console, rights,
-  keys, jobs, and the protocol of each format's clients.
+  keys, jobs, the formats compiled in (its registry) and what it lends
+  their clients' protocols.
 - `crates/core/engine`: repositories, versions, labels, state trees,
   retention and garbage collection; the `Format` trait.
+- `crates/core/proto`: what a format's client protocol is held to and
+  given (the rights rule, bodies, replies, forms, what it asks of the
+  server) and what a format says of its trees' files.
 - `crates/core/base`: the database, the content store, digests.
 - `crates/mirror`: the mirror engines (apt, dnf, Arch and Alpine
   repositories over HTTP, rsync, file trees over HTTP listings) and
@@ -38,7 +42,8 @@ The workspace, in brief:
 - `crates/formats/<format>` (the crate `pkgpod-<format>`): one crate per format (`deb`, `files`, `oci`,
   `pypi`, `npm`, `cargo`, `go`, `apk`, `rpm`, `helm`, `maven`, `gems`,
   `arch`, `nuget`, `composer`, `conda`, `cran`, `pub`, `ipk`,
-  `terraform`, `galaxy`, `conan`, `swift`).
+  `terraform`, `galaxy`, `conan`, `swift`), with its clients' protocol
+  where they speak more than static files.
 
 ## Running a local server
 
@@ -375,10 +380,12 @@ its `__init__.py`.
 ## Adding a format
 
 A format is a crate implementing `pkgpod_engine::Format`
-(`crates/core/engine/src/format.rs`), listed in `formats()` in
-`crates/server/src/lib.rs`, with what its clients speak beyond
-plain files in `crates/server/src/protocols/<format>.rs`, and end-to-end
-tests with its real client. See [format-plugins.md](format-plugins.md).
+(`crates/core/engine/src/format.rs`), a row of the registry in
+`crates/server/src/registry.rs`, with what its clients speak beyond
+plain files in `crates/formats/<format>/src/protocol.rs` and the
+server's side of it in `crates/server/src/protocols/<format>.rs`, and
+end-to-end tests with its real client. See
+[format-plugins.md](format-plugins.md).
 
 ## Where to look
 
@@ -388,13 +395,14 @@ tests with its real client. See [format-plugins.md](format-plugins.md).
 | The configuration file | `crates/server/src/config.rs` |
 | Starting, stopping, daily cleanup and GC | `crates/server/src/lib.rs` (`App::open`, `run`) |
 | Which repository a request is for | `crates/server/src/routes.rs`; serving it: `serving/mod.rs` |
+| The formats compiled in, and what the server asks of each | `crates/server/src/registry.rs` |
 | The API and its description | `crates/server/src/api/` (`mod.rs`, `openapi.rs`) |
 | The console | `crates/server/src/console/`, `templates/`, `assets/` |
 | Users, teams, rights, tokens, sessions; trusted publishing; signing keys and server settings | `crates/server/src/auth/` (`mod.rs`, `oidc.rs`, `keys.rs`, `rsa_key.rs`, `usign_key.rs`) |
 | Jobs, mirror syncs, schedules, imports, cleanup, backup | `crates/server/src/jobs/` (`mod.rs`, `cron.rs`, `schedules.rs`, `import.rs`, `cleanup.rs`, `backup.rs`) |
 | Mirrors' packages, deb re-signing, promotion | `mirror_pkgs.rs`, `resign.rs`, `promote.rs` in `crates/server/src/jobs/` |
-| Proxies, groups, host pages, statistics, status, badges | `crates/server/src/serving/` (`proxy.rs`, `group.rs`, `hosts.rs`, `stats.rs`, `status.rs`, `badge.rs`) |
-| Clients' protocols | `crates/server/src/protocols/` (`npm.rs`, `pypi.rs`, `oci.rs`, ...) |
+| Proxies, groups, host pages, statistics, status, badges | `crates/server/src/serving/` (`proxy.rs`, `group.rs`, `hosts.rs`, `stats.rs`, `status.rs`, `badge.rs`); OCI's proxies and groups: `crates/formats/oci/src/protocol/` |
+| Clients' protocols | `src/protocol.rs` of the format's crate (`crates/formats/npm/src/protocol.rs`, ...; OCI's `src/protocol/`); what they are held to and given: `crates/core/proto/src/`; the server's side: `crates/server/src/protocols/` (`npm.rs`, `pypi.rs`, `oci/`, ...) |
 | Listeners and TLS, the recent log, metrics, webhooks, the CLI handed out, Markdown notes | `crates/server/src/ops/` (`listeners.rs`, `logs.rs`, `metrics.rs`, `webhooks.rs`, `cli_dl.rs`, `notes.rs`) |
 | Repositories, versions, labels | `crates/core/engine/src/engine.rs` |
 | State trees | `crates/core/engine/src/tree.rs` |
