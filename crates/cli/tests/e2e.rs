@@ -8403,6 +8403,351 @@ fn group_answers_its_own_cargo_config() {
     }
 }
 
+/// A group's npm and cargo search is paged after the merge: each member
+/// is asked for its hits from the first, a name keeps the first
+/// member's entry, and the caller's page is cut from the merged hits,
+/// whose count is the total. The answer is revalidated, as a hosted
+/// search's is, and npm's says when in whole seconds.
+#[test]
+fn group_search_pages_after_the_merge() {
+    if !have("tar") {
+        return;
+    }
+    let s = Server::start();
+    let c = reqwest::blocking::Client::new();
+    for (f, members, g) in [("npm", ["sa", "sb"], "sg"), ("cargo", ["ca", "cb"], "cg")] {
+        for r in members {
+            s.cli(&["repo", "create", r, "-f", f, "-s", "public=true"])
+                .unwrap();
+        }
+        s.cli(&[
+            "repo",
+            "create",
+            g,
+            "-f",
+            f,
+            "-k",
+            "group",
+            "-s",
+            &format!("members={}", members.join(",")),
+            "-s",
+            "public=true",
+        ])
+        .unwrap();
+    }
+    let w = s
+        .cli(&["token", "create", "w", "--repos", "sa,sb,ca,cb", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    // Both members have both-pkg: the group's is the first's.
+    for (r, n, v) in [
+        ("sa", "alpha-pkg", "1.0.0"),
+        ("sa", "both-pkg", "1.0.0"),
+        ("sb", "both-pkg", "2.0.0"),
+        ("sb", "beta-pkg", "1.0.0"),
+        ("sb", "gamma-pkg", "1.0.0"),
+    ] {
+        let tgz = format!("{n} {v}").into_bytes();
+        let doc = json!({
+            "name": n,
+            "versions": {v: {"name": n, "version": v}},
+            "dist-tags": {"latest": v},
+            "_attachments": {format!("{n}-{v}.tgz"): {"data": b64(&tgz), "length": tgz.len()}},
+        });
+        let r = c
+            .put(s.url(&format!("/{r}/{n}")))
+            .bearer_auth(&w)
+            .json(&doc)
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 201, "{n} {v}: {}", r.text().unwrap());
+    }
+    let cache = |r: &reqwest::blocking::Response| {
+        r.headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    };
+    let npm = |q: &str| {
+        let r = c
+            .get(s.url(&format!("/sg/-/v1/search?{q}")))
+            .send()
+            .unwrap();
+        let (st, cc) = (r.status().as_u16(), cache(&r));
+        let body = r.text().unwrap();
+        let v: Value = serde_json::from_str(&body).unwrap();
+        let names: Vec<String> = v["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| {
+                let p = &o["package"];
+                format!(
+                    "{}@{}",
+                    p["name"].as_str().unwrap(),
+                    p["version"].as_str().unwrap()
+                )
+            })
+            .collect();
+        (st, cc, names, v["total"].clone(), v, body)
+    };
+    let all = [
+        "alpha-pkg@1.0.0",
+        "both-pkg@1.0.0",
+        "beta-pkg@1.0.0",
+        "gamma-pkg@1.0.0",
+    ];
+    for (q, want) in [
+        ("text=pkg", &all[..]),
+        ("text=pkg&size=2&from=1", &all[1..3]),
+        ("text=pkg&from=3", &all[3..]),
+        ("text=pkg&size=0", &all[..1]),
+        ("text=pkg&from=9", &all[..0]),
+    ] {
+        let (st, cc, names, total, _, body) = npm(q);
+        assert_eq!(
+            (st, cc.as_str(), names, total),
+            (
+                200,
+                "no-cache",
+                want.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+                json!(4)
+            ),
+            "npm {q}: {body}"
+        );
+    }
+    let (_, _, _, _, v, body) = npm("text=pkg");
+    let t = v["time"].as_str().unwrap_or("");
+    let whole = t.len() == 24
+        && t.ends_with(".000Z")
+        && t.bytes().enumerate().all(|(i, b)| match i {
+            4 | 7 => b == b'-',
+            10 => b == b'T',
+            13 | 16 => b == b':',
+            19..=23 => true,
+            _ => b.is_ascii_digit(),
+        });
+    assert!(whole, "the time in whole seconds: {t}");
+    let r = c.head(s.url("/sg/-/v1/search?text=pkg")).send().unwrap();
+    let len = r
+        .headers()
+        .get("content-length")
+        .map(|v| v.to_str().unwrap().to_string());
+    assert_eq!(
+        (r.status().as_u16(), cache(&r), len),
+        (200, "no-cache".into(), Some(body.len().to_string())),
+        "HEAD of the search"
+    );
+    // cargo: a publish as cargo sends it, of a .crate made with tar.
+    let dir = s.dir.path().join("crates");
+    for (r, n, v) in [
+        ("ca", "alpha_crate", "1.0.0"),
+        ("ca", "both_crate", "1.0.0"),
+        ("cb", "both_crate", "2.0.0"),
+        ("cb", "beta_crate", "1.0.0"),
+        ("cb", "gamma_crate", "1.0.0"),
+    ] {
+        let top = format!("{n}-{v}");
+        std::fs::create_dir_all(dir.join(r).join(&top)).unwrap();
+        std::fs::write(
+            dir.join(r).join(&top).join("Cargo.toml"),
+            format!("[package]\nname = \"{n}\"\nversion = \"{v}\"\n"),
+        )
+        .unwrap();
+        let file = dir.join(r).join(format!("{top}.crate"));
+        let ok = Command::new("tar")
+            .arg("-czf")
+            .arg(&file)
+            .arg("-C")
+            .arg(dir.join(r))
+            .arg(&top)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "tar {top}");
+        let krate = std::fs::read(&file).unwrap();
+        let meta = json!({"name": n, "vers": v, "deps": []}).to_string();
+        let mut body = (meta.len() as u32).to_le_bytes().to_vec();
+        body.extend_from_slice(meta.as_bytes());
+        body.extend_from_slice(&(krate.len() as u32).to_le_bytes());
+        body.extend_from_slice(&krate);
+        let r = c
+            .put(s.url(&format!("/{r}/api/v1/crates/new")))
+            .header("authorization", &w)
+            .body(body)
+            .send()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 200, "{top}: {}", r.text().unwrap());
+    }
+    let all = [
+        "alpha_crate@1.0.0",
+        "both_crate@1.0.0",
+        "beta_crate@1.0.0",
+        "gamma_crate@1.0.0",
+    ];
+    for (q, want) in [
+        ("q=crate", &all[..]),
+        ("q=crate&per_page=2&page=2", &all[2..]),
+        ("q=crate&per_page=3", &all[..3]),
+        ("q=crate&per_page=0", &all[..1]),
+        ("q=crate&per_page=2&page=3", &all[..0]),
+        ("q=crate&page=0", &all[..]),
+    ] {
+        for head in [false, true] {
+            let u = s.url(&format!("/cg/api/v1/crates?{q}"));
+            let r = if head { c.head(u) } else { c.get(u) }.send().unwrap();
+            let (st, cc) = (r.status().as_u16(), cache(&r));
+            if head {
+                assert_eq!((st, cc.as_str()), (200, "no-cache"), "cargo HEAD {q}");
+                continue;
+            }
+            let body = r.text().unwrap();
+            let v: Value = serde_json::from_str(&body).unwrap();
+            let names: Vec<String> = v["crates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| {
+                    format!(
+                        "{}@{}",
+                        c["name"].as_str().unwrap(),
+                        c["max_version"].as_str().unwrap()
+                    )
+                })
+                .collect();
+            assert_eq!(
+                (st, cc.as_str(), names, &v["meta"]["total"]),
+                (
+                    200,
+                    "no-cache",
+                    want.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+                    &json!(4)
+                ),
+                "cargo {q}: {body}"
+            );
+        }
+    }
+}
+
+/// pypi documents through a group say they vary by Accept: the group's
+/// own project list, which has an ETag of its body and answers a HEAD
+/// with the GET's length, and a proxy member's project page, which
+/// does too, read through the group or from the proxy itself.
+#[test]
+fn group_pypi_documents_vary_by_accept() {
+    let s = Server::start();
+    let port = stub_upstream_on(
+        0,
+        vec![(
+            "/simple/remote-pkg/".into(),
+            pypi_doc("remote-pkg", "remote_pkg-1.0.tar.gz"),
+        )],
+    );
+    s.cli(&["repo", "create", "ph", "-f", "pypi", "-s", "public=true"])
+        .unwrap();
+    s.cli(&[
+        "repo",
+        "create",
+        "pp",
+        "-f",
+        "pypi",
+        "-k",
+        "proxy",
+        "-s",
+        &format!("upstream=http://127.0.0.1:{port}/simple/"),
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    s.cli(&[
+        "repo",
+        "create",
+        "pg",
+        "-f",
+        "pypi",
+        "-k",
+        "group",
+        "-s",
+        "members=ph,pp",
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    let c = reqwest::blocking::Client::new();
+    let ask = |head: bool, path: &str, h: &[(&str, &str)]| {
+        let mut b = if head {
+            c.head(s.url(path))
+        } else {
+            c.get(s.url(path))
+        };
+        for (k, v) in h {
+            b = b.header(*k, *v);
+        }
+        let r = b.send().unwrap();
+        let len = r
+            .headers()
+            .get("content-length")
+            .map(|v| v.to_str().unwrap().to_string())
+            .unwrap_or_default();
+        (len, seen(r))
+    };
+    let json = ("accept", "application/vnd.pypi.simple.v1+json");
+    let html = ("accept", "text/html");
+    let mut tags = Vec::new();
+    for accept in [html, json] {
+        let (len, r) = ask(false, "/pg/simple/", &[accept]);
+        assert_eq!(
+            (
+                r.status,
+                r.vary.as_str(),
+                r.cache.as_str(),
+                r.etag.is_empty()
+            ),
+            (200, "Accept", "no-cache", false),
+            "/pg/simple/ {accept:?}"
+        );
+        assert_eq!(len, r.body.len().to_string());
+        let (hlen, h) = ask(true, "/pg/simple/", &[accept]);
+        assert_eq!(
+            (h.status, hlen, h.etag.as_str(), h.vary.as_str()),
+            (200, len.clone(), r.etag.as_str(), "Accept"),
+            "HEAD /pg/simple/ {accept:?}"
+        );
+        let (_, n) = ask(
+            false,
+            "/pg/simple/",
+            &[accept, ("if-none-match", r.etag.as_str())],
+        );
+        assert_eq!(
+            (n.status, n.etag.as_str(), n.vary.as_str(), n.body.as_str()),
+            (304, r.etag.as_str(), "Accept", ""),
+            "If-None-Match /pg/simple/ {accept:?}"
+        );
+        tags.push(r.etag);
+        for path in ["/pp/simple/remote-pkg/", "/pg/simple/remote-pkg/"] {
+            let (len, r) = ask(false, path, &[accept]);
+            assert_eq!(
+                (
+                    r.status,
+                    r.vary.as_str(),
+                    r.body.contains("remote_pkg-1.0.tar.gz")
+                ),
+                (200, "Accept", true),
+                "{path} {accept:?}"
+            );
+            let (hlen, h) = ask(true, path, &[accept]);
+            assert_eq!(
+                (h.status, hlen, h.vary.as_str()),
+                (200, len, "Accept"),
+                "HEAD {path} {accept:?}"
+            );
+        }
+    }
+    assert_ne!(tags[0], tags[1], "the HTML list's and the JSON list's");
+}
+
 /// A Maven group does not ask a proxy member's upstream for an
 /// artifact the proxy excludes (`groupId:artifactId`).
 #[test]

@@ -1461,11 +1461,18 @@ fn pypi_page(v: &Value, base: &str, project: &str, json: bool, head: bool) -> Re
             ),
         )
     };
-    let mut r = Response::new(Body::from(if head { String::new() } else { body }));
-    r.headers_mut()
-        .insert(header::CONTENT_TYPE, HeaderValue::from_static(ct));
-    r.headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    let len = body.len();
+    let mut r = Response::new(if head {
+        Body::empty()
+    } else {
+        Body::from(body)
+    });
+    let h = r.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(ct));
+    h.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    // HTML or JSON at one URL, as a hosted page is.
+    h.insert(header::VARY, HeaderValue::from_static("Accept"));
     r
 }
 
@@ -2318,6 +2325,41 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(!a.count);
+    }
+
+    /// A proxy's pypi project page, HTML or JSON as asked, says that it
+    /// varies by Accept, and a HEAD has the GET's length.
+    #[tokio::test]
+    async fn a_pypi_page_varies_by_accept() {
+        let doc = json!({"meta": {"api-version": "1.0"}, "name": "hello",
+                         "files": [{"filename": "hello-1.0.tar.gz", "url": "x",
+                                    "hashes": {"sha256": "0".repeat(64)}}]});
+        for json in [false, true] {
+            let mut got = Vec::new();
+            for head in [false, true] {
+                let r = pypi_page(&doc, "http://h/pp/", "hello", json, head);
+                let vary: Vec<String> = r
+                    .headers()
+                    .get_all(header::VARY)
+                    .iter()
+                    .map(|v| v.to_str().unwrap().to_string())
+                    .collect();
+                let len = r
+                    .headers()
+                    .get(header::CONTENT_LENGTH)
+                    .map(|v| v.to_str().unwrap().to_string());
+                let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+                got.push((vary, len, b.len()));
+            }
+            let n = got[0].2;
+            assert!(n > 0, "json {json}");
+            let want = (vec!["Accept".to_string()], Some(n.to_string()));
+            assert_eq!(
+                got,
+                [(want.0.clone(), want.1.clone(), n), (want.0, want.1, 0)],
+                "json {json}"
+            );
+        }
     }
 
     #[test]

@@ -295,6 +295,85 @@ fn cargo_config(base: &str, auth: bool, head: bool) -> Response {
     r
 }
 
+/// The most hits a group asks each member of its search for: the
+/// largest page the hosted search answers (npm's size, cargo's
+/// per_page), so one request a member, and at most this many of its
+/// hits in the merge.
+const NPM_SEARCH_MAX: usize = 250;
+const CARGO_SEARCH_MAX: usize = 100;
+
+/// A query's value as the formats decode it (`+` a space).
+fn decoded(s: &str) -> String {
+    String::from_utf8_lossy(&pkgpod_base::percent::percent_decode(&s.replace('+', " ")))
+        .into_owned()
+}
+
+/// The page of a search the caller asks for, as (first hit, hits),
+/// with the hosted search's defaults and limits: npm's from (0) and
+/// size (20, 1 to 250); cargo's per_page (10, 1 to 100) and page (from
+/// 1, as crates.io counts).
+fn search_page(format: &str, query: &str) -> (usize, usize) {
+    if format == "npm" {
+        let q = pkgpod_proto::query::params(query);
+        let s = |k: &str| q.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let size: usize = s("size").parse().unwrap_or(20).clamp(1, NPM_SEARCH_MAX);
+        let from: usize = s("from").parse().unwrap_or(0);
+        return (from, size);
+    }
+    let (mut page, mut per_page) = (1usize, 10usize);
+    for (k, v) in query.split('&').filter_map(|p| p.split_once('=')) {
+        match k {
+            "per_page" => per_page = decoded(v).parse().unwrap_or(10).clamp(1, CARGO_SEARCH_MAX),
+            "page" => page = decoded(v).parse().unwrap_or(1).max(1),
+            _ => {}
+        }
+    }
+    ((page - 1).saturating_mul(per_page), per_page)
+}
+
+/// The query a member's search is asked with: the caller's without its
+/// paging, from the first hit, as many as the member answers at once.
+/// Ours come last, as a repeated key's last value is the one read.
+fn member_query(format: &str, query: &str) -> String {
+    let (paging, ours): (&[&str], String) = if format == "npm" {
+        (&["from", "size"], format!("from=0&size={NPM_SEARCH_MAX}"))
+    } else {
+        (
+            &["page", "per_page"],
+            format!("per_page={CARGO_SEARCH_MAX}"),
+        )
+    };
+    let mut kept: Vec<&str> = query
+        .split('&')
+        .filter(|p| {
+            let k = p.split_once('=').map_or(*p, |(k, _)| k);
+            !p.is_empty() && !paging.contains(&decoded(k).as_str())
+        })
+        .collect();
+    kept.push(&ours);
+    kept.join("&")
+}
+
+/// The search's answer: `hits` merged from the members, `total` of
+/// them, cut to the caller's page; revalidated, as a hosted search's
+/// is (a publish to a member changes it).
+fn search_answer(format: &str, hits: Vec<Value>, query: &str) -> Response {
+    let total = hits.len();
+    let (from, size) = search_page(format, query);
+    let page: Vec<Value> = hits.into_iter().skip(from).take(size).collect();
+    let body = if format == "npm" {
+        // When it was made, in whole seconds as a hosted search says.
+        let time = pkgpod_npm::iso_time(pkgpod_base::now());
+        json!({"objects": page, "total": total, "time": time})
+    } else {
+        json!({"crates": page, "meta": {"total": total}})
+    };
+    let mut r = axum::Json(body).into_response();
+    r.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    r
+}
+
 fn text(st: StatusCode, m: String) -> Response {
     let mut r = Response::new(Body::from(format!("{m}\n")));
     *r.status_mut() = st;
@@ -485,9 +564,21 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
             } else {
                 ("crates", "")
             };
+            // Each member for its hits from the first, by GET (its
+            // body is read, a HEAD's too): the caller's page is cut
+            // from the merge, whose count is the total.
+            let mut parts = again.uri.clone().into_parts();
+            let q = member_query(&g.format, &query);
+            parts.path_and_query = format!("{}?{q}", again.uri.path()).parse().ok();
+            let asked = Again {
+                method: Method::GET,
+                uri: Uri::from_parts(parts).unwrap_or_else(|_| again.uri.clone()),
+                version: again.version,
+                headers: again.headers.clone(),
+            };
             let mut hits: Vec<Value> = Vec::new();
             for m in ms {
-                let Some(v) = json_of(from(&app, &at, m, &again).await).await else {
+                let Some(v) = json_of(from(&app, &at, m, &asked).await).await else {
                     continue;
                 };
                 for h in v[key].as_array().into_iter().flatten() {
@@ -503,18 +594,14 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
                     }
                 }
             }
-            let n = hits.len();
-            let body = if g.format == "npm" {
-                json!({"objects": hits, "total": n, "time": jiff::Timestamp::now().to_string()})
-            } else {
-                json!({"crates": hits, "meta": {"total": n}})
-            };
-            axum::Json(body).into_response()
+            search_answer(&g.format, hits, &query)
         }
     }
 }
 
-/// pypi's project list (PEP 503 HTML, or PEP 691 JSON when asked).
+/// pypi's project list (PEP 503 HTML, or PEP 691 JSON when asked): at
+/// one URL, so it says it varies by Accept; its ETag is of the body it
+/// sends (answered 304 to If-None-Match), and a HEAD has its headers.
 fn pypi_root(names: &[String], h: &HeaderMap, head: bool) -> Response {
     let json = h
         .get(header::ACCEPT)
@@ -540,11 +627,32 @@ fn pypi_root(names: &[String], h: &HeaderMap, head: bool) -> Response {
         s.push_str("</body></html>\n");
         ("text/html; charset=utf-8", s)
     };
-    let mut r = Response::new(Body::from(if head { String::new() } else { body }));
-    r.headers_mut()
-        .insert(header::CONTENT_TYPE, HeaderValue::from_static(ct));
-    r.headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    let etag = format!("\"{}\"", pkgpod_base::Digest::of(body.as_bytes()).hex());
+    let fresh = h
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| crate::serving::inm_matches(v, &etag));
+    let mut r = if fresh {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else {
+        let len = body.len();
+        let mut r = Response::new(if head {
+            Body::empty()
+        } else {
+            Body::from(body)
+        });
+        r.headers_mut()
+            .insert(header::CONTENT_TYPE, HeaderValue::from_static(ct));
+        r.headers_mut()
+            .insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+        r
+    };
+    let hd = r.headers_mut();
+    hd.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    hd.insert(header::VARY, HeaderValue::from_static("Accept"));
+    if let Ok(v) = HeaderValue::from_str(&etag) {
+        hd.insert(header::ETAG, v);
+    }
     r
 }
 
@@ -822,5 +930,150 @@ mod tests {
         let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
         let v: Value = serde_json::from_slice(&b).unwrap();
         assert_eq!(v["auth-required"], false);
+    }
+
+    /// A search through a group: each member is asked from its first
+    /// hit, as many as it answers at once; the caller's page, read as
+    /// the hosted search reads it, is cut from the merge.
+    #[tokio::test]
+    async fn a_group_s_search_pages() {
+        for (f, q, want) in [
+            ("npm", "", "from=0&size=250"),
+            ("npm", "text=a+b&size=2&from=1", "text=a+b&from=0&size=250"),
+            ("npm", "si%7Ae=2&text=x&&from", "text=x&from=0&size=250"),
+            ("cargo", "q=x&per_page=2&page=3", "q=x&per_page=100"),
+            ("cargo", "per_page=0", "per_page=100"),
+        ] {
+            assert_eq!(member_query(f, q), want, "{f} {q}");
+        }
+        for (f, q, want) in [
+            ("npm", "", (0, 20)),
+            ("npm", "size=0&from=3", (3, 1)),
+            ("npm", "size=999&from=-1", (0, 250)),
+            ("cargo", "q=x", (0, 10)),
+            ("cargo", "per_page=0", (0, 1)),
+            ("cargo", "per_page=2&page=3", (4, 2)),
+            ("cargo", "page=0&per_page=x", (0, 10)),
+            ("cargo", "per_page=500&page=2", (100, 100)),
+        ] {
+            assert_eq!(search_page(f, q), want, "{f} {q}");
+        }
+        let hits = |k: &str| -> Vec<Value> {
+            ["a", "b", "c", "d"]
+                .iter()
+                .map(|n| {
+                    if k == "npm" {
+                        json!({"package": {"name": n}})
+                    } else {
+                        json!({"name": n})
+                    }
+                })
+                .collect()
+        };
+        let r = search_answer("npm", hits("npm"), "text=x&size=2&from=1");
+        assert_eq!(r.headers()[header::CACHE_CONTROL], "no-cache");
+        let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+        let v: Value = serde_json::from_slice(&b).unwrap();
+        let t = v["time"].as_str().unwrap();
+        assert!(t.len() == 24 && t.ends_with(".000Z"), "whole seconds: {t}");
+        assert_eq!(
+            (&v["objects"], &v["total"]),
+            (
+                &json!([{"package": {"name": "b"}}, {"package": {"name": "c"}}]),
+                &json!(4)
+            )
+        );
+        let r = search_answer("cargo", hits("cargo"), "q=x&per_page=3&page=2");
+        assert_eq!(r.headers()[header::CACHE_CONTROL], "no-cache");
+        let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+        let v: Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(v, json!({"crates": [{"name": "d"}], "meta": {"total": 4}}));
+    }
+
+    /// pypi's project list at a group, HTML or JSON as asked: it says
+    /// it varies by Accept, has an ETag of the body it sends (answered
+    /// 304 to If-None-Match), and a HEAD has the GET's headers.
+    #[tokio::test]
+    async fn a_group_s_pypi_project_list() {
+        let names = v(&["hello-world", "other-pkg"]);
+        let h = |r: &Response, k: header::HeaderName| {
+            let all: Vec<&str> = r
+                .headers()
+                .get_all(k)
+                .iter()
+                .map(|v| v.to_str().unwrap())
+                .collect();
+            all.join(", ")
+        };
+        let mut tags = Vec::new();
+        for accept in ["text/html", "application/vnd.pypi.simple.v1+json"] {
+            let asked = |inm: Option<&str>| {
+                let mut m = HeaderMap::new();
+                m.insert(header::ACCEPT, HeaderValue::from_static(accept));
+                if let Some(t) = inm {
+                    m.insert(header::IF_NONE_MATCH, HeaderValue::from_str(t).unwrap());
+                }
+                m
+            };
+            let r = pypi_root(&names, &asked(None), false);
+            let (etag, vary, len) = (
+                h(&r, header::ETAG),
+                h(&r, header::VARY),
+                h(&r, header::CONTENT_LENGTH),
+            );
+            let body = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+            let want = format!("\"{}\"", pkgpod_base::Digest::of(&body).hex());
+            assert_eq!(
+                (etag.as_str(), vary.as_str(), len),
+                (want.as_str(), "Accept", body.len().to_string()),
+                "GET {accept}"
+            );
+            let r = pypi_root(&names, &asked(None), true);
+            let got = (
+                r.status(),
+                h(&r, header::ETAG),
+                h(&r, header::VARY),
+                h(&r, header::CONTENT_LENGTH),
+            );
+            let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+            assert_eq!(
+                (got, b.len()),
+                (
+                    (
+                        StatusCode::OK,
+                        etag.clone(),
+                        "Accept".into(),
+                        body.len().to_string()
+                    ),
+                    0
+                ),
+                "HEAD {accept}"
+            );
+            // Its own ETag, or any: not modified; another's: the list.
+            for (inm, st) in [
+                (etag.as_str(), StatusCode::NOT_MODIFIED),
+                ("*", StatusCode::NOT_MODIFIED),
+                ("\"other\"", StatusCode::OK),
+            ] {
+                let r = pypi_root(&names, &asked(Some(inm)), false);
+                let got = (
+                    r.status(),
+                    h(&r, header::ETAG),
+                    h(&r, header::VARY),
+                    h(&r, header::CACHE_CONTROL),
+                );
+                let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+                assert_eq!(
+                    (got, b.len()),
+                    (
+                        (st, etag.clone(), "Accept".into(), "no-cache".into()),
+                        if st == StatusCode::OK { body.len() } else { 0 }
+                    ),
+                    "If-None-Match {inm} {accept}"
+                );
+            }
+            tags.push(etag);
+        }
+        assert_ne!(tags[0], tags[1], "HTML and JSON are two bodies");
     }
 }
