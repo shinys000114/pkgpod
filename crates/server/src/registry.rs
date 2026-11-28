@@ -79,8 +79,8 @@ pub struct Row {
     pub(crate) serving: Option<&'static dyn Serve>,
     /// Whether its repositories are trees to browse. A registry's (npm,
     /// OCI, cargo, Go, NuGet, …) answer their clients' API only, as
-    /// public registries do: they are left out of listings, and their
-    /// address says how to use them.
+    /// public registries do: host pages list them with their How to use
+    /// but link no name, and their address says how to use them.
     pub browsable: bool,
     /// What it answers at a host's root, if anything.
     pub claim: Option<HostClaim>,

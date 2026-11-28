@@ -549,7 +549,8 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
         // Its body read first, whatever the answer: else the connection
         // is closed under a client still sending it.
         crate::serving::drain(req).await;
-        // npm's own endpoints (audit) answer as a hosted registry does.
+        // A write to npm's own endpoints is 404: audit's as a hosted
+        // registry's is, dist-tag add and rm because a group takes none.
         if g.format == "npm" && at.rel.first().map(String::as_str) == Some("-") {
             return crate::serving::status(StatusCode::NOT_FOUND);
         }
