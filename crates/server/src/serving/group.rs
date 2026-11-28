@@ -137,9 +137,7 @@ fn ask(format: &str, rel: &[String], dir_url: bool) -> Ask {
         // @latest (`@first/<module>`, `<a>/@first/<b>`) names no module,
         // and is not asked of the members (nor of a proxy's upstream).
         "go" => match rel.iter().position(|s| s == "@v" || s == "@latest") {
-            Some(i) if i > 0 && !rel[..i].iter().any(|s| s.starts_with('@')) => {
-                Ask::Name(rel[..i].join("/"))
-            }
+            Some(i) if crate::serving::proxy::go_module(&rel[..i]) => Ask::Name(rel[..i].join("/")),
             Some(_) => Ask::Nothing,
             None if label => Ask::Nothing,
             None => Ask::First,

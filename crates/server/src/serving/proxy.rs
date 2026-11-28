@@ -105,11 +105,19 @@ fn joined(rel: &[String]) -> String {
         .join("/")
 }
 
+/// Whether `segs`, a go path's part before `@v` or `@latest`, name a
+/// module: some, and none a label. A module path holds no '@', so
+/// `@first/<module>` (or a label at any other place) names none, and is
+/// asked of no member and no upstream.
+pub(crate) fn go_module<S: AsRef<str>>(segs: &[S]) -> bool {
+    !segs.is_empty() && !segs.iter().any(|s| s.as_ref().starts_with('@'))
+}
+
 /// Go's module proxy protocol: `<module>/@v/list`, `<module>/@latest`
 /// (metadata), `<module>/@v/<version>.info|.mod|.zip` (files).
 fn go(rel: &[String]) -> Option<Asked> {
     let at = rel.iter().position(|s| s == "@v" || s == "@latest")?;
-    if at == 0 {
+    if !go_module(&rel[..at]) {
         return None;
     }
     let name = rel[..at].join("/");
@@ -694,13 +702,13 @@ fn hash_file(p: &std::path::Path, e: &Expect) -> std::io::Result<bool> {
 /// The metadata that says whether the upstream has package `name`.
 fn name_doc(format: &str, name: &str) -> Option<String> {
     match format {
-        "go" => Some(format!(
-            "{}/@v/list",
-            name.split('/')
-                .map(percent_encode)
-                .collect::<Vec<_>>()
-                .join("/")
-        )),
+        "go" => {
+            let segs: Vec<&str> = name.split('/').collect();
+            go_module(&segs).then(|| {
+                let path: Vec<String> = segs.iter().map(|s| percent_encode(s)).collect();
+                format!("{}/@v/list", path.join("/"))
+            })
+        }
         // Groups name a Maven artifact by its directory.
         "maven" => Some(format!("{name}/maven-metadata.xml")),
         "npm" => Some(npm_path(name)),
@@ -2623,6 +2631,34 @@ pub(crate) mod tests {
         };
         assert!(up.excluded("example.com/internal/tool") && up.excluded("corp.example/x"));
         assert!(!up.excluded("corp.example/xy") && !up.excluded("example.com/greet"));
+    }
+
+    /// A module path holds no '@': a go proxy takes a label before @v or
+    /// @latest, at any place, for no module (a 404, nothing asked of the
+    /// upstream), and a group asking a proxy member whether it has one
+    /// asks its upstream nothing either.
+    #[test]
+    fn go_labels_name_no_module() {
+        for p in [
+            "@x/example.com/hello/@v/list",
+            "@x/example.com/hello/@latest",
+            "@x/example.com/hello/@v/v1.0.0.zip",
+            "example.com/@x/hello/@v/v1.0.0.info",
+            "example.com/hello/@x/@v/list",
+            "@x/@latest",
+        ] {
+            let rel: Vec<&str> = p.split('/').collect();
+            assert!(classify("go", &v(&rel)).is_none(), "{p} names a module");
+        }
+        for name in ["@x/example.com/hello", "example.com/@x/hello", "@x"] {
+            assert_eq!(name_doc("go", name), None, "{name} names a module");
+        }
+        let a = classify("go", &v(&["example.com", "hello", "@v", "list"])).unwrap();
+        assert_eq!(a.name, "example.com/hello");
+        assert_eq!(
+            name_doc("go", "example.com/hello").as_deref(),
+            Some("example.com/hello/@v/list")
+        );
     }
 
     /// An app of its own, in a directory that goes with it.
