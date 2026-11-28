@@ -794,6 +794,16 @@ fn quiet() -> &'static Mutex<HashMap<String, i64>> {
     Q.get_or_init(Default::default)
 }
 
+/// Marks `name` in `marks` (names, and until when) until [`QUIET_SECS`]
+/// from `now`: whether it was not marked, so that what goes on for a
+/// while is told in the log once. Each time renews the mark, and one
+/// that ended is remembered for as long again, as [`quiet`]'s are.
+pub(crate) fn once_a_while(marks: &Mutex<HashMap<String, i64>>, name: &str, now: i64) -> bool {
+    let mut m = marks.lock().unwrap();
+    m.retain(|_, until| now < *until + QUIET_SECS);
+    m.insert(name.to_string(), now + QUIET_SECS).is_none()
+}
+
 /// What proxies asked their upstream again for and still wait for,
 /// after [`STALE_WAIT`]: by repository and path.
 fn late() -> &'static Mutex<HashSet<(String, String)>> {
@@ -838,16 +848,11 @@ where
     if let Ok(done) = tokio::time::timeout(STALE_WAIT, &mut task).await {
         return done.ok();
     }
-    let now = pkgpod_base::now();
-    {
-        let mut q = quiet().lock().unwrap();
-        q.retain(|_, until| now < *until + QUIET_SECS);
-        if q.insert(repo.to_string(), now + QUIET_SECS).is_none() {
-            tracing::warn!(
-                "{repo}: the upstream did not answer in {} s; what is kept is served meanwhile",
-                STALE_WAIT.as_secs()
-            );
-        }
+    if once_a_while(quiet(), repo, pkgpod_base::now()) {
+        tracing::warn!(
+            "{repo}: the upstream did not answer in {} s; what is kept is served meanwhile",
+            STALE_WAIT.as_secs()
+        );
     }
     /// The path off [`late`] however the task ends.
     struct Late((String, String));

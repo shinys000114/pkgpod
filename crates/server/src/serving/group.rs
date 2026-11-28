@@ -16,7 +16,8 @@
 //! (anonymous readers of a public group only its public members), and
 //! downloads count on the member. Publishing goes to a member.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -443,6 +444,29 @@ async fn searched(r: Response) -> Searched {
     }
 }
 
+/// Groups a member of which could not be asked a moment ago, and until
+/// when (see [`member_failed`]).
+fn failing() -> &'static Mutex<HashMap<String, i64>> {
+    static F: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
+    F.get_or_init(Default::default)
+}
+
+/// Logs that group `g`'s member `member` could not be asked for
+/// `asked`, and why (`e`, which may name its upstream): the operator's,
+/// as the answer names no member. Once a while per group, as a proxy's
+/// slow upstream is told (a caller may send such requests as fast as it
+/// likes); `asked` comes from the request's path, decoded, and `e` may
+/// quote it, so both are written with their control characters escaped:
+/// a newline in them does not start a line of the log.
+fn member_failed(g: &str, member: &str, asked: &str, e: &str) {
+    if crate::serving::proxy::once_a_while(failing(), g, pkgpod_base::now()) {
+        tracing::warn!(
+            "{g}: its member {member} could not be asked for {asked:?}: {}",
+            e.escape_debug()
+        );
+    }
+}
+
 pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
     let g = at.served.repo.clone();
     if at.role.is_none() {
@@ -510,13 +534,7 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
                         Has::Yes => true,
                         Has::No => false,
                         Has::Failed(e) => {
-                            // Which member, and its error (which may
-                            // name its upstream), are the operator's.
-                            tracing::warn!(
-                                "{}: its member {} could not be asked for {key}: {e}",
-                                g.name,
-                                m.repo.name
-                            );
+                            member_failed(&g.name, &m.repo.name, &key, &e);
                             return text(
                                 StatusCode::BAD_GATEWAY,
                                 format!("{}: a member could not be asked", g.name),
@@ -1264,5 +1282,122 @@ mod tests {
             assert_eq!(got[1].1.contains(&line), html, "{accept}");
             assert_eq!(got[0].0 != got[1].0, html, "{accept}");
         }
+    }
+
+    /// The messages of the warnings logged on the thread it is the
+    /// subscriber of (a request through the router is served on the
+    /// test's own).
+    #[derive(Clone, Default)]
+    struct Warned(Arc<Mutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Warned {
+        fn on_event(&self, e: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+            struct Message(String);
+            impl tracing::field::Visit for Message {
+                fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+                    if f.name() == "message" {
+                        self.0 = format!("{v:?}");
+                    }
+                }
+            }
+            if *e.metadata().level() == tracing::Level::WARN {
+                let mut m = Message(String::new());
+                e.record(&mut m);
+                self.0.lock().unwrap().push(m.0);
+            }
+        }
+    }
+
+    /// What pypi groups `gs` log, each of a public proxy `<g>-up` whose
+    /// upstream answers 503, for GETs of `paths` (each answered 502):
+    /// each group's warnings, in order.
+    async fn failed_member_warnings(gs: &[&str], paths: &[&str]) -> Vec<Vec<String>> {
+        use crate::serving::proxy::tests::{app, get, proxy_repo, reply, stub};
+        use tracing_subscriber::layer::SubscriberExt;
+        let w = Warned::default();
+        let _log = tracing::subscriber::set_default(tracing_subscriber::registry().with(w.clone()));
+        let (_d, app) = app();
+        let up = stub(|_, _, c| reply(c, "503 Service Unavailable", b""));
+        for g in gs {
+            let m = format!("{g}-up");
+            proxy_repo(&app, &m, "pypi", &up);
+            let n = pkgpod_engine::NewRepo {
+                name: g.to_string(),
+                format: "pypi".into(),
+                kind: Kind::Group,
+                storage: None,
+                settings: json!({"members": [m], "public": true}),
+            };
+            app.engine.create_repo(n, "test").unwrap();
+        }
+        for p in paths {
+            assert_eq!(get(&app, p).await.0, 502, "{p}");
+        }
+        let all = w.0.lock().unwrap().clone();
+        gs.iter()
+            .map(|g| {
+                let of = format!("{g}: ");
+                all.iter().filter(|m| m.starts_with(&of)).cloned().collect()
+            })
+            .collect()
+    }
+
+    /// A member that could not be asked is logged on one line: the name
+    /// asked for comes from the request's path, decoded, and the
+    /// member's error may quote it (as the URL it asked for), so a
+    /// newline in it is escaped, not written into the log.
+    #[tokio::test]
+    async fn a_group_logs_a_failed_member_on_one_line() {
+        let got = failed_member_warnings(&["grplog-esc"], &["/grplog-esc/simple/hello%0Aforged/"])
+            .await
+            .remove(0);
+        assert_eq!(got.len(), 1, "{got:?}");
+        let m = &got[0];
+        assert!(!m.contains(['\n', '\r']), "a newline in the line: {m:?}");
+        assert!(
+            m.starts_with(
+                r#"grplog-esc: its member grplog-esc-up could not be asked for "hello\nforged": "#
+            ),
+            "{m}"
+        );
+    }
+
+    /// A member that cannot be asked is logged once a while per group,
+    /// as a proxy's slow upstream is: not once per request, which a
+    /// caller may send as fast as it likes.
+    #[tokio::test]
+    async fn a_group_logs_a_failed_member_once_a_while() {
+        let got = failed_member_warnings(
+            &["grplog-once", "grplog-other"],
+            &[
+                "/grplog-once/simple/hello/",
+                "/grplog-once/simple/acme/",
+                "/grplog-once/simple/hello/",
+                "/grplog-other/simple/hello/",
+            ],
+        )
+        .await;
+        assert_eq!(
+            got.iter().map(Vec::len).collect::<Vec<_>>(),
+            [1, 1],
+            "{got:?}"
+        );
+        // Marked apart from the proxies' quiet: neither the group nor
+        // its member is served from what is kept for it.
+        for r in ["grplog-once", "grplog-once-up"] {
+            assert!(!crate::serving::proxy::is_quiet(r, "hello/"), "{r}");
+        }
+        // Told again once quiet for as long again after the last time,
+        // each group on its own.
+        let marks = Mutex::new(HashMap::new());
+        let told = |g: &str, now: i64| crate::serving::proxy::once_a_while(&marks, g, now);
+        let q = crate::serving::proxy::QUIET_SECS;
+        assert!(told("g", 1000));
+        assert!(!told("g", 1000 + q / 2));
+        assert!(told("h", 1000 + q / 2));
+        let last = 1000 + q / 2 + 2 * q - 1;
+        assert!(!told("g", last), "renewed at {}", 1000 + q / 2);
+        assert!(!told("g", last + 2 * q - 1));
+        assert!(told("g", last + 4 * q - 1));
     }
 }
