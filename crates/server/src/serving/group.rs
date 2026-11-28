@@ -44,6 +44,8 @@ enum Ask {
     /// The group's own note: the address of a format whose repository
     /// answers a client note there.
     Note,
+    /// cargo's index/config.json: the group's own.
+    CargoConfig,
     /// A directory listing: every member's entries.
     Listing,
     /// The address without its slash: the redirect to the listing.
@@ -111,7 +113,7 @@ fn ask(format: &str, rel: &[String], dir_url: bool, query: &str) -> Ask {
         },
         "cargo" => match rel {
             [] => Ask::Note,
-            [i, c] if i == "index" && c == "config.json" => Ask::First,
+            [i, c] if i == "index" && c == "config.json" => Ask::CargoConfig,
             [i, .., name] if i == "index" => Ask::Name(name.to_ascii_lowercase()),
             [a, v1, c] if a == "api" && v1 == "v1" && c == "crates" && !query.is_empty() => {
                 Ask::Search
@@ -273,6 +275,26 @@ fn note(g: &pkgpod_engine::RepoInfo, base: &str) -> Option<String> {
     ))
 }
 
+/// cargo's index/config.json at the group's address `base`: crates are
+/// downloaded through the group, and there is no api, as a group takes
+/// no publish. `auth` (required) unless the group and every member it
+/// lists are public: else an anonymous caller is refused, or reads the
+/// public members only, and cargo is to send its token. A HEAD has the
+/// same headers.
+fn cargo_config(base: &str, auth: bool, head: bool) -> Response {
+    let doc = json!({"dl": format!("{base}api/v1/crates"), "auth-required": auth}).to_string();
+    let len = doc.len();
+    let mut r = Response::new(if head { Body::empty() } else { Body::from(doc) });
+    let h = r.headers_mut();
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    h.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    r
+}
+
 fn text(st: StatusCode, m: String) -> Response {
     let mut r = Response::new(Body::from(format!("{m}\n")));
     *r.status_mut() = st;
@@ -339,6 +361,14 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
                 None => crate::serving::status(StatusCode::NOT_FOUND),
             }
         }
+        // The group's own, asked of no member: a hosted member answers
+        // a HEAD with no body to read, and a member's api would point
+        // cargo's publish at the group, which refuses it.
+        Ask::CargoConfig => {
+            let base = crate::serving::client_base(at.route.as_ref(), &at.host, &at.base, &req);
+            let open = g.setting_bool("public") && all_public(&app, &g);
+            cargo_config(&base, !open, head)
+        }
         Ask::Name(key) => {
             for m in ms {
                 let found = if m.repo.kind == Kind::Proxy {
@@ -376,7 +406,6 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
             crate::serving::status(StatusCode::NOT_FOUND)
         }
         Ask::First => {
-            let config = g.format == "cargo" && at.rel == ["index", "config.json"];
             for m in ms {
                 if at.rel.is_empty() && m.repo.kind == Kind::Proxy {
                     // A proxy answers at its address with its own note,
@@ -391,14 +420,6 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
                 let r = from(&app, &at, m, &again).await;
                 if r.status() == StatusCode::NOT_FOUND {
                     continue;
-                }
-                if config && r.status().is_success() {
-                    // The group's own rights, not the member's.
-                    if let Some(mut v) = json_of(r).await {
-                        v["auth-required"] = json!(!g.setting_bool("public"));
-                        return axum::Json(v).into_response();
-                    }
-                    return crate::serving::status(StatusCode::BAD_GATEWAY);
                 }
                 return revalidated(r);
             }
@@ -622,7 +643,17 @@ mod tests {
         );
         assert_eq!(
             ask("cargo", &v(&["index", "config.json"]), false, ""),
-            Ask::First
+            Ask::CargoConfig
+        );
+        // A label's, or another file's that is not config.json, is not
+        // the group's.
+        assert_eq!(
+            ask("cargo", &v(&["@first", "index", "config.json"]), false, ""),
+            Ask::Nothing
+        );
+        assert_eq!(
+            ask("cargo", &v(&["index", "CONFIG.JSON"]), false, ""),
+            Ask::Name("config.json".into())
         );
         assert_eq!(
             ask(
@@ -761,5 +792,35 @@ mod tests {
             let got = r.headers().get(header::CACHE_CONTROL);
             assert_eq!(got.and_then(|v| v.to_str().ok()), want, "{cc:?}");
         }
+    }
+
+    /// cargo's config.json at a group: downloads through it, no api,
+    /// and the same headers by HEAD, with no body.
+    #[tokio::test]
+    async fn a_group_s_cargo_config() {
+        let doc = "{\"dl\":\"http://h/cg/api/v1/crates\",\"auth-required\":true}";
+        for head in [false, true] {
+            let r = cargo_config("http://h/cg/", true, head);
+            let h = |k| r.headers()[k].to_str().unwrap().to_string();
+            assert_eq!(
+                (
+                    h(header::CONTENT_TYPE),
+                    h(header::CACHE_CONTROL),
+                    h(header::CONTENT_LENGTH)
+                ),
+                (
+                    "application/json".into(),
+                    "no-cache".into(),
+                    doc.len().to_string()
+                ),
+                "head {head}"
+            );
+            let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+            assert_eq!(b, if head { "" } else { doc }, "head {head}");
+        }
+        let r = cargo_config("http://h/cg/", false, false);
+        let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+        let v: Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(v["auth-required"], false);
     }
 }

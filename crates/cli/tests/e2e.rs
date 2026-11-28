@@ -8282,6 +8282,127 @@ fn group_address_shows_no_proxy_note() {
     }
 }
 
+/// A cargo group's index/config.json is its own: downloads at the
+/// group's address, no api (a group takes no publish), and auth
+/// required unless the group and every member it lists are public. A
+/// HEAD answers the same headers with no body, with a hosted member
+/// first too. Callers with no role are refused as before.
+#[test]
+fn group_answers_its_own_cargo_config() {
+    let s = Server::start();
+    let c = reqwest::blocking::Client::new();
+    for (r, public) in [("cpub", "true"), ("csec", "false")] {
+        s.cli(&[
+            "repo",
+            "create",
+            r,
+            "-f",
+            "cargo",
+            "-s",
+            &format!("public={public}"),
+        ])
+        .unwrap();
+    }
+    // Public members only; a private member; a private group of a
+    // public member: auth is required by the last two.
+    for (g, members, public) in [
+        ("cgopen", "cpub", "true"),
+        ("cgmixed", "csec,cpub", "true"),
+        ("cgclosed", "cpub", "false"),
+    ] {
+        s.cli(&[
+            "repo",
+            "create",
+            g,
+            "-f",
+            "cargo",
+            "-k",
+            "group",
+            "-s",
+            &format!("members={members}"),
+            "-s",
+            &format!("public={public}"),
+        ])
+        .unwrap();
+    }
+    let token = |repos: &str| {
+        s.cli(&["token", "create", repos, "--repos", repos])
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    let (closed, other) = (token("cgclosed"), token("cpub"));
+    for (g, auth, ts) in [
+        ("cgopen", false, vec![None, Some(&other)]),
+        ("cgmixed", true, vec![None, Some(&other)]),
+        ("cgclosed", true, vec![Some(&closed)]),
+    ] {
+        let path = format!("/{g}/index/config.json");
+        let want = json!({"dl": s.url(&format!("/{g}/api/v1/crates")), "auth-required": auth});
+        for t in &ts {
+            let with = |b: reqwest::blocking::RequestBuilder| match t {
+                Some(t) => b.bearer_auth(t),
+                None => b,
+            };
+            // Kept by shared caches only where every caller reads the
+            // same: anonymously, at a group of public members only.
+            let cc = if g == "cgopen" && t.is_none() {
+                "no-cache"
+            } else {
+                "private, no-cache"
+            };
+            let r = with(c.get(s.url(&path))).send().unwrap();
+            let st = r.status().as_u16();
+            let h = |r: &reqwest::blocking::Response, k: &str| {
+                r.headers()
+                    .get(k)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string()
+            };
+            let (ty, got_cc) = (h(&r, "content-type"), h(&r, "cache-control"));
+            let body = r.text().unwrap();
+            let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+            assert_eq!(
+                (st, ty.as_str(), got_cc.as_str(), &v),
+                (200, "application/json", cc, &want),
+                "GET {path} {t:?}: {body}"
+            );
+            let r = with(c.head(s.url(&path))).send().unwrap();
+            let (st, ty, got_cc) = (
+                r.status().as_u16(),
+                h(&r, "content-type"),
+                h(&r, "cache-control"),
+            );
+            let len = h(&r, "content-length");
+            let rest = r.text().unwrap();
+            assert_eq!(
+                (st, ty.as_str(), got_cc.as_str(), len, rest.as_str()),
+                (200, "application/json", cc, body.len().to_string(), ""),
+                "HEAD {path} {t:?}"
+            );
+        }
+    }
+    // Refused as before: anonymously (401), and by a token for another
+    // repository (404).
+    let path = "/cgclosed/index/config.json";
+    for (t, want) in [(None, 401), (Some(&other), 404)] {
+        for head in [false, true] {
+            let b = if head {
+                c.head(s.url(path))
+            } else {
+                c.get(s.url(path))
+            };
+            let b = match t {
+                Some(t) => b.bearer_auth(t),
+                None => b,
+            };
+            let st = b.send().unwrap().status().as_u16();
+            assert_eq!(st, want, "{path} {t:?} head {head}");
+        }
+    }
+}
+
 /// A Maven group does not ask a proxy member's upstream for an
 /// artifact the proxy excludes (`groupId:artifactId`).
 #[test]
