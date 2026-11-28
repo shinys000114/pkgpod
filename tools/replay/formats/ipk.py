@@ -826,7 +826,9 @@ FUZZ = (["ipkpub", "ipkpriv", "ipkempty"],
 # The tree keeps no times of ipk's (no mtime, no date in its indexes;
 # the signature is Ed25519's, of the seed's key), and the versions a
 # write makes are masked by the core's rules: a fuzzed write leaves both
-# runs alike.
+# runs alike. And nothing a feed's address takes removes a file (the
+# tree refuses DELETE, and a version uploaded twice), so no download a
+# run counts is lost.
 FUZZ_WRITABLE = True
 
 PARTS = [

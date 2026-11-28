@@ -7,12 +7,12 @@ prefixes, and jars that only look like plugins; tools, whose directory
 is a plugin's group too; a deep group; names with + and ~; paths under
 by-hash and repodata; an artifact of SNAPSHOTs only), one with nothing
 in it, a proxy of the stub's Maven repository; groups (private, of
-all; public, of public members with a proxy first, of a private member
-first, of a proxy whose upstream fails first). Maven has no protocol
-module of its own: its repositories are the server's tree, read by
-path, written by PUT to the file's own path; the format makes each
-artifact's maven-metadata.xml, a SNAPSHOT's, a group's of its plugins,
-and every file's checksums."""
+mvnpub, mvnpriv and mvnproxy; public, of public members with a proxy
+first, of a private member first, of a proxy whose upstream fails
+first). Maven has no protocol module of its own: its repositories are
+the server's tree, read by path, written by PUT to the file's own path;
+the format makes each artifact's maven-metadata.xml, a SNAPSHOT's, a
+group's of its plugins, and every file's checksums."""
 
 import calendar
 import gzip
@@ -738,8 +738,8 @@ def group_stub(method, path, auth, bearer):
     return None
 
 
-# The groups: of every member, private, as the other formats' are (the
-# proxy's excluded names among them); and public ones, of public members
+# The groups: of mvnpub, mvnpriv and mvnproxy (not mvnempty), private,
+# as the other formats' are (the proxy's excluded names among them); and public ones, of public members
 # only with a proxy first (mvngup), of a private member first (mvnsec:
 # hello of a version of its own, an artifact of its own), of a proxy
 # whose upstream answers 500 first.

@@ -432,7 +432,11 @@ def end_state(data, seed_time, counts, times):
     # cross a midnight, UTC, that another does not): of those, one row
     # per package and version, its counts summed. A day outside them,
     # before the seed or past today (a count put on a wrong day), is kept
-    # as it is.
+    # as it is; one put on a wrong day inside them is summed with the
+    # rest, unseen. They start at the seed's day, not the run's: the
+    # server adds a day's counts to that day's row, so the seed's counts
+    # (it has none today) and a run's would be one row on the seed's day
+    # and two on a later one.
     day = int(seed_time) // 86400
     today = int(time.time()) // 86400
     out["downloads"] = rows(
