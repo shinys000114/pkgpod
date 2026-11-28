@@ -315,9 +315,10 @@ are read by the code around it:
 Setting `groups()` or `proxy()` makes the engine accept repositories
 of those kinds; serving them is the server's:
 
-- Groups: add the id to `group::FORMATS` and teach `group::ask` which
-  requests name a package (the state-tree directory whose first member
-  wins), which are listings and which are searches.
+- Groups: teach `group::ask` which requests name a package (the
+  state-tree directory whose first member wins), which are listings and
+  which are searches. `groups()` alone puts the format in the list a
+  refusal of another format's group names.
 - Proxies: add the id to `proxy::FORMATS`, a classifier to
   `proxy::classify` (what a path is: a file kept for good, or metadata
   asked for again after `metadata_minutes`; the package name for

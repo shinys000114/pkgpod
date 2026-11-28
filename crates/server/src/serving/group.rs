@@ -30,11 +30,6 @@ use crate::serving::proxy::Has;
 use crate::serving::{At, ListEntry};
 use crate::{App, Served};
 
-/// Formats whose groups are served, in the order a refusal names them:
-/// which they are is the registry's (`Format::groups`), and a test holds
-/// the two the same.
-pub const LISTED: &[&str] = &["files", "npm", "pypi", "maven", "go", "cargo", "oci"];
-
 /// What a request through a group asks for.
 #[derive(Debug, PartialEq)]
 enum Ask {
@@ -768,11 +763,13 @@ fn pypi_root(names: &[String], h: &HeaderMap, head: bool, incomplete: Option<&st
     r
 }
 
-/// Checks a group's members as `who` sets them: repositories of the
-/// group's format that are not groups, which `who` may read. Only the
-/// members the change adds are checked: one in `stored`, the group's
-/// list before the change (none at create), was checked when it was
-/// added, so keeping, moving or taking it out needs no right on it.
+/// Checks a group as `who` makes or changes it: its format has groups
+/// (whether or not the change names members), and its members are
+/// repositories of the group's format that are not groups, which `who`
+/// may read. Only the members the change adds are checked: one in
+/// `stored`, the group's list before the change (none at create), was
+/// checked when it was added, so keeping, moving or taking it out needs
+/// no right on it.
 pub fn check_members(
     app: &App,
     who: &crate::auth::Caller,
@@ -781,6 +778,20 @@ pub fn check_members(
     stored: &[String],
     settings: &Value,
 ) -> crate::Result<()> {
+    if !app.registry.groups(format) {
+        // The formats that have groups, in the registry's order.
+        let listed: Vec<&str> = app
+            .registry
+            .rows()
+            .iter()
+            .filter(|r| r.format.groups())
+            .map(|r| r.format.id())
+            .collect();
+        return Err(crate::Error::Invalid(format!(
+            "{format} repositories have no groups (yet): {}",
+            listed.join(", ")
+        )));
+    }
     let list: Vec<String> = match settings.get("members") {
         Some(Value::Array(a)) => a
             .iter()
@@ -794,12 +805,6 @@ pub fn check_members(
             .collect(),
         _ => return Ok(()),
     };
-    if !app.registry.groups(format) {
-        return Err(crate::Error::Invalid(format!(
-            "{format} repositories have no groups (yet): {}",
-            LISTED.join(", ")
-        )));
-    }
     for m in list.iter().filter(|m| !stored.contains(m)) {
         if m == group {
             return Err(crate::Error::Invalid(format!(

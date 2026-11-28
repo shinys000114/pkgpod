@@ -341,20 +341,14 @@ mod tests {
             set(&["terraform"])
         );
         assert_eq!(ids(|r| r.claim.is_some()), set(&["oci", "terraform"]));
-        // The refusals name the same formats, in their order.
-        use crate::serving::{group, proxy};
+        // The proxies' refusal names the same formats, in its order.
+        use crate::serving::proxy;
         assert_eq!(set(proxy::LISTED), proxies);
-        assert_eq!(set(group::LISTED), groups);
         assert_eq!(proxy::LISTED.len(), proxies.len());
-        assert_eq!(group::LISTED.len(), groups.len());
         let refused = proxy::check_settings("deb", &serde_json::json!({})).unwrap_err();
         assert_eq!(
             refused.to_string(),
             "deb repositories have no proxies (yet): go, maven, npm, pypi, cargo, oci, files"
-        );
-        assert_eq!(
-            group::LISTED.join(", "),
-            "files, npm, pypi, maven, go, cargo, oci"
         );
         // A format not compiled in: a tree, as before.
         assert!(r.row("nope").is_none());

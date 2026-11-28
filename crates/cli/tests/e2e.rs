@@ -7547,7 +7547,7 @@ fn group_of_files_repositories() {
     let e = s
         .cli(&["repo", "create", "dg", "-f", "deb", "-k", "group"])
         .unwrap_err();
-    assert!(e.contains("cannot be of kind group"), "{e}");
+    assert!(e.contains("deb repositories have no groups (yet)"), "{e}");
     s.cli(&["repo", "create", "p", "-f", "files"]).unwrap();
     s.cli_in(&["user", "add", "u", "--password-stdin"], "u-password")
         .unwrap();
@@ -7685,6 +7685,73 @@ fn group_members_are_checked_where_added() {
         "{body}"
     );
     assert_eq!(stored("members"), json!(["a"]));
+}
+
+/// A group of a format that has no groups is refused with one text,
+/// members given or not, when it is made and when its settings change;
+/// the text names the formats that have groups, in the registry's order.
+/// A group of a format that has them is made and changed without
+/// members.
+#[test]
+fn group_of_a_format_without_groups_is_refused_alike() {
+    use reqwest::Method;
+    let s = Server::start();
+    let pw = admin_password(&s);
+    let admin = As::User("admin", &pw);
+    s.cli(&["repo", "create", "d", "-f", "deb"]).unwrap();
+    let answer = |(st, v, _): (u16, Value, reqwest::header::HeaderMap)| {
+        (st, v["error"].as_str().unwrap_or_default().to_string())
+    };
+    let create = |settings: Value| {
+        answer(call(
+            &s,
+            Method::POST,
+            "/api/v1/repos",
+            admin,
+            json!({"name": "dg", "format": "deb", "kind": "group", "settings": settings}),
+        ))
+    };
+    let patch = |settings: Value| {
+        answer(call(
+            &s,
+            Method::PATCH,
+            "/api/v1/repos/dg",
+            admin,
+            json!({ "settings": settings }),
+        ))
+    };
+    let mut got = vec![create(json!({"members": ["d"]})), create(json!({}))];
+    // No request makes one: a group stored as one from a build whose
+    // deb had groups would be.
+    sql(
+        &s,
+        "INSERT INTO repos (name, format, kind, storage, settings, created)
+         VALUES ('dg', 'deb', 'group', 'main', '{\"members\": [\"d\"]}', 0)",
+    );
+    let before = s.json(&["repo", "show", "dg"])["settings"].clone();
+    got.push(patch(json!({"members": ["d"]})));
+    got.push(patch(json!({"description": "changed"})));
+    let refused = "deb repositories have no groups (yet): files, oci, pypi, npm, cargo, go, maven";
+    assert_eq!(got, vec![(400, refused.to_string()); 4]);
+    assert_eq!(s.json(&["repo", "show", "dg"])["settings"], before);
+    // A files group: made and changed without members.
+    let (st, v, _) = call(
+        &s,
+        Method::POST,
+        "/api/v1/repos",
+        admin,
+        json!({"name": "fg", "format": "files", "kind": "group"}),
+    );
+    assert_eq!(st, 201, "{v}");
+    let (st, v, _) = call(
+        &s,
+        Method::PATCH,
+        "/api/v1/repos/fg",
+        admin,
+        json!({"settings": {"description": "changed"}}),
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["settings"]["description"], json!("changed"), "{v}");
 }
 
 /// A group of npm registries with npm: a package from the first member
