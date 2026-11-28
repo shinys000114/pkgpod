@@ -90,6 +90,13 @@ fn ask(format: &str, rel: &[String], dir_url: bool, query: &str) -> Ask {
             [] => Ask::Note,
             [d, v1, s] if d == "-" && v1 == "v1" && s == "search" => Ask::Search,
             [d, l, ..] if d == "-" && l == "label" => Ask::Nothing,
+            // A package's dist-tags are the member's that has it, as its
+            // packument is (`-/package/<name>` or `<@scope>/<name>`).
+            [d, p, rest @ ..] if d == "-" && p == "package" => match rest {
+                [scope, name, ..] if scope.starts_with('@') => Ask::Name(format!("{scope}/{name}")),
+                [name, ..] if !name.starts_with('@') => Ask::Name(name.clone()),
+                _ => Ask::Nothing,
+            },
             [d, ..] if d == "-" => Ask::First,
             [scope, name, ..] if scope.starts_with('@') => Ask::Name(format!("{scope}/{name}")),
             [name, ..] => Ask::Name(name.clone()),
@@ -116,10 +123,16 @@ fn ask(format: &str, rel: &[String], dir_url: bool, query: &str) -> Ask {
             _ => Ask::First,
         },
         "go" if rel.is_empty() => Ask::Note,
+        // A module path holds no '@': a label anywhere before @v or
+        // @latest (`@first/<module>`, `<a>/@first/<b>`) names no module,
+        // and is not asked of the members (nor of a proxy's upstream).
         "go" => match rel.iter().position(|s| s == "@v" || s == "@latest") {
-            Some(0) | None if label => Ask::Nothing,
-            Some(i) if i > 0 => Ask::Name(rel[..i].join("/")),
-            _ => Ask::First,
+            Some(i) if i > 0 && !rel[..i].iter().any(|s| s.starts_with('@')) => {
+                Ask::Name(rel[..i].join("/"))
+            }
+            Some(_) => Ask::Nothing,
+            None if label => Ask::Nothing,
+            None => Ask::First,
         },
         _ => Ask::Nothing,
     }
@@ -669,6 +682,60 @@ mod tests {
         assert_eq!(ask("maven", &[], true, ""), Ask::Listing);
         assert_eq!(ask("maven", &[], false, ""), Ask::Slash);
         assert_eq!(ask("files", &v(&["@first", "b"]), false, ""), Ask::Nothing);
+    }
+
+    /// A go module path holds no '@': a label before @v or @latest, at
+    /// any place, names no module (no member and no upstream is asked
+    /// for "@first/example.com/hello"). npm's dist-tags of a package are
+    /// the member's that has it, as its packument is.
+    #[test]
+    fn names_through_a_group() {
+        for p in [
+            "@first/example.com/hello/@v/list",
+            "@first/example.com/hello/@latest",
+            "example.com/@first/hello/@v/list",
+            "example.com/hello/@first/@latest",
+            "@first/@v/list",
+            "@first/@latest",
+            "@v/list",
+        ] {
+            let rel: Vec<&str> = p.split('/').collect();
+            assert_eq!(ask("go", &v(&rel), false, ""), Ask::Nothing, "{p}");
+        }
+        assert_eq!(
+            ask(
+                "go",
+                &v(&["example.com", "hello", "@v", "@first"]),
+                false,
+                ""
+            ),
+            Ask::Name("example.com/hello".into())
+        );
+        assert_eq!(
+            ask(
+                "npm",
+                &v(&["-", "package", "hello", "dist-tags"]),
+                false,
+                ""
+            ),
+            Ask::Name("hello".into())
+        );
+        // @scope%2fname arrives as two segments, as @scope/name does.
+        assert_eq!(
+            ask(
+                "npm",
+                &v(&["-", "package", "@team", "lib", "dist-tags"]),
+                false,
+                ""
+            ),
+            Ask::Name("@team/lib".into())
+        );
+        assert_eq!(ask("npm", &v(&["-", "package"]), false, ""), Ask::Nothing);
+        assert_eq!(
+            ask("npm", &v(&["-", "package", "@team"]), false, ""),
+            Ask::Nothing
+        );
+        assert_eq!(ask("npm", &v(&["-", "ping"]), false, ""), Ask::First);
     }
 
     /// A member's lifetime is dropped at the group's address, but for
