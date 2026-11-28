@@ -775,16 +775,14 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
     }
 }
 
-/// pypi's project list (PEP 503 HTML, or PEP 691 JSON when asked): at
-/// one URL, so it says it varies by Accept; its ETag is of the body it
-/// sends (answered 304 to If-None-Match), and a HEAD has its headers.
-/// `incomplete`, a line of the HTML saying what it may lack.
+/// pypi's project list (PEP 503 HTML, or PEP 691 JSON when Accept
+/// weighs it first, as at a hosted repository): at one URL, so it says
+/// it varies by Accept; its ETag is of the body it sends (answered 304
+/// to If-None-Match), and a HEAD has its headers. `incomplete`, a line
+/// of the HTML saying what it may lack.
 fn pypi_root(names: &[String], h: &HeaderMap, head: bool, incomplete: Option<&str>) -> Response {
-    let json = h
-        .get(header::ACCEPT)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|a| a.contains("application/vnd.pypi.simple.v1+json"));
-    let (ct, body) = if json {
+    let accept = h.get(header::ACCEPT).and_then(|v| v.to_str().ok());
+    let (ct, body) = if pkgpod_pypi::protocol::wants_json(accept.unwrap_or("")) {
         (
             "application/vnd.pypi.simple.v1+json",
             json!({
@@ -1355,6 +1353,52 @@ mod tests {
             tags.push(etag);
         }
         assert_ne!(tags[0], tags[1], "HTML and JSON are two bodies");
+    }
+
+    /// pypi's project list at a group is JSON or HTML by the q-values
+    /// of Accept, as a hosted repository's: JSON refused (q=0) or
+    /// weighed below HTML is HTML; `*/*` and no Accept are HTML.
+    #[tokio::test]
+    async fn a_group_s_pypi_project_list_weighs_accept() {
+        let names = v(&["hello-world"]);
+        let (json, html) = (
+            "application/vnd.pypi.simple.v1+json",
+            "text/html; charset=utf-8",
+        );
+        // "": no Accept.
+        let html_asked = [
+            "",
+            "text/html",
+            "*/*",
+            "application/vnd.pypi.simple.v1+json;q=0, text/html",
+            "application/vnd.pypi.simple.v1+json; q=0",
+            "application/vnd.pypi.simple.v1+json; q=0.5, text/html",
+            "application/vnd.pypi.simple.v1+json; q=0.2, */*; q=0.5",
+        ];
+        let json_asked = [
+            json,
+            "application/vnd.pypi.simple.v1+json, application/vnd.pypi.simple.v1+html; q=0.1, text/html; q=0.01",
+            "text/html; q=0.5, application/vnd.pypi.simple.v1+json",
+        ];
+        let cases = html_asked.map(|a| (a, html));
+        for (accept, want) in cases.into_iter().chain(json_asked.map(|a| (a, json))) {
+            let mut h = HeaderMap::new();
+            if !accept.is_empty() {
+                h.insert(header::ACCEPT, HeaderValue::from_static(accept));
+            }
+            let r = pypi_root(&names, &h, false, None);
+            let ct = r.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .to_string();
+            let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+            let body = String::from_utf8(b.to_vec()).unwrap();
+            assert_eq!(
+                (ct.as_str(), body.starts_with('{')),
+                (want, want == json),
+                "Accept {accept:?}"
+            );
+        }
     }
 
     /// A union says how many of its members could not be read, in a

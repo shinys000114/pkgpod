@@ -1379,11 +1379,12 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
                 "the upstream's project page is not PEP 691 JSON".into(),
             );
         };
-        let json = req
+        // JSON or HTML as Accept weighs them, as at a hosted repository.
+        let accept = req
             .headers()
             .get(header::ACCEPT)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|a| a.contains("application/vnd.pypi.simple.v1+json"));
+            .and_then(|v| v.to_str().ok());
+        let json = pkgpod_pypi::protocol::wants_json(accept.unwrap_or(""));
         return pypi_page(&v, &base, &a.name, json, method == Method::HEAD);
     }
     let counts = crate::serving::stats::counts(req.method(), req.headers());
@@ -2425,6 +2426,74 @@ pub(crate) mod tests {
                 got,
                 [(want.0.clone(), want.1.clone(), n), (want.0, want.1, 0)],
                 "json {json}"
+            );
+        }
+    }
+
+    /// A pypi proxy's project page is JSON or HTML by the q-values of
+    /// Accept, as a hosted repository's: JSON refused (q=0) or weighed
+    /// below HTML is HTML; `*/*` and no Accept are HTML.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pypi_proxy_page_weighs_accept() {
+        use tower::ServiceExt;
+        let (_d, app) = app();
+        let up = stub(|_, path, c| match path {
+            "/simple/hello/" => reply(
+                c,
+                "200 OK\r\nContent-Type: application/vnd.pypi.simple.v1+json",
+                json!({"meta": {"api-version": "1.0"}, "name": "hello",
+                       "files": [{"filename": "hello-1.0.0.tar.gz",
+                                  "url": "hello-1.0.0.tar.gz", "hashes": {}}]})
+                .to_string()
+                .as_bytes(),
+            ),
+            _ => reply(c, "404 Not Found", b""),
+        });
+        proxy_repo(&app, "pp", "pypi", &format!("{up}simple/"));
+        let (json, html) = (
+            "application/vnd.pypi.simple.v1+json",
+            "text/html; charset=utf-8",
+        );
+        // "": no Accept.
+        let html_asked = [
+            "",
+            "text/html",
+            "*/*",
+            "application/vnd.pypi.simple.v1+json;q=0, text/html",
+            "application/vnd.pypi.simple.v1+json; q=0",
+            "application/vnd.pypi.simple.v1+json; q=0.5, text/html",
+            "application/vnd.pypi.simple.v1+json; q=0.2, */*; q=0.5",
+        ];
+        let json_asked = [
+            json,
+            "application/vnd.pypi.simple.v1+json, application/vnd.pypi.simple.v1+html; q=0.1, text/html; q=0.01",
+            "text/html; q=0.5, application/vnd.pypi.simple.v1+json",
+        ];
+        let cases = html_asked.map(|a| (a, html));
+        for (accept, want) in cases.into_iter().chain(json_asked.map(|a| (a, json))) {
+            let mut req = axum::http::Request::builder()
+                .uri("/pp/simple/hello/")
+                .header(header::HOST, "localhost");
+            if !accept.is_empty() {
+                req = req.header(header::ACCEPT, accept);
+            }
+            let resp = crate::serving::router(app.clone())
+                .oneshot(req.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let st = resp.status();
+            let ct = resp
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .map(|v| v.to_str().unwrap().to_string());
+            let b = axum::body::to_bytes(resp.into_body(), 1 << 16)
+                .await
+                .unwrap();
+            let body = String::from_utf8(b.to_vec()).unwrap();
+            assert_eq!(
+                (st, ct.as_deref(), body.starts_with('{')),
+                (StatusCode::OK, Some(want), want == json),
+                "Accept {accept:?}: {body}"
             );
         }
     }

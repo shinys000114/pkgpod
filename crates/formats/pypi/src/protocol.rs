@@ -63,6 +63,16 @@ fn q_of(accept: &str, ty: &str) -> f32 {
         .fold(0.0, f32::max)
 }
 
+/// Whether `accept` asks for a simple index page's JSON form (PEP 691)
+/// rather than its HTML: JSON's q-value is above 0 and at least the
+/// HTML forms' (`*/*` counting as HTML). The hosted pages, a group's
+/// project list and a proxy's project page all choose by it.
+pub fn wants_json(accept: &str) -> bool {
+    let json = q_of(accept, crate::JSON_TYPE);
+    let html = q_of(accept, "application/vnd.pypi.simple.v1+html").max(q_of(accept, "text/html"));
+    json > 0.0 && json >= html
+}
+
 /// A directory of the simple index: its page, JSON or HTML as asked.
 pub async fn index_page(
     r: &RepoInfo,
@@ -71,9 +81,7 @@ pub async fn index_page(
     head: bool,
 ) -> Option<Response> {
     let accept = accept.unwrap_or_default();
-    let json = q_of(&accept, crate::JSON_TYPE);
-    let html = q_of(&accept, "application/vnd.pypi.simple.v1+html").max(q_of(&accept, "text/html"));
-    let (name, ty) = if json > 0.0 && json >= html {
+    let (name, ty) = if wants_json(&accept) {
         ("index.json", crate::JSON_TYPE)
     } else {
         ("index.html", "text/html; charset=utf-8")
@@ -194,6 +202,25 @@ mod tests {
         assert!(q_of(pip, crate::JSON_TYPE) > q_of(pip, "text/html"));
         assert_eq!(q_of("text/html", crate::JSON_TYPE), 0.0);
         assert_eq!(q_of("*/*", "text/html"), 1.0);
+        // JSON refused (q=0) or weighed below HTML is HTML.
+        for a in [
+            "",
+            "text/html",
+            "*/*",
+            "application/vnd.pypi.simple.v1+json;q=0, text/html",
+            "application/vnd.pypi.simple.v1+json; q=0",
+            "application/vnd.pypi.simple.v1+json; q=0.5, text/html",
+            "application/vnd.pypi.simple.v1+json; q=0.2, */*; q=0.5",
+        ] {
+            assert!(!wants_json(a), "{a}");
+        }
+        for a in [
+            crate::JSON_TYPE,
+            pip,
+            "text/html; q=0.5, application/vnd.pypi.simple.v1+json",
+        ] {
+            assert!(wants_json(a), "{a}");
+        }
     }
 
     #[test]
