@@ -9,7 +9,8 @@
 //! never adds to or outranks it. What names no package (a file of a
 //! files repository) comes from the first member that has it; directory
 //! listings, pypi's project list and npm's and cargo's search show every
-//! member's, the first one's entry for a name.
+//! member's, the first one's entry for a name, and say how many members
+//! could not be read.
 //!
 //! A group is read through: its readers read its members through it
 //! (anonymous readers of a public group only its public members), and
@@ -19,7 +20,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::Request;
-use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, Version, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, Version, header};
 use axum::response::{IntoResponse, Response};
 use pkgpod_engine::Kind;
 use serde_json::{Value, json};
@@ -384,12 +385,67 @@ fn text(st: StatusCode, m: String) -> Response {
     r
 }
 
-async fn json_of(r: Response) -> Option<Value> {
-    if !r.status().is_success() {
-        return None;
+/// Of the members a union asked (a listing, pypi's project list, a
+/// search), how many could not be read: `failed` of the `of` the caller
+/// reads through the group. A failing member leaves the others' entries
+/// in an answer that says it is incomplete, naming none; when none
+/// could be read, the answer is as it was.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Unread {
+    failed: usize,
+    of: usize,
+}
+
+impl Unread {
+    fn of(n: usize) -> Unread {
+        Unread { failed: 0, of: n }
     }
-    let b = axum::body::to_bytes(r.into_body(), 64 << 20).await.ok()?;
-    serde_json::from_slice(&b).ok()
+
+    /// The words of the answer's Pkgpod-Incomplete header.
+    fn words(self) -> Option<String> {
+        (self.failed > 0 && self.failed < self.of)
+            .then(|| format!("{} of {} members could not be read", self.failed, self.of))
+    }
+
+    /// The line an HTML answer shows.
+    fn line(self) -> Option<String> {
+        self.words().map(|w| format!("Incomplete: {w}."))
+    }
+
+    /// `r` with the Pkgpod-Incomplete header, when some member failed.
+    fn mark(self, mut r: Response) -> Response {
+        if let Some(v) = self.words().and_then(|w| HeaderValue::from_str(&w).ok()) {
+            r.headers_mut()
+                .insert(HeaderName::from_static("pkgpod-incomplete"), v);
+        }
+        r
+    }
+}
+
+/// A member's answer to a search: its hits, a document of them; none
+/// (a proxy answers a search 404, a hosted registry a query it does not
+/// take with a 4xx); or a failure: a 5xx, or a body that is not JSON.
+enum Searched {
+    Hits(Value),
+    Not,
+    Failed(String),
+}
+
+async fn searched(r: Response) -> Searched {
+    let st = r.status();
+    if st.is_server_error() {
+        return Searched::Failed(format!("it answered {st}"));
+    }
+    if !st.is_success() {
+        return Searched::Not;
+    }
+    match axum::body::to_bytes(r.into_body(), 64 << 20).await {
+        Ok(b) => serde_json::from_slice(&b).map_or_else(
+            |e| Searched::Failed(format!("its answer is not JSON: {e}")),
+            Searched::Hits,
+        ),
+        Err(e) => Searched::Failed(format!("its answer could not be read: {e}")),
+    }
 }
 
 pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
@@ -509,6 +565,7 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
             // upstream.
             let mut out: Vec<ListEntry> = Vec::new();
             let mut any = false;
+            let mut unread = Unread::of(ms.len());
             for m in &ms {
                 let es = if m.repo.kind == Kind::Proxy && m.repo.format == "files" {
                     crate::serving::proxy::group_entries(&app, m, &at.rel).await
@@ -518,25 +575,46 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
                         crate::serving::dir_entries(&app2, &m2, &rel)
                     })
                     .await
-                    .ok()
-                    .flatten()
+                    .unwrap_or_else(|e| Err(e.to_string()))
                 };
-                if let Some(es) = es {
-                    any = true;
-                    for e in es {
-                        if !out.iter().any(|o| o.name == e.name) {
-                            out.push(e);
+                match es {
+                    Ok(Some(es)) => {
+                        any = true;
+                        for e in es {
+                            if !out.iter().any(|o| o.name == e.name) {
+                                out.push(e);
+                            }
                         }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        unread.failed += 1;
+                        // The operator's, as the Name arm's: the answer
+                        // names no member.
+                        tracing::warn!(
+                            "{}: its member {} could not be listed: {e}",
+                            g.name,
+                            m.repo.name
+                        );
                     }
                 }
             }
-            let entries = any.then_some(out);
-            match entries {
-                Some(es) => {
-                    crate::serving::listing(&at.raw_path, es, &query, head, &Default::default())
-                }
-                None => crate::serving::status(StatusCode::NOT_FOUND),
-            }
+            // A directory no member that was read has is not found,
+            // incomplete as a listing is when some member failed.
+            let r = if any {
+                let line = unread.line();
+                crate::serving::listing(
+                    &at.raw_path,
+                    out,
+                    &query,
+                    head,
+                    &Default::default(),
+                    line.as_deref(),
+                )
+            } else {
+                crate::serving::status(StatusCode::NOT_FOUND)
+            };
+            unread.mark(r)
         }
         Ask::PypiRoot => {
             if !at.raw_path.ends_with('/') {
@@ -544,19 +622,38 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
                     .into_response();
             }
             let (app2, rel) = (app.clone(), at.rel.clone());
-            let mut names: Vec<String> = tokio::task::spawn_blocking(move || {
+            let mut unread = Unread::of(ms.len());
+            let read = tokio::task::spawn_blocking(move || {
                 ms.iter()
-                    .filter_map(|m| crate::serving::dir_entries(&app2, m, &rel))
-                    .flatten()
-                    .filter(|e| e.dir)
-                    .map(|e| e.name)
-                    .collect()
+                    .map(|m| {
+                        let es = crate::serving::dir_entries(&app2, m, &rel);
+                        (m.repo.name.clone(), es)
+                    })
+                    .collect::<Vec<_>>()
             })
             .await
-            .unwrap_or_default();
+            .unwrap_or_else(|e| {
+                // None read: the list is empty, as it was.
+                tracing::warn!("{}: its members could not be listed: {e}", g.name);
+                unread.failed = unread.of;
+                Vec::new()
+            });
+            let mut names: Vec<String> = Vec::new();
+            for (m, es) in read {
+                match es {
+                    Ok(es) => {
+                        names.extend(es.into_iter().flatten().filter(|e| e.dir).map(|e| e.name))
+                    }
+                    Err(e) => {
+                        unread.failed += 1;
+                        tracing::warn!("{}: its member {m} could not be listed: {e}", g.name);
+                    }
+                }
+            }
             names.sort();
             names.dedup();
-            pypi_root(&names, req.headers(), head)
+            let line = unread.line();
+            unread.mark(pypi_root(&names, req.headers(), head, line.as_deref()))
         }
         Ask::Search => {
             let (key, list) = if g.format == "npm" {
@@ -577,9 +674,20 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
                 headers: again.headers.clone(),
             };
             let mut hits: Vec<Value> = Vec::new();
+            let mut unread = Unread::of(ms.len());
             for m in ms {
-                let Some(v) = json_of(from(&app, &at, m, &asked).await).await else {
-                    continue;
+                let member = m.repo.name.clone();
+                let v = match searched(from(&app, &at, m, &asked).await).await {
+                    Searched::Hits(v) => v,
+                    Searched::Not => continue,
+                    Searched::Failed(e) => {
+                        unread.failed += 1;
+                        tracing::warn!(
+                            "{}: its member {member} could not be searched: {e}",
+                            g.name
+                        );
+                        continue;
+                    }
                 };
                 for h in v[key].as_array().into_iter().flatten() {
                     let name = |h: &Value| {
@@ -594,7 +702,7 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
                     }
                 }
             }
-            search_answer(&g.format, hits, &query)
+            unread.mark(search_answer(&g.format, hits, &query))
         }
     }
 }
@@ -602,7 +710,8 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
 /// pypi's project list (PEP 503 HTML, or PEP 691 JSON when asked): at
 /// one URL, so it says it varies by Accept; its ETag is of the body it
 /// sends (answered 304 to If-None-Match), and a HEAD has its headers.
-fn pypi_root(names: &[String], h: &HeaderMap, head: bool) -> Response {
+/// `incomplete`, a line of the HTML saying what it may lack.
+fn pypi_root(names: &[String], h: &HeaderMap, head: bool, incomplete: Option<&str>) -> Response {
     let json = h
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
@@ -620,6 +729,9 @@ fn pypi_root(names: &[String], h: &HeaderMap, head: bool) -> Response {
         let mut s = String::from(
             "<!DOCTYPE html>\n<html><head><meta name=\"pypi:repository-version\" content=\"1.1\"><title>Simple index</title></head><body>\n",
         );
+        if let Some(l) = incomplete {
+            s.push_str(&format!("<p>{}</p>\n", crate::serving::html(l)));
+        }
         for n in names {
             let n = crate::serving::html(n);
             s.push_str(&format!("<a href=\"{n}/\">{n}</a><br>\n"));
@@ -1015,7 +1127,7 @@ mod tests {
                 }
                 m
             };
-            let r = pypi_root(&names, &asked(None), false);
+            let r = pypi_root(&names, &asked(None), false, None);
             let (etag, vary, len) = (
                 h(&r, header::ETAG),
                 h(&r, header::VARY),
@@ -1028,7 +1140,7 @@ mod tests {
                 (want.as_str(), "Accept", body.len().to_string()),
                 "GET {accept}"
             );
-            let r = pypi_root(&names, &asked(None), true);
+            let r = pypi_root(&names, &asked(None), true, None);
             let got = (
                 r.status(),
                 h(&r, header::ETAG),
@@ -1055,7 +1167,7 @@ mod tests {
                 ("*", StatusCode::NOT_MODIFIED),
                 ("\"other\"", StatusCode::OK),
             ] {
-                let r = pypi_root(&names, &asked(Some(inm)), false);
+                let r = pypi_root(&names, &asked(Some(inm)), false, None);
                 let got = (
                     r.status(),
                     h(&r, header::ETAG),
@@ -1075,5 +1187,73 @@ mod tests {
             tags.push(etag);
         }
         assert_ne!(tags[0], tags[1], "HTML and JSON are two bodies");
+    }
+
+    /// A union says how many of its members could not be read, in a
+    /// header (naming none) and a line of its HTML, when some failed
+    /// and not all; a member's search failed when it answered 5xx or
+    /// what is not JSON, and searches nothing when it answered a 4xx.
+    #[tokio::test]
+    async fn a_union_says_it_is_incomplete() {
+        let said = |u: Unread| {
+            let r = u.mark(StatusCode::OK.into_response());
+            let h = r.headers().get("pkgpod-incomplete");
+            (h.map(|v| v.to_str().unwrap().to_string()), u.line())
+        };
+        let words = "1 of 2 members could not be read";
+        assert_eq!(
+            said(Unread { failed: 1, of: 2 }),
+            (Some(words.into()), Some(format!("Incomplete: {words}.")))
+        );
+        for (failed, of) in [(0, 2), (2, 2), (0, 0)] {
+            assert_eq!(
+                said(Unread { failed, of }),
+                (None, None),
+                "{failed} of {of}"
+            );
+        }
+        let answer = |st: StatusCode, body: &'static str| {
+            let mut r = Response::new(Body::from(body));
+            *r.status_mut() = st;
+            r
+        };
+        for (st, body, want) in [
+            (StatusCode::OK, "{\"objects\":[]}", "hits"),
+            (StatusCode::NOT_FOUND, "Not Found", "not"),
+            (StatusCode::BAD_REQUEST, "{}", "not"),
+            (StatusCode::INTERNAL_SERVER_ERROR, "{}", "failed"),
+            (StatusCode::BAD_GATEWAY, "", "failed"),
+            (StatusCode::OK, "<html>", "failed"),
+        ] {
+            let got = match searched(answer(st, body)).await {
+                Searched::Hits(_) => "hits",
+                Searched::Not => "not",
+                Searched::Failed(_) => "failed",
+            };
+            assert_eq!(got, want, "{st} {body}");
+        }
+        // pypi's project list: the line in its HTML (another ETag), the
+        // JSON as it was.
+        let names = v(&["hello-world"]);
+        let line = format!("Incomplete: {words}.");
+        for accept in ["text/html", "application/vnd.pypi.simple.v1+json"] {
+            let mut h = HeaderMap::new();
+            h.insert(header::ACCEPT, HeaderValue::from_static(accept));
+            let mut got = Vec::new();
+            for l in [None, Some(line.as_str())] {
+                let r = pypi_root(&names, &h, false, l);
+                let etag = r.headers()[header::ETAG].to_str().unwrap().to_string();
+                let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+                got.push((etag, String::from_utf8(b.to_vec()).unwrap()));
+            }
+            let html = accept == "text/html";
+            assert_eq!(
+                got[1].1.replace(&format!("<p>{line}</p>\n"), ""),
+                got[0].1,
+                "{accept}"
+            );
+            assert_eq!(got[1].1.contains(&line), html, "{accept}");
+            assert_eq!(got[0].0 != got[1].0, html, "{accept}");
+        }
     }
 }

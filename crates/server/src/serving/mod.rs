@@ -804,7 +804,7 @@ async fn get(
                 })
                 .collect();
             let notes = tree_notes(&s.repo, &t, head).await;
-            listing(raw_path, entries, &query, head, &notes)
+            listing(raw_path, entries, &query, head, &notes, None)
         }
         Entry::Blob { sha256, meta, .. } => {
             let mtime = meta.get("mtime").and_then(Value::as_i64);
@@ -1181,11 +1181,11 @@ async fn serve_mirror(
             } else {
                 Default::default()
             };
-            (fs_entries(&tree2, &full, hidden), notes)
+            (fs_entries(&tree2, &full, hidden).unwrap_or_default(), notes)
         })
         .await
         .unwrap_or_default();
-        return listing(raw_path, entries, &query, head, &notes);
+        return listing(raw_path, entries, &query, head, &notes, None);
     }
     let uri: Uri = match format!(
         "/{}",
@@ -1360,27 +1360,43 @@ impl tower_http::services::fs::Backend for MirrorFs {
 }
 
 /// The entries of directory `rel` of what a repository serves (its
-/// current version, or a mirror's received tree); `None` if it is not a
-/// directory there.
-pub(crate) fn dir_entries(app: &App, s: &crate::Served, rel: &[String]) -> Option<Vec<ListEntry>> {
+/// current version, or a mirror's received tree): `None` if it is not a
+/// directory there, an error if it could not be read.
+pub(crate) fn dir_entries(
+    app: &App,
+    s: &crate::Served,
+    rel: &[String],
+) -> std::result::Result<Option<Vec<ListEntry>>, String> {
     let rel_s = rel.join("/");
     if s.repo.kind == Kind::Mirror {
         let files = app.registry.tree(&s.repo.format).plain;
         let hidden = move |name: &str| mirror_hidden(files, name);
         if rel.iter().any(|x| hidden(x)) {
-            return None;
+            return Ok(None);
         }
         let tree = s.repo.tree_dir();
         let full = tree.join(&rel_s);
-        inside(&tree, &full)?;
-        return full.is_dir().then(|| fs_entries(&tree, &full, hidden));
+        if inside(&tree, &full).is_none() || !full.is_dir() {
+            return Ok(None);
+        }
+        return fs_entries(&tree, &full, hidden)
+            .map(Some)
+            .map_err(|e| e.to_string());
     }
-    let v = s.current.as_ref()?;
-    let Entry::Dir { id } = app.engine.objects().resolve(&v.served(), &rel_s).ok()?? else {
-        return None;
+    // A path no tree holds names no directory; the store failing to
+    // read one is an error.
+    let (Some(v), Ok(_)) = (s.current.as_ref(), pkgpod_engine::tree::split(&rel_s)) else {
+        return Ok(None);
     };
-    let t = app.engine.objects().get(&id).ok()?;
-    Some(
+    let objects = app.engine.objects();
+    let Some(Entry::Dir { id }) = objects
+        .resolve(&v.served(), &rel_s)
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(None);
+    };
+    let t = objects.get(&id).map_err(|e| e.to_string())?;
+    Ok(Some(
         t.iter()
             .filter_map(|(name, e)| match e {
                 Entry::Dir { .. } => Some(ListEntry {
@@ -1400,18 +1416,16 @@ pub(crate) fn dir_entries(app: &App, s: &crate::Served, rel: &[String]) -> Optio
                 _ => None,
             })
             .collect(),
-    )
+    ))
 }
 
 fn fs_entries(
     tree: &std::path::Path,
     dir: &std::path::Path,
     hidden: impl Fn(&str) -> bool,
-) -> Vec<ListEntry> {
+) -> std::io::Result<Vec<ListEntry>> {
     let mut v = Vec::new();
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return v;
-    };
+    let rd = std::fs::read_dir(dir)?;
     for d in rd.flatten() {
         let Ok(name) = d.file_name().into_string() else {
             continue;
@@ -1432,7 +1446,7 @@ fn fs_entries(
             modified: md.modified().ok(),
         });
     }
-    v
+    Ok(v)
 }
 
 pub use pkgpod_proto::query::params as query_params;
@@ -1590,12 +1604,15 @@ pub struct ListEntry {
     pub modified: Option<std::time::SystemTime>,
 }
 
+/// A directory listing; `incomplete`, a line under its header saying
+/// what it may lack (a group's, of members that could not be read).
 pub(crate) fn listing(
     path: &str,
     mut entries: Vec<ListEntry>,
     query: &str,
     head: bool,
     notes: &crate::ops::notes::Notes,
+    incomplete: Option<&str>,
 ) -> Response {
     entries.retain(|e| e.dir || !notes.shown(&e.name));
     let q = |k: &str| {
@@ -1614,7 +1631,7 @@ pub(crate) fn listing(
     let body = if head {
         String::new()
     } else {
-        listing_html(path, entries, sort, notes)
+        listing_html(path, entries, sort, notes, incomplete)
     };
     (
         [
@@ -1696,12 +1713,14 @@ pub fn human(n: u64) -> String {
 }
 
 /// A directory listing in the manner of Caddy's file browser:
-/// breadcrumb, directories first, name / size / modified, sortable.
+/// breadcrumb, directories first, name / size / modified, sortable;
+/// `incomplete`, a line under the header.
 pub fn listing_html(
     path: &str,
     mut entries: Vec<ListEntry>,
     (key, desc): (&str, bool),
     notes: &crate::ops::notes::Notes,
+    incomplete: Option<&str>,
 ) -> String {
     entries.sort_by(|a, b| {
         let o = match key {
@@ -1794,7 +1813,7 @@ th, td {{ text-align:left; padding:.45rem .6rem; border-bottom:1px solid var(--l
 .note table {{ margin:.6rem 0; display:block; overflow-x:auto; }} .note th, .note td {{ padding:.3rem .6rem; }}
 .note th {{ font-weight:600; border-bottom-width:2px; }}
 </style></head>
-<body><header><h1>{crumbs}</h1><div class="meta">{dirs} director{dies}, {files} file{fs}, {total}</div></header>
+<body><header><h1>{crumbs}</h1><div class="meta">{dirs} director{dies}, {files} file{fs}, {total}</div>{incomplete}</header>
 <main>{note_head}<table class="list"><thead><tr><th>{h_name}</th><th class="num">{h_size}</th><th>{h_time}</th></tr></thead>
 <tbody>
 {rows}</tbody></table>{note_foot}</main></body></html>
@@ -1808,6 +1827,9 @@ th, td {{ text-align:left; padding:.45rem .6rem; border-bottom:1px solid var(--l
             .footer
             .as_deref()
             .map(|h| format!("<section class=\"note foot\">{h}</section>"))
+            .unwrap_or_default(),
+        incomplete = incomplete
+            .map(|l| format!("<div class=\"meta\" role=\"status\">{}</div>", html(l)))
             .unwrap_or_default(),
         title = html(&shown),
         dies = if dirs == 1 { "y" } else { "ies" },
@@ -2171,7 +2193,13 @@ mod tests {
                 modified: None,
             },
         ];
-        let h = listing_html("/ppa/pool/", entries, ("size", true), &Default::default());
+        let h = listing_html(
+            "/ppa/pool/",
+            entries,
+            ("size", true),
+            &Default::default(),
+            None,
+        );
         assert!(
             h.contains("&lt;x&gt;&amp;&quot;") && !h.contains("<x>"),
             "{h}"

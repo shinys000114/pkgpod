@@ -7953,6 +7953,103 @@ fn group_stops_at_a_failing_proxy_member() {
     }
 }
 
+/// A group's listing says when a member could not be read: a files
+/// proxy whose upstream is down leaves the other members' entries, and
+/// the answer says how many of its members could not be read, in a
+/// header and in a line of the page, naming none. A directory that no
+/// member read has is still not found, and says so too. A proxy whose
+/// upstream answers, with the directory or without, was read; a group
+/// none of whose members could be read answers as it did.
+#[test]
+fn group_listing_says_a_member_could_not_be_read() {
+    let s = Server::start();
+    s.cli(&["repo", "create", "h", "-f", "files", "-s", "public=true"])
+        .unwrap();
+    let f = s.dir.path().join("own.txt");
+    std::fs::write(&f, "own").unwrap();
+    s.cli(&["upload", "h", f.to_str().unwrap(), "-s", "path=a/own.txt"])
+        .unwrap();
+    let live = stub_upstream_on(
+        0,
+        vec![(
+            "/".into(),
+            b"<html><body><a href=\"up.txt\">up.txt</a></body></html>\n".to_vec(),
+        )],
+    );
+    for (r, port) in [("fdown", dead_port()), ("flive", live)] {
+        s.cli(&[
+            "repo",
+            "create",
+            r,
+            "-f",
+            "files",
+            "-k",
+            "proxy",
+            "-s",
+            &format!("upstream=http://127.0.0.1:{port}/"),
+            "-s",
+            "public=true",
+        ])
+        .unwrap();
+    }
+    for (g, members) in [("g", "fdown,h"), ("gok", "flive,h"), ("g0", "fdown")] {
+        s.cli(&[
+            "repo",
+            "create",
+            g,
+            "-f",
+            "files",
+            "-k",
+            "group",
+            "-s",
+            &format!("members={members}"),
+            "-s",
+            "public=true",
+        ])
+        .unwrap();
+    }
+    let c = reqwest::blocking::Client::new();
+    let ask = |m: reqwest::Method, p: &str| {
+        let r = c.request(m, s.url(p)).send().unwrap();
+        let said = r
+            .headers()
+            .get("pkgpod-incomplete")
+            .map(|v| v.to_str().unwrap().to_string());
+        (r.status().as_u16(), said, r.text().unwrap())
+    };
+    let words = "1 of 2 members could not be read";
+    for (p, entry) in [("/g/", "href=\"a/\""), ("/g/a/", "href=\"own.txt\"")] {
+        let (st, said, body) = ask(reqwest::Method::GET, p);
+        assert_eq!((st, said.as_deref()), (200, Some(words)), "{p}: {body}");
+        assert!(
+            body.contains(entry) && body.contains(&format!("Incomplete: {words}.")),
+            "{p}: {body}"
+        );
+        assert!(!body.contains("fdown"), "{p}: {body}");
+    }
+    let (st, said, _) = ask(reqwest::Method::HEAD, "/g/");
+    assert_eq!((st, said.as_deref()), (200, Some(words)), "HEAD /g/");
+    let (st, said, body) = ask(reqwest::Method::GET, "/g/nothere/");
+    assert_eq!(
+        (st, said.as_deref()),
+        (404, Some(words)),
+        "/g/nothere/: {body}"
+    );
+    for (p, entry) in [
+        ("/gok/", "href=\"up.txt\""),
+        ("/gok/a/", "href=\"own.txt\""),
+    ] {
+        let (st, said, body) = ask(reqwest::Method::GET, p);
+        assert_eq!((st, said.as_deref()), (200, None), "{p}: {body}");
+        assert!(
+            body.contains(entry) && !body.contains("could not be read"),
+            "{p}: {body}"
+        );
+    }
+    let (st, said, body) = ask(reqwest::Method::GET, "/g0/");
+    assert_eq!((st, said.as_deref()), (404, None), "/g0/: {body}");
+}
+
 /// A group's write refusal names no member: every caller who may read
 /// the group (an anonymous one at a public group whose first member is
 /// private among them) is told it is read only, with the methods it

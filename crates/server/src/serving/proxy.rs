@@ -2166,9 +2166,14 @@ async fn files_listing(
         format!("{}/", joined(&at.rel))
     };
     match files_entries(app, r, up, &at.rel).await {
-        Ok(entries) => {
-            crate::serving::listing(&at.raw_path, entries, query, head, &Default::default())
-        }
+        Ok(entries) => crate::serving::listing(
+            &at.raw_path,
+            entries,
+            query,
+            head,
+            &Default::default(),
+            None,
+        ),
         Err(Listed::Missing) => status(StatusCode::NOT_FOUND),
         Err(Listed::Moved(to)) => {
             // Within the upstream: the same place through here.
@@ -2270,15 +2275,21 @@ async fn files_entries(
         .collect())
 }
 
-/// A files proxy's entries for a group's listing (nothing when the
-/// upstream has none there).
+/// A files proxy's entries for a group's listing: none when the
+/// upstream has no such directory, an error when it could not be read
+/// (it failed, or moved the directory: a group lists no redirect).
 pub(crate) async fn group_entries(
     app: &Arc<App>,
     m: &Served,
     rel: &[String],
-) -> Option<Vec<crate::serving::ListEntry>> {
-    let up = Upstream::of(&m.repo).ok()?;
-    files_entries(app, &m.repo, &up, rel).await.ok()
+) -> std::result::Result<Option<Vec<crate::serving::ListEntry>>, String> {
+    let up = Upstream::of(&m.repo).map_err(|e| e.to_string())?;
+    match files_entries(app, &m.repo, &up, rel).await {
+        Ok(es) => Ok(Some(es)),
+        Err(Listed::Missing) => Ok(None),
+        Err(Listed::Moved(to)) => Err(format!("the upstream moves the directory to {to}")),
+        Err(Listed::Failed(e)) => Err(e),
+    }
 }
 
 #[cfg(test)]
