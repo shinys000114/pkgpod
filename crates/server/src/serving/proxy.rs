@@ -1353,18 +1353,21 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
                 }
             }
         }
-        let body = if method == Method::HEAD {
-            String::new()
+        // A HEAD says the GET's length, without its body.
+        let body = v.to_string();
+        let len = body.len();
+        let mut resp = Response::new(if method == Method::HEAD {
+            Body::empty()
         } else {
-            v.to_string()
-        };
-        let mut resp = Response::new(Body::from(body));
-        resp.headers_mut().insert(
+            Body::from(body)
+        });
+        let h = resp.headers_mut();
+        h.insert(
             header::CONTENT_TYPE,
             HeaderValue::from_static("application/json"),
         );
-        resp.headers_mut()
-            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+        h.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+        h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
         return resp;
     }
     if r.format == "pypi" && a.kind == CacheKind::Meta {
@@ -1558,7 +1561,7 @@ async fn files_serve(app: Arc<App>, at: At, req: Request) -> Response {
     };
     let head = req.method() == Method::HEAD;
     if at.rel.is_empty() || at.raw_path.ends_with('/') {
-        return files_listing(&app, &r, &up, &at, head, req.uri().query().unwrap_or("")).await;
+        return files_listing(&app, &r, &up, &at, req.uri().query().unwrap_or("")).await;
     }
     let Some(a) = files(&at.rel) else {
         return status(StatusCode::NOT_FOUND);
@@ -1596,7 +1599,12 @@ async fn files_serve(app: Arc<App>, at: At, req: Request) -> Response {
         // Not kept: what the upstream says of it, nothing fetched.
         return match client().head(&url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                let mut out = Response::new(Body::empty());
+                // Its length as the upstream says it, or none, as its
+                // GET (streamed as it comes) then says none: a body of no
+                // known size, never sent to a HEAD, where an empty one
+                // would say 0.
+                let none = futures_util::stream::empty::<std::io::Result<axum::body::Bytes>>();
+                let mut out = Response::new(Body::from_stream(none));
                 for k in [
                     header::CONTENT_LENGTH,
                     header::CONTENT_TYPE,
@@ -2198,13 +2206,13 @@ async fn files_stream(
 
 /// A directory of the upstream, listed as pkgpod lists its own: the
 /// upstream's HTML listing (kept as metadata) read for its entries; a
-/// file kept here shows its size.
+/// file kept here shows its size. A HEAD's page is made whole too: the
+/// router says its length and sends no body.
 async fn files_listing(
     app: &Arc<App>,
     r: &RepoInfo,
     up: &Upstream,
     at: &At,
-    head: bool,
     query: &str,
 ) -> Response {
     let dir = if at.rel.is_empty() {
@@ -2217,7 +2225,7 @@ async fn files_listing(
             &at.raw_path,
             entries,
             query,
-            head,
+            false,
             &Default::default(),
             None,
         ),
@@ -2639,6 +2647,29 @@ pub(crate) mod tests {
         (st, body.unwrap().to_vec())
     }
 
+    /// What the server answers to `method` `path`: status, the length it
+    /// says (if it says one) and the body.
+    async fn fetch(app: &Arc<App>, method: Method, path: &str) -> (u16, Option<String>, Vec<u8>) {
+        use tower::ServiceExt;
+        let req = axum::http::Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::HOST, "localhost")
+            .body(Body::empty())
+            .unwrap();
+        let resp = crate::serving::router(app.clone())
+            .oneshot(req)
+            .await
+            .unwrap();
+        let st = resp.status().as_u16();
+        let len = resp
+            .headers()
+            .get(header::CONTENT_LENGTH)
+            .map(|v| v.to_str().unwrap().to_string());
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await;
+        (st, len, body.unwrap().to_vec())
+    }
+
     /// Whether proxy `repo` holds a path for a late answer.
     pub(crate) fn holds(repo: &str) -> bool {
         late().lock().unwrap().iter().any(|(r, _)| r == repo)
@@ -2771,5 +2802,114 @@ pub(crate) mod tests {
         assert!(holds("late-hold"));
         tokio::time::sleep(Duration::from_secs(QUIET_SECS as u64 + 1)).await;
         assert!(!holds("late-hold"), "held while the body comes");
+    }
+
+    /// A proxy's HEAD says the length its GET has, and sends no body:
+    /// each format's documents and files, before they are kept and
+    /// after, read directly or through a group, and a files proxy's
+    /// directory. A file not kept whose upstream says no length says
+    /// none, as its GET (streamed as it comes) says none, not 0.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_proxy_head_says_the_get_s_length() {
+        let (_d, app) = app();
+        // The stub's own address, for the URLs its documents give.
+        let at = Arc::new(OnceLock::<String>::new());
+        let at2 = at.clone();
+        let up = stub(move |_, path, c| {
+            let base = at2.get().cloned().unwrap_or_default();
+            let tgz = format!("{base}npm/hello/-/hello-1.0.0.tgz");
+            let body = match path {
+                "/npm/hello" => json!({
+                    "name": "hello",
+                    "dist-tags": {"latest": "1.0.0"},
+                    "versions": {"1.0.0": {"name": "hello", "version": "1.0.0",
+                                           "dist": {"tarball": tgz}}},
+                })
+                .to_string(),
+                "/npm/hello/-/hello-1.0.0.tgz" => "hello tarball".into(),
+                "/pypi/hello/" => json!({
+                    "meta": {"api-version": "1.0"},
+                    "name": "hello",
+                    "files": [{"filename": "hello-1.0.0.tar.gz", "url": "hello-1.0.0.tar.gz",
+                               "hashes": {}}],
+                })
+                .to_string(),
+                "/pypi/hello/hello-1.0.0.tar.gz" => "hello sdist".into(),
+                "/go/example.com/hello/@v/list" => "v1.0.0\n".into(),
+                "/go/example.com/hello/@v/v1.0.0.mod" => "module example.com/hello\n".into(),
+                "/maven/org/acme/hello/maven-metadata.xml" => {
+                    "<metadata><groupId>org.acme</groupId><artifactId>hello</artifactId></metadata>\n"
+                        .into()
+                }
+                "/maven/org/acme/hello/1.0.0/hello-1.0.0.jar" => "hello jar".into(),
+                "/cargo/config.json" => json!({"dl": format!("{base}cargo/dl")}).to_string(),
+                "/cargo/he/ll/hello" => {
+                    "{\"name\":\"hello\",\"vers\":\"1.0.0\",\"deps\":[],\"features\":{}}\n".into()
+                }
+                "/cargo/dl/hello/1.0.0/download" => "hello crate".into(),
+                "/files/a.txt" => "hello file\n".into(),
+                "/files/dir/" => "<a href=\"a.txt\">a.txt</a>\n".into(),
+                "/files/nolen.txt" => {
+                    // No length, by HEAD or GET: the body ends with the
+                    // connection.
+                    use std::io::Write;
+                    let _ = c.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nno length\n");
+                    return;
+                }
+                _ => return reply(c, "404 Not Found", b""),
+            };
+            reply(c, "200 OK", body.as_bytes())
+        });
+        at.set(up.clone()).unwrap();
+        for f in ["npm", "pypi", "go", "maven", "cargo", "files"] {
+            proxy_repo(&app, &format!("p{f}"), f, &format!("{up}{f}/"));
+        }
+        let g = pkgpod_engine::NewRepo {
+            name: "gnpm".into(),
+            format: "npm".into(),
+            kind: pkgpod_engine::Kind::Group,
+            storage: None,
+            settings: json!({"members": ["pnpm"], "public": true}),
+        };
+        app.engine.create_repo(g, "test").unwrap();
+        let mut bad = Vec::new();
+        for path in [
+            "/pnpm/hello",
+            "/pnpm/hello/-/hello-1.0.0.tgz",
+            "/gnpm/hello",
+            "/ppypi/simple/hello/",
+            "/ppypi/files/hello/hello-1.0.0.tar.gz",
+            "/pgo/example.com/hello/@v/list",
+            "/pgo/example.com/hello/@v/v1.0.0.mod",
+            "/pmaven/org/acme/hello/maven-metadata.xml",
+            "/pmaven/org/acme/hello/1.0.0/hello-1.0.0.jar",
+            "/pcargo/index/he/ll/hello",
+            "/pcargo/api/v1/crates/hello/1.0.0/download",
+            "/pfiles/a.txt",
+            "/pfiles/dir/",
+            "/pfiles/nolen.txt",
+        ] {
+            // Not kept yet, then kept (a file not kept is asked of the
+            // upstream by HEAD).
+            let first = fetch(&app, Method::HEAD, path).await;
+            let (st, len, body) = fetch(&app, Method::GET, path).await;
+            assert_eq!(st, 200, "GET {path}: {}", String::from_utf8_lossy(&body));
+            assert!(!body.is_empty(), "GET {path}");
+            let then = fetch(&app, Method::HEAD, path).await;
+            // The file of no length: its GET says none, and so does its
+            // HEAD until it is kept (then it is served as any kept file).
+            let n = Some(body.len().to_string());
+            let unsaid = (path == "/pfiles/nolen.txt").then_some(None);
+            assert_eq!(len, unsaid.clone().unwrap_or(n.clone()), "GET {path}");
+            for (when, h, n) in [
+                ("before", first, unsaid.unwrap_or(n.clone())),
+                ("after", then, n),
+            ] {
+                if h != (200, n, Vec::new()) {
+                    bad.push(format!("HEAD {path} {when}: {h:?}, GET {}", body.len()));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{bad:#?}");
     }
 }
