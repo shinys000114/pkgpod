@@ -1266,8 +1266,24 @@ pub(crate) fn for_publishing(label: &str) -> bool {
         || w.starts_with("push")
 }
 
-/// The How to use part for `place` (empty: the default), with `token` in
-/// place of `<token>` when one was just made.
+/// Where a How to use line wants a token: `<token>`, written escaped in
+/// XML (Maven's settings.xml, NuGet's nuget.config) so that the XML is
+/// whole as given.
+const TOKEN: &str = "<token>";
+const TOKEN_IN_XML: &str = "&lt;token&gt;";
+
+/// Does this How to use text ask for a token?
+pub(crate) fn asks_for_token(text: &str) -> bool {
+    text.contains(TOKEN) || text.contains(TOKEN_IN_XML)
+}
+
+/// This How to use text with `token` where it wants one (in XML escaped
+/// as XML is, though a token of ours has nothing to escape).
+pub(crate) fn with_token(text: &str, token: &str) -> String {
+    text.replace(TOKEN, token)
+        .replace(TOKEN_IN_XML, &crate::serving::html(token))
+}
+
 /// How to use a repository, as its How to use tab says it, from these
 /// addresses (the first is shown) and for this place (a deb dist; empty:
 /// the default).
@@ -1309,6 +1325,8 @@ pub(crate) fn use_lines(
     usage
 }
 
+/// The How to use part for `place` (empty: the default), with `token` in
+/// the commands that want one when one was just made.
 pub(crate) fn use_render(
     app: &Arc<App>,
     caller: &Caller,
@@ -1330,7 +1348,7 @@ pub(crate) fn use_render(
     let mut token_note = String::new();
     if let Some((t, note)) = token {
         for u in &mut usage {
-            u.text = u.text.replace("<token>", t);
+            u.text = with_token(&u.text, t);
         }
         token_note = note;
     }
@@ -1618,5 +1636,104 @@ mod tests {
         let ls = lines(&app, &hosted);
         let xml = text(&ls, "~/.m2/settings.xml");
         assert!(!xml.contains("mirror"), "{xml}");
+    }
+
+    /// `html`'s text: its character references read, in one pass.
+    fn unescaped(html: &str) -> String {
+        let mut out = String::new();
+        let mut rest = html;
+        while let Some(i) = rest.find('&') {
+            out.push_str(&rest[..i]);
+            rest = &rest[i..];
+            let Some(end) = rest.find(';') else { break };
+            let name = &rest[1..end];
+            let c = match name {
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "amp" => Some('&'),
+                "quot" => Some('"'),
+                "apos" => Some('\''),
+                _ => name
+                    .strip_prefix("#x")
+                    .map(|h| u32::from_str_radix(h, 16))
+                    .or_else(|| name.strip_prefix('#').map(|d| d.parse()))
+                    .and_then(|n| n.ok())
+                    .and_then(char::from_u32),
+            };
+            match c {
+                Some(c) => {
+                    out.push(c);
+                    rest = &rest[end + 1..];
+                }
+                None => {
+                    out.push('&');
+                    rest = &rest[1..];
+                }
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// The How to use part of `r` as the console shows it once `token`
+    /// was made for it, as text.
+    async fn shown_with(app: &Arc<App>, r: &RepoInfo, token: &str) -> String {
+        let made = Some((token, "made".to_string()));
+        let res = use_render(app, &Caller::anonymous(), r, "", "pkg.example.org", made);
+        let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        unescaped(std::str::from_utf8(&body).unwrap())
+    }
+
+    /// Make a token puts it in every command that asks for one: in the
+    /// XML of Maven's settings.xml and NuGet's nuget.config too, whose
+    /// placeholder is written escaped so that the XML is whole as given.
+    #[tokio::test]
+    async fn a_made_token_fills_every_usage_placeholder() {
+        assert_eq!(
+            unescaped("&#60;a&#62; &amp;lt;b&#38;gt; &#x27;c&quot; &d"),
+            "<a> &lt;b&gt; 'c\" &d"
+        );
+        let (_d, app) = app();
+        let t = "made-up-for-the-test";
+        for f in crate::registry::get().formats() {
+            if !f.kinds().contains(&Kind::Hosted) {
+                continue;
+            }
+            let f = f.id();
+            let r = repo(&app, &format!("{f}-priv"), f, Kind::Hosted, json!({}));
+            let page = shown_with(&app, &r, t).await;
+            assert!(
+                !page.contains("<token>") && !page.contains("&lt;token&gt;"),
+                "{f}: a placeholder is left in {page}"
+            );
+        }
+        let mvn = app.engine.repo("maven-priv").unwrap();
+        let page = shown_with(&app, &mvn, t).await;
+        assert!(
+            page.contains(&format!("      <password>{t}</password>\n")),
+            "{page}"
+        );
+        let nu = app.engine.repo("nuget-priv").unwrap();
+        let page = shown_with(&app, &nu, t).await;
+        assert!(
+            page.contains(&format!("<add key=\"ClearTextPassword\" value=\"{t}\" />")),
+            "{page}"
+        );
+        // A group's, with its mirror.
+        let g = repo(
+            &app,
+            "maven-all",
+            "maven",
+            Kind::Group,
+            json!({"members": ["maven-priv"]}),
+        );
+        let page = shown_with(&app, &g, t).await;
+        assert!(
+            page.contains(&format!("<password>{t}</password>"))
+                && page.contains("<mirrorOf>*</mirrorOf>"),
+            "{page}"
+        );
     }
 }

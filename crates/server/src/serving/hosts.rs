@@ -314,7 +314,11 @@ fn rows(app: &App, caller: &Caller, host: &str, list: &[(String, String)]) -> Ve
                 if !r.setting_bool("public") {
                     return Some((l.label, l.text));
                 }
-                let text: Vec<&str> = l.text.lines().filter(|x| !x.contains("<token>")).collect();
+                let text: Vec<&str> = l
+                    .text
+                    .lines()
+                    .filter(|x| !crate::console::asks_for_token(x))
+                    .collect();
                 (!text.is_empty()).then(|| (l.label, text.join("\n")))
             })
             .collect();
@@ -508,4 +512,108 @@ pre {{ margin:.15rem 0; padding:.5rem .7rem; background:var(--head); border:1px 
         head = note(page.map(|p| p.header.as_str()), "head"),
         foot = note(page.map(|p| p.footer.as_str()), "foot"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::User;
+    use crate::serving::proxy::tests::app;
+
+    fn repo(app: &App, name: &str, format: &str, kind: Kind, settings: Value) -> RepoInfo {
+        let n = pkgpod_engine::NewRepo {
+            name: name.into(),
+            format: format.into(),
+            kind,
+            storage: None,
+            settings,
+        };
+        app.engine.create_repo(n, "test").unwrap()
+    }
+
+    /// The How to use of `name`'s row.
+    fn uses<'a>(rows: &'a [Row], name: &str) -> &'a [(String, String)] {
+        &rows
+            .iter()
+            .find(|r| r.name == name)
+            .unwrap_or_else(|| panic!("no {name} row"))
+            .uses
+    }
+
+    fn text<'a>(uses: &'a [(String, String)], label: &str) -> &'a str {
+        uses.iter()
+            .find(|(l, _)| l == label)
+            .map(|(_, t)| t.as_str())
+            .unwrap_or_else(|| panic!("no {label:?} line in {uses:#?}"))
+    }
+
+    /// A public repository's readers need no token: its How to use on a
+    /// host page has no line that asks for one, in either spelling of
+    /// the placeholder (Maven's settings.xml has it escaped, as XML).
+    /// A private repository's keeps its token lines.
+    #[test]
+    fn a_public_repository_s_host_usage_asks_for_no_token() {
+        let (_d, app) = app();
+        let mut list = Vec::new();
+        for f in crate::registry::get().formats() {
+            if !f.kinds().contains(&Kind::Hosted) {
+                continue;
+            }
+            let name = format!("{}-pub", f.id());
+            repo(&app, &name, f.id(), Kind::Hosted, json!({"public": true}));
+            list.push((name.clone(), name));
+        }
+        repo(
+            &app,
+            "maven-all",
+            "maven",
+            Kind::Group,
+            json!({"members": ["maven-pub"], "public": true}),
+        );
+        repo(&app, "maven-priv", "maven", Kind::Hosted, json!({}));
+        for n in ["maven-all", "maven-priv"] {
+            list.push((n.to_string(), n.to_string()));
+        }
+        let anon = rows(&app, &Caller::anonymous(), "pkg.example.org", &list);
+        assert_eq!(anon.len(), list.len() - 1, "the private one is not listed");
+        for r in &anon {
+            for (l, t) in &r.uses {
+                assert!(
+                    !t.contains("<token>") && !t.contains("&lt;token&gt;"),
+                    "{}: {l}: {t}",
+                    r.name
+                );
+            }
+        }
+        // What else Maven is told stays: the server's id and user, a
+        // group's mirror.
+        let xml = text(uses(&anon, "maven-pub"), "~/.m2/settings.xml");
+        assert!(
+            xml.contains(
+                "      <id>maven-pub</id>\n      <username>token</username>\n    </server>"
+            ),
+            "{xml}"
+        );
+        let xml = text(uses(&anon, "maven-all"), "~/.m2/settings.xml");
+        assert!(
+            xml.contains("<mirrorOf>*</mirrorOf>") && !xml.contains("<password>"),
+            "{xml}"
+        );
+        let admin = Caller {
+            user: Some(User {
+                id: 1,
+                name: "admin".into(),
+                admin: true,
+                disabled: false,
+                created: 0,
+            }),
+            scope: None,
+        };
+        let all = rows(&app, &admin, "pkg.example.org", &list);
+        let xml = text(uses(&all, "maven-priv"), "~/.m2/settings.xml");
+        assert!(
+            xml.contains("      <password>&lt;token&gt;</password>\n"),
+            "{xml}"
+        );
+    }
 }
