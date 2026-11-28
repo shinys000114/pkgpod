@@ -232,9 +232,10 @@ def seed_groups(p, fx):
             raise SystemExit(f"cargo publish to csec: {st} {out[:200]}")
     p.cli("repo", "create", "cgup", "-f", "cargo", "-k", "proxy", "-s",
           f"upstream=http://127.0.0.1:{UP}/cargo-g/index/", "-s", "public=true", "-s",
-          "exclude=hidden*")
+          "exclude=hidden*", "-s", PROXY_KEPT)
     p.cli("repo", "create", "c500", "-f", "cargo", "-k", "proxy", "-s",
-          f"upstream=http://127.0.0.1:{UP}/cargo500/index/", "-s", "public=true")
+          f"upstream=http://127.0.0.1:{UP}/cargo500/index/", "-s", "public=true", "-s",
+          PROXY_KEPT)
     for g, members in GROUPS:
         p.cli("repo", "create", g, "-f", "cargo", "-k", "group", "-s", f"members={members}",
               "-s", "public=true")

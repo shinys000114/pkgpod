@@ -444,7 +444,7 @@ GROUPS = (("ogall", "ogup,opub"), ("ogmix", "opriv,opub"), ("ogfail", "o500,opub
 def seed_groups(p, fx):
     for name, up in (("ogup", "up"), ("o500", "o500")):
         p.cli("repo", "create", name, "-f", "oci", "-k", "proxy", "-s",
-              f"upstream=http://127.0.0.1:{UP}/{up}", "-s", "public=true")
+              f"upstream=http://127.0.0.1:{UP}/{up}", "-s", "public=true", "-s", PROXY_KEPT)
     for g, members in GROUPS:
         p.cli("repo", "create", g, "-f", "oci", "-k", "group", "-s", f"members={members}",
               "-s", "public=true")

@@ -242,9 +242,10 @@ def seed_groups(p, fx):
         if st != 201:
             raise SystemExit(f"npm publish {path}: {st} {body[:200]}")
     p.cli("repo", "create", "ngup", "-f", "npm", "-k", "proxy", "-s",
-          f"upstream=http://127.0.0.1:{UP}/npm-g/", "-s", "public=true", "-s", "exclude=hidden*")
+          f"upstream=http://127.0.0.1:{UP}/npm-g/", "-s", "public=true", "-s", "exclude=hidden*",
+          "-s", PROXY_KEPT)
     p.cli("repo", "create", "n500", "-f", "npm", "-k", "proxy", "-s",
-          f"upstream=http://127.0.0.1:{UP}/npm500/", "-s", "public=true")
+          f"upstream=http://127.0.0.1:{UP}/npm500/", "-s", "public=true", "-s", PROXY_KEPT)
     for g, members in GROUPS:
         p.cli("repo", "create", g, "-f", "npm", "-k", "group", "-s", f"members={members}",
               "-s", "public=true")

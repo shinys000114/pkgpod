@@ -192,9 +192,9 @@ def seed_groups(p, fx):
             raise SystemExit(f"go upload {m}@{v}: {st} {out[:200]}")
     p.cli("repo", "create", "ggup", "-f", "go", "-k", "proxy", "-s",
           f"upstream=http://127.0.0.1:{UP}/go-g/", "-s", "public=true", "-s",
-          "exclude=example.com/hidden*")
+          "exclude=example.com/hidden*", "-s", PROXY_KEPT)
     p.cli("repo", "create", "g500", "-f", "go", "-k", "proxy", "-s",
-          f"upstream=http://127.0.0.1:{UP}/go500/", "-s", "public=true")
+          f"upstream=http://127.0.0.1:{UP}/go500/", "-s", "public=true", "-s", PROXY_KEPT)
     for g, members in GROUPS:
         p.cli("repo", "create", g, "-f", "go", "-k", "group", "-s", f"members={members}",
               "-s", "public=true")

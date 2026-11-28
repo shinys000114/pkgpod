@@ -259,9 +259,10 @@ def seed_groups(p, fx):
             raise SystemExit(f"pypi upload {fn}: {st} {out[:200]}")
     p.cli("repo", "create", "pgup", "-f", "pypi", "-k", "proxy", "-s",
           f"upstream=http://127.0.0.1:{UP}/pypi-g/simple/", "-s", "public=true", "-s",
-          "exclude=hidden*")
+          "exclude=hidden*", "-s", PROXY_KEPT)
     p.cli("repo", "create", "p500", "-f", "pypi", "-k", "proxy", "-s",
-          f"upstream=http://127.0.0.1:{UP}/pypi500/simple/", "-s", "public=true")
+          f"upstream=http://127.0.0.1:{UP}/pypi500/simple/", "-s", "public=true", "-s",
+          PROXY_KEPT)
     for g, members in GROUPS:
         p.cli("repo", "create", g, "-f", "pypi", "-k", "group", "-s", f"members={members}",
               "-s", "public=true")

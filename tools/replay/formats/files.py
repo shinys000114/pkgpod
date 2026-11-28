@@ -163,7 +163,7 @@ def seed_groups(p, fx):
         p.cli(*(["upload", "fsec", f] + (["-s", f"path={sub}/"] if sub else [])))
     for name, up in (("fgup", "files-g"), ("f500", "files500")):
         p.cli("repo", "create", name, "-f", "files", "-k", "proxy", "-s",
-              f"upstream=http://127.0.0.1:{UP}/{up}/", "-s", "public=true")
+              f"upstream=http://127.0.0.1:{UP}/{up}/", "-s", "public=true", "-s", PROXY_KEPT)
     for g, members, public in GROUPS:
         p.cli("repo", "create", g, "-f", "files", "-k", "group", "-s", f"members={members}",
               "-s", f"public={public}")

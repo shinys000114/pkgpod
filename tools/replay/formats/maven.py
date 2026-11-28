@@ -760,7 +760,7 @@ def seed_groups(p, fx):
             raise SystemExit(f"maven put mvnsec/{path}: {st} {out[:200]}")
     for name, up in (("mvngup", "maven-g"), ("mvn500", "maven500")):
         p.cli("repo", "create", name, "-f", "maven", "-k", "proxy", "-s",
-              f"upstream=http://127.0.0.1:{UP}/{up}", "-s", "public=true")
+              f"upstream=http://127.0.0.1:{UP}/{up}", "-s", "public=true", "-s", PROXY_KEPT)
     for g, members, public in GROUPS:
         p.cli("repo", "create", g, "-f", "maven", "-k", "group", "-s", f"members={members}",
               "-s", f"public={public}")
