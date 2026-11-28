@@ -12,7 +12,7 @@ import json
 import tarfile
 import zipfile
 
-from core import PROXY_KEPT, UP, auth_header, request
+from core import PROXY_KEPT, UP, auth_header, group_badges, request
 
 NAME = "pypi"
 
@@ -314,6 +314,7 @@ def group_reads(c, who):
         page = f"pypi {g}/simple/hello-world/ {who}" if g == "pgroup" else \
             f"pypi group {g}/simple/hello-world/ {who}"
         group_asked(c, who, g, PGROUP_ASKED if g == "pgroup" else (), "{%s.etag}" % page)
+    group_badges(c, "pypi", who, ["pgroup"] + [g for g, _ in GROUPS] + ["pgbad"], "hello-world")
 
 
 def group_writes_of(c, who, g):

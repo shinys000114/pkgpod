@@ -9,7 +9,7 @@ import io
 import re
 import zipfile
 
-from core import PROXY_KEPT, UP, auth_header, request, times
+from core import PROXY_KEPT, UP, auth_header, group_badges, request, times
 
 NAME = "go"
 # The paths of Go's answers, which may hold the run's times.
@@ -236,6 +236,7 @@ def group_reads(c, who):
         add(f"go group {g} ims {who}", who, "GET", f"{b}{H}/v1.0.0.mod",
             {"If-Modified-Since": "Fri, 01 Jan 2100 00:00:00 GMT"})
         add(f"go group {g} range {who}", who, "GET", f"{b}{H}/v1.0.0.zip", {"Range": "bytes=0-9"})
+    group_badges(c, "go", who, ["ggroup"] + [g for g, _ in GROUPS], "example.com/hello")
 
 
 def group_writes(c, who):

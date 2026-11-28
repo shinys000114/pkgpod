@@ -24,7 +24,7 @@ import time
 import urllib.parse
 import zipfile
 
-from core import IDENTS, PROXY_KEPT, UP, auth_header, request
+from core import IDENTS, PROXY_KEPT, UP, auth_header, group_badges, request
 
 NAME = "maven"
 # The paths of the hosted repositories' answers and their groups', which
@@ -801,6 +801,7 @@ def group_reads(c, who):
                         ("ims", {"If-Modified-Since": "Fri, 01 Jan 2100 00:00:00 GMT"}),
                         ("range", {"Range": "bytes=0-9"})):
             add(f"maven group {g} jar {name} {who}", who, "GET", f"{b}/{J100}", h)
+    group_badges(c, "maven", who, [g for g, _, _ in GROUPS], "org.acme:hello")
 
 
 def group_writes(c, who):

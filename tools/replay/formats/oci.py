@@ -10,7 +10,7 @@ import json
 import re
 import time
 
-from core import PROXY_KEPT, UP, UPB, Upstream, auth_header, request
+from core import PROXY_KEPT, UP, UPB, Upstream, auth_header, group_badges, request
 
 NAME = "oci"
 INDEX = "application/vnd.oci.image.index.v1+json"
@@ -491,6 +491,7 @@ def group_reads(c, who):
             {"Accept": INDEX})
         for rel in ("", "/", "/x"):
             add(f"oci group /{g}{rel} {who}", who, "GET", f"/{g}{rel}")
+    group_badges(c, "oci", who, ["ogroup"] + [g for g, _ in GROUPS], "app")
 
 
 def group_writes(c, who):

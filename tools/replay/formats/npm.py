@@ -9,7 +9,7 @@ import hashlib
 import json
 import re
 
-from core import PROXY_KEPT, UP, IDENTS, auth_header, request, times
+from core import PROXY_KEPT, UP, IDENTS, auth_header, group_badges, request, times
 
 NAME = "npm"
 # The paths of npm's answers, which may hold the run's times.
@@ -296,6 +296,14 @@ def group_reads(c, who):
         if g != "ngroup":
             for rel in ("/-/v1/search/", "/-/v1/search?text=hello"):
                 add(f"npm group {g} HEAD {rel} {who}", who, "HEAD", b + rel)
+    groups = ["ngroup"] + [g for g, _ in GROUPS]
+    # dist-tags of each name (First today), of one only a later member
+    # or the proxy has, a private member's, a scoped one, none.
+    for g in groups:
+        for name in ("up-pkg", "sec-only", "@team%2flib", "nope-pkg"):
+            add(f"npm group {g}/-/package/{name}/dist-tags {who}", who, "GET",
+                f"/{g}/-/package/{name}/dist-tags")
+    group_badges(c, "npm", who, groups, "hello")
 
 
 def group_writes(c, who):

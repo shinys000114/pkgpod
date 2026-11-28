@@ -13,7 +13,7 @@ import re
 import struct
 import tarfile
 
-from core import PROXY_KEPT, UP, auth_header, request, times
+from core import PROXY_KEPT, UP, auth_header, group_badges, request, times
 
 NAME = "cargo"
 # The paths of cargo's answers, which may hold the run's times.
@@ -279,6 +279,7 @@ def group_reads(c, who):
         add(f"cargo group {g} ims {who}", who, "GET", f"{b}/index/{HP}",
             {"If-Modified-Since": "Fri, 01 Jan 2100 00:00:00 GMT"})
         add(f"cargo group {g} range {who}", who, "GET", f"{b}{DL}", {"Range": "bytes=0-9"})
+    group_badges(c, "cargo", who, ["cgroup"] + [g for g, _ in GROUPS], "hello_pod")
 
 
 def group_writes(c, who):

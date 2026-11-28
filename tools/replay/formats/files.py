@@ -7,7 +7,7 @@ proxy whose upstream fails first, of none)."""
 import hashlib
 import os
 
-from core import PROXY_KEPT, UP
+from core import PROXY_KEPT, UP, group_badges
 
 NAME = "files"
 
@@ -201,6 +201,7 @@ def group_reads(c, who):
                  {"Range": "bytes=0-9",
                   "If-Range": "{files group %s/big.bin %s.etag}" % (g, who)})):
             add(f"files group {g} {name} {who}", who, "GET", b + rel, h)
+    group_badges(c, "files", who, [g for g, _, _ in GROUPS], "a.txt")
 
 
 def group_writes(c, who):

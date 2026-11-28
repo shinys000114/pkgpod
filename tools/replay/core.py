@@ -288,6 +288,25 @@ class Corpus:
         self.seq(rid, ident, [(method, path, headers or {}, body)])
 
 
+# Where a repository's badges are, on every serving listener.
+BADGES = "/.well-known/pkgpod/badges"
+
+
+def group_badges(c, fmt, who, groups, package):
+    """Each group's badges as `who` reads them: its status, its count, a
+    package's version and a version with no package, and its status by
+    HEAD (not its downloads: counted as the server writes them, every
+    few seconds). A group shows its own catalog there today, which holds
+    nothing."""
+    for g in groups:
+        for kind, q in (("status", ""), ("packages", ""), ("version", "?package=" + package),
+                        ("version", "")):
+            c.add(f"{fmt} group badge {g} {kind}{q} {who}", who, "GET",
+                  f"{BADGES}/{g}/{kind}.svg{q}")
+        c.add(f"{fmt} group badge {g} HEAD status {who}", who, "HEAD",
+              f"{BADGES}/{g}/status.svg")
+
+
 # ---- what is compared, and what is masked ---------------------------------
 
 # A time in an npm, Go or cargo answer.
