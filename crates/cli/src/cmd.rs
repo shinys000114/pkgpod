@@ -604,6 +604,12 @@ pub fn run(
                         "failing"
                     }
                 );
+                if v["members"].is_number() {
+                    // A group holds nothing of its own: what it serves,
+                    // and the downloads, are its members'.
+                    println!("group of {}", s(&v["members"]));
+                    return;
+                }
                 if v["version"].is_object() {
                     println!(
                         "version {}: {}",

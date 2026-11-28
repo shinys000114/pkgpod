@@ -439,11 +439,15 @@ fn schemas() -> Value {
                     ("public", boolean()),
                     (
                         "version",
-                        json!({"type": ["object", "null"], "description": "The current version: seq, created, summary; null for none (and mirrors).", "properties": {"seq": integer(), "created": integer(), "summary": string()}}),
+                        json!({"type": ["object", "null"], "description": "The current version: seq, created, summary; null for none (and mirrors and groups).", "properties": {"seq": integer(), "created": integer(), "summary": string()}}),
                     ),
                     (
                         "packages",
-                        json!({"type": ["integer", "null"], "description": "Catalog rows of the current version; a mirror: the pool files its last good sync counted, null for none."}),
+                        json!({"type": ["integer", "null"], "description": "Catalog rows of the current version; a mirror: the pool files its last good sync counted, null for none; a group: null (what it serves is its members')."}),
+                    ),
+                    (
+                        "members",
+                        json!({"type": "integer", "description": "Groups only: how many repositories it lists."}),
                     ),
                     (
                         "downloads",
@@ -459,7 +463,7 @@ fn schemas() -> Value {
                     ),
                     (
                         "package",
-                        json!({"type": "object", "description": "With ?package=: its latest version (the format's order), how many, downloads in 30 days.", "properties": {"name": string(), "latest": {"type": ["string", "null"]}, "versions": integer(), "downloads": integer()}}),
+                        json!({"type": "object", "description": "With ?package=: its latest version (the format's order), how many, downloads in 30 days; a group: no latest version and no count.", "properties": {"name": string(), "latest": {"type": ["string", "null"]}, "versions": {"type": ["integer", "null"]}, "downloads": integer()}}),
                     ),
                 ],
                 &[

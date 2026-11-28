@@ -380,6 +380,9 @@ listener, is an SVG badge for a README or a dashboard:
 | `downloads` | downloads in 30 days (`?package=` for one package) |
 | `packages` | how many packages |
 
+A group's badges, every kind, say `group of N`, the number of
+repositories it lists: what it serves is its members'.
+
 A public repository's badges are open. A private one's need its badge
 token (`?token=`), which grants nothing else: `pkgpod badge <repo>`
 shows it, `--new` makes a new one (the old one stops working),
@@ -388,8 +391,10 @@ rights tab shows the badges with their addresses.
 
 `pkgpod status <repo>` (with `--package <name>`: one package's latest
 version and downloads) and `GET /api/v1/repos/<repo>/status` give the
-same state as JSON. `pkgpod downloads <repo>` lists downloads by day
-and package (`--days`, `--name`); counts are kept a year unless
+same state as JSON; a group's says how many repositories it lists
+(`members`), and has no version and no package counts.
+`pkgpod downloads <repo>` lists downloads by day and package
+(`--days`, `--name`); counts are kept a year unless
 `pkgpod settings --downloads-days <n>` says otherwise. `/metrics` on
 the management listener is for Prometheus.
 

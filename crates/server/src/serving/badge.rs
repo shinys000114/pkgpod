@@ -9,7 +9,8 @@
 //!
 //! Kinds: `status` (a mirror's last sync, a hosted repository's
 //! version), `version` (`?package=`: its latest version), `downloads`
-//! (in 30 days; `?package=` for one), `packages` (how many).
+//! (in 30 days; `?package=` for one), `packages` (how many). A group's,
+//! every kind, say `group of N`: what it serves is its members'.
 
 use axum::body::Body;
 use axum::http::{HeaderValue, StatusCode, header};
@@ -108,6 +109,17 @@ pub fn serve(
     };
     let label = query(query_s, "label");
     let (l, v, colour) = match kind {
+        // A group holds nothing of its own: whatever is asked, it says
+        // what it is and how many repositories it reads (not which).
+        _ if r.kind == Kind::Group => (
+            match kind {
+                "status" => r.name.clone(),
+                "version" => package.clone().unwrap_or_else(|| "version".into()),
+                k => k.to_string(),
+            },
+            format!("group of {}", st["members"].as_u64().unwrap_or(0)),
+            GREY,
+        ),
         "status" => {
             if r.kind == Kind::Mirror {
                 let state = st["sync"]["state"].as_str().unwrap_or("never synced");
@@ -277,5 +289,58 @@ mod tests {
         assert_eq!(short(12_345), "12k");
         assert_eq!(short(2_500_000), "2.5M");
         assert!(same("abc", "abc") && !same("abc", "abd") && !same("abc", "ab"));
+    }
+
+    /// A group's badges, every kind, say what it is: a group of so many
+    /// repositories (not which), not its own empty catalog's state.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_group_s_badges_say_group_of_n() {
+        use crate::serving::status::tests::repo;
+        use serde_json::json;
+        let (_d, app) = crate::serving::proxy::tests::app();
+        for m in ["secret-a", "secret-b"] {
+            repo(&app, m, Kind::Hosted, json!({}));
+        }
+        let settings = json!({"members": ["secret-a", "secret-b"], "public": true});
+        repo(&app, "g", Kind::Group, settings);
+        let anon = Caller::anonymous();
+        let ask = |file: &str, q: &str, inm: Option<&str>| {
+            serve(&app, &anon, &["g".into(), file.into()], q, inm)
+        };
+        for (file, q, label) in [
+            ("status.svg", "", "g"),
+            ("packages.svg", "", "packages"),
+            ("version.svg", "package=hello", "hello"),
+            ("version.svg", "", "version"),
+            ("downloads.svg", "", "downloads"),
+            ("downloads.svg", "package=hello", "downloads"),
+        ] {
+            let at = format!("{file}?{q}");
+            let r = ask(file, q, None);
+            assert_eq!(r.status(), StatusCode::OK, "{at}");
+            let (ct, etag) = (
+                &r.headers()[header::CONTENT_TYPE],
+                &r.headers()[header::ETAG],
+            );
+            assert_eq!(ct, "image/svg+xml; charset=utf-8", "{at}");
+            let etag = etag.to_str().unwrap().to_string();
+            let body = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+            let svg = String::from_utf8(body.to_vec()).unwrap();
+            assert_eq!(svg, render(label, "group of 2", GREY), "{at}");
+            assert!(!svg.contains("secret"), "{at}: {svg}");
+            // Answered 304 while it says the same, as any badge.
+            let r = ask(file, q, Some(&etag));
+            assert_eq!(r.status(), StatusCode::NOT_MODIFIED, "{at}");
+            assert_eq!(r.headers()[header::ETAG], etag.as_str(), "{at}");
+        }
+        // Its label may be put in, as any badge's.
+        let r = ask("status.svg", "label=pkgs", None);
+        let body = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        assert_eq!(body, render("pkgs", "group of 2", GREY).as_bytes());
+        // A hosted repository's version badge still needs its package.
+        repo(&app, "open", Kind::Hosted, json!({"public": true}));
+        let open = ["open".to_string(), "version.svg".to_string()];
+        let r = serve(&app, &anon, &open, "", None);
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
     }
 }

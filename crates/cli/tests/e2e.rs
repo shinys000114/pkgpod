@@ -7523,6 +7523,30 @@ fn group_of_files_repositories() {
     assert_eq!(get("/g/shared.txt", None), (200, "from b".into()));
     assert_eq!(get("/g/only-a/x.txt", None).0, 404);
     assert_eq!(get("/g/shared.txt", Some(&gt)), (200, "from a".into()));
+    // Its status and badges say what it is, a group of two, not an
+    // empty repository.
+    let st = s.json(&["status", "g"]);
+    assert_eq!((&st["kind"], &st["members"]), (&json!("group"), &json!(2)));
+    assert!(st["packages"].is_null() && st["version"].is_null(), "{st}");
+    let out = s.cli(&["status", "g"]).unwrap();
+    assert!(
+        out.contains("group of 2\n") && !out.contains("packages"),
+        "{out}"
+    );
+    for b in [
+        "status.svg",
+        "packages.svg",
+        "version.svg",
+        "version.svg?package=shared.txt",
+    ] {
+        let (st, svg) = get(&format!("/.well-known/pkgpod/badges/g/{b}"), None);
+        assert!(st == 200 && svg.contains(">group of 2<"), "{b}: {st} {svg}");
+    }
+    let r = c
+        .head(s.url("/.well-known/pkgpod/badges/g/status.svg"))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
     // Members: existing, of the format, not groups, readable by who sets
     // them.
     let e = s
@@ -7603,6 +7627,8 @@ fn group_of_files_repositories() {
     let g = s.json(&["repo", "show", "g"]);
     assert_eq!(g["settings"]["members"], serde_json::json!(["b"]), "{g}");
     assert_eq!(get("/g/shared.txt", Some(&gt)), (200, "from b".into()));
+    let (_, svg) = get("/.well-known/pkgpod/badges/g/status.svg", None);
+    assert!(svg.contains(">group of 1<"), "{svg}");
 }
 
 /// A group's members are checked where a change adds them: its admin,
