@@ -739,10 +739,10 @@ def group_stub(method, path, auth, bearer):
 
 
 # The groups: of mvnpub, mvnpriv and mvnproxy (not mvnempty), private,
-# as the other formats' are (the proxy's excluded names among them); and public ones, of public members
-# only with a proxy first (mvngup), of a private member first (mvnsec:
-# hello of a version of its own, an artifact of its own), of a proxy
-# whose upstream answers 500 first.
+# as the other formats' are (the proxy's excluded names among them);
+# and public ones, of public members only with a proxy first (mvngup),
+# of a private member first (mvnsec: hello of a version of its own, an
+# artifact of its own), of a proxy whose upstream answers 500 first.
 GROUPS = (("mvngroup", "mvnpub,mvnpriv,mvnproxy", "false"), ("mvngall", "mvngup,mvnpub", "true"),
           ("mvngmix", "mvnsec,mvnpub", "true"), ("mvngfail", "mvn500,mvnpub", "true"))
 SEC = (deployed(f"{HELLO}/5.0.0/hello-5.0.0.jar", jar("hello", "5.0.0", " secret"))
