@@ -221,7 +221,8 @@ A group reads its members in order. For each artifact, the first member
 that has it answers alone: a later member's versions of the same
 artifact are not added, so a hosted repository before a proxy of Maven
 Central keeps your coordinates from being answered by public ones.
-Directory listings show every member's entries.
+A directory listing names each entry once, the first member's that has
+it.
 
 | Setting | Default | |
 |---------|---------|-|
@@ -234,11 +235,27 @@ pkgpod repo create maven-all -f maven -k group -s members=mvn,central \
 pkgpod token create build --repos maven-all
 ```
 
+Builds use it as the mirror of every repository (`mirrorOf *`, Central
+too), so Maven asks for nothing but through the group; the `<server>`
+of the same id carries the token:
+
 ```xml
-<repository>
-  <id>maven-all</id>
-  <url>https://pkg.example.org/maven-all/</url>
-</repository>
+<settings>
+  <servers>
+    <server>
+      <id>maven-all</id>
+      <username>token</username>
+      <password>&lt;token&gt;</password>
+    </server>
+  </servers>
+  <mirrors>
+    <mirror>
+      <id>maven-all</id>
+      <mirrorOf>*</mirrorOf>
+      <url>https://pkg.example.org/maven-all/</url>
+    </mirror>
+  </mirrors>
+</settings>
 ```
 
 A token for the group reads its members through it. Deploys go to a

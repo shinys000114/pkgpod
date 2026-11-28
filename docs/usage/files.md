@@ -239,7 +239,8 @@ curl -fLO https://pkg.example.org/debian-cloud/images/cloud/trixie/latest/debian
 ## Groups
 
 A group reads its members in order: a path comes from the first member
-that has it, and its listings show every member's files.
+that has it, and a listing names each entry once, the first member's
+that has it.
 
 ```sh
 pkgpod repo create all-tools -f files -k group -s members=tools,isos

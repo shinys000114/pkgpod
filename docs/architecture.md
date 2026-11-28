@@ -332,12 +332,12 @@ member that has it answers alone: versions are not merged, so a public
 package of the same name further down never adds to or outranks yours.
 A proxy member whose upstream fails while it keeps nothing for the name
 ends the search with a 502, rather than let a later member answer for
-it. Listings and search show every member's entries. A group is read
-through: its readers read the members through it (anonymous readers of
-a public group only its public members, so a public group with a member
-that is not public answers as a private repository does, for caches:
-`group::all_public`), downloads count on the member, and writes are
-refused with the member to publish to.
+it. Listings and search name each entry once, the first member's that
+has it. A group is read through: its readers read the members through
+it (anonymous readers of a public group only its public members, so a
+public group with a member that is not public answers as a private
+repository does, for caches: `group::all_public`), downloads count on
+the member, and writes are refused with the member to publish to.
 
 ## Jobs
 

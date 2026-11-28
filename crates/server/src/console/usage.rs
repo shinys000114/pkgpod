@@ -180,10 +180,13 @@ pub(crate) fn usage(
                     format!("registry={base}\n//{nerf}:_authToken=<token>")
                 },
             });
-            out.push(UseLine {
-                label: "Or for one scope".into(),
-                text: format!("@team:registry={base}"),
-            });
+            // A group is the one registry: no scope is sent elsewhere.
+            if r.kind != Kind::Group {
+                out.push(UseLine {
+                    label: "Or for one scope".into(),
+                    text: format!("@team:registry={base}"),
+                });
+            }
             out.push(UseLine {
                 label: "Install".into(),
                 text: "npm install <package>".into(),
@@ -710,10 +713,20 @@ pub(crate) fn usage(
     }
     if r.format == "maven" {
         let id = r.name.replace('.', "-");
+        // A group is a mirror of every repository a build names (Central
+        // too), so Maven asks for nothing but through it; its token goes
+        // with the mirror's id.
+        let mirror = if r.kind == Kind::Group {
+            format!(
+                "  <mirrors>\n    <mirror>\n      <id>{id}</id>\n      <mirrorOf>*</mirrorOf>\n      <url>{base}</url>\n    </mirror>\n  </mirrors>\n"
+            )
+        } else {
+            String::new()
+        };
         out.push(UseLine {
             label: "~/.m2/settings.xml".into(),
             text: format!(
-                "<settings>\n  <servers>\n    <server>\n      <id>{id}</id>\n      <username>token</username>\n      <password>&lt;token&gt;</password>\n    </server>\n  </servers>\n</settings>"
+                "<settings>\n  <servers>\n    <server>\n      <id>{id}</id>\n      <username>token</username>\n      <password>&lt;token&gt;</password>\n    </server>\n  </servers>\n{mirror}</settings>"
             ),
         });
         out.push(UseLine {
@@ -881,10 +894,18 @@ pub(crate) fn usage(
             .split('/')
             .next()
             .unwrap_or("");
+        // A group is the one proxy: go falls back neither to
+        // proxy.golang.org nor to a direct fetch for a module it does
+        // not have.
+        let fallback = if r.kind == Kind::Group {
+            ""
+        } else {
+            ",https://proxy.golang.org,direct"
+        };
         out.push(UseLine {
             label: "Environment".into(),
             text: format!(
-                "go env -w GOPROXY={base},https://proxy.golang.org,direct\ngo env -w GONOSUMDB=<your module prefix>   # e.g. example.com/team/*: not in the public checksum database"
+                "go env -w GOPROXY={base}{fallback}\ngo env -w GONOSUMDB=<your module prefix>   # e.g. example.com/team/*: not in the public checksum database"
             ),
         });
         if !public {
@@ -955,9 +976,14 @@ pub(crate) fn usage(
         };
         out.push(UseLine {
             label: "Install".into(),
-            text: format!(
-                "pip install --index-url {index} <project>\n# packages from PyPI as well: install from a group of this repository and a PyPI proxy cache,\n# or add --extra-index-url https://pypi.org/simple/"
-            ),
+            text: if r.kind == Kind::Group {
+                // The group is the one index: pip adds none.
+                format!("pip install --index-url {index} <project>")
+            } else {
+                format!(
+                    "pip install --index-url {index} <project>\n# packages from PyPI as well: install from a group of this repository and a PyPI proxy cache,\n# or add --extra-index-url https://pypi.org/simple/"
+                )
+            },
         });
         out.push(UseLine {
             label: "pip.conf".into(),
@@ -1398,5 +1424,199 @@ pub(crate) async fn use_token(
             ))
         }
         Err(e) => err_part(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::serving::proxy::tests::{app, proxy_repo};
+    use pkgpod_engine::RepoInfo;
+
+    fn repo(app: &App, name: &str, format: &str, kind: Kind, settings: Value) -> RepoInfo {
+        let n = pkgpod_engine::NewRepo {
+            name: name.into(),
+            format: format.into(),
+            kind,
+            storage: None,
+            settings,
+        };
+        app.engine.create_repo(n, "test").unwrap()
+    }
+
+    /// How to use `r` at its address on pkg.example.org: (label, text).
+    fn lines(app: &App, r: &RepoInfo) -> Vec<(String, String)> {
+        let urls = vec![format!("https://pkg.example.org/{}/", r.name)];
+        use_lines(app, r, &urls, "pkg.example.org", "")
+            .into_iter()
+            .map(|l| (l.label, l.text))
+            .collect()
+    }
+
+    fn text<'a>(lines: &'a [(String, String)], label: &str) -> &'a str {
+        lines
+            .iter()
+            .find(|(l, _)| l == label)
+            .map(|(_, t)| t.as_str())
+            .unwrap_or_else(|| panic!("no {label:?} line in {lines:#?}"))
+    }
+
+    /// A group still says what it reads, members by name.
+    fn note_lists(lines: &[(String, String)], members: &str) {
+        let note = text(lines, "Note");
+        assert!(
+            note.starts_with(&format!("A group of {members}: ")),
+            "{note}"
+        );
+    }
+
+    /// A go group is the one proxy: go is not told to fall back to
+    /// proxy.golang.org or to direct fetches for what it does not have.
+    #[test]
+    fn a_go_group_s_usage_names_the_group_alone() {
+        let (_d, app) = app();
+        let hosted = repo(&app, "gomods", "go", Kind::Hosted, json!({}));
+        let proxy = proxy_repo(&app, "go-public", "go", "http://127.0.0.1:9/");
+        let g = repo(
+            &app,
+            "go-all",
+            "go",
+            Kind::Group,
+            json!({"members": ["gomods", "go-public"]}),
+        );
+        let ls = lines(&app, &g);
+        assert_eq!(
+            text(&ls, "Environment"),
+            "go env -w GOPROXY=https://pkg.example.org/go-all/\ngo env -w GONOSUMDB=<your module prefix>   # e.g. example.com/team/*: not in the public checksum database",
+        );
+        for (l, t) in &ls {
+            assert!(
+                !t.contains(",direct")
+                    && !t.contains("proxy.golang.org")
+                    && !t.contains("GOPRIVATE"),
+                "{l}: {t}"
+            );
+        }
+        note_lists(&ls, "gomods, go-public");
+        // A hosted repository and a proxy are one proxy among others.
+        for r in [hosted, proxy] {
+            let ls = lines(&app, &r);
+            let env = text(&ls, "Environment");
+            assert!(
+                env.starts_with(&format!(
+                    "go env -w GOPROXY=https://pkg.example.org/{}/,https://proxy.golang.org,direct\n",
+                    r.name
+                )),
+                "{}: {env}",
+                r.name
+            );
+        }
+    }
+
+    /// A pypi group is the one index: pip is not told to add pypi.org.
+    #[test]
+    fn a_pypi_group_s_usage_has_no_extra_index() {
+        let (_d, app) = app();
+        let hosted = repo(&app, "py", "pypi", Kind::Hosted, json!({}));
+        proxy_repo(&app, "pypi-public", "pypi", "http://127.0.0.1:9/");
+        let g = repo(
+            &app,
+            "pypi-all",
+            "pypi",
+            Kind::Group,
+            json!({"members": ["py", "pypi-public"]}),
+        );
+        let ls = lines(&app, &g);
+        assert_eq!(
+            text(&ls, "Install"),
+            "pip install --index-url https://__token__:<token>@pkg.example.org/pypi-all/simple/ <project>",
+        );
+        for (l, t) in &ls {
+            assert!(
+                !t.contains("extra-index-url") && !t.contains("pypi.org"),
+                "{l}: {t}"
+            );
+        }
+        note_lists(&ls, "py, pypi-public");
+        let ls = lines(&app, &hosted);
+        assert!(
+            text(&ls, "Install").contains("# or add --extra-index-url https://pypi.org/simple/"),
+            "{ls:#?}"
+        );
+    }
+
+    /// An npm group is the one registry: no scope is sent elsewhere.
+    #[test]
+    fn an_npm_group_s_usage_has_no_scope_line() {
+        let (_d, app) = app();
+        let hosted = repo(&app, "js", "npm", Kind::Hosted, json!({}));
+        let proxy = proxy_repo(&app, "npm-public", "npm", "http://127.0.0.1:9/");
+        let g = repo(
+            &app,
+            "npm-all",
+            "npm",
+            Kind::Group,
+            json!({"members": ["js", "npm-public"], "public": true}),
+        );
+        let ls = lines(&app, &g);
+        assert_eq!(
+            text(&ls, ".npmrc"),
+            "registry=https://pkg.example.org/npm-all/"
+        );
+        for (l, t) in &ls {
+            assert!(
+                l != "Or for one scope" && !t.contains("@team:registry"),
+                "{l}: {t}"
+            );
+        }
+        note_lists(&ls, "js, npm-public");
+        // A hosted registry and a proxy still offer one for a scope.
+        for r in [hosted, proxy] {
+            let ls = lines(&app, &r);
+            assert_eq!(
+                text(&ls, "Or for one scope"),
+                format!("@team:registry=https://pkg.example.org/{}/", r.name)
+            );
+        }
+    }
+
+    /// A maven group is a mirror of every repository a build names, so
+    /// Maven asks nothing of Central but through it.
+    #[test]
+    fn a_maven_group_s_usage_mirrors_everything_to_it() {
+        let (_d, app) = app();
+        let hosted = repo(&app, "mvn", "maven", Kind::Hosted, json!({}));
+        proxy_repo(&app, "central", "maven", "http://127.0.0.1:9/");
+        let g = repo(
+            &app,
+            "maven.all",
+            "maven",
+            Kind::Group,
+            json!({"members": ["mvn", "central"]}),
+        );
+        let ls = lines(&app, &g);
+        let xml = text(&ls, "~/.m2/settings.xml");
+        assert!(
+            xml.contains(
+                "  <mirrors>\n    <mirror>\n      <id>maven-all</id>\n      <mirrorOf>*</mirrorOf>\n      <url>https://pkg.example.org/maven.all/</url>\n    </mirror>\n  </mirrors>\n"
+            ),
+            "{xml}"
+        );
+        // Its token goes with the mirror's id.
+        assert!(
+            xml.contains(
+                "    <server>\n      <id>maven-all</id>\n      <username>token</username>\n"
+            ),
+            "{xml}"
+        );
+        assert!(
+            xml.starts_with("<settings>\n") && xml.ends_with("</settings>"),
+            "{xml}"
+        );
+        note_lists(&ls, "mvn, central");
+        // A hosted repository is one among others: no mirror.
+        let ls = lines(&app, &hosted);
+        let xml = text(&ls, "~/.m2/settings.xml");
+        assert!(!xml.contains("mirror"), "{xml}");
     }
 }

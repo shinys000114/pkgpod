@@ -202,8 +202,8 @@ pkgpod cache crates-public prefetch index/<prefix>/<crate>
 A group reads its members in order. For each crate, the first member
 that has it answers alone: a later member's versions of the same name
 are not added, so a hosted repository before a proxy of crates.io keeps
-your names from being taken by public ones. Search shows every member's
-crates.
+your names from being taken by public ones. Search lists each crate
+once, the first member's that has it.
 
 | Setting | Default | |
 |---------|---------|-|

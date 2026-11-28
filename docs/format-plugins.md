@@ -323,7 +323,8 @@ of those kinds; serving them is the server's:
   `proxy::classify` (what a path is: a file kept for good, or metadata
   asked for again after `metadata_minutes`; the package name for
   `exclude`; the version for pins), and `proxy_upstream()`. OCI does
-  its groups and proxies in `oci.rs`.
+  its groups and proxies in its format crate,
+  `crates/formats/oci/src/protocol/group.rs` and `proxy.rs`.
 - The console's `blurb` for `(<id>, Kind::Proxy)`, if the generic one
   does not fit.
 

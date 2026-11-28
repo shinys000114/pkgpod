@@ -183,11 +183,14 @@ ones.
 pkgpod repo create go-all -f go -k group -s members=gomods,go-public \
   -s urls=https://pkg.example.org/go-all/
 pkgpod token create build --repos go-all
-go env -w GOPROXY=https://pkg.example.org/go-all/,direct
+go env -w GOPROXY=https://pkg.example.org/go-all/
+go env -w 'GONOSUMDB=example.com/team/*'
 ```
 
-A token for the group reads its members through it. Uploads go to a
-member, not to the group.
+The group is the one proxy: with nothing after it in `GOPROXY`, go
+fetches no module from proxy.golang.org or directly, so what the group
+does not have is not found. A token for the group reads its members
+through it. Uploads go to a member, not to the group.
 
 ## Example
 

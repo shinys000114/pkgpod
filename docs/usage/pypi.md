@@ -198,7 +198,8 @@ A group reads its members in order. For each project, the first member
 that has it answers alone: a later member's versions of the same name
 are not added, so a hosted repository before a proxy of pypi.org keeps
 your names from being taken by public ones. The project list at
-`simple/` has every member's projects.
+`simple/` names each project once, and its page is the first member's
+that has it.
 
 | Setting | Default | |
 |---------|---------|-|
@@ -212,8 +213,9 @@ pkgpod token create pip --repos pypi-all
 pip install --index-url https://__token__:<token>@pkg.example.org/pypi-all/simple/ <project>
 ```
 
-A token for the group reads its members through it. Uploads go to a
-member, not to the group.
+The group is the one index: pip is given no `--extra-index-url`, so it
+takes no name from anywhere else. A token for the group reads its
+members through it. Uploads go to a member, not to the group.
 
 ## Example
 

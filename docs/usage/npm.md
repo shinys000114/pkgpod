@@ -192,8 +192,8 @@ there, `@scope%2Fname`.
 A group reads its members in order. For each package, the first member
 that has it answers alone: a later member's versions of the same name
 are not added, so a hosted repository before a proxy of npmjs keeps your
-names from being taken by public ones. Search shows every member's
-packages.
+names from being taken by public ones. Search lists each package once,
+the first member's that has it.
 
 | Setting | Default | |
 |---------|---------|-|
@@ -211,9 +211,11 @@ registry=https://pkg.example.org/npm-all/
 //pkg.example.org/npm-all/:_authToken=<token>
 ```
 
-A token for the group reads its members through it. Publishing goes to
-a member (with `--registry https://pkg.example.org/js/` and that
-registry's token), not to the group.
+The group is the one registry: no `@scope:registry` line sends a scope
+elsewhere. A token for the group reads its members through it.
+Publishing goes to a member (with
+`--registry https://pkg.example.org/js/` and that registry's token),
+not to the group.
 
 ## Example
 
