@@ -104,7 +104,11 @@ fn ask(format: &str, rel: &[String], dir_url: bool) -> Ask {
             },
             [d, ..] if d == "-" => Ask::First,
             [scope, name, ..] if scope.starts_with('@') => Ask::Name(format!("{scope}/{name}")),
-            [name, ..] => Ask::Name(name.clone()),
+            // A lone scope (`@first`) names no package, as the hosted
+            // registry says: no member, nor a proxy's upstream, is
+            // asked for it.
+            [name, ..] if !name.starts_with('@') => Ask::Name(name.clone()),
+            _ => Ask::Nothing,
         },
         "pypi" => match rel {
             [] => Ask::Note,
@@ -524,11 +528,13 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
     }
     let method = req.method().clone();
     if method != Method::GET && method != Method::HEAD {
+        // Its body read first, whatever the answer: else the connection
+        // is closed under a client still sending it.
+        crate::serving::drain(req).await;
         // npm's own endpoints (audit) answer as a hosted registry does.
         if g.format == "npm" && at.rel.first().map(String::as_str) == Some("-") {
             return crate::serving::status(StatusCode::NOT_FOUND);
         }
-        crate::serving::drain(req).await;
         // The group's own words, the same to every caller: a member's
         // name would tell an anonymous writer at a public group of a
         // member it may not read.
@@ -1088,6 +1094,18 @@ mod tests {
             Ask::Nothing
         );
         assert_eq!(ask("npm", &v(&["-", "ping"]), false), Ask::First);
+        // A lone scope names no package: no member (nor a proxy
+        // member's upstream) is asked for "@first"; a scope and a name
+        // are a scoped package's.
+        for dir_url in [false, true] {
+            for s in ["@first", "@"] {
+                assert_eq!(ask("npm", &v(&[s]), dir_url), Ask::Nothing, "{s}");
+            }
+        }
+        assert_eq!(
+            ask("npm", &v(&["@first", "hello"]), false),
+            Ask::Name("@first/hello".into())
+        );
     }
 
     /// A member's lifetime is dropped at the group's address, but for

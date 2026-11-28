@@ -216,11 +216,12 @@ fn npm_path(pkg: &str) -> String {
 
 /// npm's registry: a package's document (metadata, its tarball URLs
 /// made ours when served) and its tarballs (files, fetched from where
-/// the document says).
+/// the document says). A lone scope (`@first`) names no package, nor
+/// does npm's own `-`: nothing to ask the upstream for.
 fn npm(rel: &[String]) -> Option<Asked> {
     let (pkg, rest) = match rel {
         [s, n, rest @ ..] if s.starts_with('@') => (format!("{s}/{n}"), rest),
-        [n, rest @ ..] if !n.starts_with('-') => (n.clone(), rest),
+        [n, rest @ ..] if !n.starts_with(['-', '@']) => (n.clone(), rest),
         _ => return None,
     };
     match rest {
@@ -1244,11 +1245,13 @@ pub(crate) async fn serve(app: Arc<App>, at: At, req: Request) -> Response {
     }
     let method = req.method().clone();
     if method != Method::GET && method != Method::HEAD {
+        // Its body read first, whatever the answer: else the connection
+        // is closed under a client still sending it.
+        crate::serving::drain(req).await;
         // npm's own endpoints (audit) answer as a hosted registry does.
         if r.format == "npm" && at.rel.first().map(String::as_str) == Some("-") {
             return status(StatusCode::NOT_FOUND);
         }
-        crate::serving::drain(req).await;
         return text(
             StatusCode::METHOD_NOT_ALLOWED,
             format!(
@@ -2421,6 +2424,26 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(a.kind, CacheKind::Meta);
         assert!(classify("maven", &v(&["org", "ex", "app", "1.0", "other-1.0.jar"])).is_none());
+    }
+
+    /// npm's packument and tarball of a package, a scoped one's too; a
+    /// lone scope names no package (its upstream is not asked for it),
+    /// and npm's own endpoints are not a package's.
+    #[test]
+    fn npm_requests() {
+        let a = classify("npm", &v(&["@team", "lib"])).unwrap();
+        assert_eq!(
+            (a.kind, a.name.as_str(), a.path.as_str()),
+            (CacheKind::Meta, "@team/lib", "@team%2Flib")
+        );
+        let a = classify("npm", &v(&["hello", "-", "hello-1.0.0.tgz"])).unwrap();
+        assert_eq!(
+            (a.kind, a.name.as_str(), a.version.as_str(), a.count),
+            (CacheKind::File, "hello", "1.0.0", true)
+        );
+        for rel in [&["@first"][..], &["@"], &["-", "ping"]] {
+            assert!(classify("npm", &v(rel)).is_none(), "{rel:?}");
+        }
     }
 
     #[test]

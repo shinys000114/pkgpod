@@ -8577,6 +8577,161 @@ fn group_refusals_name_no_member() {
     assert_eq!(r.status().as_u16(), 404);
 }
 
+/// An npm group or proxy is not asked for a lone scope ("@first"),
+/// which names no package: it answers 404, asking no member and no
+/// upstream (a hosted member holding the scope's packages, or a proxy
+/// member whose upstream is down, made it another answer). A scope
+/// and a name are a scoped package's, asked for as before.
+#[test]
+fn group_and_proxy_ask_for_no_lone_npm_scope() {
+    let s = Server::start();
+    let (port, log) = stub_upstream_log(0, vec![]);
+    for (r, port) in [("nup", port), ("ndown", dead_port())] {
+        s.cli(&[
+            "repo",
+            "create",
+            r,
+            "-f",
+            "npm",
+            "-k",
+            "proxy",
+            "-s",
+            &format!("upstream=http://127.0.0.1:{port}/"),
+            "-s",
+            "public=true",
+        ])
+        .unwrap();
+    }
+    s.cli(&["repo", "create", "nh", "-f", "npm", "-s", "public=true"])
+        .unwrap();
+    for (g, members) in [("ng", "nup,nh"), ("ngd", "ndown,nh")] {
+        s.cli(&[
+            "repo",
+            "create",
+            g,
+            "-f",
+            "npm",
+            "-k",
+            "group",
+            "-s",
+            &format!("members={members}"),
+            "-s",
+            "public=true",
+        ])
+        .unwrap();
+    }
+    let w = s
+        .cli(&["token", "create", "w", "--repos", "nh", "--write"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let c = reqwest::blocking::Client::new();
+    let tgz = b"lib 1.0.0".to_vec();
+    let doc = json!({
+        "name": "@team/lib",
+        "versions": {"1.0.0": {"name": "@team/lib", "version": "1.0.0"}},
+        "dist-tags": {"latest": "1.0.0"},
+        "_attachments": {"lib-1.0.0.tgz": {"data": b64(&tgz), "length": tgz.len()}},
+    });
+    let r = c
+        .put(s.url("/nh/@team%2flib"))
+        .bearer_auth(&w)
+        .json(&doc)
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 201, "{}", r.text().unwrap());
+    let get = |p: &str| {
+        let r = c.get(s.url(p)).send().unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+    for p in [
+        "/ng/@team",
+        "/ng/@first",
+        "/ngd/@team",
+        "/ngd/@first/",
+        "/nup/@team",
+        "/nup/@first/",
+    ] {
+        assert_eq!(get(p), (404, "Not Found".to_string()), "{p}");
+    }
+    assert_eq!(*log.lock().unwrap(), Vec::<String>::new(), "upstream asked");
+    let (st, body) = get("/ng/@team/lib");
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(*log.lock().unwrap(), ["/@team%2Flib"], "upstream asked");
+}
+
+/// A write to npm's own endpoints (`/-/`) of a group or a proxy is
+/// answered 404 as a hosted registry's, once its body is read: not
+/// before the body is there, and the connection serves the client's
+/// next request.
+#[test]
+fn group_and_proxy_read_a_refused_npm_body() {
+    use std::io::{Read, Write};
+    let s = Server::start();
+    s.cli(&[
+        "repo",
+        "create",
+        "np",
+        "-f",
+        "npm",
+        "-k",
+        "proxy",
+        "-s",
+        &format!("upstream=http://127.0.0.1:{}/", dead_port()),
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    s.cli(&[
+        "repo",
+        "create",
+        "ng",
+        "-f",
+        "npm",
+        "-k",
+        "group",
+        "-s",
+        "members=np",
+        "-s",
+        "public=true",
+    ])
+    .unwrap();
+    for r in ["ng", "np"] {
+        let mut c = std::net::TcpStream::connect(("127.0.0.1", s.serve_port)).unwrap();
+        c.set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        c.write_all(
+            format!(
+                "POST /{r}/-/npm/v1/security/audits/quick HTTP/1.1\r\nHost: t\r\n\
+                 Content-Type: application/json\r\nContent-Length: 2\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let mut buf = [0u8; 1024];
+        let early = c.read(&mut buf);
+        assert!(
+            early.is_err(),
+            "{r}: answered before its body was sent: {:?}",
+            early.map(|n| String::from_utf8_lossy(&buf[..n]).into_owned())
+        );
+        c.write_all(
+            format!("{{}}GET /{r}/ HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n").as_bytes(),
+        )
+        .unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let mut out = Vec::new();
+        let _ = c.read_to_end(&mut out);
+        let out = String::from_utf8_lossy(&out);
+        // The 404's body ends in no newline: the next answer follows it.
+        let answers: Vec<&str> = out
+            .match_indices("HTTP/1.1 ")
+            .map(|(i, _)| &out[i + 9..i + 12])
+            .collect();
+        assert_eq!(answers, ["404", "200"], "{r}: {out}");
+    }
+}
+
 /// An npm, cargo or go group's address answers the group's own note:
 /// how many members it lists and how a client reads through it, the
 /// same to every caller who may read it, with no member's name, no
